@@ -1,0 +1,9 @@
+CLAUDE.md
+.DS_Store
+.git
+.github
+task.md
+implementation_plan.md
+walkthrough.md
+test/
+src/test/
