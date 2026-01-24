@@ -29,7 +29,7 @@ status:
 // ---------------------------------------------------------
 // 3. DEFINE SYSTEM KERNEL (The Protocol)
 // ---------------------------------------------------------
-const PROTOCOL = `
+const CORE_PROTOCOL = `
 ---
 ## 🧠 SYSTEM KERNEL: SHADOW_MODE (Active)
 
@@ -46,7 +46,17 @@ const PROTOCOL = `
    * **AUTO-LOCK:** Never edit lines marked \`# [LOCKED]\` (Core Values).
    * **EVOLUTION:** Silently overwrite outdated status/focus.
 
-**3. GENESIS PROTOCOL (Deep Cognitive Mapping):**
+**3. EVOLUTION MECHANISM (The Feedback Loop):**
+   *   **TRIGGER:** When you detect a **Significant Shift** in the user's constraints, preferences, or mental state (not just a temporary mood).
+   *   **ACTION:** You have the power to update your own memory.
+   *   **COMMAND:** Run \`!metame evolve "Your concise insight here"\`.
+   *   **EXAMPLE:** If User says "I hate Tailwind, stop suggesting it", run: \`!metame evolve "User has a strong aversion to Tailwind CSS (Cognitive Constraint)"\`.
+   *   **NOTIFICATION:** After evolving, inform the User: *"I have updated my understanding of you."*
+---
+`;
+
+const GENESIS_PROTOCOL = `
+**GENESIS PROTOCOL (Deep Cognitive Mapping):**
    * **TRIGGER:** If \`identity.role\` is 'Unknown' OR \`identity.nickname\` is 'null', **STOP** and enter **Calibration Mode**.
    * **OBJECTIVE:** You are not a chatbot; you are a Psychologist and a Mirror. Your goal is to map the User's soul to build the perfect "Meta Avatar".
    * **INSTRUCTIONS:**
@@ -65,7 +75,6 @@ const PROTOCOL = `
      - When finished, summarize everything into the \`~/.claude_profile.yaml\` format.
      - **LOCK** the Core Values using \`# [LOCKED]\`.
      - Announce: "Link Established. I see you now, [Nickname]."
----
 `;
 
 // ---------------------------------------------------------
@@ -84,8 +93,33 @@ if (fs.existsSync(PROJECT_FILE)) {
   fileContent = fileContent.replace(/^\n+/, '');
 }
 
+// Logic: Only inject Genesis if the user is UNKNOWN
+let finalProtocol = CORE_PROTOCOL;
+const yaml = require('js-yaml');
+
+// Quick check of the brain file
+let isKnownUser = false;
+try {
+  if (fs.existsSync(BRAIN_FILE)) {
+    const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
+    // If nickname exists and is not null/empty, we assume they are "calibrated"
+    if (doc.identity && doc.identity.nickname && doc.identity.nickname !== 'null') {
+      isKnownUser = true;
+    }
+  }
+} catch (e) {
+  // Ignore error, treat as unknown
+}
+
+if (!isKnownUser) {
+  // Inject the interview instructions into the Core Protocol
+  // We insert it before the Evolution Mechanism
+  finalProtocol = finalProtocol.replace('**3. EVOLUTION MECHANISM', GENESIS_PROTOCOL + '\n**3. EVOLUTION MECHANISM');
+  console.log("🆕 User Unknown: Injecting Deep Genesis Protocol...");
+}
+
 // Prepend the new Protocol to the top
-const newContent = PROTOCOL + "\n" + fileContent;
+const newContent = finalProtocol + "\n" + fileContent;
 fs.writeFileSync(PROJECT_FILE, newContent, 'utf8');
 
 console.log("🔮 MetaMe: Link Established.");
@@ -101,6 +135,51 @@ const isRefresh = process.argv.includes('refresh') || process.argv.includes('--r
 if (isRefresh) {
   console.log("✅ MetaMe configuration re-injected.");
   console.log("   Ask Claude to 'read CLAUDE.md' to apply the changes.");
+  process.exit(0);
+}
+
+// Check for "evolve" command (Manual Evolution)
+const isEvolve = process.argv.includes('evolve');
+
+if (isEvolve) {
+  const yaml = require('js-yaml');
+
+  // Extract insight: everything after "evolve"
+  const evolveIndex = process.argv.indexOf('evolve');
+  const insight = process.argv.slice(evolveIndex + 1).join(' ').trim();
+
+  if (!insight) {
+    console.error("❌ Error: Missing insight.");
+    console.error("   Usage: metame evolve \"I realized I prefer functional programming\"");
+    process.exit(1);
+  }
+
+  try {
+    if (fs.existsSync(BRAIN_FILE)) {
+      const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
+
+      // Initialize evolution log if missing
+      if (!doc.evolution) doc.evolution = {};
+      if (!doc.evolution.log) doc.evolution.log = [];
+
+      // Add timestamped entry
+      doc.evolution.log.push({
+        timestamp: new Date().toISOString(),
+        insight: insight
+      });
+
+      // Save back to file
+      fs.writeFileSync(BRAIN_FILE, yaml.dump(doc), 'utf8');
+
+      console.log("🧠 MetaMe Brain Updated.");
+      console.log(`   Added insight: "${insight}"`);
+      console.log("   (Run 'metame refresh' to apply this to the current session)");
+    } else {
+      console.error("❌ Error: No profile found. Run 'metame' first to initialize.");
+    }
+  } catch (e) {
+    console.error("❌ Error updating profile:", e.message);
+  }
   process.exit(0);
 }
 
