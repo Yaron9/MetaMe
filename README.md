@@ -1,5 +1,9 @@
 # 🔮 MetaMe
 
+<p align="center">
+  <img src="./logo.png" alt="MetaMe Logo" width="200"/>
+</p>
+
 > **The Meta-Cognitive Layer for Claude Code.**
 >
 > *Turn your AI assistant into a psychological mirror that knows you, evolves with you, and protects your core values.*

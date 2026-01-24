@@ -1,5 +1,9 @@
 # 🔮 MetaMe
 
+<p align="center">
+  <img src="./logo.png" alt="MetaMe Logo" width="200"/>
+</p>
+
 > **Claude Code 的“元认知”层 (The Meta-Cognitive Layer)**
 >
 > *将你的 AI 助手变成一面心理镜像：它了解你，随你进化，并时刻守护你的核心原则。*
