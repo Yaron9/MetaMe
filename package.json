@@ -1,0 +1,25 @@
+{
+    "name": "metame-cli",
+    "version": "1.0.0",
+    "description": "The Meta-Cognitive Layer for Claude Code. Turns your AI into a psychological partner.",
+    "main": "index.js",
+    "bin": {
+        "metame": "./index.js"
+    },
+    "scripts": {
+        "start": "node index.js"
+    },
+    "keywords": [
+        "claude",
+        "ai",
+        "meta-cognition",
+        "productivity",
+        "cli"
+    ],
+    "author": "Yaron",
+    "license": "MIT",
+    "dependencies": {},
+    "engines": {
+        "node": ">=14"
+    }
+}
