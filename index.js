@@ -183,24 +183,26 @@ if (isEvolve) {
 }
 
 // ---------------------------------------------------------
-// 6. SAFETY GUARD: PREVENT RECURSION
 // ---------------------------------------------------------
-// If we are already running inside Claude (detected via environment variable),
-// and we did NOT trigger a refresh above, it usually means a typo or user error.
-// Spawning a nested Claude session here creates confusion.
-if (process.env.CLAUDE_CODE_SSE_PORT) {
-  console.warn("\n⚠️  WARNING: Possible Nested Session Detected");
-  console.warn("   You appear to be running inside an existing Claude session (or an IDE that inherits its env).");
-  console.warn("   - If you meant to refresh config, run: !metame refresh");
-  console.warn("   - If this is a new session, you can ignore this warning.\n");
-  // process.exit(1); // DISABLED: Too many false positives in VSCode terminals
+// 6. SAFETY GUARD: RECURSION PREVENTION (v2)
+// ---------------------------------------------------------
+// We rely on our own scoped variable to detect nesting, 
+// ignoring the leaky CLAUDE_CODE_SSE_PORT from IDEs.
+if (process.env.METAME_ACTIVE_SESSION === 'true') {
+  console.error("\n🚫 ACTION BLOCKED: Nested Session Detected");
+  console.error("   You are actively running inside a MetaMe session.");
+  console.error("   To reload configuration, use: \x1b[36m!metame refresh\x1b[0m\n");
+  process.exit(1);
 }
 
 // ---------------------------------------------------------
 // 7. LAUNCH CLAUDE
 // ---------------------------------------------------------
-// Spawn the official claude tool
-const child = spawn('claude', process.argv.slice(2), { stdio: 'inherit' });
+// Spawn the official claude tool with our marker
+const child = spawn('claude', process.argv.slice(2), {
+  stdio: 'inherit',
+  env: { ...process.env, METAME_ACTIVE_SESSION: 'true' }
+});
 
 child.on('error', (err) => {
   console.error("\n❌ Error: Could not launch 'claude'.");
