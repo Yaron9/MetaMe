@@ -19,7 +19,7 @@ It is not just a launcher; it is a  **Meta Avatar** .
 ## ✨ Key Features
 
 * **🧠 Global Brain (`~/.claude_profile.yaml`):** A single source of truth for your identity, storing your nickname, stress status, and cognitive traits.
-* **🧬 Genesis Protocol:** On the first run, MetaMe conducts a **Deep Cognitive Interview** to map your **Psychological DNA** (Talents, Fears, Cognition, Values) via open-ended, Socratic dialogue.
+* **🧬 Evolution Mechanism:** You are in control. Use `!metame evolve` to manually teach Claude about your new preferences or constraints, ensuring it gets smarter with every interaction.
 * **🤝 Dynamic Handshake Protocol:** The "Canary Test." MetaMe verifies its connection to your profile by addressing you by your chosen **Codename** in the very first sentence. If it doesn't, you know the link is broken.
 * **🛡️ Auto-Lock Mechanism:** Mark any value in your profile with `# [LOCKED]`, and MetaMe will treat it as a constitution that cannot be overwritten.
 * **🔌 Smart Injection:** Automatically injects your profile context into the `CLAUDE.md` of any project you enter, ensuring seamless context switching.
