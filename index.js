@@ -48,8 +48,10 @@ const CORE_PROTOCOL = `
 
 **3. EVOLUTION MECHANISM (Manual Sync):**
    *   **PHILOSOPHY:** You respect the User's flow. You do NOT interrupt.
-   *   **TOOL:** You have the capability to save insights using \`!metame evolve "Insight"\`.
-   *   **RULE:** Only use this tool when the User **EXPLICITLY** instructs you to "remember this", "save this preference", or "update my profile".
+   *   **TOOLS:**
+       1. **Log Insight:** \`!metame evolve "Insight"\` (For additive knowledge).
+       2. **Surgical Update:** \`!metame set-trait key value\` (For overwriting specific fields, e.g., \`!metame set-trait status.focus "API Design"\`).
+   *   **RULE:** Only use these tools when the User **EXPLICITLY** instructs you.
    *   **REMINDER:** If the User expresses a strong persistent preference, you may gently ask *at the end of the task*: "Should I save this preference to your MetaMe profile?"
 ---
 `;
@@ -175,6 +177,59 @@ if (isEvolve) {
       console.log("   (Run 'metame refresh' to apply this to the current session)");
     } else {
       console.error("❌ Error: No profile found. Run 'metame' first to initialize.");
+    }
+  } catch (e) {
+    console.error("❌ Error updating profile:", e.message);
+  }
+  process.exit(0);
+}
+
+// Check for "set-trait" command (Surgical Update)
+const isSetTrait = process.argv.includes('set-trait');
+
+if (isSetTrait) {
+  const yaml = require('js-yaml');
+
+  // Syntax: metame set-trait <key> <value>
+  // Example: metame set-trait identity.role "Engineering Manager"
+
+  const setIndex = process.argv.indexOf('set-trait');
+  const key = process.argv[setIndex + 1];
+  // Join the rest as the value (allows spaces)
+  const value = process.argv.slice(setIndex + 2).join(' ').trim();
+
+  if (!key || !value) {
+    console.error("❌ Error: Missing key or value.");
+    console.error("   Usage: metame set-trait identity.role \"New Role\"");
+    process.exit(1);
+  }
+
+  try {
+    if (fs.existsSync(BRAIN_FILE)) {
+      const rawContent = fs.readFileSync(BRAIN_FILE, 'utf8');
+      const doc = yaml.load(rawContent) || {};
+
+      // Helper to set nested property
+      const setNested = (obj, path, val) => {
+        const keys = path.split('.');
+        let current = obj;
+        for (let i = 0; i < keys.length - 1; i++) {
+          if (!current[keys[i]]) current[keys[i]] = {};
+          current = current[keys[i]];
+        }
+        current[keys[keys.length - 1]] = val;
+      };
+
+      // Set the value
+      setNested(doc, key, value);
+
+      fs.writeFileSync(BRAIN_FILE, yaml.dump(doc), 'utf8');
+
+      console.log(`🧠 MetaMe Brain Surgically Updated.`);
+      console.log(`   Set \`${key}\` = "${value}"`);
+      console.log("   (Run 'metame refresh' to apply this to the current session)");
+    } else {
+      console.error("❌ Error: No profile found.");
     }
   } catch (e) {
     console.error("❌ Error updating profile:", e.message);

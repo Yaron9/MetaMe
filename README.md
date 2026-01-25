@@ -26,17 +26,10 @@ It is not just a launcher; it is a  **Meta Avatar** .
 
 ## 🛠 Prerequisites
 
-MetaMe is a wrapper around  **Claude Code** . You must have Node.js and the official Claude Code tool installed first.
+MetaMe is a wrapper around **Claude Code**. You must have Node.js and the official Claude Code tool installed first.
 
-1. **Node.js** : Version 14 or higher.
-2. **Claude Code** :
-   **Bash**
-
-```
-   npm install -g @anthropic-ai/claude-code
-```
-
-1. **Auth** : Ensure you have logged in via `claude login`.
+1. **Node.js**: Version 14 or higher.
+2. **Claude Code**: Ensure `claude` is available in your PATH and you are logged in.
 
 ## 📦 Installation
 
@@ -83,6 +76,27 @@ When you run MetaMe for the first time, it will detect that your profile is empt
 2. Run `metame`.
 3. Claude will start and immediately say: *"Ready, [Your Name]..."*
 4. Start coding. MetaMe manages the context in the background.
+
+### Global Initialization (Reset/Interview)
+
+If you want to restart the **Genesis Interview** to update your psychological profile:
+
+**Bash**
+
+```
+metame interview
+```
+(Command to be implemented in v1.3 - currently you can manually edit `~/.claude_profile.yaml` or use `set-trait`)
+
+### Surgical Update (Manual Override)
+
+If you need to update a specific trait without editing the file manually:
+
+**Bash**
+
+```
+metame set-trait status.focus "Learning Rust"
+```
 
 ### Hot Reload (Refresh)
 

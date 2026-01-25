@@ -28,15 +28,8 @@
 
 MetaMe 是 **Claude Code** 的外壳。你必须先安装 Node.js 和官方的 Claude Code 工具。
 
-1. **Node.js** : 版本 14 或更高。
-2. **Claude Code** :
-   **Bash**
-
-```
-   npm install -g @anthropic-ai/claude-code
-```
-
-1. **认证** : 确保你已经运行过 `claude login` 并登录成功。
+1. **Node.js**: 版本 14 或更高。
+2. **Claude Code**: 确保 `claude` 命令可用且已登录。
 
 ## 📦 安装 (Installation)
 
@@ -83,6 +76,16 @@ MetaMe
 2. 运行 `metame`。
 3. Claude 启动并立即说：*“Ready, [你的名字]...”*
 4. 开始写代码。MetaMe 会在后台自动管理上下文。
+
+### 精准手术 (Surgical Update)
+
+如果你需要更新某个具体的特征，而不想手动编辑文件：
+
+**Bash**
+
+```
+metame set-trait status.focus "Learning Rust"
+```
 
 ### 热重载 (Hot Reload)
 
