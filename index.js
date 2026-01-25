@@ -189,12 +189,11 @@ if (isEvolve) {
 // and we did NOT trigger a refresh above, it usually means a typo or user error.
 // Spawning a nested Claude session here creates confusion.
 if (process.env.CLAUDE_CODE_SSE_PORT) {
-  console.error("\n⚠️  SAFETY GUARD TRIGGERED: Nested Session Detected");
-  console.error("   You are trying to spawn Claude **inside** an existing Claude session.");
-  console.error("   This often happens if you made a typo (e.g., !metame regresh).");
-  console.error("\n   👉 If you wanted to reload config, run: !metame refresh");
-  console.error("   👉 If you really want a nested session, unset CLAUDE_CODE_SSE_PORT first.\n");
-  process.exit(1);
+  console.warn("\n⚠️  WARNING: Possible Nested Session Detected");
+  console.warn("   You appear to be running inside an existing Claude session (or an IDE that inherits its env).");
+  console.warn("   - If you meant to refresh config, run: !metame refresh");
+  console.warn("   - If this is a new session, you can ignore this warning.\n");
+  // process.exit(1); // DISABLED: Too many false positives in VSCode terminals
 }
 
 // ---------------------------------------------------------
