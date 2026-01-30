@@ -11,6 +11,181 @@ const { spawn } = require('child_process');
 const HOME_DIR = os.homedir();
 const BRAIN_FILE = path.join(HOME_DIR, '.claude_profile.yaml');
 const PROJECT_FILE = path.join(process.cwd(), 'CLAUDE.md');
+const METAME_DIR = path.join(HOME_DIR, '.metame');
+const CLAUDE_SETTINGS = path.join(HOME_DIR, '.claude', 'settings.json');
+const SIGNAL_CAPTURE_SCRIPT = path.join(METAME_DIR, 'signal-capture.js');
+
+// ---------------------------------------------------------
+// 1.5 ENSURE METAME DIRECTORY + DEPLOY SCRIPTS
+// ---------------------------------------------------------
+if (!fs.existsSync(METAME_DIR)) {
+  fs.mkdirSync(METAME_DIR, { recursive: true });
+}
+
+// Auto-deploy bundled scripts to ~/.metame/
+const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js'];
+const scriptsDir = path.join(__dirname, 'scripts');
+
+for (const script of BUNDLED_SCRIPTS) {
+  const src = path.join(scriptsDir, script);
+  const dest = path.join(METAME_DIR, script);
+  try {
+    if (fs.existsSync(src)) {
+      const srcContent = fs.readFileSync(src, 'utf8');
+      const destContent = fs.existsSync(dest) ? fs.readFileSync(dest, 'utf8') : '';
+      if (srcContent !== destContent) {
+        fs.writeFileSync(dest, srcContent, 'utf8');
+      }
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
+// ---------------------------------------------------------
+// 1.6 AUTO-INSTALL SIGNAL CAPTURE HOOK
+// ---------------------------------------------------------
+function ensureHookInstalled() {
+  try {
+    // Ensure ~/.claude/ exists
+    const claudeDir = path.join(HOME_DIR, '.claude');
+    if (!fs.existsSync(claudeDir)) {
+      fs.mkdirSync(claudeDir, { recursive: true });
+    }
+
+    let settings = {};
+    if (fs.existsSync(CLAUDE_SETTINGS)) {
+      settings = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf8'));
+    }
+
+    // Check if our hook is already configured
+    const hookCommand = `node ${SIGNAL_CAPTURE_SCRIPT}`;
+    const existing = settings.hooks?.UserPromptSubmit || [];
+    const alreadyInstalled = existing.some(entry =>
+      entry.hooks?.some(h => h.command === hookCommand)
+    );
+
+    if (!alreadyInstalled) {
+      if (!settings.hooks) settings.hooks = {};
+      if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
+
+      settings.hooks.UserPromptSubmit.push({
+        hooks: [{
+          type: 'command',
+          command: hookCommand
+        }]
+      });
+
+      fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2), 'utf8');
+      console.log("🪝 MetaMe: Signal capture hook installed.");
+    }
+  } catch (e) {
+    // Non-fatal: hook install failure shouldn't block launch
+    console.error("⚠️  Hook install skipped:", e.message);
+  }
+}
+
+ensureHookInstalled();
+
+// ---------------------------------------------------------
+// 1.7 PASSIVE DISTILLATION (Background, post-launch)
+// ---------------------------------------------------------
+function shouldDistill() {
+  const bufferFile = path.join(METAME_DIR, 'raw_signals.jsonl');
+  if (!fs.existsSync(bufferFile)) return false;
+  const content = fs.readFileSync(bufferFile, 'utf8').trim();
+  return content.length > 0;
+}
+
+function spawnDistillBackground() {
+  const distillPath = path.join(METAME_DIR, 'distill.js');
+  if (!fs.existsSync(distillPath)) return;
+  if (!shouldDistill()) return;
+
+  const bufferFile = path.join(METAME_DIR, 'raw_signals.jsonl');
+  const lines = fs.readFileSync(bufferFile, 'utf8').trim().split('\n').filter(l => l.trim());
+  console.log(`🧠 MetaMe: Distilling ${lines.length} moment${lines.length > 1 ? 's' : ''} in background...`);
+
+  // Spawn as detached background process — won't block Claude launch
+  const bg = spawn('node', [distillPath], {
+    detached: true,
+    stdio: 'ignore'
+  });
+  bg.unref();
+}
+
+// ---------------------------------------------------------
+// 1.8 TIME-BASED EXPIRY (Startup cleanup)
+// ---------------------------------------------------------
+function runExpiryCleanup() {
+  try {
+    const yaml = require('js-yaml');
+    if (!fs.existsSync(BRAIN_FILE)) return;
+
+    const rawProfile = fs.readFileSync(BRAIN_FILE, 'utf8');
+    const profile = yaml.load(rawProfile);
+    if (!profile || typeof profile !== 'object') return;
+
+    const now = Date.now();
+    let changed = false;
+
+    // context.focus: if focus_since > 30 days, auto-clear
+    if (profile.context && profile.context.focus_since) {
+      const focusSince = new Date(profile.context.focus_since).getTime();
+      if (now - focusSince > 30 * 24 * 60 * 60 * 1000) {
+        profile.context.focus = null;
+        profile.context.focus_since = null;
+        changed = true;
+      }
+    }
+
+    // context.blockers: if > 14 days, auto-clear
+    // (blockers are arrays — clear entire array if stale)
+    if (profile.context && Array.isArray(profile.context.blockers) && profile.context.blockers.length > 0) {
+      // If we don't have a blockers_since timestamp, just leave them
+      // Future: add per-item timestamps
+    }
+
+    // context.energy: reset to null on each session start
+    if (profile.context && profile.context.energy !== undefined) {
+      if (profile.context.energy !== null) {
+        profile.context.energy = null;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      // Preserve comments
+      const commentMatch = rawProfile.match(/^(\s*[\w_]+\s*:.+?)\s+(#.+)$/gm);
+      const dumped = yaml.dump(profile, { lineWidth: -1 });
+      fs.writeFileSync(BRAIN_FILE, dumped, 'utf8');
+    }
+
+    // Expire stale pending traits
+    const pendingFile = path.join(METAME_DIR, 'pending_traits.yaml');
+    if (fs.existsSync(pendingFile)) {
+      const pending = yaml.load(fs.readFileSync(pendingFile, 'utf8')) || {};
+      const cutoff = 30 * 24 * 60 * 60 * 1000;
+      let expiredCount = 0;
+      for (const [key, meta] of Object.entries(pending)) {
+        if (meta.last_seen) {
+          const lastSeen = new Date(meta.last_seen).getTime();
+          if (now - lastSeen > cutoff) {
+            delete pending[key];
+            expiredCount++;
+          }
+        }
+      }
+      if (expiredCount > 0) {
+        fs.writeFileSync(pendingFile, yaml.dump(pending, { lineWidth: -1 }), 'utf8');
+      }
+    }
+  } catch {
+    // Non-fatal — expiry cleanup failure shouldn't block launch
+  }
+}
+
+runExpiryCleanup();
 
 // ---------------------------------------------------------
 // 2. BRAIN INITIALIZATION (Cold Start)
@@ -264,3 +439,6 @@ child.on('error', (err) => {
   console.error("   Please make sure Claude Code is installed globally:");
   console.error("   npm install -g @anthropic-ai/claude-code");
 });
+
+// Launch background distillation AFTER Claude starts — no blocking
+spawnDistillBackground();
