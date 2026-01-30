@@ -1,11 +1,15 @@
 {
     "name": "metame-cli",
-    "version": "1.2.0",
-    "description": "The Meta-Cognitive Layer for Claude Code. Turns your AI into a psychological partner.",
+    "version": "1.2.1",
+    "description": "The Cognitive Profile Layer for Claude Code. Knows how you think, not just what you said.",
     "main": "index.js",
     "bin": {
         "metame": "./index.js"
     },
+    "files": [
+        "index.js",
+        "scripts/"
+    ],
     "scripts": {
         "start": "node index.js"
     },
