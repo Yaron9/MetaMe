@@ -60,6 +60,8 @@ const SCHEMA = {
   'context.active_projects':   { tier: 'T4', type: 'array', maxItems: 5 },
   'context.blockers':          { tier: 'T4', type: 'array', maxItems: 3 },
   'context.energy':            { tier: 'T4', type: 'enum', values: ['high', 'medium', 'low', null] },
+  'context.milestones':        { tier: 'T4', type: 'array', maxItems: 3 },
+  'context.anti_patterns':     { tier: 'T4', type: 'array', maxItems: 5 },
   'status.focus':              { tier: 'T4', type: 'string', maxChars: 80 },
   'status.language':           { tier: 'T4', type: 'string' },
 

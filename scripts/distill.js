@@ -110,6 +110,12 @@ INSTRUCTIONS:
 5. Fields marked [LOCKED] must NEVER be changed (T1 and T2 tiers).
 6. For enum fields, you MUST use one of the listed values.
 
+EPISODIC MEMORY — TWO EXCEPTIONS to the "no facts" rule:
+7. context.anti_patterns (max 5): If the user encountered a REPEATED technical failure or expressed strong frustration about a specific technical approach, record it as an anti-pattern. Format: "topic — what failed and why". Only cross-project generalizable lessons, NOT project-specific bugs.
+   Example: ["async/await deadlock — Promise.all rejects all on single failure, use Promise.allSettled", "CSS Grid in email templates — no support, use tables"]
+8. context.milestones (max 3): If the user completed a significant milestone or made a key decision, record it. Only the 3 most recent. Format: short description string.
+   Example: ["MetaMe v1.3 published", "Switched from REST to GraphQL"]
+
 COGNITIVE BIAS PREVENTION:
 - A single observation is a STATE, not a TRAIT. Do NOT infer T3 cognition fields from one message.
 - Never infer cognitive style from identity/demographics.
@@ -232,6 +238,9 @@ Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
       }
 
       const profile = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
+
+      // Auto-expire anti_patterns older than 60 days
+      expireAntiPatterns(profile);
 
       // Read raw content to find locked lines and comments
       const rawProfile = fs.readFileSync(BRAIN_FILE, 'utf8');
@@ -415,7 +424,18 @@ function strategicMerge(profile, updates, lockedKeys, pendingTraits, confidenceM
       }
 
       case 'T4':
-        setNested(result, key, value);
+        // Stamp added date on anti_pattern entries for auto-expiry
+        if (key === 'context.anti_patterns' && Array.isArray(value)) {
+          const today = new Date().toISOString().slice(0, 10);
+          const existing = getNested(result, key) || [];
+          const existingTexts = new Set(existing.map(e => typeof e === 'string' ? e : e.text));
+          const stamped = value
+            .filter(v => !existingTexts.has(typeof v === 'string' ? v : v.text))
+            .map(v => typeof v === 'string' ? { text: v, added: today } : v);
+          setNested(result, key, [...existing, ...stamped].slice(-5));
+        } else {
+          setNested(result, key, value);
+        }
         // Auto-set focus_since when focus changes
         if (key === 'context.focus') {
           setNested(result, 'context.focus_since', new Date().toISOString().slice(0, 10));
@@ -453,6 +473,19 @@ function flattenObject(obj, parentKey = '', result = {}) {
     }
   }
   return result;
+}
+
+/**
+ * Get a nested property by dot-path key.
+ */
+function getNested(obj, dotPath) {
+  const keys = dotPath.split('.');
+  let current = obj;
+  for (const k of keys) {
+    if (!current || typeof current !== 'object') return undefined;
+    current = current[k];
+  }
+  return current;
 }
 
 /**
@@ -506,6 +539,24 @@ function truncateArrays(obj) {
       truncateArrays(obj[key]);
     }
   }
+}
+
+/**
+ * Auto-expire anti_patterns older than 60 days.
+ * Each entry is stored as { text: "...", added: "2026-01-15" } internally.
+ * If legacy string entries exist, they are kept (no added date = never expire).
+ */
+function expireAntiPatterns(profile) {
+  if (!profile.context || !Array.isArray(profile.context.anti_patterns)) return;
+  const now = Date.now();
+  const SIXTY_DAYS = 60 * 24 * 60 * 60 * 1000;
+  profile.context.anti_patterns = profile.context.anti_patterns.filter(entry => {
+    if (typeof entry === 'string') return true; // legacy, keep
+    if (entry.added) {
+      return (now - new Date(entry.added).getTime()) < SIXTY_DAYS;
+    }
+    return true;
+  });
 }
 
 /**
