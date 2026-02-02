@@ -776,6 +776,20 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
+  if (text === '/reload') {
+    if (global._metameReload) {
+      const r = global._metameReload();
+      if (r.success) {
+        await bot.sendMessage(chatId, `✅ Config reloaded. ${r.tasks} heartbeat tasks active.`);
+      } else {
+        await bot.sendMessage(chatId, `❌ Reload failed: ${r.error}`);
+      }
+    } else {
+      await bot.sendMessage(chatId, '❌ Reload not available (daemon not fully started).');
+    }
+    return;
+  }
+
   if (text.startsWith('/')) {
     await bot.sendMessage(chatId, [
       'Commands:',
@@ -784,7 +798,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       '/resume <id> — resume specific session',
       '/cd <path> — change workdir',
       '/session — current session info',
-      '/status /tasks /run /budget /quiet',
+      '/status /tasks /run /budget /quiet /reload',
       '',
       'Or just type naturally.',
     ].join('\n'));
@@ -1041,7 +1055,7 @@ function sleep(ms) {
 // MAIN
 // ---------------------------------------------------------
 async function main() {
-  const config = loadConfig();
+  let config = loadConfig();
   if (!config || Object.keys(config).length === 0) {
     console.error('No daemon config found. Run: metame daemon init');
     process.exit(1);
@@ -1055,7 +1069,7 @@ async function main() {
 
   log('INFO', `MetaMe daemon started (PID: ${process.pid})`);
 
-  // Task executor lookup
+  // Task executor lookup (always reads fresh config)
   function executeTaskByName(name) {
     const tasks = (config.heartbeat && config.heartbeat.tasks) || [];
     const task = tasks.find(t => t.name === name);
@@ -1088,7 +1102,38 @@ async function main() {
   };
 
   // Start heartbeat scheduler
-  const heartbeatTimer = startHeartbeat(config, notifyFn);
+  let heartbeatTimer = startHeartbeat(config, notifyFn);
+
+  // Hot reload: re-read config and restart heartbeat scheduler
+  function reloadConfig() {
+    const newConfig = loadConfig();
+    if (!newConfig) return { success: false, error: 'Failed to read config' };
+    config = newConfig;
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = startHeartbeat(config, notifyFn);
+    log('INFO', `Config reloaded: ${(config.heartbeat && config.heartbeat.tasks || []).length} tasks`);
+    return { success: true, tasks: (config.heartbeat && config.heartbeat.tasks || []).length };
+  }
+  // Expose reloadConfig to handleCommand via closure
+  global._metameReload = reloadConfig;
+
+  // Auto-reload: watch daemon.yaml for changes (e.g. Claude edits it via askClaude)
+  let _reloadDebounce = null;
+  fs.watchFile(CONFIG_FILE, { interval: 2000 }, (curr, prev) => {
+    if (curr.mtimeMs === prev.mtimeMs) return;
+    // Debounce: wait 1s for file write to finish
+    if (_reloadDebounce) clearTimeout(_reloadDebounce);
+    _reloadDebounce = setTimeout(() => {
+      log('INFO', 'daemon.yaml changed on disk — auto-reloading config');
+      const r = reloadConfig();
+      if (r.success) {
+        log('INFO', `Auto-reload OK: ${r.tasks} tasks`);
+        notifyFn(`🔄 Config auto-reloaded. ${r.tasks} heartbeat tasks active.`).catch(() => {});
+      } else {
+        log('ERROR', `Auto-reload failed: ${r.error}`);
+      }
+    }, 1000);
+  });
 
   // Start bridges (both can run simultaneously)
   telegramBridge = await startTelegramBridge(config, executeTaskByName);
@@ -1097,6 +1142,7 @@ async function main() {
   // Graceful shutdown
   const shutdown = () => {
     log('INFO', 'Daemon shutting down...');
+    fs.unwatchFile(CONFIG_FILE);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (telegramBridge) telegramBridge.stop();
     if (feishuBridge) feishuBridge.stop();
