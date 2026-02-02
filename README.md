@@ -107,6 +107,11 @@ metame set-trait status.focus "Learning Rust"
 metame evolve "I prefer functional programming patterns"
 ```
 
+**Episodic memory (keyframe, not full log):** MetaMe is not a memory system, but it captures two types of experiential "keyframes" that pure personality traits can't replace:
+
+* **Anti-patterns** (`context.anti_patterns`, max 5): Cross-project failure lessons — e.g., *"Promise.all rejects all on single failure, use Promise.allSettled"*. Auto-expires after 60 days. Prevents the AI from repeating the same mistakes across sessions.
+* **Milestones** (`context.milestones`, max 3): Recent completed landmarks — e.g., *"MetaMe v1.3 published"*. Provides continuity so Claude knows where you left off without you having to recap.
+
 **Anti-bias safeguards:** single observations ≠ traits, contradictions are tracked not overwritten, pending traits expire after 30 days, context fields auto-clear on staleness.
 
 **Metacognition controls:**
