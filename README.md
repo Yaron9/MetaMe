@@ -18,14 +18,11 @@ It is not a memory system; it is a  **Cognitive Mirror** .
 
 ## ✨ Key Features
 
-* **🧠 Global Brain (`~/.claude_profile.yaml`):** A single source of truth for your identity, storing your nickname, stress status, and cognitive traits.
-* **🧬 Evolution Mechanism:** You are in control. Use `!metame evolve` to manually teach Claude about your new preferences or constraints, ensuring it gets smarter with every interaction.
-* **🤝 Dynamic Handshake Protocol:** The "Canary Test." MetaMe verifies its connection to your profile by addressing you by your chosen **Codename** in the very first sentence. If it doesn't, you know the link is broken.
-* **🛡️ Auto-Lock Mechanism:** Mark any value in your profile with `# [LOCKED]`, and MetaMe will treat it as a constitution that cannot be overwritten.
-* **🔌 Smart Injection:** Automatically injects your profile context into the `CLAUDE.md` of any project you enter, ensuring seamless context switching.
-* **🧠 Passive Distillation:** MetaMe silently captures your messages via Claude Code hooks and, on next launch, uses a lightweight LLM (Haiku) to extract cognitive traits and preferences — automatically merging them into your profile with confidence-based upsert. Zero manual effort required.
-* **📊 Schema-Enforced Profile:** A 41-field whitelist across 5 tiers (T1-T5) prevents profile bloat. Fields have type validation, enum constraints, and token budget limits (800 tokens max).
-* **🎯 Confidence-Based Learning:** Strong directives ("always"/"以后一律") write directly. Normal observations accumulate in a pending queue and only promote to the profile after 3 consistent observations — preventing single-session bias.
+* **🧠 Global Brain (`~/.claude_profile.yaml`):** A single, portable source of truth — your identity, cognitive traits, and preferences travel with you across every project.
+* **🧬 Cognitive Evolution Engine:** MetaMe learns how you think through three channels: (1) **Passive** — silently captures your messages and distills cognitive traits via Haiku on next launch; (2) **Manual** — `!metame evolve` for explicit teaching; (3) **Confidence gates** — strong directives ("always"/"以后一律") write immediately, normal observations need 3+ consistent sightings before promotion. Schema-enforced (41 fields, 5 tiers, 800 token budget) to prevent bloat.
+* **🤝 Dynamic Handshake:** The "Canary Test." Claude must address you by your **Codename** in the first sentence. If it doesn't, the link is broken.
+* **🛡️ Auto-Lock:** Mark any value with `# [LOCKED]` — treated as a constitution, never auto-modified.
+* **📱 Telegram Bot + Daemon (v1.3):** Talk to Claude from your phone. Send a message, get a profile-aware response. Background daemon with scheduled heartbeat tasks, precondition gates (zero tokens when idle), and macOS launchd auto-start.
 
 ## 🛠 Prerequisites
 
@@ -91,41 +88,107 @@ metame interview
 ```
 (Command to be implemented in v1.3 - currently you can manually edit `~/.claude_profile.yaml` or use `set-trait`)
 
-### Surgical Update (Manual Override)
+### Cognitive Evolution
 
-If you need to update a specific trait without editing the file manually:
+MetaMe learns who you are through two paths:
 
-**Bash**
-
-```
-metame set-trait status.focus "Learning Rust"
-```
-
-### Passive Distillation (Automatic)
-
-MetaMe automatically learns your cognitive patterns from conversations — no action needed.
-
-**How it works:**
-
-1. A global Claude Code hook captures every message, tagging each with a **confidence level** (high for strong directives like "always"/"以后一律", normal otherwise).
-2. On your next `metame` launch, a background Haiku model analyzes the buffer and extracts cognitive traits and preferences.
-3. **High-confidence** traits write directly to your profile. **Normal-confidence** traits enter a pending queue (`~/.metame/pending_traits.yaml`) and only promote after 3+ consistent observations.
-4. All writes are validated against a **41-field schema whitelist** — unknown keys are silently dropped, enum fields are type-checked, and a **token budget** (800 max) prevents bloat.
-5. The buffer is cleared, and Claude starts with a clean context.
-
-**Anti-bias safeguards:**
-- Single observations are treated as states, not traits
-- Contradictions are tracked, not blindly overwritten
-- Pending traits expire after 30 days without re-observation
-- Context fields (focus, energy) auto-expire on staleness
-
-You'll see this in the startup log:
+**Automatic (zero effort):** A global hook captures your messages. On next launch, Haiku distills cognitive traits in the background. Strong directives ("always"/"以后一律") write immediately; normal observations need 3+ consistent sightings. All writes are schema-validated (41 fields, 800 token budget). You'll see:
 
 ```
 🧠 MetaMe: Distilling 7 moments in background...
 ```
 
-The hook is installed automatically on first run to `~/.claude/settings.json` (global scope — works across all projects).
+**Manual:** Update a specific trait directly:
+
+```bash
+metame set-trait status.focus "Learning Rust"
+metame evolve "I prefer functional programming patterns"
+```
+
+**Anti-bias safeguards:** single observations ≠ traits, contradictions are tracked not overwritten, pending traits expire after 30 days, context fields auto-clear on staleness.
+
+### Telegram Bot & Daemon (v1.3)
+
+Wake up Claude from your phone — no terminal, no IDE. Just text your Telegram bot.
+
+**Setup:**
+
+```bash
+metame daemon init                    # Create config + Telegram setup guide
+```
+
+Edit `~/.metame/daemon.yaml`:
+
+```yaml
+telegram:
+  enabled: true
+  bot_token: "YOUR_BOT_TOKEN"         # From @BotFather
+  allowed_chat_ids:
+    - 123456789                        # Your Telegram chat ID
+```
+
+**Start the daemon:**
+
+```bash
+metame daemon start                   # Background process
+metame daemon status                  # Check if running
+metame daemon logs                    # Tail the log
+metame daemon stop                    # Shutdown
+```
+
+**Auto-start on macOS:**
+
+```bash
+metame daemon install-launchd         # Creates launchd plist (RunAtLoad + KeepAlive)
+launchctl load ~/Library/LaunchAgents/com.metame.daemon.plist
+```
+
+**Talking to your bot:**
+
+Just type naturally — no commands needed. Your message goes to Claude with your profile context injected.
+
+Slash commands are also available:
+
+| Command | Description |
+|---------|-------------|
+| `/status` | Daemon status + profile summary |
+| `/tasks` | List scheduled heartbeat tasks |
+| `/run <name>` | Run a task immediately |
+| `/budget` | Today's token usage |
+| `/quiet` | Silence mirror/reflections for 48h |
+
+**Heartbeat Tasks:**
+
+Define scheduled tasks in `daemon.yaml`. They run automatically at the configured interval:
+
+```yaml
+heartbeat:
+  tasks:
+    - name: "morning-news"
+      prompt: "Summarize today's top 3 AI news stories."
+      interval: "24h"
+      model: "haiku"
+      notify: true
+      precondition: "curl -s -o /dev/null -w '%{http_code}' https://news.ycombinator.com | grep 200"
+```
+
+* `precondition`: A shell command that must produce non-empty output. If empty → task is skipped, zero tokens burned.
+* `type: "script"`: Run a local script directly instead of `claude -p`.
+* `notify: true`: Push the result to your Telegram.
+
+**Token efficiency:**
+
+* Telegram polling and slash commands: **zero tokens**
+* Profile injection uses lightweight mode (core fields only, no evolution history)
+* Budget tracking with daily limit (default 50k tokens)
+* 10-second cooldown between Claude calls to prevent rate limiting
+
+**Security:**
+
+* `allowed_chat_ids` whitelist — unauthorized users are silently ignored
+* No arbitrary code execution — daemon only runs `claude -p` or predefined scripts
+* `~/.metame/` directory set to mode 700
+* Bot token stored locally, never transmitted
 
 ### Hot Reload (Refresh)
 
@@ -226,7 +289,15 @@ If you want to delete your stored profile data:
 rm ~/.claude_profile.yaml
 ```
 
-### 3. Remove Passive Distillation Data (Optional)
+### 3. Stop the Daemon (if running)
+
+```bash
+metame daemon stop
+launchctl unload ~/Library/LaunchAgents/com.metame.daemon.plist 2>/dev/null
+rm -f ~/Library/LaunchAgents/com.metame.daemon.plist
+```
+
+### 4. Remove Passive Distillation Data (Optional)
 
 Remove the signal capture scripts:
 
@@ -236,7 +307,7 @@ Remove the signal capture scripts:
 rm -rf ~/.metame
 ```
 
-### 4. Remove the Signal Capture Hook (Optional)
+### 5. Remove the Signal Capture Hook (Optional)
 
 MetaMe installs a global hook in `~/.claude/settings.json`. To remove it, edit the file and delete the `UserPromptSubmit` entry under `hooks`, or run:
 
@@ -253,7 +324,7 @@ console.log('Hook removed.');
 "
 ```
 
-### 5. Cleanup Project Files (Optional)
+### 6. Cleanup Project Files (Optional)
 
 MetaMe adds a header to `CLAUDE.md` files in your projects. To restore them to their original state (if you have many), you can use a text editor to remove the block starting with `## 🧠 SYSTEM KERNEL`.
 

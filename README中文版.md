@@ -16,16 +16,13 @@
 
 它不是记忆系统；它是你的  **认知镜像** 。
 
-## ✨ 核心特性 (Key Features)
+## ✨ 核心特性
 
-* **🧠 全局大脑 (`~/.claude_profile.yaml`)：** 关于你身份的“唯一真理来源”。存储你的昵称、压力状态和认知特征，跨项目共享。
-* **🧬 进化机制 (Evolution Mechanism)：** 你掌握控制权。使用 `!metame evolve` 手动教导 Claude 你的新偏好或限制，确保它在每次交互中变得更聪明。
-* **🤝 动态握手协议 (Dynamic Handshake)：** 即“金丝雀测试”。MetaMe 会强制 AI 在回复的第一句话中通过你的 **代号 (Codename)** 来称呼你。如果它没叫你的名字，你就知道元认知连接已断开。
-* **🛡️ 自动锁定机制 (Auto-Lock)：** 在配置文件中为任何值添加 `# [LOCKED]`，MetaMe 就会将其视为不可动摇的“宪法”，防止 AI 随意修改。
-* **🔌 智能注入 (Smart Injection)：** 自动将你的个人档案注入到你进入的任何项目的 `CLAUDE.md` 中，实现无缝的上下文切换。
-* **🧠 被动蒸馏 (Passive Distillation)：** 通过 Claude Code Hooks 静默捕获消息，用 Haiku 自动提取认知特征和偏好，基于置信度机制合并到档案。完全无需手动操作。
-* **📊 Schema 白名单：** 41 个字段、5 层 Tier（T1-T5），防止档案膨胀。字段有类型验证、枚举约束和 Token 预算上限（800 tokens）。
-* **🎯 置信度学习：** 强指令（"以后一律"/"always"）直接写入。普通观察进入 pending 队列，累计 3 次一致观察后才晋升为正式特征——防止单次对话偏差。
+* **🧠 全局大脑 (`~/.claude_profile.yaml`)：** 唯一的、可移植的真理来源——你的身份、认知特征和偏好跟随你穿梭于每个项目。
+* **🧬 认知进化引擎：** MetaMe 通过三个通道学习你的思维方式：(1) **被动蒸馏**——静默捕获消息，启动时用 Haiku 提取认知特征；(2) **手动进化**——`!metame evolve` 显式教学；(3) **置信度门控**——强指令（"以后一律"/"always"）直写，普通观察需 3+ 次一致观察才晋升。Schema 白名单（41 字段、5 层 Tier、800 token 预算）防止膨胀。
+* **🤝 动态握手：** "金丝雀测试"——Claude 必须在第一句话中叫你的**代号**。没叫就说明连接断了。
+* **🛡️ 自动锁定：** 任何值标记 `# [LOCKED]` 即为宪法，永不被自动修改。
+* **📱 Telegram Bot + 守护进程（v1.3）：** 手机直接和 Claude 对话。发消息即得到带认知画像上下文的回复。后台 daemon 支持定时心跳任务、预检门控（空闲零 token）、macOS launchd 自启动。
 
 ## 🛠 前置要求 (Prerequisites)
 
@@ -80,41 +77,106 @@ MetaMe
 3. Claude 启动并立即说：*“Ready, [你的名字]...”*
 4. 开始写代码。MetaMe 会在后台自动管理上下文。
 
-### 精准手术 (Surgical Update)
+### 认知进化
 
-如果你需要更新某个具体的特征，而不想手动编辑文件：
+MetaMe 通过两条路径认识你：
 
-**Bash**
-
-```
-metame set-trait status.focus "Learning Rust"
-```
-
-### 被动蒸馏（自动认知画像提取）
-
-MetaMe 自动从你的对话中学习认知模式，无需任何操作。
-
-**工作原理：**
-
-1. 全局 Hook 捕获每条消息，标注**置信度**（强指令如"以后一律"/"always"标为 high，其他标为 normal）。
-2. 下次启动时，后台 Haiku 模型分析缓冲区，提取认知特征和偏好。
-3. **高置信度**特征直接写入档案。**普通置信度**特征进入 pending 队列（`~/.metame/pending_traits.yaml`），累计 3+ 次一致观察后才晋升。
-4. 所有写入经过 **41 字段白名单** 验证——未知字段静默丢弃，枚举字段类型检查，**Token 预算**（最高 800）防止膨胀。
-5. 缓冲区清空，Claude 以干净的上下文启动。
-
-**防偏差机制：**
-- 单次观察视为状态，不视为特征
-- 矛盾信号被追踪，不会盲目覆盖
-- Pending 特征 30 天无新观察自动过期
-- 上下文字段（focus、energy）过期自动清理
-
-启动时你会看到：
+**自动（零操作）：** 全局 Hook 捕获消息，下次启动时 Haiku 在后台蒸馏认知特征。强指令（"以后一律"/"always"）直接写入；普通观察需 3+ 次一致观察才晋升。所有写入经过 Schema 验证（41 字段，800 token 预算）。启动时你会看到：
 
 ```
 🧠 MetaMe: Distilling 7 moments in background...
 ```
 
-Hook 在首次运行时自动安装到 `~/.claude/settings.json`（全局生效，所有项目通用）。
+**手动：** 直接更新某个特征：
+
+```bash
+metame set-trait status.focus "Learning Rust"
+metame evolve "我更喜欢函数式编程"
+```
+
+**防偏差机制：** 单次观察 ≠ 特征，矛盾信号追踪而非盲目覆盖，pending 特征 30 天无新观察自动过期，上下文字段过期自动清理。
+
+### Telegram Bot 与守护进程（v1.3）
+
+手机唤醒 Claude——不需要终端、不需要 IDE。直接给 Telegram Bot 发消息。
+
+**配置：**
+
+```bash
+metame daemon init                    # 创建配置 + Telegram 设置指引
+```
+
+编辑 `~/.metame/daemon.yaml`：
+
+```yaml
+telegram:
+  enabled: true
+  bot_token: "你的BOT_TOKEN"           # 从 @BotFather 获取
+  allowed_chat_ids:
+    - 123456789                        # 你的 Telegram chat ID
+```
+
+**启动守护进程：**
+
+```bash
+metame daemon start                   # 后台运行
+metame daemon status                  # 查看状态
+metame daemon logs                    # 查看日志
+metame daemon stop                    # 停止
+```
+
+**macOS 自启动：**
+
+```bash
+metame daemon install-launchd         # 创建 launchd plist（开机自启 + 崩溃重启）
+launchctl load ~/Library/LaunchAgents/com.metame.daemon.plist
+```
+
+**和 Bot 对话：**
+
+直接打字，不需要任何命令前缀。你的消息会带着认知画像上下文一起发给 Claude。
+
+也支持斜杠命令：
+
+| 命令 | 说明 |
+|------|------|
+| `/status` | 守护进程状态 + 画像摘要 |
+| `/tasks` | 列出心跳任务 |
+| `/run <名称>` | 立即执行某个任务 |
+| `/budget` | 今日 token 用量 |
+| `/quiet` | 静默 mirror/反思 48 小时 |
+
+**心跳任务：**
+
+在 `daemon.yaml` 中定义定时任务，按配置的间隔自动运行：
+
+```yaml
+heartbeat:
+  tasks:
+    - name: "morning-news"
+      prompt: "抓取今天AI领域的重要新闻，整理成3条摘要。"
+      interval: "24h"
+      model: "haiku"
+      notify: true
+```
+
+* `precondition`：预检 shell 命令，输出为空则跳过任务，零 token 消耗。
+* `type: "script"`：直接运行本地脚本，不走 `claude -p`。
+* `notify: true`：结果推送到 Telegram。
+
+**Token 效率：**
+
+* Telegram 轮询和斜杠命令：**零 token**
+* 画像注入使用轻量模式（仅核心字段，不带 evolution 历史）
+* 日 token 预算限额（默认 50000）
+* Claude 调用间隔 10 秒冷却，防止触发速率限制
+
+**安全模型：**
+
+* `allowed_chat_ids` 白名单——未授权用户静默忽略
+* 不执行任意代码——daemon 只跑 `claude -p` 或预定义脚本
+* `~/.metame/` 目录权限 700
+* Bot token 仅存本地，不外传
 
 ### 热重载 (Hot Reload)
 
@@ -215,7 +277,15 @@ npm uninstall -g metame-cli
 rm ~/.claude_profile.yaml
 ```
 
-### 3. 移除被动蒸馏数据（可选）
+### 3. 停止守护进程（如有运行）
+
+```bash
+metame daemon stop
+launchctl unload ~/Library/LaunchAgents/com.metame.daemon.plist 2>/dev/null
+rm -f ~/Library/LaunchAgents/com.metame.daemon.plist
+```
+
+### 4. 移除被动蒸馏数据（可选）
 
 删除信号捕获脚本：
 
@@ -225,7 +295,7 @@ rm ~/.claude_profile.yaml
 rm -rf ~/.metame
 ```
 
-### 4. 移除信号捕获 Hook（可选）
+### 5. 移除信号捕获 Hook（可选）
 
 MetaMe 在 `~/.claude/settings.json` 中安装了全局 Hook。可以手动编辑该文件删除 `hooks` 下的 `UserPromptSubmit` 条目，或运行：
 
@@ -242,7 +312,7 @@ console.log('Hook 已移除。');
 "
 ```
 
-### 5. 清理项目文件（可选）
+### 6. 清理项目文件（可选）
 
 MetaMe 会在项目的 `CLAUDE.md` 文件头部添加一段协议。如果你想恢复原状，可以用文本编辑器删除以 `## 🧠 SYSTEM KERNEL` 开头的块。
 

@@ -23,7 +23,7 @@ if (!fs.existsSync(METAME_DIR)) {
 }
 
 // Auto-deploy bundled scripts to ~/.metame/
-const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js'];
+const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'daemon-default.yaml'];
 const scriptsDir = path.join(__dirname, 'scripts');
 
 for (const script of BUNDLED_SCRIPTS) {
@@ -559,6 +559,244 @@ if (isMirror) {
     console.log(`🪞 MetaMe: Mirror ${toggle === 'on' ? 'enabled' : 'disabled'}.`);
   } catch (e) {
     console.error("❌ Error:", e.message);
+  }
+  process.exit(0);
+}
+
+// ---------------------------------------------------------
+// 5.6 DAEMON SUBCOMMANDS
+// ---------------------------------------------------------
+const isDaemon = process.argv.includes('daemon');
+if (isDaemon) {
+  const daemonIndex = process.argv.indexOf('daemon');
+  const subCmd = process.argv[daemonIndex + 1];
+  const DAEMON_CONFIG = path.join(METAME_DIR, 'daemon.yaml');
+  const DAEMON_STATE = path.join(METAME_DIR, 'daemon_state.json');
+  const DAEMON_PID = path.join(METAME_DIR, 'daemon.pid');
+  const DAEMON_LOG = path.join(METAME_DIR, 'daemon.log');
+  const DAEMON_DEFAULT = path.join(__dirname, 'scripts', 'daemon-default.yaml');
+  const DAEMON_SCRIPT = path.join(METAME_DIR, 'daemon.js');
+
+  if (subCmd === 'init') {
+    // Create config from template
+    if (fs.existsSync(DAEMON_CONFIG)) {
+      console.log("⚠️  daemon.yaml already exists at ~/.metame/daemon.yaml");
+      console.log("   Delete it first if you want to re-initialize.");
+    } else {
+      const templateSrc = fs.existsSync(DAEMON_DEFAULT)
+        ? DAEMON_DEFAULT
+        : path.join(METAME_DIR, 'daemon-default.yaml');
+      if (fs.existsSync(templateSrc)) {
+        fs.copyFileSync(templateSrc, DAEMON_CONFIG);
+      } else {
+        console.error("❌ Template not found. Reinstall MetaMe.");
+        process.exit(1);
+      }
+      // Ensure directory permissions (700)
+      try { fs.chmodSync(METAME_DIR, 0o700); } catch { /* ignore on Windows */ }
+      console.log("✅ MetaMe daemon initialized.");
+      console.log(`   Config: ${DAEMON_CONFIG}`);
+    }
+
+    console.log("\n📱 Telegram Setup (optional):");
+    console.log("   1. Message @BotFather on Telegram → /newbot");
+    console.log("   2. Copy the bot token");
+    console.log("   3. Edit ~/.metame/daemon.yaml:");
+    console.log("      telegram:");
+    console.log("        enabled: true");
+    console.log("        bot_token: \"YOUR_TOKEN\"");
+    console.log("        allowed_chat_ids: [YOUR_CHAT_ID]");
+    console.log("   4. To find your chat_id: message your bot, then run:");
+    console.log("      curl https://api.telegram.org/botYOUR_TOKEN/getUpdates");
+    console.log("\n   Then: metame daemon start");
+
+    // Optional launchd setup (macOS only)
+    if (process.platform === 'darwin') {
+      const plistDir = path.join(HOME_DIR, 'Library', 'LaunchAgents');
+      const plistPath = path.join(plistDir, 'com.metame.daemon.plist');
+      console.log("\n🍎 Auto-start on macOS (optional):");
+      console.log("   To start daemon automatically on login:");
+      console.log(`   metame daemon start  (first time to verify it works)`);
+      console.log(`   Then create: ${plistPath}`);
+      console.log("   Or run: metame daemon install-launchd");
+    }
+    process.exit(0);
+  }
+
+  if (subCmd === 'install-launchd') {
+    if (process.platform !== 'darwin') {
+      console.error("❌ launchd is macOS-only.");
+      process.exit(1);
+    }
+    const plistDir = path.join(HOME_DIR, 'Library', 'LaunchAgents');
+    if (!fs.existsSync(plistDir)) fs.mkdirSync(plistDir, { recursive: true });
+    const plistPath = path.join(plistDir, 'com.metame.daemon.plist');
+    const nodePath = process.execPath;
+    // Capture current PATH so launchd can find `claude` and other tools
+    const currentPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin';
+    const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.metame.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${nodePath}</string>
+    <string>${DAEMON_SCRIPT}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${DAEMON_LOG}</string>
+  <key>StandardErrorPath</key>
+  <string>${DAEMON_LOG}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>METAME_ROOT</key>
+    <string>${__dirname}</string>
+    <key>PATH</key>
+    <string>${currentPath}</string>
+    <key>HOME</key>
+    <string>${HOME_DIR}</string>
+  </dict>
+</dict>
+</plist>`;
+    fs.writeFileSync(plistPath, plistContent, 'utf8');
+    console.log(`✅ launchd plist installed: ${plistPath}`);
+    console.log("   Load now: launchctl load " + plistPath);
+    console.log("   Unload:   launchctl unload " + plistPath);
+    process.exit(0);
+  }
+
+  if (subCmd === 'start') {
+    // Check if already running
+    if (fs.existsSync(DAEMON_PID)) {
+      const existingPid = parseInt(fs.readFileSync(DAEMON_PID, 'utf8').trim(), 10);
+      try {
+        process.kill(existingPid, 0); // test if alive
+        console.log(`⚠️  Daemon already running (PID: ${existingPid})`);
+        console.log("   Use 'metame daemon stop' first.");
+        process.exit(1);
+      } catch {
+        // Stale PID file — clean up
+        fs.unlinkSync(DAEMON_PID);
+      }
+    }
+    if (!fs.existsSync(DAEMON_CONFIG)) {
+      console.error("❌ No config found. Run: metame daemon init");
+      process.exit(1);
+    }
+    if (!fs.existsSync(DAEMON_SCRIPT)) {
+      console.error("❌ daemon.js not found. Reinstall MetaMe.");
+      process.exit(1);
+    }
+    const bg = spawn(process.execPath, [DAEMON_SCRIPT], {
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env, HOME: HOME_DIR, METAME_ROOT: __dirname },
+    });
+    bg.unref();
+    console.log(`✅ MetaMe daemon started (PID: ${bg.pid})`);
+    console.log("   Logs: metame daemon logs");
+    console.log("   Stop: metame daemon stop");
+    process.exit(0);
+  }
+
+  if (subCmd === 'stop') {
+    if (!fs.existsSync(DAEMON_PID)) {
+      console.log("ℹ️  No daemon running (no PID file).");
+      process.exit(0);
+    }
+    const pid = parseInt(fs.readFileSync(DAEMON_PID, 'utf8').trim(), 10);
+    try {
+      process.kill(pid, 'SIGTERM');
+      console.log(`✅ Daemon stopped (PID: ${pid})`);
+    } catch (e) {
+      console.log(`⚠️  Process ${pid} not found (may have already exited).`);
+      fs.unlinkSync(DAEMON_PID);
+    }
+    process.exit(0);
+  }
+
+  if (subCmd === 'status') {
+    let state = {};
+    try { state = JSON.parse(fs.readFileSync(DAEMON_STATE, 'utf8')); } catch { /* empty */ }
+
+    // Check if running
+    let isRunning = false;
+    if (fs.existsSync(DAEMON_PID)) {
+      const pid = parseInt(fs.readFileSync(DAEMON_PID, 'utf8').trim(), 10);
+      try { process.kill(pid, 0); isRunning = true; } catch { /* dead */ }
+    }
+
+    console.log(`🤖 MetaMe Daemon: ${isRunning ? '🟢 Running' : '🔴 Stopped'}`);
+    if (state.started_at) console.log(`   Started: ${state.started_at}`);
+    if (state.pid) console.log(`   PID: ${state.pid}`);
+
+    // Budget
+    const budget = state.budget || {};
+    const config = {};
+    try { Object.assign(config, yaml.load(fs.readFileSync(DAEMON_CONFIG, 'utf8'))); } catch { /* empty */ }
+    const limit = (config.budget && config.budget.daily_limit) || 50000;
+    console.log(`   Budget: ${budget.tokens_used || 0}/${limit} tokens (${budget.date || 'no data'})`);
+
+    // Tasks
+    const tasks = state.tasks || {};
+    if (Object.keys(tasks).length > 0) {
+      console.log("   Recent tasks:");
+      for (const [name, info] of Object.entries(tasks)) {
+        const icon = info.status === 'success' ? '✅' : '❌';
+        console.log(`     ${icon} ${name}: ${info.last_run || 'unknown'}`);
+        if (info.output_preview) console.log(`        ${info.output_preview.slice(0, 80)}...`);
+      }
+    }
+    process.exit(0);
+  }
+
+  if (subCmd === 'logs') {
+    if (!fs.existsSync(DAEMON_LOG)) {
+      console.log("ℹ️  No log file yet. Start the daemon first.");
+      process.exit(0);
+    }
+    const content = fs.readFileSync(DAEMON_LOG, 'utf8');
+    const lines = content.split('\n');
+    const tail = lines.slice(-50).join('\n');
+    console.log(tail);
+    process.exit(0);
+  }
+
+  if (subCmd === 'run') {
+    const taskName = process.argv[daemonIndex + 2];
+    if (!taskName) {
+      console.error("❌ Usage: metame daemon run <task-name>");
+      process.exit(1);
+    }
+    if (!fs.existsSync(DAEMON_SCRIPT)) {
+      console.error("❌ daemon.js not found. Reinstall MetaMe.");
+      process.exit(1);
+    }
+    // Run in foreground using daemon.js --run
+    const result = require('child_process').spawnSync(
+      process.execPath,
+      [DAEMON_SCRIPT, '--run', taskName],
+      { stdio: 'inherit', env: { ...process.env, HOME: HOME_DIR, METAME_ROOT: __dirname } }
+    );
+    process.exit(result.status || 0);
+  }
+
+  // Unknown subcommand
+  console.log("📖 MetaMe Daemon Commands:");
+  console.log("   metame daemon init           — initialize config");
+  console.log("   metame daemon start           — start background daemon");
+  console.log("   metame daemon stop            — stop daemon");
+  console.log("   metame daemon status          — show status & budget");
+  console.log("   metame daemon logs            — tail log file");
+  console.log("   metame daemon run <name>      — run a task once");
+  if (process.platform === 'darwin') {
+    console.log("   metame daemon install-launchd — auto-start on macOS");
   }
   process.exit(0);
 }
