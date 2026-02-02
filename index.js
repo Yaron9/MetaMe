@@ -23,7 +23,7 @@ if (!fs.existsSync(METAME_DIR)) {
 }
 
 // Auto-deploy bundled scripts to ~/.metame/
-const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'daemon-default.yaml'];
+const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml'];
 const scriptsDir = path.join(__dirname, 'scripts');
 
 for (const script of BUNDLED_SCRIPTS) {
@@ -608,6 +608,17 @@ if (isDaemon) {
     console.log("        allowed_chat_ids: [YOUR_CHAT_ID]");
     console.log("   4. To find your chat_id: message your bot, then run:");
     console.log("      curl https://api.telegram.org/botYOUR_TOKEN/getUpdates");
+    console.log("\n📘 Feishu Setup (optional):");
+    console.log("   1. Go to open.feishu.cn → Create App → get app_id & app_secret");
+    console.log("   2. Enable Bot capability + im:message events");
+    console.log("   3. Enable 'Long Connection' (长连接) mode in Event Subscription");
+    console.log("   4. Edit ~/.metame/daemon.yaml:");
+    console.log("      feishu:");
+    console.log("        enabled: true");
+    console.log("        app_id: \"YOUR_APP_ID\"");
+    console.log("        app_secret: \"YOUR_APP_SECRET\"");
+    console.log("        allowed_chat_ids: [CHAT_ID]");
+
     console.log("\n   Then: metame daemon start");
 
     // Optional launchd setup (macOS only)

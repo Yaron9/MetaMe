@@ -6,6 +6,12 @@ telegram:
   bot_token: null
   allowed_chat_ids: []
 
+feishu:
+  enabled: false
+  app_id: null
+  app_secret: null
+  allowed_chat_ids: []
+
 heartbeat:
   tasks: []
     # Examples — uncomment or add your own:
