@@ -23,6 +23,7 @@
     "author": "Yaron",
     "license": "MIT",
     "dependencies": {
+        "@larksuiteoapi/node-sdk": "^1.58.0",
         "js-yaml": "^4.1.1"
     },
     "engines": {

@@ -78,7 +78,7 @@ function createBot(token) {
         const result = await apiRequest(token, 'getUpdates', {
           offset,
           timeout,
-          allowed_updates: ['message'],
+          allowed_updates: ['message', 'callback_query'],
         }, (timeout + 5) * 1000); // HTTP timeout > long-poll timeout
         return result || [];
       } catch (e) {
@@ -143,6 +143,29 @@ function createBot(token) {
       await apiRequest(token, 'sendChatAction', {
         chat_id: chatId,
         action: 'typing',
+      });
+    },
+
+    /**
+     * Send a message with inline keyboard buttons
+     * @param {number|string} chatId
+     * @param {string} text
+     * @param {Array<Array<{text: string, callback_data: string}>>} buttons - rows of buttons
+     */
+    async sendButtons(chatId, text, buttons) {
+      await apiRequest(token, 'sendMessage', {
+        chat_id: chatId,
+        text,
+        reply_markup: JSON.stringify({ inline_keyboard: buttons }),
+      });
+    },
+
+    /**
+     * Answer a callback query (dismiss the loading indicator on button press)
+     */
+    async answerCallback(callbackQueryId) {
+      await apiRequest(token, 'answerCallbackQuery', {
+        callback_query_id: callbackQueryId,
       });
     },
 

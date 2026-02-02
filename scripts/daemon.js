@@ -89,12 +89,15 @@ function loadConfig() {
 
 function loadState() {
   try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    if (!s.sessions) s.sessions = {};
+    return s;
   } catch {
     return {
       pid: null,
       budget: { date: null, tokens_used: 0 },
       tasks: {},
+      sessions: {},
       started_at: null,
     };
   }
@@ -388,6 +391,20 @@ async function startTelegramBridge(config, executeTaskByName) {
         const updates = await bot.getUpdates(offset, 30);
         for (const update of updates) {
           offset = update.update_id + 1;
+
+          // Handle inline keyboard button presses
+          if (update.callback_query) {
+            const cb = update.callback_query;
+            const chatId = cb.message && cb.message.chat.id;
+            bot.answerCallback(cb.id).catch(() => {});
+            if (chatId && cb.data) {
+              if (allowedIds.length > 0 && !allowedIds.includes(chatId)) continue;
+              // callback_data is a command string, e.g. "/resume <session-id>"
+              await handleCommand(bot, chatId, cb.data, config, executeTaskByName);
+            }
+            continue;
+          }
+
           if (!update.message) continue;
 
           const msg = update.message;
@@ -407,7 +424,7 @@ async function startTelegramBridge(config, executeTaskByName) {
 
           // Text message (commands or natural language)
           if (msg.text) {
-            await handleTelegramCommand(bot, chatId, msg.text.trim(), config, executeTaskByName);
+            await handleCommand(bot, chatId, msg.text.trim(), config, executeTaskByName);
           }
         }
       } catch (e) {
@@ -441,78 +458,243 @@ function checkCooldown(chatId) {
   return { ok: true };
 }
 
-async function handleTelegramCommand(bot, chatId, text, config, executeTaskByName) {
+/**
+ * Send directory picker: recent projects + Browse button
+ * @param {string} mode - 'new' or 'cd' (determines callback command)
+ */
+async function sendDirPicker(bot, chatId, mode, title) {
+  const dirs = listProjectDirs();
+  const cmd = mode === 'new' ? '/new' : '/cd';
+  if (bot.sendButtons) {
+    const buttons = dirs.map(d => [{ text: d.label, callback_data: `${cmd} ${d.path}` }]);
+    buttons.push([{ text: 'Browse...', callback_data: `/browse ${mode} ${HOME}` }]);
+    await bot.sendButtons(chatId, title, buttons);
+  } else {
+    let msg = `${title}\n`;
+    dirs.forEach((d, i) => { msg += `${i + 1}. ${d.label}\n   ${cmd} ${d.path}\n`; });
+    msg += `\nOr type: ${cmd} /full/path`;
+    await bot.sendMessage(chatId, msg);
+  }
+}
+
+/**
+ * Send directory browser: list subdirs of a path with .. parent nav
+ */
+async function sendBrowse(bot, chatId, mode, dirPath) {
+  const cmd = mode === 'new' ? '/new' : '/cd';
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    const subdirs = entries
+      .filter(e => e.isDirectory() && !e.name.startsWith('.'))
+      .map(e => e.name)
+      .sort()
+      .slice(0, 8); // max 8 subdirs per screen
+
+    if (bot.sendButtons) {
+      const buttons = [];
+      // Select this directory
+      buttons.push([{ text: `>> Use this dir`, callback_data: `${cmd} ${dirPath}` }]);
+      // Subdirectories
+      for (const name of subdirs) {
+        const full = path.join(dirPath, name);
+        buttons.push([{ text: `${name}/`, callback_data: `/browse ${mode} ${full}` }]);
+      }
+      // Parent
+      const parent = path.dirname(dirPath);
+      if (parent !== dirPath) {
+        buttons.push([{ text: '.. back', callback_data: `/browse ${mode} ${parent}` }]);
+      }
+      await bot.sendButtons(chatId, dirPath, buttons);
+    } else {
+      let msg = `${dirPath}\n\n`;
+      subdirs.forEach((name, i) => {
+        msg += `${i + 1}. ${name}/\n   /browse ${mode} ${path.join(dirPath, name)}\n`;
+      });
+      msg += `\nSelect: ${cmd} ${dirPath}\nBack: /browse ${mode} ${path.dirname(dirPath)}`;
+      await bot.sendMessage(chatId, msg);
+    }
+  } catch (e) {
+    await bot.sendMessage(chatId, `Cannot read: ${dirPath}`);
+  }
+}
+
+/**
+ * Unified command handler — shared by Telegram & Feishu
+ */
+async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   const state = loadState();
 
+  // --- Browse handler (directory navigation) ---
+  if (text.startsWith('/browse ')) {
+    const parts = text.slice(8).trim().split(' ');
+    const mode = parts[0]; // 'new' or 'cd'
+    const dirPath = parts.slice(1).join(' ');
+    if (mode && dirPath && fs.existsSync(dirPath)) {
+      await sendBrowse(bot, chatId, mode, dirPath);
+    } else {
+      await bot.sendMessage(chatId, 'Invalid browse path.');
+    }
+    return;
+  }
+
+  // --- Session commands ---
+
+  if (text === '/new' || text.startsWith('/new ')) {
+    const arg = text.slice(4).trim();
+    if (!arg) {
+      await sendDirPicker(bot, chatId, 'new', 'Pick a workdir:');
+      return;
+    }
+    if (!fs.existsSync(arg)) {
+      await bot.sendMessage(chatId, `Path not found: ${arg}`);
+      return;
+    }
+    const session = createSession(chatId, arg);
+    await bot.sendMessage(chatId, `New session.\nWorkdir: ${session.cwd}`);
+    return;
+  }
+
+  if (text === '/continue') {
+    // Continue the most recent conversation in current workdir
+    const session = getSession(chatId);
+    const cwd = session ? session.cwd : HOME;
+    const state2 = loadState();
+    state2.sessions[chatId] = {
+      id: '__continue__',
+      cwd,
+      created: new Date().toISOString(),
+      started: true,
+    };
+    saveState(state2);
+    await bot.sendMessage(chatId, `Resuming last conversation in ${cwd}`);
+    return;
+  }
+
+  if (text === '/resume' || text.startsWith('/resume ')) {
+    const arg = text.slice(7).trim();
+
+    // Get current workdir to scope session list
+    const curSession = getSession(chatId);
+    const curCwd = curSession ? curSession.cwd : null;
+    const recentSessions = listRecentSessions(5, curCwd);
+
+    if (!arg) {
+      if (recentSessions.length === 0) {
+        await bot.sendMessage(chatId, `No sessions found${curCwd ? ' in ' + path.basename(curCwd) : ''}. Try /new first.`);
+        return;
+      }
+      const title = curCwd ? `Sessions in ${path.basename(curCwd)}:` : 'Recent sessions:';
+      if (bot.sendButtons) {
+        const buttons = recentSessions.map(s => {
+          return [{ text: sessionLabel(s), callback_data: `/resume ${s.sessionId}` }];
+        });
+        await bot.sendButtons(chatId, title, buttons);
+      } else {
+        let msg = `${title}\n`;
+        recentSessions.forEach((s, i) => {
+          msg += `${i + 1}. ${sessionLabel(s)}\n   /resume ${s.sessionId.slice(0, 8)}\n`;
+        });
+        await bot.sendMessage(chatId, msg);
+      }
+      return;
+    }
+
+    // Argument given → match by prefix or full ID
+    const match = recentSessions.length > 0
+      ? recentSessions.find(s => s.sessionId.startsWith(arg))
+      : null;
+    const fullMatch = match || listRecentSessions(50).find(s => s.sessionId.startsWith(arg));
+    const sessionId = fullMatch ? fullMatch.sessionId : arg;
+    const cwd = (fullMatch && fullMatch.projectPath) || (getSession(chatId) && getSession(chatId).cwd) || HOME;
+
+    const state2 = loadState();
+    state2.sessions[chatId] = {
+      id: sessionId,
+      cwd,
+      created: new Date().toISOString(),
+      started: true,
+    };
+    saveState(state2);
+    const label = fullMatch ? (fullMatch.summary || fullMatch.firstPrompt || '').slice(0, 40) : sessionId.slice(0, 8);
+    await bot.sendMessage(chatId, `Resumed: ${label}\nWorkdir: ${cwd}`);
+    return;
+  }
+
+  if (text === '/cd' || text.startsWith('/cd ')) {
+    const newCwd = text.slice(3).trim();
+    if (!newCwd) {
+      await sendDirPicker(bot, chatId, 'cd', 'Switch workdir:');
+      return;
+    }
+    if (!fs.existsSync(newCwd)) {
+      await bot.sendMessage(chatId, `Path not found: ${newCwd}`);
+      return;
+    }
+    const state2 = loadState();
+    if (!state2.sessions[chatId]) {
+      createSession(chatId, newCwd);
+    } else {
+      state2.sessions[chatId].cwd = newCwd;
+      saveState(state2);
+    }
+    await bot.sendMessage(chatId, `Workdir: ${newCwd}`);
+    return;
+  }
+
+  if (text === '/session') {
+    const session = getSession(chatId);
+    if (!session) {
+      await bot.sendMessage(chatId, 'No active session. Send any message to start one.');
+    } else {
+      await bot.sendMessage(chatId, `Session: ${session.id.slice(0, 8)}...\nWorkdir: ${session.cwd}\nStarted: ${session.created}`);
+    }
+    return;
+  }
+
+  // --- Daemon commands ---
+
   if (text === '/status') {
-    let msg = `🤖 *MetaMe Daemon*\n`;
-    msg += `Status: Running\n`;
-    msg += `Started: ${state.started_at || 'unknown'}\n`;
-    msg += `Budget: ${state.budget.tokens_used}/${(config.budget && config.budget.daily_limit) || 50000} tokens\n`;
-    // Profile summary
+    const session = getSession(chatId);
+    let msg = `MetaMe Daemon\nStatus: Running\nStarted: ${state.started_at || 'unknown'}\n`;
+    msg += `Budget: ${state.budget.tokens_used}/${(config.budget && config.budget.daily_limit) || 50000} tokens`;
+    if (session) msg += `\nSession: ${session.id.slice(0, 8)}... (${session.cwd})`;
     try {
       if (fs.existsSync(BRAIN_FILE)) {
         const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
-        if (doc.identity) {
-          msg += `\nProfile: ${doc.identity.nickname || 'unknown'} (${doc.identity.role || 'unknown'})`;
-        }
-        if (doc.context && doc.context.focus) {
-          msg += `\nFocus: ${doc.context.focus}`;
-        }
+        if (doc.identity) msg += `\nProfile: ${doc.identity.nickname || 'unknown'}`;
+        if (doc.context && doc.context.focus) msg += `\nFocus: ${doc.context.focus}`;
       }
     } catch { /* ignore */ }
-    await bot.sendMarkdown(chatId, msg);
+    await bot.sendMessage(chatId, msg);
     return;
   }
 
   if (text === '/tasks') {
     const tasks = (config.heartbeat && config.heartbeat.tasks) || [];
-    if (tasks.length === 0) {
-      await bot.sendMessage(chatId, 'No heartbeat tasks configured.');
-      return;
-    }
-    let msg = '📋 *Heartbeat Tasks*\n\n';
+    if (tasks.length === 0) { await bot.sendMessage(chatId, 'No heartbeat tasks configured.'); return; }
+    let msg = 'Heartbeat Tasks:\n';
     for (const t of tasks) {
-      const taskState = state.tasks[t.name] || {};
-      const status = taskState.status || 'never_run';
-      const lastRun = taskState.last_run ? new Date(taskState.last_run).toLocaleString() : 'never';
-      msg += `• *${t.name}* (${t.interval})\n  Status: ${status} | Last: ${lastRun}\n`;
+      const ts = state.tasks[t.name] || {};
+      msg += `- ${t.name} (${t.interval}) ${ts.status || 'never_run'}\n`;
     }
-    await bot.sendMarkdown(chatId, msg);
+    await bot.sendMessage(chatId, msg);
     return;
   }
 
   if (text.startsWith('/run ')) {
     const cd = checkCooldown(chatId);
-    if (!cd.ok) { await bot.sendMessage(chatId, `⏳ Cooldown: ${cd.wait}s`); return; }
+    if (!cd.ok) { await bot.sendMessage(chatId, `Cooldown: ${cd.wait}s`); return; }
     const taskName = text.slice(5).trim();
-    await bot.sendMessage(chatId, `⏳ Running task: ${taskName}...`);
+    await bot.sendMessage(chatId, `Running: ${taskName}...`);
     const result = executeTaskByName(taskName);
-    if (result.success) {
-      await bot.sendMarkdown(chatId, `✅ *${taskName}*\n\n${result.output}`);
-    } else {
-      await bot.sendMessage(chatId, `❌ ${taskName}: ${result.error}`);
-    }
+    await bot.sendMessage(chatId, result.success ? `${taskName}\n\n${result.output}` : `Error: ${result.error}`);
     return;
   }
 
   if (text === '/budget') {
     const limit = (config.budget && config.budget.daily_limit) || 50000;
     const used = state.budget.tokens_used;
-    const pct = ((used / limit) * 100).toFixed(1);
-    await bot.sendMessage(chatId, `💰 Budget: ${used}/${limit} tokens (${pct}%)\nDate: ${state.budget.date || 'today'}`);
-    return;
-  }
-
-  if (text.startsWith('/ask ')) {
-    const prompt = text.slice(5).trim();
-    if (!prompt) {
-      await bot.sendMessage(chatId, 'Usage: /ask <your question>');
-      return;
-    }
-    const cd = checkCooldown(chatId);
-    if (!cd.ok) { await bot.sendMessage(chatId, `⏳ ${cd.wait}s`); return; }
-    await askClaude(bot, chatId, prompt);
+    await bot.sendMessage(chatId, `Budget: ${used}/${limit} tokens (${((used/limit)*100).toFixed(1)}%)`);
     return;
   }
 
@@ -522,69 +704,249 @@ async function handleTelegramCommand(bot, chatId, text, config, executeTaskByNam
       if (!doc.growth) doc.growth = {};
       doc.growth.quiet_until = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
       fs.writeFileSync(BRAIN_FILE, yaml.dump(doc, { lineWidth: -1 }), 'utf8');
-      await bot.sendMessage(chatId, '🤫 Mirror & reflections silenced for 48 hours.');
-    } catch (e) {
-      await bot.sendMessage(chatId, `❌ Error: ${e.message}`);
-    }
+      await bot.sendMessage(chatId, 'Mirror & reflections silenced for 48h.');
+    } catch (e) { await bot.sendMessage(chatId, `Error: ${e.message}`); }
     return;
   }
 
-  // No slash command matched → treat as natural language ask
   if (text.startsWith('/')) {
-    // Unknown slash command → show help
     await bot.sendMessage(chatId, [
-      '📖 Commands:',
-      '/status — daemon status + profile',
-      '/tasks — list heartbeat tasks',
-      '/run <name> — run a task now',
-      '/budget — token usage',
-      '/quiet — silence reflections 48h',
-      '/help — this message',
+      'Commands:',
+      '/new [path] — new session',
+      '/continue — resume last computer session',
+      '/resume <id> — resume specific session',
+      '/cd <path> — change workdir',
+      '/session — current session info',
+      '/status /tasks /run /budget /quiet',
       '',
-      '💬 Or just type naturally — no command needed.',
+      'Or just type naturally.',
     ].join('\n'));
     return;
   }
 
-  // Natural language → ask Claude directly
+  // --- Natural language → Claude Code session ---
   const cd = checkCooldown(chatId);
-  if (!cd.ok) { await bot.sendMessage(chatId, `⏳ ${cd.wait}s`); return; }
+  if (!cd.ok) { await bot.sendMessage(chatId, `${cd.wait}s`); return; }
   if (!checkBudget(loadConfig(), loadState())) {
-    await bot.sendMessage(chatId, '⚠️ Daily token budget exceeded.');
+    await bot.sendMessage(chatId, 'Daily token budget exceeded.');
     return;
   }
   await askClaude(bot, chatId, text);
 }
 
+// ---------------------------------------------------------
+// SESSION MANAGEMENT (persistent Claude Code conversations)
+// ---------------------------------------------------------
+const crypto = require('crypto');
+const CLAUDE_PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
+
 /**
- * Shared ask logic — sends prompt to claude -p with profile preamble
+ * Scan all project session indexes, return most recent N sessions.
+ * Filters out trivial sessions (no summary, < 3 messages).
+ */
+/**
+ * @param {number} limit
+ * @param {string} [cwd] - if provided, only return sessions whose projectPath matches
+ */
+function listRecentSessions(limit, cwd) {
+  try {
+    if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return [];
+    const projects = fs.readdirSync(CLAUDE_PROJECTS_DIR);
+    let all = [];
+    for (const proj of projects) {
+      const indexFile = path.join(CLAUDE_PROJECTS_DIR, proj, 'sessions-index.json');
+      try {
+        if (!fs.existsSync(indexFile)) continue;
+        const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+        if (data.entries) all = all.concat(data.entries);
+      } catch { /* skip */ }
+    }
+    // Filter: must have summary and at least 3 messages
+    all = all.filter(s => s.summary && s.messageCount >= 3);
+    // Filter by cwd if provided
+    if (cwd) {
+      const matched = all.filter(s => s.projectPath === cwd);
+      if (matched.length > 0) all = matched;
+      // else fallback to all projects
+    }
+    // Sort by modified desc, take top N
+    all.sort((a, b) => new Date(b.modified) - new Date(a.modified));
+    return all.slice(0, limit || 10);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Format a session entry into a short, readable label for buttons
+ */
+function sessionLabel(s) {
+  const proj = s.projectPath ? path.basename(s.projectPath) : '';
+  const date = new Date(s.modified).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+  const title = (s.summary || '').slice(0, 28);
+  return `${date} ${proj ? proj + ': ' : ''}${title}`;
+}
+
+/**
+ * Extract unique project directories from session history, sorted by most recent activity.
+ * Returns [{path, label}] for button display.
+ */
+function listProjectDirs() {
+  try {
+    const all = listRecentSessions(50);
+    const seen = new Map(); // path → latest modified
+    for (const s of all) {
+      if (!s.projectPath || !fs.existsSync(s.projectPath)) continue;
+      const prev = seen.get(s.projectPath);
+      if (!prev || new Date(s.modified) > new Date(prev)) {
+        seen.set(s.projectPath, s.modified);
+      }
+    }
+    // Sort by most recent, take top 6
+    return [...seen.entries()]
+      .sort((a, b) => new Date(b[1]) - new Date(a[1]))
+      .slice(0, 6)
+      .map(([p]) => ({ path: p, label: path.basename(p) }));
+  } catch {
+    return [];
+  }
+}
+
+function getSession(chatId) {
+  const state = loadState();
+  return state.sessions[chatId] || null;
+}
+
+function createSession(chatId, cwd) {
+  const state = loadState();
+  const sessionId = crypto.randomUUID();
+  state.sessions[chatId] = {
+    id: sessionId,
+    cwd: cwd || HOME,
+    created: new Date().toISOString(),
+    started: false, // true after first message sent
+  };
+  saveState(state);
+  log('INFO', `New session for ${chatId}: ${sessionId} (cwd: ${state.sessions[chatId].cwd})`);
+  return state.sessions[chatId];
+}
+
+function markSessionStarted(chatId) {
+  const state = loadState();
+  if (state.sessions[chatId]) {
+    state.sessions[chatId].started = true;
+    saveState(state);
+  }
+}
+
+/**
+ * Shared ask logic — full Claude Code session (stateful, with tools)
  */
 async function askClaude(bot, chatId, prompt) {
-  await bot.sendMessage(chatId, '让我想想...');
-  // Keep "typing..." visible until Claude responds
+  log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
+  try {
+    await bot.sendMessage(chatId, '🤔');
+  } catch (e) {
+    log('ERROR', `Failed to send ack to ${chatId}: ${e.message}`);
+  }
+  // Send typing immediately (await to ensure it registers), then refresh every 4s
+  await bot.sendTyping(chatId).catch(() => {});
   const typingTimer = setInterval(() => {
     bot.sendTyping(chatId).catch(() => {});
   }, 4000);
-  bot.sendTyping(chatId).catch(() => {});
 
-  const preamble = buildProfilePreamble();
-  const fullPrompt = preamble + prompt;
+  let session = getSession(chatId);
+  if (!session) {
+    session = createSession(chatId);
+  }
+
+  // Build claude command
+  const args = ['-p'];
+  if (session.id === '__continue__') {
+    // /continue — resume most recent conversation in cwd
+    args.push('--continue');
+  } else if (session.started) {
+    args.push('--resume', session.id);
+  } else {
+    args.push('--session-id', session.id);
+  }
+
   try {
-    const output = execSync('claude -p --model haiku', {
-      input: fullPrompt,
+    const output = execSync(`claude ${args.join(' ')}`, {
+      input: prompt,
       encoding: 'utf8',
-      timeout: 120000,
-      maxBuffer: 1024 * 1024,
+      timeout: 300000, // 5 min (Claude Code may use tools)
+      maxBuffer: 5 * 1024 * 1024,
+      cwd: session.cwd,
     }).trim();
     clearInterval(typingTimer);
 
-    const estimated = Math.ceil((fullPrompt.length + output.length) / 4);
+    // Mark session as started after first successful call
+    if (!session.started) markSessionStarted(chatId);
+
+    const estimated = Math.ceil((prompt.length + output.length) / 4);
     recordTokens(loadState(), estimated);
 
     await bot.sendMarkdown(chatId, output);
   } catch (e) {
     clearInterval(typingTimer);
-    await bot.sendMessage(chatId, `❌ ${e.message.slice(0, 200)}`);
+    const errMsg = e.message || '';
+    log('ERROR', `askClaude failed for ${chatId}: ${errMsg.slice(0, 300)}`);
+    // If session not found (expired/deleted), create new and retry once
+    if (errMsg.includes('not found') || errMsg.includes('No session')) {
+      log('WARN', `Session ${session.id} not found, creating new`);
+      session = createSession(chatId, session.cwd);
+      try {
+        const output = execSync(`claude -p --session-id ${session.id}`, {
+          input: prompt,
+          encoding: 'utf8',
+          timeout: 300000,
+          maxBuffer: 5 * 1024 * 1024,
+          cwd: session.cwd,
+        }).trim();
+        markSessionStarted(chatId);
+        await bot.sendMarkdown(chatId, output);
+      } catch (e2) {
+        log('ERROR', `askClaude retry failed: ${(e2.message || '').slice(0, 200)}`);
+        try { await bot.sendMessage(chatId, `Error: ${(e2.message || '').slice(0, 200)}`); } catch { /* */ }
+      }
+    } else {
+      try { await bot.sendMessage(chatId, `Error: ${errMsg.slice(0, 200)}`); } catch { /* */ }
+    }
+  }
+}
+
+// ---------------------------------------------------------
+// FEISHU BOT BRIDGE
+// ---------------------------------------------------------
+async function startFeishuBridge(config, executeTaskByName) {
+  if (!config.feishu || !config.feishu.enabled) return null;
+  if (!config.feishu.app_id || !config.feishu.app_secret) {
+    log('WARN', 'Feishu enabled but app_id/app_secret missing');
+    return null;
+  }
+
+  const { createBot } = require(path.join(__dirname, 'feishu-adapter.js'));
+  const bot = createBot(config.feishu);
+  const allowedIds = config.feishu.allowed_chat_ids || [];
+
+  try {
+    const receiver = await bot.startReceiving((chatId, text, event) => {
+      // Security: check whitelist (empty = allow all)
+      if (allowedIds.length > 0 && !allowedIds.includes(chatId)) {
+        log('WARN', `Feishu: rejected message from ${chatId}`);
+        return;
+      }
+
+      log('INFO', `Feishu message from ${chatId}: ${text.slice(0, 50)}`);
+      handleCommand(bot, chatId, text, config, executeTaskByName);
+    });
+
+    log('INFO', 'Feishu bot connected (WebSocket long connection)');
+    return { stop: () => receiver.stop(), bot };
+  } catch (e) {
+    log('ERROR', `Feishu bridge failed: ${e.message}`);
+    return null;
   }
 }
 
@@ -634,16 +996,26 @@ async function main() {
     return executeTask(task, config);
   }
 
-  // Notification function (sends to all allowed Telegram chats)
+  // Bridges
   let telegramBridge = null;
+  let feishuBridge = null;
+
+  // Notification function (sends to all enabled channels)
   const notifyFn = async (message) => {
-    if (!telegramBridge || !telegramBridge.bot) return;
-    const allowedIds = config.telegram.allowed_chat_ids || [];
-    for (const chatId of allowedIds) {
-      try {
-        await telegramBridge.bot.sendMarkdown(chatId, message);
-      } catch (e) {
-        log('ERROR', `Failed to notify chat ${chatId}: ${e.message}`);
+    if (telegramBridge && telegramBridge.bot) {
+      const tgIds = (config.telegram && config.telegram.allowed_chat_ids) || [];
+      for (const chatId of tgIds) {
+        try { await telegramBridge.bot.sendMarkdown(chatId, message); } catch (e) {
+          log('ERROR', `Telegram notify failed ${chatId}: ${e.message}`);
+        }
+      }
+    }
+    if (feishuBridge && feishuBridge.bot) {
+      const fsIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
+      for (const chatId of fsIds) {
+        try { await feishuBridge.bot.sendMessage(chatId, message); } catch (e) {
+          log('ERROR', `Feishu notify failed ${chatId}: ${e.message}`);
+        }
       }
     }
   };
@@ -651,14 +1023,16 @@ async function main() {
   // Start heartbeat scheduler
   const heartbeatTimer = startHeartbeat(config, notifyFn);
 
-  // Start Telegram bridge (if enabled)
+  // Start bridges (both can run simultaneously)
   telegramBridge = await startTelegramBridge(config, executeTaskByName);
+  feishuBridge = await startFeishuBridge(config, executeTaskByName);
 
   // Graceful shutdown
   const shutdown = () => {
     log('INFO', 'Daemon shutting down...');
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (telegramBridge) telegramBridge.stop();
+    if (feishuBridge) feishuBridge.stop();
     cleanPid();
     const s = loadState();
     s.pid = null;
