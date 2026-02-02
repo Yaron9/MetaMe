@@ -22,7 +22,9 @@ It is not a memory system; it is a  **Cognitive Mirror** .
 * **🧬 Cognitive Evolution Engine:** MetaMe learns how you think through three channels: (1) **Passive** — silently captures your messages and distills cognitive traits via Haiku on next launch; (2) **Manual** — `!metame evolve` for explicit teaching; (3) **Confidence gates** — strong directives ("always"/"以后一律") write immediately, normal observations need 3+ consistent sightings before promotion. Schema-enforced (41 fields, 5 tiers, 800 token budget) to prevent bloat.
 * **🤝 Dynamic Handshake:** The "Canary Test." Claude must address you by your **Codename** in the first sentence. If it doesn't, the link is broken.
 * **🛡️ Auto-Lock:** Mark any value with `# [LOCKED]` — treated as a constitution, never auto-modified.
+* **🪞 Metacognition Layer (v1.3):** MetaMe now observes *how* you think, not just *what* you say. Behavioral pattern detection runs inside the existing Haiku distill call (zero extra cost). It tracks decision patterns, cognitive load, comfort zones, and avoidance topics across sessions. When persistent patterns emerge, MetaMe injects a one-line mirror observation — e.g., *"You tend to avoid testing until forced"* — with a 14-day cooldown per pattern. Conditional reflection prompts appear only when triggered (every 7th distill or 3x consecutive comfort zone). All injection logic runs in Node.js; Claude receives only pre-decided directives, never rules to self-evaluate.
 * **📱 Remote Claude Code (v1.3):** Full Claude Code from your phone via Telegram or Feishu (Lark). Stateful sessions with `--resume` — same conversation history, tool use, and file editing as your terminal. Interactive buttons for project/session picking, directory browser, and macOS launchd auto-start.
+* **🔄 Workflow Engine (v1.3):** Define multi-step skill chains as heartbeat tasks. Each workflow runs in a single Claude Code session via `--resume`, so step outputs flow as context to the next step. Example: `deep-research` → `tech-writing` → `wechat-publisher` — fully automated content pipeline.
 
 ## 🛠 Prerequisites
 
@@ -107,6 +109,14 @@ metame evolve "I prefer functional programming patterns"
 
 **Anti-bias safeguards:** single observations ≠ traits, contradictions are tracked not overwritten, pending traits expire after 30 days, context fields auto-clear on staleness.
 
+**Metacognition controls:**
+
+```bash
+metame quiet            # Silence mirror observations & reflections for 48h
+metame insights         # Show detected behavioral patterns
+metame mirror on|off    # Toggle mirror injection
+```
+
 ### Remote Claude Code — Telegram & Feishu (v1.3)
 
 Full Claude Code from your phone — stateful sessions with conversation history, tool use, and file editing. Supports both Telegram and Feishu (Lark).
@@ -168,6 +178,7 @@ Each chat gets a persistent session via `claude -p --resume <session-id>`. This 
 | `/run <name>` | Run a task immediately |
 | `/budget` | Today's token usage |
 | `/quiet` | Silence mirror/reflections for 48h |
+| `/reload` | Manually reload daemon.yaml (also auto-reloads on file change) |
 
 **Heartbeat Tasks:**
 
@@ -187,6 +198,30 @@ heartbeat:
 * `precondition`: Shell command — empty output → task skipped, zero tokens.
 * `type: "script"`: Run a local script directly instead of `claude -p`.
 * `notify: true`: Push results to Telegram/Feishu.
+
+**Workflow tasks** (multi-step skill chains):
+
+```yaml
+heartbeat:
+  tasks:
+    - name: "daily-wechat"
+      type: "workflow"
+      interval: "24h"
+      model: "sonnet"
+      notify: true
+      steps:
+        - skill: "deep-research"
+          prompt: "Today's top 3 AI news stories"
+        - skill: "tech-writing"
+          prompt: "Write a WeChat article based on the research above"
+        - skill: "wechat-publisher"
+          prompt: "Publish the article"
+          optional: true
+```
+
+Each step runs in the same Claude Code session. Step outputs automatically become context for the next step. Set `optional: true` on steps that may fail without aborting the workflow.
+
+**Auto-reload:** The daemon watches `daemon.yaml` for changes. When Claude (or you) edits the config file, the daemon automatically reloads — no restart or `/reload` needed. A notification is pushed to confirm.
 
 **Token efficiency:**
 
