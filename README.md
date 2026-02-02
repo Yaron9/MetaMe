@@ -20,7 +20,6 @@ It is not a memory system; it is a  **Cognitive Mirror** .
 
 * **🧠 Global Brain (`~/.claude_profile.yaml`):** A single, portable source of truth — your identity, cognitive traits, and preferences travel with you across every project.
 * **🧬 Cognitive Evolution Engine:** MetaMe learns how you think through three channels: (1) **Passive** — silently captures your messages and distills cognitive traits via Haiku on next launch; (2) **Manual** — `!metame evolve` for explicit teaching; (3) **Confidence gates** — strong directives ("always"/"以后一律") write immediately, normal observations need 3+ consistent sightings before promotion. Schema-enforced (41 fields, 5 tiers, 800 token budget) to prevent bloat.
-* **🤝 Dynamic Handshake:** The "Canary Test." Claude must address you by your **Codename** in the first sentence. If it doesn't, the link is broken.
 * **🛡️ Auto-Lock:** Mark any value with `# [LOCKED]` — treated as a constitution, never auto-modified.
 * **🪞 Metacognition Layer (v1.3):** MetaMe now observes *how* you think, not just *what* you say. Behavioral pattern detection runs inside the existing Haiku distill call (zero extra cost). It tracks decision patterns, cognitive load, comfort zones, and avoidance topics across sessions. When persistent patterns emerge, MetaMe injects a one-line mirror observation — e.g., *"You tend to avoid testing until forced"* — with a 14-day cooldown per pattern. Conditional reflection prompts appear only when triggered (every 7th distill or 3x consecutive comfort zone). All injection logic runs in Node.js; Claude receives only pre-decided directives, never rules to self-evaluate.
 * **📱 Remote Claude Code (v1.3):** Full Claude Code from your phone via Telegram or Feishu (Lark). Stateful sessions with `--resume` — same conversation history, tool use, and file editing as your terminal. Interactive buttons for project/session picking, directory browser, and macOS launchd auto-start.
@@ -396,8 +395,6 @@ You might worry: *"Does this eat up my context window?"*
 **Q: Does this replace `CLAUDE.md`?**
 A: No. It *prepends* its meta-cognitive protocol to your existing `CLAUDE.md`. Your project-specific notes remain intact.
 
-**Q: What if Claude stops calling me by my nickname?**
-A: This is the "Canary Test." It means the context window has been compressed or the file link is broken. Run `/compact` in Claude or restart `metame` to fix it.
 
 **Q: Is my data sent to a third party?**
 A: No. Your profile stays local at `~/.claude_profile.yaml`. MetaMe simply passes text to the official Claude Code tool.
