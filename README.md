@@ -22,7 +22,7 @@ It is not a memory system; it is a  **Cognitive Mirror** .
 * **🧬 Cognitive Evolution Engine:** MetaMe learns how you think through three channels: (1) **Passive** — silently captures your messages and distills cognitive traits via Haiku on next launch; (2) **Manual** — `!metame evolve` for explicit teaching; (3) **Confidence gates** — strong directives ("always"/"以后一律") write immediately, normal observations need 3+ consistent sightings before promotion. Schema-enforced (41 fields, 5 tiers, 800 token budget) to prevent bloat.
 * **🤝 Dynamic Handshake:** The "Canary Test." Claude must address you by your **Codename** in the first sentence. If it doesn't, the link is broken.
 * **🛡️ Auto-Lock:** Mark any value with `# [LOCKED]` — treated as a constitution, never auto-modified.
-* **📱 Telegram Bot + Daemon (v1.3):** Talk to Claude from your phone. Send a message, get a profile-aware response. Background daemon with scheduled heartbeat tasks, precondition gates (zero tokens when idle), and macOS launchd auto-start.
+* **📱 Remote Claude Code (v1.3):** Full Claude Code from your phone via Telegram or Feishu (Lark). Stateful sessions with `--resume` — same conversation history, tool use, and file editing as your terminal. Interactive buttons for project/session picking, directory browser, and macOS launchd auto-start.
 
 ## 🛠 Prerequisites
 
@@ -107,14 +107,14 @@ metame evolve "I prefer functional programming patterns"
 
 **Anti-bias safeguards:** single observations ≠ traits, contradictions are tracked not overwritten, pending traits expire after 30 days, context fields auto-clear on staleness.
 
-### Telegram Bot & Daemon (v1.3)
+### Remote Claude Code — Telegram & Feishu (v1.3)
 
-Wake up Claude from your phone — no terminal, no IDE. Just text your Telegram bot.
+Full Claude Code from your phone — stateful sessions with conversation history, tool use, and file editing. Supports both Telegram and Feishu (Lark).
 
 **Setup:**
 
 ```bash
-metame daemon init                    # Create config + Telegram setup guide
+metame daemon init                    # Create config + setup guide
 ```
 
 Edit `~/.metame/daemon.yaml`:
@@ -125,6 +125,12 @@ telegram:
   bot_token: "YOUR_BOT_TOKEN"         # From @BotFather
   allowed_chat_ids:
     - 123456789                        # Your Telegram chat ID
+
+feishu:
+  enabled: true
+  app_id: "YOUR_APP_ID"              # From Feishu Developer Console
+  app_secret: "YOUR_APP_SECRET"
+  allowed_chat_ids: []                # Empty = allow all
 ```
 
 **Start the daemon:**
@@ -134,20 +140,26 @@ metame daemon start                   # Background process
 metame daemon status                  # Check if running
 metame daemon logs                    # Tail the log
 metame daemon stop                    # Shutdown
+metame daemon install-launchd         # macOS auto-start (RunAtLoad + KeepAlive)
 ```
 
-**Auto-start on macOS:**
+**Session commands (interactive buttons on Telegram & Feishu):**
 
-```bash
-metame daemon install-launchd         # Creates launchd plist (RunAtLoad + KeepAlive)
-launchctl load ~/Library/LaunchAgents/com.metame.daemon.plist
-```
+| Command | Description |
+|---------|-------------|
+| `/new` | Start new session — pick project directory from button list |
+| `/resume` | Resume a session — clickable list scoped to current workdir |
+| `/continue` | Continue the most recent terminal session |
+| `/cd` | Change working directory — with directory browser |
+| `/session` | Current session info |
 
-**Talking to your bot:**
+Just type naturally for conversation — every message stays in the same Claude Code session with full context.
 
-Just type naturally — no commands needed. Your message goes to Claude with your profile context injected.
+**How it works:**
 
-Slash commands are also available:
+Each chat gets a persistent session via `claude -p --resume <session-id>`. This is the same Claude Code engine as your terminal — same tools (file editing, bash, code search), same conversation history. You can start work on your computer and `/resume` from your phone, or vice versa.
+
+**Other commands:**
 
 | Command | Description |
 |---------|-------------|
@@ -159,7 +171,7 @@ Slash commands are also available:
 
 **Heartbeat Tasks:**
 
-Define scheduled tasks in `daemon.yaml`. They run automatically at the configured interval:
+Define scheduled tasks in `daemon.yaml`:
 
 ```yaml
 heartbeat:
@@ -172,23 +184,23 @@ heartbeat:
       precondition: "curl -s -o /dev/null -w '%{http_code}' https://news.ycombinator.com | grep 200"
 ```
 
-* `precondition`: A shell command that must produce non-empty output. If empty → task is skipped, zero tokens burned.
+* `precondition`: Shell command — empty output → task skipped, zero tokens.
 * `type: "script"`: Run a local script directly instead of `claude -p`.
-* `notify: true`: Push the result to your Telegram.
+* `notify: true`: Push results to Telegram/Feishu.
 
 **Token efficiency:**
 
-* Telegram polling and slash commands: **zero tokens**
-* Profile injection uses lightweight mode (core fields only, no evolution history)
+* Polling, slash commands, directory browsing: **zero tokens**
+* Stateful sessions: same cost as using Claude Code in terminal (conversation history managed by Claude CLI)
 * Budget tracking with daily limit (default 50k tokens)
-* 10-second cooldown between Claude calls to prevent rate limiting
+* 10-second cooldown between Claude calls
 
 **Security:**
 
-* `allowed_chat_ids` whitelist — unauthorized users are silently ignored
-* No arbitrary code execution — daemon only runs `claude -p` or predefined scripts
+* `allowed_chat_ids` whitelist — unauthorized users silently ignored
+* No `--dangerously-skip-permissions` — standard `-p` mode permissions
 * `~/.metame/` directory set to mode 700
-* Bot token stored locally, never transmitted
+* Bot tokens stored locally, never transmitted
 
 ### Hot Reload (Refresh)
 

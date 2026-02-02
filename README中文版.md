@@ -22,7 +22,7 @@
 * **🧬 认知进化引擎：** MetaMe 通过三个通道学习你的思维方式：(1) **被动蒸馏**——静默捕获消息，启动时用 Haiku 提取认知特征；(2) **手动进化**——`!metame evolve` 显式教学；(3) **置信度门控**——强指令（"以后一律"/"always"）直写，普通观察需 3+ 次一致观察才晋升。Schema 白名单（41 字段、5 层 Tier、800 token 预算）防止膨胀。
 * **🤝 动态握手：** "金丝雀测试"——Claude 必须在第一句话中叫你的**代号**。没叫就说明连接断了。
 * **🛡️ 自动锁定：** 任何值标记 `# [LOCKED]` 即为宪法，永不被自动修改。
-* **📱 Telegram Bot + 守护进程（v1.3）：** 手机直接和 Claude 对话。发消息即得到带认知画像上下文的回复。后台 daemon 支持定时心跳任务、预检门控（空闲零 token）、macOS launchd 自启动。
+* **📱 远程 Claude Code（v1.3）：** 手机端完整 Claude Code 体验，支持 Telegram 和飞书。有状态会话（`--resume`）——和终端一样的对话历史、工具调用、文件编辑。可点击按钮选择项目/会话/目录，支持 macOS launchd 自启动。
 
 ## 🛠 前置要求 (Prerequisites)
 
@@ -96,14 +96,14 @@ metame evolve "我更喜欢函数式编程"
 
 **防偏差机制：** 单次观察 ≠ 特征，矛盾信号追踪而非盲目覆盖，pending 特征 30 天无新观察自动过期，上下文字段过期自动清理。
 
-### Telegram Bot 与守护进程（v1.3）
+### 远程 Claude Code —— Telegram & 飞书（v1.3）
 
-手机唤醒 Claude——不需要终端、不需要 IDE。直接给 Telegram Bot 发消息。
+手机端完整 Claude Code——有状态会话，支持对话历史、工具调用、文件编辑。同时支持 Telegram 和飞书（Lark）。
 
 **配置：**
 
 ```bash
-metame daemon init                    # 创建配置 + Telegram 设置指引
+metame daemon init                    # 创建配置 + 设置指引
 ```
 
 编辑 `~/.metame/daemon.yaml`：
@@ -114,6 +114,12 @@ telegram:
   bot_token: "你的BOT_TOKEN"           # 从 @BotFather 获取
   allowed_chat_ids:
     - 123456789                        # 你的 Telegram chat ID
+
+feishu:
+  enabled: true
+  app_id: "你的APP_ID"                # 从飞书开发者后台获取
+  app_secret: "你的APP_SECRET"
+  allowed_chat_ids: []                # 空 = 允许所有
 ```
 
 **启动守护进程：**
@@ -123,20 +129,26 @@ metame daemon start                   # 后台运行
 metame daemon status                  # 查看状态
 metame daemon logs                    # 查看日志
 metame daemon stop                    # 停止
+metame daemon install-launchd         # macOS 自启动（开机自启 + 崩溃重启）
 ```
 
-**macOS 自启动：**
+**会话命令（Telegram 和飞书均支持可点击按钮）：**
 
-```bash
-metame daemon install-launchd         # 创建 launchd plist（开机自启 + 崩溃重启）
-launchctl load ~/Library/LaunchAgents/com.metame.daemon.plist
-```
+| 命令 | 说明 |
+|------|------|
+| `/new` | 新建会话——从按钮列表选择项目目录 |
+| `/resume` | 恢复会话——可点击列表，按当前工作目录过滤 |
+| `/continue` | 继续电脑上最近一次终端会话 |
+| `/cd` | 切换工作目录——带目录浏览器 |
+| `/session` | 查看当前会话信息 |
 
-**和 Bot 对话：**
+直接打字即可对话——每条消息都在同一个 Claude Code 会话中，保持完整上下文。
 
-直接打字，不需要任何命令前缀。你的消息会带着认知画像上下文一起发给 Claude。
+**原理：**
 
-也支持斜杠命令：
+每个聊天绑定一个持久会话，通过 `claude -p --resume <session-id>` 调用。这是和终端完全相同的 Claude Code 引擎——相同的工具（文件编辑、bash、代码搜索）、相同的对话历史。你可以在电脑上开始工作，手机上 `/resume` 继续，反之亦然。
+
+**其他命令：**
 
 | 命令 | 说明 |
 |------|------|
@@ -148,7 +160,7 @@ launchctl load ~/Library/LaunchAgents/com.metame.daemon.plist
 
 **心跳任务：**
 
-在 `daemon.yaml` 中定义定时任务，按配置的间隔自动运行：
+在 `daemon.yaml` 中定义定时任务：
 
 ```yaml
 heartbeat:
@@ -158,23 +170,24 @@ heartbeat:
       interval: "24h"
       model: "haiku"
       notify: true
+      precondition: "curl -s -o /dev/null -w '%{http_code}' https://news.ycombinator.com | grep 200"
 ```
 
-* `precondition`：预检 shell 命令，输出为空则跳过任务，零 token 消耗。
+* `precondition`：预检命令——输出为空则跳过，零 token 消耗。
 * `type: "script"`：直接运行本地脚本，不走 `claude -p`。
-* `notify: true`：结果推送到 Telegram。
+* `notify: true`：结果推送到 Telegram/飞书。
 
 **Token 效率：**
 
-* Telegram 轮询和斜杠命令：**零 token**
-* 画像注入使用轻量模式（仅核心字段，不带 evolution 历史）
+* 轮询、斜杠命令、目录浏览：**零 token**
+* 有状态会话：和终端使用 Claude Code 成本相同（对话历史由 Claude CLI 管理）
 * 日 token 预算限额（默认 50000）
-* Claude 调用间隔 10 秒冷却，防止触发速率限制
+* Claude 调用间隔 10 秒冷却
 
 **安全模型：**
 
 * `allowed_chat_ids` 白名单——未授权用户静默忽略
-* 不执行任意代码——daemon 只跑 `claude -p` 或预定义脚本
+* 不使用 `--dangerously-skip-permissions`——标准 `-p` 模式权限
 * `~/.metame/` 目录权限 700
 * Bot token 仅存本地，不外传
 
