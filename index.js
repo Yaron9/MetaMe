@@ -294,8 +294,86 @@ if (!isKnownUser) {
   console.log("🆕 User Unknown: Injecting Deep Genesis Protocol...");
 }
 
+// ---------------------------------------------------------
+// 4.5 MIRROR INJECTION (Phase C — metacognition observation)
+// ---------------------------------------------------------
+let mirrorLine = '';
+try {
+  if (isKnownUser && fs.existsSync(BRAIN_FILE)) {
+    const brainDoc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
+
+    // Check quiet mode
+    const quietUntil = brainDoc.growth && brainDoc.growth.quiet_until;
+    const isQuiet = quietUntil && new Date(quietUntil).getTime() > Date.now();
+
+    // Check mirror enabled (default: true)
+    const mirrorEnabled = !(brainDoc.growth && brainDoc.growth.mirror_enabled === false);
+
+    if (!isQuiet && mirrorEnabled && brainDoc.growth && Array.isArray(brainDoc.growth.patterns)) {
+      const now = Date.now();
+      const COOLDOWN_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+
+      // Find a pattern that hasn't been surfaced in 14 days
+      const candidate = brainDoc.growth.patterns.find(p => {
+        if (!p.surfaced) return true;
+        return (now - new Date(p.surfaced).getTime()) > COOLDOWN_MS;
+      });
+
+      if (candidate) {
+        mirrorLine = `\n[MetaMe observation: ${candidate.summary} 不要主动提起，只在用户自然提到相关话题时温和回应。]\n`;
+
+        // Mark as surfaced
+        candidate.surfaced = new Date().toISOString().slice(0, 10);
+        fs.writeFileSync(BRAIN_FILE, yaml.dump(brainDoc, { lineWidth: -1 }), 'utf8');
+      }
+    }
+  }
+} catch {
+  // Non-fatal
+}
+
+// ---------------------------------------------------------
+// 4.6 REFLECTION PROMPT (Phase C — conditional, NOT static)
+// ---------------------------------------------------------
+// Only inject when trigger conditions are met at startup.
+// This ensures reflections don't fire every session.
+let reflectionLine = '';
+try {
+  if (isKnownUser && fs.existsSync(BRAIN_FILE)) {
+    const refDoc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
+
+    // Check quiet mode
+    const quietUntil = refDoc.growth && refDoc.growth.quiet_until;
+    const isQuietForRef = quietUntil && new Date(quietUntil).getTime() > Date.now();
+
+    if (!isQuietForRef) {
+      const distillCount = (refDoc.evolution && refDoc.evolution.distill_count) || 0;
+      const zoneHistory = (refDoc.growth && refDoc.growth.zone_history) || [];
+
+      // Trigger 1: Every 7th session
+      const trigger7th = distillCount > 0 && distillCount % 7 === 0;
+
+      // Trigger 2: Three consecutive comfort-zone sessions
+      const lastThree = zoneHistory.slice(-3);
+      const triggerComfort = lastThree.length === 3 && lastThree.every(z => z === 'C');
+
+      if (trigger7th || triggerComfort) {
+        let hint = '';
+        if (triggerComfort) {
+          hint = '连续几次都在熟悉领域。如果用户在session结束时自然停顿，可以温和地问：🪞 准备好探索拉伸区了吗？';
+        } else {
+          hint = '这是第' + distillCount + '次session。如果session自然结束，可以附加一句：🪞 一个词形容这次session的感受？';
+        }
+        reflectionLine = `\n[MetaMe reflection: ${hint} 只在session即将结束时说一次。如果用户没回应就不要追问。]\n`;
+      }
+    }
+  }
+} catch {
+  // Non-fatal
+}
+
 // Prepend the new Protocol to the top
-const newContent = finalProtocol + "\n" + fileContent;
+const newContent = finalProtocol + mirrorLine + reflectionLine + "\n" + fileContent;
 fs.writeFileSync(PROJECT_FILE, newContent, 'utf8');
 
 console.log("🔮 MetaMe: Link Established.");
@@ -408,6 +486,79 @@ if (isSetTrait) {
     }
   } catch (e) {
     console.error("❌ Error updating profile:", e.message);
+  }
+  process.exit(0);
+}
+
+// ---------------------------------------------------------
+// 5.5 METACOGNITION CONTROL COMMANDS (Phase C)
+// ---------------------------------------------------------
+
+// metame quiet — silence mirror + reflections for 48 hours
+const isQuiet = process.argv.includes('quiet');
+if (isQuiet) {
+  try {
+    const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
+    if (!doc.growth) doc.growth = {};
+    doc.growth.quiet_until = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(BRAIN_FILE, yaml.dump(doc, { lineWidth: -1 }), 'utf8');
+    console.log("🤫 MetaMe: Mirror & reflections silenced for 48 hours.");
+  } catch (e) {
+    console.error("❌ Error:", e.message);
+  }
+  process.exit(0);
+}
+
+// metame insights — show detected patterns
+const isInsights = process.argv.includes('insights');
+if (isInsights) {
+  try {
+    const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
+    const patterns = (doc.growth && doc.growth.patterns) || [];
+    const zoneHistory = (doc.growth && doc.growth.zone_history) || [];
+
+    if (patterns.length === 0) {
+      console.log("🔍 MetaMe: No patterns detected yet. Keep using MetaMe and patterns will emerge after ~5 sessions.");
+    } else {
+      console.log("🪞 MetaMe Insights:\n");
+      patterns.forEach((p, i) => {
+        const icon = p.type === 'avoidance' ? '⚠️' : p.type === 'growth' ? '🌱' : p.type === 'energy' ? '⚡' : '🔄';
+        console.log(`   ${icon} [${p.type}] ${p.summary} (confidence: ${(p.confidence * 100).toFixed(0)}%)`);
+        console.log(`      Detected: ${p.detected}${p.surfaced ? `, Last shown: ${p.surfaced}` : ''}`);
+      });
+      if (zoneHistory.length > 0) {
+        console.log(`\n   📊 Recent zone history: ${zoneHistory.join(' → ')}`);
+        console.log(`      (C=Comfort, S=Stretch, P=Panic)`);
+      }
+      const answered = (doc.growth && doc.growth.reflections_answered) || 0;
+      const skipped = (doc.growth && doc.growth.reflections_skipped) || 0;
+      if (answered + skipped > 0) {
+        console.log(`\n   💭 Reflections: ${answered} answered, ${skipped} skipped`);
+      }
+    }
+  } catch (e) {
+    console.error("❌ Error:", e.message);
+  }
+  process.exit(0);
+}
+
+// metame mirror on/off — toggle mirror injection
+const isMirror = process.argv.includes('mirror');
+if (isMirror) {
+  const mirrorIndex = process.argv.indexOf('mirror');
+  const toggle = process.argv[mirrorIndex + 1];
+  if (toggle !== 'on' && toggle !== 'off') {
+    console.error("❌ Usage: metame mirror on|off");
+    process.exit(1);
+  }
+  try {
+    const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
+    if (!doc.growth) doc.growth = {};
+    doc.growth.mirror_enabled = (toggle === 'on');
+    fs.writeFileSync(BRAIN_FILE, yaml.dump(doc, { lineWidth: -1 }), 'utf8');
+    console.log(`🪞 MetaMe: Mirror ${toggle === 'on' ? 'enabled' : 'disabled'}.`);
+  } catch (e) {
+    console.error("❌ Error:", e.message);
   }
   process.exit(0);
 }

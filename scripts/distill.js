@@ -29,24 +29,24 @@ const { loadPending, savePending, upsertPending, getPromotable, removePromoted }
 function distill() {
   // 1. Check if buffer exists and has content
   if (!fs.existsSync(BUFFER_FILE)) {
-    return { updated: false, summary: 'No signals to process.' };
+    return { updated: false, behavior: null, summary: 'No signals to process.' };
   }
 
   const raw = fs.readFileSync(BUFFER_FILE, 'utf8').trim();
   if (!raw) {
-    return { updated: false, summary: 'Empty buffer.' };
+    return { updated: false, behavior: null, summary: 'Empty buffer.' };
   }
 
   const lines = raw.split('\n').filter(l => l.trim());
   if (lines.length === 0) {
-    return { updated: false, summary: 'No signals to process.' };
+    return { updated: false, behavior: null, summary: 'No signals to process.' };
   }
 
   // 2. Prevent concurrent distillation
   if (fs.existsSync(LOCK_FILE)) {
     const lockAge = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
     if (lockAge < 120000) { // 2 min timeout
-      return { updated: false, summary: 'Distillation already in progress.' };
+      return { updated: false, behavior: null, summary: 'Distillation already in progress.' };
     }
     // Stale lock, remove it
     fs.unlinkSync(LOCK_FILE);
@@ -71,7 +71,7 @@ function distill() {
 
     if (signals.length === 0) {
       cleanup();
-      return { updated: false, summary: 'No valid signals.' };
+      return { updated: false, behavior: null, summary: 'No valid signals.' };
     }
 
     // 4. Read current profile
@@ -138,7 +138,30 @@ _source:
   context.focus: "我现在在做API重构"
 \`\`\`
 
-If nothing worth saving: respond with exactly NO_UPDATE
+BEHAVIORAL PATTERN DETECTION (Phase C):
+In addition to cognitive traits, analyze the messages for behavioral patterns in THIS session.
+Output a _behavior block with these fields (use null if not enough signal):
+  decision_pattern: premature_closure | exploratory | iterative | null
+  cognitive_load: low | medium | high | null
+  zone: comfort | stretch | panic | null
+  avoidance_topics: []           # topics mentioned but not acted on
+  emotional_response: analytical | blame_external | blame_self | withdrawal | null
+  topics: []                     # main topics discussed (max 5 keywords)
+
+Example _behavior block:
+\`\`\`yaml
+_behavior:
+  decision_pattern: iterative
+  cognitive_load: medium
+  zone: stretch
+  avoidance_topics: ["testing"]
+  emotional_response: analytical
+  topics: ["rust", "error-handling"]
+\`\`\`
+
+IMPORTANT: _behavior is ALWAYS output, even if no profile updates. If there are no profile updates but behavior was detected, output ONLY the _behavior block (do NOT output NO_UPDATE in that case).
+
+If nothing worth saving AND no behavior detected: respond with exactly NO_UPDATE
 Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
 
     // 6. Call Claude in print mode with haiku
@@ -158,28 +181,28 @@ Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
       try { fs.unlinkSync(LOCK_FILE); } catch {}
       const isTimeout = err.killed || (err.signal === 'SIGTERM');
       if (isTimeout) {
-        return { updated: false, summary: 'Skipped — API too slow. Will retry next launch.' };
+        return { updated: false, behavior: null, summary: 'Skipped — API too slow. Will retry next launch.' };
       }
-      return { updated: false, summary: 'Skipped — Claude not available. Will retry next launch.' };
+      return { updated: false, behavior: null, summary: 'Skipped — Claude not available. Will retry next launch.' };
     }
 
     // 7. Parse result
-    if (!result || result.includes('NO_UPDATE')) {
+    if (!result || result === 'NO_UPDATE') {
       cleanup();
-      return { updated: false, summary: `Analyzed ${signals.length} messages — no persistent insights found.` };
+      return { updated: false, behavior: null, summary: `Analyzed ${signals.length} messages — no persistent insights found.` };
     }
 
     // Extract YAML block from response — require explicit code block, no fallback
     const yamlMatch = result.match(/```yaml\n([\s\S]*?)```/) || result.match(/```\n([\s\S]*?)```/);
     if (!yamlMatch) {
       cleanup();
-      return { updated: false, summary: `Analyzed ${signals.length} messages — no persistent insights found.` };
+      return { updated: false, behavior: null, summary: `Analyzed ${signals.length} messages — no persistent insights found.` };
     }
     const yamlContent = yamlMatch[1].trim();
 
     if (!yamlContent) {
       cleanup();
-      return { updated: false, summary: 'Distiller returned empty result.' };
+      return { updated: false, behavior: null, summary: 'Distiller returned empty result.' };
     }
 
     // 8. Validate against schema + merge into profile
@@ -188,14 +211,24 @@ Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
       const updates = yaml.load(yamlContent);
       if (!updates || typeof updates !== 'object') {
         cleanup();
-        return { updated: false, summary: 'Distiller returned invalid data.' };
+        return { updated: false, behavior: null, summary: 'Distiller returned invalid data.' };
       }
+
+      // Extract _behavior block before filtering (it's not a profile field)
+      const behavior = updates._behavior || null;
+      delete updates._behavior;
 
       // Schema whitelist filter: drop any keys not in schema or locked
       const filtered = filterBySchema(updates);
-      if (Object.keys(filtered).length === 0) {
+      if (Object.keys(filtered).length === 0 && !behavior) {
         cleanup();
-        return { updated: false, summary: `Analyzed ${signals.length} messages — all extracted fields rejected by schema.` };
+        return { updated: false, behavior: null, summary: `Analyzed ${signals.length} messages — all extracted fields rejected by schema.` };
+      }
+
+      // If only behavior detected but no profile updates
+      if (Object.keys(filtered).length === 0 && behavior) {
+        cleanup();
+        return { updated: false, behavior, signalCount: signals.length, summary: `Analyzed ${signals.length} messages — behavior logged, no profile changes.` };
       }
 
       const profile = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
@@ -250,7 +283,7 @@ Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
       if (tokens > TOKEN_BUDGET) {
         // Step 3: Reject write entirely, keep previous version
         cleanup();
-        return { updated: false, summary: `Profile too large (${tokens} tokens > ${TOKEN_BUDGET}). Write rejected to prevent bloat.` };
+        return { updated: false, behavior, signalCount: signals.length, summary: `Profile too large (${tokens} tokens > ${TOKEN_BUDGET}). Write rejected to prevent bloat.` };
       }
 
       fs.writeFileSync(BRAIN_FILE, restored, 'utf8');
@@ -258,17 +291,19 @@ Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
       cleanup();
       return {
         updated: true,
+        behavior,
+        signalCount: signals.length,
         summary: `${Object.keys(filtered).length} new trait${Object.keys(filtered).length > 1 ? 's' : ''} absorbed. (${tokens} tokens)`
       };
 
     } catch (err) {
       cleanup();
-      return { updated: false, summary: `Profile merge failed: ${err.message}` };
+      return { updated: false, behavior: null, summary: `Profile merge failed: ${err.message}` };
     }
 
   } catch (err) {
     cleanup();
-    return { updated: false, summary: `Distillation error: ${err.message}` };
+    return { updated: false, behavior: null, summary: `Distillation error: ${err.message}` };
   }
 }
 
@@ -481,12 +516,178 @@ function cleanup() {
   try { fs.unlinkSync(LOCK_FILE); } catch {}
 }
 
+// ---------------------------------------------------------
+// SESSION LOG — records behavioral patterns per distill cycle
+// ---------------------------------------------------------
+const SESSION_LOG_FILE = path.join(HOME, '.metame', 'session_log.yaml');
+const MAX_SESSION_LOG = 30;
+
+/**
+ * Write a session entry to session_log.yaml.
+ * @param {object} behavior - The _behavior block from Haiku
+ * @param {number} signalCount - Number of signals processed
+ */
+function writeSessionLog(behavior, signalCount) {
+  if (!behavior) return;
+
+  const yaml = require('js-yaml');
+  let log = { sessions: [] };
+  try {
+    if (fs.existsSync(SESSION_LOG_FILE)) {
+      log = yaml.load(fs.readFileSync(SESSION_LOG_FILE, 'utf8')) || { sessions: [] };
+    }
+  } catch {
+    log = { sessions: [] };
+  }
+
+  if (!Array.isArray(log.sessions)) log.sessions = [];
+
+  const entry = {
+    ts: new Date().toISOString().slice(0, 10),
+    topics: behavior.topics || [],
+    zone: behavior.zone || null,
+    decision_pattern: behavior.decision_pattern || null,
+    cognitive_load: behavior.cognitive_load || null,
+    emotional_response: behavior.emotional_response || null,
+    avoidance: behavior.avoidance_topics || [],
+    signal_count: signalCount,
+  };
+
+  log.sessions.push(entry);
+
+  // FIFO: keep only most recent entries
+  if (log.sessions.length > MAX_SESSION_LOG) {
+    log.sessions = log.sessions.slice(-MAX_SESSION_LOG);
+  }
+
+  fs.writeFileSync(SESSION_LOG_FILE, yaml.dump(log, { lineWidth: -1 }), 'utf8');
+}
+
+// ---------------------------------------------------------
+// PATTERN DETECTION — every 5th distill, analyze session_log
+// ---------------------------------------------------------
+
+/**
+ * Detect repeated behavioral patterns from session history.
+ * Called when distill_count % 5 === 0 and there are enough sessions.
+ * Writes results to profile growth.patterns (max 3).
+ */
+function detectPatterns() {
+  const yaml = require('js-yaml');
+
+  // Read session log
+  if (!fs.existsSync(SESSION_LOG_FILE)) return;
+  const log = yaml.load(fs.readFileSync(SESSION_LOG_FILE, 'utf8'));
+  if (!log || !Array.isArray(log.sessions) || log.sessions.length < 5) return;
+
+  // Read current profile to check distill_count
+  if (!fs.existsSync(BRAIN_FILE)) return;
+  const profile = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8'));
+  if (!profile) return;
+
+  const distillCount = (profile.evolution && profile.evolution.distill_count) || 0;
+  if (distillCount % 5 !== 0 || distillCount === 0) return;
+
+  // Take last 20 sessions
+  const recent = log.sessions.slice(-20);
+  const sessionSummary = recent.map((s, i) =>
+    `${i + 1}. [${s.ts}] topics=${(s.topics || []).join(',')} zone=${s.zone || '?'} decision=${s.decision_pattern || '?'} load=${s.cognitive_load || '?'} avoidance=[${(s.avoidance || []).join(',')}]`
+  ).join('\n');
+
+  const patternPrompt = `You are a metacognition pattern detector. Analyze these ${recent.length} session summaries and find repeated behavioral patterns.
+
+SESSION HISTORY:
+${sessionSummary}
+
+Find at most 2 patterns from these categories:
+1. Avoidance: topics mentioned repeatedly but never acted on
+2. Energy: what task types correlate with high/low cognitive load
+3. Zone: consecutive comfort zone? frequent panic?
+4. Growth: areas where user went from asking questions to giving commands (mastery signal)
+
+RULES:
+- Only report patterns with confidence > 0.7 (based on frequency/consistency)
+- Each pattern must appear in at least 3 sessions to count
+- Be specific and concise (one sentence per pattern)
+
+OUTPUT FORMAT — respond with ONLY a YAML code block:
+\`\`\`yaml
+patterns:
+  - type: avoidance|energy|zone|growth
+    summary: "one sentence description"
+    confidence: 0.7-1.0
+\`\`\`
+
+If no clear patterns found: respond with exactly NO_PATTERNS`;
+
+  try {
+    const result = execSync(
+      `claude -p --model haiku`,
+      {
+        input: patternPrompt,
+        encoding: 'utf8',
+        timeout: 30000,
+        stdio: ['pipe', 'pipe', 'pipe']
+      }
+    ).trim();
+
+    if (!result || result.includes('NO_PATTERNS')) return;
+
+    const yamlMatch = result.match(/```yaml\n([\s\S]*?)```/) || result.match(/```\n([\s\S]*?)```/);
+    if (!yamlMatch) return;
+
+    const parsed = yaml.load(yamlMatch[1].trim());
+    if (!parsed || !Array.isArray(parsed.patterns)) return;
+
+    // Validate and cap at 3 patterns
+    const validated = parsed.patterns
+      .filter(p => p.type && p.summary && p.confidence >= 0.7)
+      .slice(0, 3)
+      .map(p => ({
+        type: p.type,
+        summary: p.summary,
+        detected: new Date().toISOString().slice(0, 10),
+        surfaced: null,
+        confidence: p.confidence,
+      }));
+
+    if (validated.length === 0) return;
+
+    // Write to profile growth.patterns
+    const rawProfile = fs.readFileSync(BRAIN_FILE, 'utf8');
+    const freshProfile = yaml.load(rawProfile) || {};
+    if (!freshProfile.growth) freshProfile.growth = {};
+    freshProfile.growth.patterns = validated;
+
+    // Also update zone_history from recent sessions
+    const zoneHistory = recent.slice(-10)
+      .map(s => {
+        if (s.zone === 'comfort') return 'C';
+        if (s.zone === 'stretch') return 'S';
+        if (s.zone === 'panic') return 'P';
+        return '?';
+      });
+    freshProfile.growth.zone_history = zoneHistory;
+
+    fs.writeFileSync(BRAIN_FILE, yaml.dump(freshProfile, { lineWidth: -1 }), 'utf8');
+
+  } catch {
+    // Non-fatal — pattern detection failure shouldn't break anything
+  }
+}
+
 // Export for use in index.js
-module.exports = { distill };
+module.exports = { distill, writeSessionLog, detectPatterns };
 
 // Also allow direct execution
 if (require.main === module) {
   const result = distill();
+  // Write session log if behavior was detected
+  if (result.behavior) {
+    writeSessionLog(result.behavior, result.signalCount || 0);
+  }
+  // Run pattern detection (only triggers every 5th distill)
+  detectPatterns();
   if (result.updated) {
     console.log(`🧠 ${result.summary}`);
   } else {

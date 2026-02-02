@@ -68,6 +68,15 @@ const SCHEMA = {
   'evolution.distill_count':   { tier: 'T5', type: 'number' },
   'evolution.recent_changes':  { tier: 'T5', type: 'array', maxItems: 5 },
   'evolution.auto_distill':    { tier: 'T5', type: 'array', maxItems: 10 },
+
+  // === T5: Growth (metacognition, system-managed) ===
+  'growth.patterns':              { tier: 'T5', type: 'array', maxItems: 3 },
+  'growth.zone_history':          { tier: 'T5', type: 'array', maxItems: 10 },
+  'growth.reflections_answered':  { tier: 'T5', type: 'number' },
+  'growth.reflections_skipped':   { tier: 'T5', type: 'number' },
+  'growth.last_reflection':       { tier: 'T5', type: 'string' },
+  'growth.quiet_until':           { tier: 'T5', type: 'string' },
+  'growth.mirror_enabled':        { tier: 'T5', type: 'boolean' },
 };
 
 /**
