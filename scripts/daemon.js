@@ -211,6 +211,11 @@ function executeTask(task, config) {
     return { success: true, output: '(skipped — no activity)', skipped: true };
   }
 
+  // Workflow tasks: multi-step skill chain via --resume session
+  if (task.type === 'workflow') {
+    return executeWorkflow(task, config);
+  }
+
   // Script tasks: run a local script directly (e.g. distill.js), no claude -p
   if (task.type === 'script') {
     log('INFO', `Executing script task: ${task.name} → ${task.command}`);
@@ -305,6 +310,68 @@ function parseInterval(str) {
     case 'd': return val * 86400;
     default: return 3600;
   }
+}
+
+// ---------------------------------------------------------
+// WORKFLOW EXECUTION (multi-step skill chain via --resume)
+// ---------------------------------------------------------
+function executeWorkflow(task, config) {
+  const state = loadState();
+  if (!checkBudget(config, state)) {
+    log('WARN', `Budget exceeded, skipping workflow: ${task.name}`);
+    return { success: false, error: 'budget_exceeded', output: '' };
+  }
+  const precheck = checkPrecondition(task);
+  if (!precheck.pass) {
+    state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'skipped', output_preview: 'Precondition not met' };
+    saveState(state);
+    return { success: true, output: '(skipped)', skipped: true };
+  }
+  const steps = task.steps || [];
+  if (steps.length === 0) return { success: false, error: 'No steps defined', output: '' };
+
+  const model = task.model || 'sonnet';
+  const cwd = task.cwd ? task.cwd.replace(/^~/, HOME) : HOME;
+  const sessionId = crypto.randomUUID();
+  const outputs = [];
+  let totalTokens = 0;
+
+  log('INFO', `Workflow ${task.name}: ${steps.length} steps, session ${sessionId.slice(0, 8)}`);
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    let prompt = (step.skill ? `/${step.skill} ` : '') + (step.prompt || '');
+    if (i === 0 && precheck.context) prompt += `\n\n相关数据:\n\`\`\`\n${precheck.context}\n\`\`\``;
+    const args = ['-p', '--model', model];
+    args.push(i === 0 ? '--session-id' : '--resume', sessionId);
+
+    log('INFO', `Workflow ${task.name} step ${i + 1}/${steps.length}: ${step.skill || 'prompt'}`);
+    try {
+      const output = execSync(`claude ${args.join(' ')}`, {
+        input: prompt, encoding: 'utf8', timeout: step.timeout || 300000, maxBuffer: 5 * 1024 * 1024, cwd,
+      }).trim();
+      const tk = Math.ceil((prompt.length + output.length) / 4);
+      totalTokens += tk;
+      outputs.push({ step: i + 1, skill: step.skill || null, output: output.slice(0, 500), tokens: tk });
+      log('INFO', `Workflow ${task.name} step ${i + 1} done (${tk} tokens)`);
+      if (!checkBudget(config, loadState())) { log('WARN', 'Budget exceeded mid-workflow'); break; }
+    } catch (e) {
+      log('ERROR', `Workflow ${task.name} step ${i + 1} failed: ${e.message.slice(0, 200)}`);
+      outputs.push({ step: i + 1, skill: step.skill || null, error: e.message.slice(0, 200) });
+      if (!step.optional) {
+        recordTokens(loadState(), totalTokens);
+        state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: `Step ${i + 1} failed`, steps_completed: i, steps_total: steps.length };
+        saveState(state);
+        return { success: false, error: `Step ${i + 1} failed`, output: outputs.map(o => `Step ${o.step}: ${o.error ? 'FAILED' : 'OK'}`).join('\n'), tokens: totalTokens };
+      }
+    }
+  }
+  recordTokens(loadState(), totalTokens);
+  const lastOk = [...outputs].reverse().find(o => !o.error);
+  state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'success', output_preview: (lastOk ? lastOk.output : '').slice(0, 200), steps_completed: outputs.filter(o => !o.error).length, steps_total: steps.length };
+  saveState(state);
+  log('INFO', `Workflow ${task.name} done: ${outputs.filter(o => !o.error).length}/${steps.length} steps (${totalTokens} tokens)`);
+  return { success: true, output: outputs.map(o => `Step ${o.step} (${o.skill || 'prompt'}): ${o.error ? 'FAILED' : 'OK'}`).join('\n') + '\n\n' + (lastOk ? lastOk.output : ''), tokens: totalTokens };
 }
 
 // ---------------------------------------------------------

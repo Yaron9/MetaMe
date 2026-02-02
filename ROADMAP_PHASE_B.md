@@ -301,7 +301,91 @@ if (tokens > 800) {
 
 ---
 
-## 9. Expert Sources
+---
+
+## Phase C: True Metacognition Layer (元认知引领系统)
+
+> 灵感来源：周岭《认知觉醒》+ 元认知系统设计专家 + 行为模式分析师 + 成长系统架构师
+> 核心转变：从"偏好记录器"升级为"认知镜像"——揭示用户自己都没意识到的模式，引领成长
+
+### 设计原则
+
+- **系统是你路过的镜子，不是跟着你的教练** — 永不打断心流
+- **一句话胜过一页纸** — 每次最多注入一行反思
+- **事件驱动，不是定时器** — 只在自然过渡点出现（session结束、突破瓶颈、上下文切换）
+- **描述不处方** — "你倾向于X"而不是"你应该停止X"
+- **零额外API成本** — 复用现有Haiku distill管道
+
+### 架构：在现有管道上加一层
+
+```
+                          现有管道（Phase A+B）
+用户消息 → hook捕获 → buffer → Haiku分析 → 写入profile
+                                  │
+                          Phase C 新增 ↓
+                                  ├── 行为模式检测（同一次Haiku调用）
+                                  ├── session摘要 → session_log.yaml（不注入prompt）
+                                  └── 条件触发 → CLAUDE.md注入一行镜像
+```
+
+### ~~C1. 扩展Distill：偏好 + 行为模式（一次Haiku调用）~~ ✅ DONE
+
+distill prompt v4：在现有偏好提取后追加行为模式检测指令。Haiku同一次调用额外输出`_behavior` block（decision_pattern, cognitive_load, zone, avoidance_topics, emotional_response, topics）。distill.js解析后传递给session_log writer。所有return路径增加`behavior`和`signalCount`字段。
+
+### ~~C2. Session Log~~ ✅ DONE
+
+新增`writeSessionLog()`函数写入`~/.metame/session_log.yaml`。每次distill后记录一条session摘要（ts, topics, zone, decision_pattern, cognitive_load, emotional_response, avoidance, signal_count）。FIFO保留最近30条。
+
+### ~~C3. 模式检测（每5次distill跑一次）~~ ✅ DONE
+
+新增`detectPatterns()`函数。当`distill_count % 5 === 0`且session_log >= 5条时触发。读最近20条session摘要，调用Haiku检测4类模式（回避、能量、区域、成长），只保留confidence > 0.7的结果。写入profile `growth.patterns`（max 3条）+ `growth.zone_history`（最近10次zone字母序列）。
+
+### ~~C4. 一行镜像注入（CLAUDE.md条件注入）~~ ✅ DONE
+
+index.js注入CLAUDE.md时，检查`growth.patterns`中未surfaced的模式。14天冷却期，每session最多注入一条。注入格式：`[MetaMe observation: ... 不要主动提起，只在用户自然提到相关话题时温和回应。]`。写入后自动标记`surfaced`日期。支持quiet模式和mirror开关。
+
+### ~~C5. 反思微提示（session结束时）~~ ✅ DONE
+
+CORE_PROTOCOL新增Section 4「REFLECTION MIRROR」：定义触发条件（每7次session / 突破瓶颈 / 3次comfort zone）、🪞格式、规则（永不打断心流、每session最多一次、尊重quiet模式）。Claude自行判断何时在session末尾附加反思提示。
+
+### ~~C6. Growth字段~~ ✅ DONE
+
+schema.js新增7个T5字段：`growth.patterns`（array max 3）、`growth.zone_history`（array max 10）、`growth.reflections_answered`（number）、`growth.reflections_skipped`（number）、`growth.last_reflection`（string）、`growth.quiet_until`（string）、`growth.mirror_enabled`（boolean）。
+
+### ~~C7. 用户控制~~ ✅ DONE
+
+index.js新增3个CLI命令：
+- `metame quiet` — 设置`growth.quiet_until`为48小时后，静默镜像和反思
+- `metame insights` — 显示当前检测到的模式、zone历史、反思统计
+- `metame mirror on/off` — 开关镜像注入（`growth.mirror_enabled`）
+
+### 实施顺序
+
+| 步骤 | 内容 | 状态 | 改动范围 |
+|------|------|------|----------|
+| C6 | growth字段加入schema | ✅ | schema.js |
+| C1 | distill prompt v4 + _behavior输出 | ✅ | distill.js prompt + 解析 |
+| C2 | session_log.yaml写入 | ✅ | distill.js writeSessionLog() |
+| C3 | 模式检测（每5次distill） | ✅ | distill.js detectPatterns() |
+| C4 | CLAUDE.md条件注入一行镜像 | ✅ | index.js Section 4.5 |
+| C5 | 反思微提示 | ✅ | index.js CORE_PROTOCOL Section 4 → 修复后改为 Section 4.6 条件注入 |
+| C7 | 用户控制命令 | ✅ | index.js Section 5.5 |
+
+### Bug Fix: C5 反思提示从静态注入改为条件注入
+
+**问题**：反思指令写死在 CORE_PROTOCOL 静态文本中，每次启动都注入 CLAUDE.md。Claude 每次 `/compact` 重新加载时都会看到反思指令，导致每个 session 都可能触发反思，而非按设计的条件触发。
+
+**修复**：
+- 从 CORE_PROTOCOL 中移除 Section 4（REFLECTION MIRROR）静态文本
+- 新增 Section 4.6：在 index.js 中用 Node.js 代码判断触发条件（`distill_count % 7 === 0` 或 `zone_history` 末尾 3 条全为 `C`）
+- 只有条件满足时才注入一行 `[MetaMe reflection: ...]` 到 CLAUDE.md
+- 不满足条件的 session，Claude 完全看不到反思指令——零干扰
+
+**原则**：所有条件判断在 Node.js 侧完成，不依赖 Claude 自行判断。注入 CLAUDE.md 的永远是已决策的指令，不是需要 Claude 判断的规则。
+
+---
+
+## 10. Expert Sources
 
 - **Cognitive Psychology**: Decision style (System 1/2), Kolb learning cycle, Miller's 7±2, SDT motivation theory
 - **Linguistics**: Speech act theory, hedging vs commitment markers, code-switching patterns
