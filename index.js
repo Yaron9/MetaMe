@@ -571,11 +571,12 @@ if (isDaemon) {
   const DAEMON_SCRIPT = path.join(METAME_DIR, 'daemon.js');
 
   if (subCmd === 'init') {
-    // Create config from template
-    if (fs.existsSync(DAEMON_CONFIG)) {
-      console.log("⚠️  daemon.yaml already exists at ~/.metame/daemon.yaml");
-      console.log("   Delete it first if you want to re-initialize.");
-    } else {
+    const readline = require('readline');
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const ask = (q) => new Promise(r => rl.question(q, r));
+
+    // Create config from template if not exists
+    if (!fs.existsSync(DAEMON_CONFIG)) {
       const templateSrc = fs.existsSync(DAEMON_DEFAULT)
         ? DAEMON_DEFAULT
         : path.join(METAME_DIR, 'daemon-default.yaml');
@@ -585,45 +586,113 @@ if (isDaemon) {
         console.error("❌ Template not found. Reinstall MetaMe.");
         process.exit(1);
       }
-      // Ensure directory permissions (700)
       try { fs.chmodSync(METAME_DIR, 0o700); } catch { /* ignore on Windows */ }
-      console.log("✅ MetaMe daemon initialized.");
-      console.log(`   Config: ${DAEMON_CONFIG}`);
+      console.log("✅ Config created: ~/.metame/daemon.yaml\n");
+    } else {
+      console.log("✅ Config exists: ~/.metame/daemon.yaml\n");
     }
 
-    console.log("\n📱 Telegram Setup (optional):");
-    console.log("   1. Message @BotFather on Telegram → /newbot");
-    console.log("   2. Copy the bot token");
-    console.log("   3. Edit ~/.metame/daemon.yaml:");
-    console.log("      telegram:");
-    console.log("        enabled: true");
-    console.log("        bot_token: \"YOUR_TOKEN\"");
-    console.log("        allowed_chat_ids: [YOUR_CHAT_ID]");
-    console.log("   4. To find your chat_id: message your bot, then run:");
-    console.log("      curl https://api.telegram.org/botYOUR_TOKEN/getUpdates");
-    console.log("\n📘 Feishu Setup (optional):");
-    console.log("   1. Go to open.feishu.cn → Create App → get app_id & app_secret");
-    console.log("   2. Enable Bot capability + im:message events");
-    console.log("   3. Enable 'Long Connection' (长连接) mode in Event Subscription");
-    console.log("   4. Edit ~/.metame/daemon.yaml:");
-    console.log("      feishu:");
-    console.log("        enabled: true");
-    console.log("        app_id: \"YOUR_APP_ID\"");
-    console.log("        app_secret: \"YOUR_APP_SECRET\"");
-    console.log("        allowed_chat_ids: [CHAT_ID]");
+    const yaml = require(path.join(__dirname, 'node_modules', 'js-yaml'));
+    let cfg = yaml.load(fs.readFileSync(DAEMON_CONFIG, 'utf8')) || {};
 
-    console.log("\n   Then: metame daemon start");
+    // --- Telegram Setup ---
+    console.log("━━━ 📱 Telegram Setup ━━━");
+    console.log("Steps:");
+    console.log("  1. Open Telegram, search @BotFather");
+    console.log("  2. Send /newbot, follow prompts to create a bot");
+    console.log("  3. Copy the bot token (looks like: 123456:ABC-DEF...)");
+    console.log("");
 
-    // Optional launchd setup (macOS only)
+    const tgToken = (await ask("Paste your Telegram bot token (Enter to skip): ")).trim();
+    if (tgToken) {
+      if (!cfg.telegram) cfg.telegram = {};
+      cfg.telegram.enabled = true;
+      cfg.telegram.bot_token = tgToken;
+
+      console.log("\nFinding your chat ID...");
+      console.log("  → Send any message to your bot in Telegram first, then press Enter.");
+      await ask("Press Enter after you've messaged your bot: ");
+
+      try {
+        const https = require('https');
+        const chatIds = await new Promise((resolve, reject) => {
+          https.get(`https://api.telegram.org/bot${tgToken}/getUpdates`, (res) => {
+            let body = '';
+            res.on('data', d => body += d);
+            res.on('end', () => {
+              try {
+                const data = JSON.parse(body);
+                const ids = new Set();
+                if (data.result) {
+                  for (const u of data.result) {
+                    if (u.message && u.message.chat) ids.add(u.message.chat.id);
+                  }
+                }
+                resolve([...ids]);
+              } catch { resolve([]); }
+            });
+          }).on('error', () => resolve([]));
+        });
+
+        if (chatIds.length > 0) {
+          cfg.telegram.allowed_chat_ids = chatIds;
+          console.log(`  ✅ Found chat ID(s): ${chatIds.join(', ')}`);
+        } else {
+          console.log("  ⚠️  No messages found. Make sure you messaged the bot.");
+          console.log("     You can set allowed_chat_ids manually in daemon.yaml later.");
+        }
+      } catch {
+        console.log("  ⚠️  Could not fetch chat ID. Set it manually in daemon.yaml.");
+      }
+      console.log("  ✅ Telegram configured!\n");
+    } else {
+      console.log("  Skipped.\n");
+    }
+
+    // --- Feishu Setup ---
+    console.log("━━━ 📘 Feishu (Lark) Setup ━━━");
+    console.log("Steps:");
+    console.log("  1. Go to: https://open.feishu.cn/app");
+    console.log("     → Create App (企业自建应用)");
+    console.log("  2. In 'Credentials' (凭证与基础信息), copy App ID & App Secret");
+    console.log("  3. In 'Bot' (机器人), enable bot capability");
+    console.log("  4. In 'Event Subscription' (事件订阅):");
+    console.log("     → Set mode to 'Long Connection' (使用长连接接收事件)");
+    console.log("     → Add event: im.message.receive_v1 (接收消息)");
+    console.log("  5. In 'Permissions' (权限管理), add:");
+    console.log("     → im:message, im:message:send_as_bot, im:chat");
+    console.log("  6. Publish the app version (创建版本 → 申请发布)");
+    console.log("");
+
+    const feishuAppId = (await ask("Paste your Feishu App ID (Enter to skip): ")).trim();
+    if (feishuAppId) {
+      const feishuSecret = (await ask("Paste your Feishu App Secret: ")).trim();
+      if (feishuSecret) {
+        if (!cfg.feishu) cfg.feishu = {};
+        cfg.feishu.enabled = true;
+        cfg.feishu.app_id = feishuAppId;
+        cfg.feishu.app_secret = feishuSecret;
+        if (!cfg.feishu.allowed_chat_ids) cfg.feishu.allowed_chat_ids = [];
+        console.log("  ✅ Feishu configured!");
+        console.log("  Note: allowed_chat_ids is empty = allow all users.");
+        console.log("        To restrict, add chat IDs to daemon.yaml later.\n");
+      }
+    } else {
+      console.log("  Skipped.\n");
+    }
+
+    // Write config
+    fs.writeFileSync(DAEMON_CONFIG, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+    console.log("━━━ ✅ Setup Complete ━━━");
+    console.log(`Config saved: ${DAEMON_CONFIG}`);
+    console.log("\nNext steps:");
+    console.log("  metame daemon start         — start the daemon");
+    console.log("  metame daemon status        — check status");
     if (process.platform === 'darwin') {
-      const plistDir = path.join(HOME_DIR, 'Library', 'LaunchAgents');
-      const plistPath = path.join(plistDir, 'com.metame.daemon.plist');
-      console.log("\n🍎 Auto-start on macOS (optional):");
-      console.log("   To start daemon automatically on login:");
-      console.log(`   metame daemon start  (first time to verify it works)`);
-      console.log(`   Then create: ${plistPath}`);
-      console.log("   Or run: metame daemon install-launchd");
+      console.log("  metame daemon install-launchd — auto-start on login");
     }
+
+    rl.close();
     process.exit(0);
   }
 
