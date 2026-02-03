@@ -56,17 +56,21 @@ The plugin includes full daemon support for mobile access via Telegram and Feish
 **Mobile Session Commands:**
 | Command | Description |
 |---------|-------------|
-| `/last` | Quick resume the most recent session |
+| `/last` | 优先当前目录最近 session，否则全局最近 |
 | `/new <name>` | Start a new session with a name |
-| `/name <name>` | Name the current session (syncs with desktop) |
-| `/resume` | Pick from recent sessions (shows names) |
-| `/cd` | Change working directory |
+| `/resume` | Pick from recent sessions (real-time timestamps) |
+| `/resume <name>` | Resume by name (partial match, cross-project) |
+| `/name <name>` | Name current session (syncs with desktop `/rename`) |
+| `/cd` | Change working directory (with picker) |
+| `/cd last` | **Sync to computer** — jump to most recent directory |
+| `/session` | Current session info |
 
 **Features:**
 - Full Claude Code engine on your phone (file editing, bash, code search)
-- Session naming syncs between phone and computer
+- Session naming uses Claude's native `customTitle` — syncs everywhere
+- Real file mtime for accurate "刚刚/X分钟前" timestamps
 - Parallel request handling (async spawning, non-blocking)
-- Stateful sessions with `--resume`
+- Daemon takeover: new instance auto-kills old (no conflicts)
 
 ## Profile Tiers
 

@@ -161,18 +161,20 @@ metame daemon install-launchd         # macOS auto-start (RunAtLoad + KeepAlive)
 
 | Command | Description |
 |---------|-------------|
+| `/last` | **Quick resume** — 优先当前目录最近 session，否则全局最近 |
 | `/new` | Start new session — pick project directory from button list |
 | `/new <name>` | Start new session with a name (e.g., `/new API重构`) |
-| `/last` | **Quick resume** — jump to the most recent session (mobile favorite) |
-| `/resume` | Resume a session — clickable list scoped to current workdir, shows session names |
+| `/resume` | Resume a session — clickable list, shows session names + real-time timestamps |
+| `/resume <name>` | Resume by name (supports partial match, cross-project) |
 | `/name <name>` | Name the current session (syncs with computer's `/rename`) |
-| `/continue` | Continue the most recent terminal session |
 | `/cd` | Change working directory — with directory browser |
+| `/cd last` | **Sync to computer** — jump to the most recent session's directory |
 | `/session` | Current session info |
+| `/continue` | Continue the most recent terminal session |
 
 Just type naturally for conversation — every message stays in the same Claude Code session with full context.
 
-**Session naming:** Sessions can be named via `/new <name>`, `/name <name>` (mobile), or Claude Code's `/rename` (desktop). Names are stored in Claude's session index and sync across all interfaces — name it on your phone, see it on your computer.
+**Session naming:** Sessions can be named via `/new <name>`, `/name <name>` (mobile), or Claude Code's `/rename` (desktop). Names are stored in Claude's native session index and sync across all interfaces — name it on your phone, see it on your computer.
 
 **How it works:**
 
