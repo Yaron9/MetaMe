@@ -46,11 +46,27 @@ MetaMe builds a persistent cognitive profile (`~/.claude_profile.yaml`) that cap
 
 ## Telegram/Feishu Setup
 
-The plugin includes full daemon support for mobile access via Telegram and Feishu.
+The plugin includes full daemon support for mobile access via Telegram and Feishu — **same features as the npm CLI**.
 
-1. Run `/metame:daemon-init` and follow the setup wizard
+**Quick Start:**
+1. Run `/metame:daemon-init` and follow the interactive setup wizard
 2. The daemon auto-starts on each Claude session (if configured)
-3. Use `/last` on your phone to resume the most recent session
+3. Use `/last` on your phone to quickly resume the most recent session
+
+**Mobile Session Commands:**
+| Command | Description |
+|---------|-------------|
+| `/last` | Quick resume the most recent session |
+| `/new <name>` | Start a new session with a name |
+| `/name <name>` | Name the current session (syncs with desktop) |
+| `/resume` | Pick from recent sessions (shows names) |
+| `/cd` | Change working directory |
+
+**Features:**
+- Full Claude Code engine on your phone (file editing, bash, code search)
+- Session naming syncs between phone and computer
+- Parallel request handling (async spawning, non-blocking)
+- Stateful sessions with `--resume`
 
 ## Profile Tiers
 
@@ -68,5 +84,7 @@ The plugin includes full daemon support for mobile access via Telegram and Feish
 
 ## Also Available As
 
-- **npm package**: `npm install -g metame-cli` — full CLI with daemon, Telegram, Feishu
+- **npm package**: `npm install -g metame-cli` — same features, plus `metame interview` for genesis
 - **Source**: https://github.com/Yaron9/MetaMe
+
+Both plugin and npm CLI share the same daemon code and feature set.

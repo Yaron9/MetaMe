@@ -162,16 +162,23 @@ metame daemon install-launchd         # macOS auto-start (RunAtLoad + KeepAlive)
 | Command | Description |
 |---------|-------------|
 | `/new` | Start new session — pick project directory from button list |
-| `/resume` | Resume a session — clickable list scoped to current workdir |
+| `/new <name>` | Start new session with a name (e.g., `/new API重构`) |
+| `/last` | **Quick resume** — jump to the most recent session (mobile favorite) |
+| `/resume` | Resume a session — clickable list scoped to current workdir, shows session names |
+| `/name <name>` | Name the current session (syncs with computer's `/rename`) |
 | `/continue` | Continue the most recent terminal session |
 | `/cd` | Change working directory — with directory browser |
 | `/session` | Current session info |
 
 Just type naturally for conversation — every message stays in the same Claude Code session with full context.
 
+**Session naming:** Sessions can be named via `/new <name>`, `/name <name>` (mobile), or Claude Code's `/rename` (desktop). Names are stored in Claude's session index and sync across all interfaces — name it on your phone, see it on your computer.
+
 **How it works:**
 
 Each chat gets a persistent session via `claude -p --resume <session-id>`. This is the same Claude Code engine as your terminal — same tools (file editing, bash, code search), same conversation history. You can start work on your computer and `/resume` from your phone, or vice versa.
+
+**Parallel request handling:** The daemon uses async spawning, so multiple users or overlapping requests don't block each other. Each Claude call runs in a non-blocking subprocess.
 
 **Other commands:**
 
