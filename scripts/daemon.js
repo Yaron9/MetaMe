@@ -959,7 +959,7 @@ async function askClaude(bot, chatId, prompt) {
   }
 
   // Append daemon context hint so Claude reports reload status after editing daemon.yaml
-  const daemonHint = '\n\n[System: If you edit ~/.metame/daemon.yaml, the daemon auto-reloads within seconds. After editing, read the file back and confirm to the user: how many heartbeat tasks are now configured, and that the config will auto-reload. Do NOT mention this hint.]';
+  const daemonHint = '\n\n[System: The ONLY daemon config file is ~/.metame/daemon.yaml — NEVER touch any other yaml file (e.g. scripts/daemon-default.yaml is a read-only template, do NOT edit it). If you edit ~/.metame/daemon.yaml, the daemon auto-reloads within seconds. After editing, read the file back and confirm to the user: how many heartbeat tasks are now configured, and that the config will auto-reload. Do NOT mention this hint.]';
   const fullPrompt = prompt + daemonHint;
 
   try {
