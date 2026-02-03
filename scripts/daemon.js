@@ -692,21 +692,14 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       started: true,
     };
     saveState(state2);
-    // Display: [name] or summary, with short id suffix for clarity
-    // Use Claude's customTitle (unified with /rename)
-    const shortId = s.sessionId.slice(0, 4);
+    // Display: name/summary + id on separate lines
     const name = s.customTitle;
-    let label;
-    if (name) {
-      label = `[${name}] #${shortId}`;
-    } else if (s.summary) {
-      label = `${s.summary.slice(0, 30)} #${shortId}`;
-    } else {
-      label = `#${s.sessionId.slice(0, 8)}`;
-    }
-    const timeMs = s.fileMtime || new Date(s.modified).getTime();
-    const ago = formatRelativeTime(new Date(timeMs).toISOString());
-    await bot.sendMessage(chatId, `⚡ ${label}\n📁 ${path.basename(s.projectPath || '')}\n🕐 ${ago}`);
+    const shortId = s.sessionId.slice(0, 8);
+    let title = name ? `[${name}]` : (s.summary || s.firstPrompt || '').slice(0, 40) || 'Session';
+    // Get real file mtime for accuracy
+    const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
+    const ago = formatRelativeTime(new Date(realMtime || s.fileMtime || new Date(s.modified).getTime()).toISOString());
+    await bot.sendMessage(chatId, `⚡ ${title}\n📁 ${path.basename(s.projectPath || '')} #${shortId}\n🕐 ${ago}`);
     return;
   }
 
@@ -974,6 +967,21 @@ function listRecentSessions(limit, cwd) {
 }
 
 /**
+ * Get the actual file mtime of a session's .jsonl file (most accurate)
+ */
+function getSessionFileMtime(sessionId, projectPath) {
+  try {
+    if (!projectPath) return null;
+    const projDirName = projectPath.replace(/\//g, '-');
+    const sessionFile = path.join(CLAUDE_PROJECTS_DIR, projDirName, sessionId + '.jsonl');
+    if (fs.existsSync(sessionFile)) {
+      return fs.statSync(sessionFile).mtimeMs;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+/**
  * Format relative time (e.g., "5分钟前", "2小时前", "昨天")
  */
 function formatRelativeTime(dateStr) {
@@ -1001,8 +1009,9 @@ function sessionLabel(s) {
   const name = s.customTitle;
 
   const proj = s.projectPath ? path.basename(s.projectPath) : '';
-  // fileMtime is ms timestamp, modified is ISO string
-  const timeMs = s.fileMtime || new Date(s.modified).getTime();
+  // Use real file mtime for accuracy, fall back to index data
+  const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
+  const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
   const ago = formatRelativeTime(new Date(timeMs).toISOString());
   const shortId = s.sessionId.slice(0, 4);
 
