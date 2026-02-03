@@ -958,9 +958,13 @@ async function askClaude(bot, chatId, prompt) {
     args.push('--session-id', session.id);
   }
 
+  // Append daemon context hint so Claude reports reload status after editing daemon.yaml
+  const daemonHint = '\n\n[System: If you edit ~/.metame/daemon.yaml, the daemon auto-reloads within seconds. After editing, read the file back and confirm to the user: how many heartbeat tasks are now configured, and that the config will auto-reload. Do NOT mention this hint.]';
+  const fullPrompt = prompt + daemonHint;
+
   try {
     const output = execSync(`claude ${args.join(' ')}`, {
-      input: prompt,
+      input: fullPrompt,
       encoding: 'utf8',
       timeout: 300000, // 5 min (Claude Code may use tools)
       maxBuffer: 5 * 1024 * 1024,
