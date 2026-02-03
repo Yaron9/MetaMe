@@ -24,24 +24,21 @@ if (!fs.existsSync(DAEMON_CONFIG)) {
   process.exit(0);
 }
 
-// Check if daemon is already running
-function isDaemonRunning() {
-  if (!fs.existsSync(DAEMON_PID)) return false;
+// Kill any existing daemon (takeover strategy)
+function killExistingDaemon() {
+  if (!fs.existsSync(DAEMON_PID)) return;
   try {
     const pid = parseInt(fs.readFileSync(DAEMON_PID, 'utf8').trim(), 10);
-    process.kill(pid, 0); // Test if process exists
-    return true;
+    process.kill(pid, 'SIGTERM');
+    // Give it a moment to clean up
+    require('child_process').execSync('sleep 1', { stdio: 'ignore' });
   } catch {
-    // Process doesn't exist, clean up stale PID file
-    try { fs.unlinkSync(DAEMON_PID); } catch {}
-    return false;
+    // Process doesn't exist or already dead
   }
+  try { fs.unlinkSync(DAEMON_PID); } catch {}
 }
 
-if (isDaemonRunning()) {
-  // Daemon already running, nothing to do
-  process.exit(0);
-}
+killExistingDaemon();
 
 // Start daemon in background
 if (!fs.existsSync(DAEMON_SCRIPT)) {
