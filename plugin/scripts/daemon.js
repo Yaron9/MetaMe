@@ -1319,6 +1319,24 @@ async function startFeishuBridge(config, executeTaskByName) {
 // ---------------------------------------------------------
 // PID MANAGEMENT
 // ---------------------------------------------------------
+
+// Kill any existing daemon before starting (takeover strategy)
+function killExistingDaemon() {
+  if (!fs.existsSync(PID_FILE)) return;
+  try {
+    const oldPid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
+    if (oldPid && oldPid !== process.pid) {
+      process.kill(oldPid, 'SIGTERM');
+      log('INFO', `Killed existing daemon (PID: ${oldPid})`);
+      // Brief pause to let it clean up
+      require('child_process').execSync('sleep 1', { stdio: 'ignore' });
+    }
+  } catch {
+    // Process doesn't exist or already dead
+  }
+  try { fs.unlinkSync(PID_FILE); } catch {}
+}
+
 function writePid() {
   fs.writeFileSync(PID_FILE, String(process.pid), 'utf8');
 }
@@ -1346,6 +1364,8 @@ async function main() {
     process.exit(1);
   }
 
+  // Takeover: kill any existing daemon
+  killExistingDaemon();
   writePid();
   const state = loadState();
   state.pid = process.pid;
