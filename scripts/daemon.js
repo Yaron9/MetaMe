@@ -767,10 +767,20 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   }
 
   if (text === '/cd' || text.startsWith('/cd ')) {
-    const newCwd = text.slice(3).trim();
+    let newCwd = text.slice(3).trim();
     if (!newCwd) {
       await sendDirPicker(bot, chatId, 'cd', 'Switch workdir:');
       return;
+    }
+    // /cd last — jump to the most recent session's directory globally
+    if (newCwd === 'last') {
+      const recent = listRecentSessions(1);
+      if (recent.length > 0 && recent[0].projectPath) {
+        newCwd = recent[0].projectPath;
+      } else {
+        await bot.sendMessage(chatId, 'No recent session found.');
+        return;
+      }
     }
     if (!fs.existsSync(newCwd)) {
       await bot.sendMessage(chatId, `Path not found: ${newCwd}`);
@@ -900,7 +910,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       '/resume [name] — 选择/搜索 session',
       '/continue — resume last in current dir',
       '/name <name> — name current session',
-      '/cd <path> — change workdir',
+      '/cd <path|last> — change workdir (last=最近目录)',
       '/session — current session info',
       '/status /tasks /budget /reload',
       '',
