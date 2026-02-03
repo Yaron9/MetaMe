@@ -256,11 +256,12 @@ function executeTask(task, config) {
   }
   const fullPrompt = preamble + taskPrompt;
 
+  const allowedArgs = (task.allowedTools || []).map(t => `--allowedTools ${t}`).join(' ');
   log('INFO', `Executing task: ${task.name} (model: ${model})`);
 
   try {
     const output = execSync(
-      `claude -p --model ${model}`,
+      `claude -p --model ${model}${allowedArgs ? ' ' + allowedArgs : ''}`,
       {
         input: fullPrompt,
         encoding: 'utf8',
@@ -335,6 +336,7 @@ function executeWorkflow(task, config) {
   const sessionId = crypto.randomUUID();
   const outputs = [];
   let totalTokens = 0;
+  const allowed = task.allowedTools || [];
 
   log('INFO', `Workflow ${task.name}: ${steps.length} steps, session ${sessionId.slice(0, 8)}`);
 
@@ -343,6 +345,7 @@ function executeWorkflow(task, config) {
     let prompt = (step.skill ? `/${step.skill} ` : '') + (step.prompt || '');
     if (i === 0 && precheck.context) prompt += `\n\n相关数据:\n\`\`\`\n${precheck.context}\n\`\`\``;
     const args = ['-p', '--model', model];
+    for (const tool of allowed) args.push('--allowedTools', tool);
     args.push(i === 0 ? '--session-id' : '--resume', sessionId);
 
     log('INFO', `Workflow ${task.name} step ${i + 1}/${steps.length}: ${step.skill || 'prompt'}`);
@@ -943,6 +946,9 @@ async function askClaude(bot, chatId, prompt) {
 
   // Build claude command
   const args = ['-p'];
+  // Per-session allowed tools from daemon config
+  const sessionAllowed = (loadConfig().daemon && loadConfig().daemon.session_allowed_tools) || [];
+  for (const tool of sessionAllowed) args.push('--allowedTools', tool);
   if (session.id === '__continue__') {
     // /continue — resume most recent conversation in cwd
     args.push('--continue');
@@ -978,7 +984,9 @@ async function askClaude(bot, chatId, prompt) {
       log('WARN', `Session ${session.id} not found, creating new`);
       session = createSession(chatId, session.cwd);
       try {
-        const output = execSync(`claude -p --session-id ${session.id}`, {
+        const retryArgs = ['-p', '--session-id', session.id];
+        for (const tool of sessionAllowed) retryArgs.push('--allowedTools', tool);
+        const output = execSync(`claude ${retryArgs.join(' ')}`, {
           input: prompt,
           encoding: 'utf8',
           timeout: 300000,
