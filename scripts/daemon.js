@@ -655,6 +655,64 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
+  // /last — smart resume: prefer current cwd, then most recent globally
+  if (text === '/last') {
+    const curSession = getSession(chatId);
+    const curCwd = curSession ? curSession.cwd : null;
+
+    // Strategy: try current cwd first, then fall back to global
+    let s = null;
+    if (curCwd) {
+      const cwdSessions = listRecentSessions(1, curCwd);
+      if (cwdSessions.length > 0) s = cwdSessions[0];
+    }
+    if (!s) {
+      const globalSessions = listRecentSessions(1);
+      if (globalSessions.length > 0) s = globalSessions[0];
+    }
+
+    if (!s) {
+      // Last resort: use __continue__ to resume whatever Claude thinks is last
+      const state2 = loadState();
+      state2.sessions[chatId] = {
+        id: '__continue__',
+        cwd: curCwd || HOME,
+        created: new Date().toISOString(),
+        started: true,
+      };
+      saveState(state2);
+      await bot.sendMessage(chatId, `⚡ Resuming last session in ${path.basename(curCwd || HOME)}`);
+      return;
+    }
+
+    const state2 = loadState();
+    state2.sessions[chatId] = {
+      id: s.sessionId,
+      cwd: s.projectPath || HOME,
+      created: new Date().toISOString(),
+      started: true,
+    };
+    const existingName = getSessionName(s.sessionId);
+    if (existingName) state2.sessions[chatId].name = existingName;
+    saveState(state2);
+    // Display: [name] or summary, with short id suffix for clarity
+    // Priority: daemon name > Claude customTitle > summary > id
+    const shortId = s.sessionId.slice(0, 4);
+    const name = existingName || s.customTitle;
+    let label;
+    if (name) {
+      label = `[${name}] #${shortId}`;
+    } else if (s.summary) {
+      label = `${s.summary.slice(0, 30)} #${shortId}`;
+    } else {
+      label = `#${s.sessionId.slice(0, 8)}`;
+    }
+    const timeMs = s.fileMtime || new Date(s.modified).getTime();
+    const ago = formatRelativeTime(new Date(timeMs).toISOString());
+    await bot.sendMessage(chatId, `⚡ ${label}\n📁 ${path.basename(s.projectPath || '')}\n🕐 ${ago}`);
+    return;
+  }
+
   if (text === '/resume' || text.startsWith('/resume ')) {
     const arg = text.slice(7).trim();
 
@@ -757,11 +815,29 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       await bot.sendMessage(chatId, 'No active session. Start one first.');
       return;
     }
+    const sessionId = state2.sessions[chatId].id;
+    const cwd = state2.sessions[chatId].cwd;
+
+    // Write to Claude's session file (same format as /rename on computer)
+    try {
+      const projDirName = cwd.replace(/\//g, '-');
+      const sessionFile = path.join(CLAUDE_PROJECTS_DIR, projDirName, sessionId + '.jsonl');
+      if (fs.existsSync(sessionFile)) {
+        const entry = JSON.stringify({ type: 'custom-title', customTitle: name, sessionId }) + '\n';
+        fs.appendFileSync(sessionFile, entry, 'utf8');
+        log('INFO', `Named session ${sessionId.slice(0, 8)}: ${name} (wrote to Claude session file)`);
+      }
+    } catch (e) {
+      log('WARN', `Failed to write customTitle to session file: ${e.message}`);
+    }
+
+    // Also update daemon state for quick access
     state2.sessions[chatId].name = name;
     if (!state2.session_names) state2.session_names = {};
-    state2.session_names[state2.sessions[chatId].id] = name;
+    state2.session_names[sessionId] = name;
     saveState(state2);
-    await bot.sendMessage(chatId, `Session named: ${name}`);
+
+    await bot.sendMessage(chatId, `✅ Session: [${name}]`);
     return;
   }
 
@@ -851,13 +927,14 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   if (text.startsWith('/')) {
     await bot.sendMessage(chatId, [
       'Commands:',
-      '/new [path] [name] — new session (optional name)',
-      '/continue — resume last computer session',
-      '/resume <name|id> — resume by name or session ID',
+      '/last — ⚡ 一键继续最近的 session',
+      '/new [path] [name] — new session',
+      '/resume [name] — 选择/搜索 session',
+      '/continue — resume last in current dir',
       '/name <name> — name current session',
       '/cd <path> — change workdir',
       '/session — current session info',
-      '/status /tasks /run /budget /quiet /reload',
+      '/status /tasks /budget /reload',
       '',
       'Or just type naturally.',
     ].join('\n'));
@@ -901,16 +978,20 @@ function listRecentSessions(limit, cwd) {
         if (data.entries) all = all.concat(data.entries);
       } catch { /* skip */ }
     }
-    // Filter: must have summary and at least 3 messages
-    all = all.filter(s => s.summary && s.messageCount >= 3);
+    // Filter: must have at least 1 message
+    all = all.filter(s => s.messageCount >= 1);
     // Filter by cwd if provided
     if (cwd) {
       const matched = all.filter(s => s.projectPath === cwd);
       if (matched.length > 0) all = matched;
       // else fallback to all projects
     }
-    // Sort by modified desc, take top N
-    all.sort((a, b) => new Date(b.modified) - new Date(a.modified));
+    // Sort by fileMtime (most accurate), fall back to modified
+    all.sort((a, b) => {
+      const aTime = a.fileMtime || new Date(a.modified).getTime();
+      const bTime = b.fileMtime || new Date(b.modified).getTime();
+      return bTime - aTime;
+    });
     return all.slice(0, limit || 10);
   } catch {
     return [];
@@ -918,15 +999,52 @@ function listRecentSessions(limit, cwd) {
 }
 
 /**
+ * Format relative time (e.g., "5分钟前", "2小时前", "昨天")
+ */
+function formatRelativeTime(dateStr) {
+  const now = Date.now();
+  const then = new Date(dateStr).getTime();
+  const diffMs = now - then;
+  const diffMin = Math.floor(diffMs / 60000);
+  const diffHour = Math.floor(diffMs / 3600000);
+  const diffDay = Math.floor(diffMs / 86400000);
+
+  if (diffMin < 1) return '刚刚';
+  if (diffMin < 60) return `${diffMin}分钟前`;
+  if (diffHour < 24) return `${diffHour}小时前`;
+  if (diffDay === 1) return '昨天';
+  if (diffDay < 7) return `${diffDay}天前`;
+  return new Date(dateStr).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+}
+
+/**
  * Format a session entry into a short, readable label for buttons
+ * Enhanced: shows relative time, project, name/summary, and first message preview
  */
 function sessionLabel(s) {
-  const name = getSessionName(s.sessionId);
+  // Priority: daemon name > Claude customTitle > summary > firstPrompt > id
+  const daemonName = getSessionName(s.sessionId);
+  const claudeName = s.customTitle;
+  const name = daemonName || claudeName;
+
   const proj = s.projectPath ? path.basename(s.projectPath) : '';
-  const date = new Date(s.modified).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
-  if (name) return `${date} [${name}] ${proj}`;
-  const title = (s.summary || '').slice(0, 28);
-  return `${date} ${proj ? proj + ': ' : ''}${title}`;
+  // fileMtime is ms timestamp, modified is ISO string
+  const timeMs = s.fileMtime || new Date(s.modified).getTime();
+  const ago = formatRelativeTime(new Date(timeMs).toISOString());
+  const shortId = s.sessionId.slice(0, 4);
+
+  if (name) {
+    return `${ago} [${name}] ${proj} #${shortId}`;
+  }
+
+  // Use summary, or fall back to firstPrompt preview
+  let title = (s.summary || '').slice(0, 20);
+  if (!title && s.firstPrompt) {
+    title = s.firstPrompt.slice(0, 20);
+    if (s.firstPrompt.length > 20) title += '..';
+  }
+
+  return `${ago} ${proj ? proj + ': ' : ''}${title || ''} #${shortId}`;
 }
 
 /**
@@ -992,7 +1110,94 @@ function markSessionStarted(chatId) {
 }
 
 /**
+ * Auto-generate a session name using Haiku (async, non-blocking).
+ * Runs in background — failures are silent.
+ */
+async function autoNameSession(chatId, sessionId, firstPrompt) {
+  try {
+    const namePrompt = `Generate a very short session name (2-5 Chinese characters, no punctuation, no quotes) that captures the essence of this user request:
+
+"${firstPrompt.slice(0, 200)}"
+
+Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug修复, 代码审查`;
+
+    const { output } = await spawnClaudeAsync(
+      ['-p', '--model', 'haiku'],
+      namePrompt,
+      HOME,
+      15000 // 15s timeout
+    );
+
+    if (output) {
+      // Clean up: remove quotes, punctuation, trim
+      let name = output.replace(/["""''`]/g, '').replace(/[.,!?:;。，！？：；]/g, '').trim();
+      // Limit to reasonable length
+      if (name.length > 12) name = name.slice(0, 12);
+      if (name.length >= 2) {
+        const state = loadState();
+        if (state.sessions[chatId]) {
+          state.sessions[chatId].name = name;
+        }
+        if (!state.session_names) state.session_names = {};
+        state.session_names[sessionId] = name;
+        saveState(state);
+        log('INFO', `Auto-named session ${sessionId.slice(0, 8)}: ${name}`);
+      }
+    }
+  } catch (e) {
+    log('DEBUG', `Auto-name failed for ${sessionId.slice(0, 8)}: ${e.message}`);
+  }
+}
+
+/**
+ * Spawn claude as async child process (non-blocking).
+ * Returns { output, error } after process exits.
+ */
+function spawnClaudeAsync(args, input, cwd, timeoutMs = 300000) {
+  return new Promise((resolve) => {
+    const child = spawn('claude', args, {
+      cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env },
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let killed = false;
+
+    const timer = setTimeout(() => {
+      killed = true;
+      child.kill('SIGTERM');
+    }, timeoutMs);
+
+    child.stdout.on('data', (data) => { stdout += data.toString(); });
+    child.stderr.on('data', (data) => { stderr += data.toString(); });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (killed) {
+        resolve({ output: null, error: 'Timeout: Claude took too long' });
+      } else if (code !== 0) {
+        resolve({ output: null, error: stderr || `Exit code ${code}` });
+      } else {
+        resolve({ output: stdout.trim(), error: null });
+      }
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({ output: null, error: err.message });
+    });
+
+    // Write input and close stdin
+    child.stdin.write(input);
+    child.stdin.end();
+  });
+}
+
+/**
  * Shared ask logic — full Claude Code session (stateful, with tools)
+ * Now uses spawn (async) instead of execSync to allow parallel requests.
  */
 async function askClaude(bot, chatId, prompt) {
   log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
@@ -1030,46 +1235,42 @@ async function askClaude(bot, chatId, prompt) {
   const daemonHint = '\n\n[System: The ONLY daemon config file is ~/.metame/daemon.yaml — NEVER touch any other yaml file (e.g. scripts/daemon-default.yaml is a read-only template, do NOT edit it). If you edit ~/.metame/daemon.yaml, the daemon auto-reloads within seconds. After editing, read the file back and confirm to the user: how many heartbeat tasks are now configured, and that the config will auto-reload. Do NOT mention this hint.]';
   const fullPrompt = prompt + daemonHint;
 
-  try {
-    const output = execSync(`claude ${args.join(' ')}`, {
-      input: fullPrompt,
-      encoding: 'utf8',
-      timeout: 300000, // 5 min (Claude Code may use tools)
-      maxBuffer: 5 * 1024 * 1024,
-      cwd: session.cwd,
-    }).trim();
-    clearInterval(typingTimer);
+  const { output, error } = await spawnClaudeAsync(args, fullPrompt, session.cwd);
+  clearInterval(typingTimer);
 
+  if (output) {
     // Mark session as started after first successful call
-    if (!session.started) markSessionStarted(chatId);
+    const wasNew = !session.started;
+    if (wasNew) markSessionStarted(chatId);
 
     const estimated = Math.ceil((prompt.length + output.length) / 4);
     recordTokens(loadState(), estimated);
 
     await bot.sendMarkdown(chatId, output);
-  } catch (e) {
-    clearInterval(typingTimer);
-    const errMsg = e.message || '';
+
+    // Auto-name: if this was the first message and session has no name, generate one
+    if (wasNew && !session.name && !getSessionName(session.id)) {
+      autoNameSession(chatId, session.id, prompt).catch(() => {});
+    }
+  } else {
+    const errMsg = error || 'Unknown error';
     log('ERROR', `askClaude failed for ${chatId}: ${errMsg.slice(0, 300)}`);
+
     // If session not found (expired/deleted), create new and retry once
     if (errMsg.includes('not found') || errMsg.includes('No session')) {
       log('WARN', `Session ${session.id} not found, creating new`);
       session = createSession(chatId, session.cwd);
-      try {
-        const retryArgs = ['-p', '--session-id', session.id];
-        for (const tool of sessionAllowed) retryArgs.push('--allowedTools', tool);
-        const output = execSync(`claude ${retryArgs.join(' ')}`, {
-          input: prompt,
-          encoding: 'utf8',
-          timeout: 300000,
-          maxBuffer: 5 * 1024 * 1024,
-          cwd: session.cwd,
-        }).trim();
+
+      const retryArgs = ['-p', '--session-id', session.id];
+      for (const tool of sessionAllowed) retryArgs.push('--allowedTools', tool);
+
+      const retry = await spawnClaudeAsync(retryArgs, prompt, session.cwd);
+      if (retry.output) {
         markSessionStarted(chatId);
-        await bot.sendMarkdown(chatId, output);
-      } catch (e2) {
-        log('ERROR', `askClaude retry failed: ${(e2.message || '').slice(0, 200)}`);
-        try { await bot.sendMessage(chatId, `Error: ${(e2.message || '').slice(0, 200)}`); } catch { /* */ }
+        await bot.sendMarkdown(chatId, retry.output);
+      } else {
+        log('ERROR', `askClaude retry failed: ${(retry.error || '').slice(0, 200)}`);
+        try { await bot.sendMessage(chatId, `Error: ${(retry.error || '').slice(0, 200)}`); } catch { /* */ }
       }
     } else {
       try { await bot.sendMessage(chatId, `Error: ${errMsg.slice(0, 200)}`); } catch { /* */ }

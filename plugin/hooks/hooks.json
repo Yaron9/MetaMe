@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/setup.js\" && node \"${CLAUDE_PLUGIN_ROOT}/scripts/inject-profile.js\" && node \"${CLAUDE_PLUGIN_ROOT}/scripts/distill-on-start.js\""
+      }]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/signal-capture.js\""
+      }]
+    }]
+  }
+}

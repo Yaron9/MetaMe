@@ -11,7 +11,9 @@
         "scripts/"
     ],
     "scripts": {
-        "start": "node index.js"
+        "start": "node index.js",
+        "sync:plugin": "cp scripts/schema.js plugin/scripts/ && cp scripts/pending-traits.js plugin/scripts/ && cp scripts/signal-capture.js plugin/scripts/ && echo '✅ Plugin scripts synced'",
+        "precommit": "npm run sync:plugin"
     },
     "keywords": [
         "claude",
