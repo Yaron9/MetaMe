@@ -676,18 +676,21 @@ if (isDaemon) {
   }
 
   if (subCmd === 'start') {
+    // Kill any lingering daemon.js processes to avoid Feishu WebSocket conflicts
+    try {
+      const { execSync: es } = require('child_process');
+      const pids = es("pgrep -f 'node.*daemon\\.js' 2>/dev/null || true", { encoding: 'utf8' }).trim();
+      if (pids) {
+        for (const p of pids.split('\n').filter(Boolean)) {
+          const n = parseInt(p, 10);
+          if (n && n !== process.pid) try { process.kill(n, 'SIGKILL'); } catch { /* */ }
+        }
+        es('sleep 1');
+      }
+    } catch { /* ignore */ }
     // Check if already running
     if (fs.existsSync(DAEMON_PID)) {
-      const existingPid = parseInt(fs.readFileSync(DAEMON_PID, 'utf8').trim(), 10);
-      try {
-        process.kill(existingPid, 0); // test if alive
-        console.log(`⚠️  Daemon already running (PID: ${existingPid})`);
-        console.log("   Use 'metame daemon stop' first.");
-        process.exit(1);
-      } catch {
-        // Stale PID file — clean up
-        fs.unlinkSync(DAEMON_PID);
-      }
+      try { fs.unlinkSync(DAEMON_PID); } catch { /* */ }
     }
     if (!fs.existsSync(DAEMON_CONFIG)) {
       console.error("❌ No config found. Run: metame daemon init");
@@ -717,11 +720,21 @@ if (isDaemon) {
     const pid = parseInt(fs.readFileSync(DAEMON_PID, 'utf8').trim(), 10);
     try {
       process.kill(pid, 'SIGTERM');
+      // Wait for process to die (up to 3s), then force kill
+      let dead = false;
+      for (let i = 0; i < 6; i++) {
+        const { execSync: es } = require('child_process');
+        es('sleep 0.5');
+        try { process.kill(pid, 0); } catch { dead = true; break; }
+      }
+      if (!dead) {
+        try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+      }
       console.log(`✅ Daemon stopped (PID: ${pid})`);
     } catch (e) {
       console.log(`⚠️  Process ${pid} not found (may have already exited).`);
-      fs.unlinkSync(DAEMON_PID);
     }
+    try { fs.unlinkSync(DAEMON_PID); } catch { /* ignore */ }
     process.exit(0);
   }
 
