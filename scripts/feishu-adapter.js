@@ -121,11 +121,31 @@ function createBot(config) {
           loggerLevel: Lark.LoggerLevel.info,
         });
 
+        // Dedup: track recent message_ids (Feishu may redeliver on slow ack)
+        const _seenMsgIds = new Map(); // message_id → timestamp
+        const DEDUP_TTL = 60000; // 60s window
+        function isDuplicate(msgId) {
+          if (!msgId) return false;
+          const now = Date.now();
+          // Cleanup old entries
+          if (_seenMsgIds.size > 200) {
+            for (const [k, t] of _seenMsgIds) {
+              if (now - t > DEDUP_TTL) _seenMsgIds.delete(k);
+            }
+          }
+          if (_seenMsgIds.has(msgId)) return true;
+          _seenMsgIds.set(msgId, now);
+          return false;
+        }
+
         const eventDispatcher = new Lark.EventDispatcher({}).register({
           'im.message.receive_v1': async (data) => {
             try {
               const msg = data.message;
               if (!msg) return;
+
+              // Dedup by message_id
+              if (isDuplicate(msg.message_id)) return;
 
               const chatId = msg.chat_id;
               let text = '';
@@ -143,7 +163,8 @@ function createBot(config) {
               text = text.replace(/@_user_\d+\s*/g, '').trim();
 
               if (text) {
-                onMessage(chatId, text, data);
+                // Fire-and-forget: don't block the event loop (SDK needs fast ack)
+                Promise.resolve().then(() => onMessage(chatId, text, data)).catch(() => {});
               }
             } catch (e) {
               // Non-fatal
@@ -159,7 +180,7 @@ function createBot(config) {
               if (action && chatId) {
                 const cmd = action.value && action.value.cmd;
                 if (cmd) {
-                  onMessage(chatId, cmd, data);
+                  Promise.resolve().then(() => onMessage(chatId, cmd, data)).catch(() => {});
                 }
               }
             } catch (e) {
