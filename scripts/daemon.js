@@ -615,12 +615,27 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       await sendDirPicker(bot, chatId, 'new', 'Pick a workdir:');
       return;
     }
-    if (!fs.existsSync(arg)) {
-      await bot.sendMessage(chatId, `Path not found: ${arg}`);
-      return;
+    // Parse: /new <path> [name] — if arg contains a space after a valid path, rest is name
+    let dirPath = arg;
+    let sessionName = '';
+    // Try full arg as path first; if not, split on spaces to find path + name
+    if (!fs.existsSync(dirPath)) {
+      const spaceIdx = arg.indexOf(' ');
+      if (spaceIdx > 0) {
+        const maybePath = arg.slice(0, spaceIdx);
+        if (fs.existsSync(maybePath)) {
+          dirPath = maybePath;
+          sessionName = arg.slice(spaceIdx + 1).trim();
+        }
+      }
+      if (!fs.existsSync(dirPath)) {
+        await bot.sendMessage(chatId, `Path not found: ${dirPath}`);
+        return;
+      }
     }
-    const session = createSession(chatId, arg);
-    await bot.sendMessage(chatId, `New session.\nWorkdir: ${session.cwd}`);
+    const session = createSession(chatId, dirPath, sessionName || '');
+    const label = sessionName ? `[${sessionName}]` : '';
+    await bot.sendMessage(chatId, `New session ${label}\nWorkdir: ${session.cwd}`);
     return;
   }
 
@@ -669,11 +684,26 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       return;
     }
 
-    // Argument given → match by prefix or full ID
-    const match = recentSessions.length > 0
-      ? recentSessions.find(s => s.sessionId.startsWith(arg))
-      : null;
-    const fullMatch = match || listRecentSessions(50).find(s => s.sessionId.startsWith(arg));
+    // Argument given → match by name, then by session ID prefix
+    const allSessions = listRecentSessions(50);
+    const argLower = arg.toLowerCase();
+    // 1. Match by name (from session_names map)
+    let fullMatch = allSessions.find(s => {
+      const n = getSessionName(s.sessionId);
+      return n && n.toLowerCase() === argLower;
+    });
+    // 2. Partial name match
+    if (!fullMatch) {
+      fullMatch = allSessions.find(s => {
+        const n = getSessionName(s.sessionId);
+        return n && n.toLowerCase().includes(argLower);
+      });
+    }
+    // 3. Session ID prefix match
+    if (!fullMatch) {
+      fullMatch = recentSessions.find(s => s.sessionId.startsWith(arg))
+        || allSessions.find(s => s.sessionId.startsWith(arg));
+    }
     const sessionId = fullMatch ? fullMatch.sessionId : arg;
     const cwd = (fullMatch && fullMatch.projectPath) || (getSession(chatId) && getSession(chatId).cwd) || HOME;
 
@@ -684,8 +714,13 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       created: new Date().toISOString(),
       started: true,
     };
+    if (fullMatch) {
+      const n = getSessionName(sessionId);
+      if (n) state2.sessions[chatId].name = n;
+    }
     saveState(state2);
-    const label = fullMatch ? (fullMatch.summary || fullMatch.firstPrompt || '').slice(0, 40) : sessionId.slice(0, 8);
+    const name = getSessionName(sessionId);
+    const label = name || (fullMatch ? (fullMatch.summary || fullMatch.firstPrompt || '').slice(0, 40) : sessionId.slice(0, 8));
     await bot.sendMessage(chatId, `Resumed: ${label}\nWorkdir: ${cwd}`);
     return;
   }
@@ -711,12 +746,32 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
+  if (text.startsWith('/name ')) {
+    const name = text.slice(6).trim();
+    if (!name) {
+      await bot.sendMessage(chatId, 'Usage: /name <session name>');
+      return;
+    }
+    const state2 = loadState();
+    if (!state2.sessions[chatId]) {
+      await bot.sendMessage(chatId, 'No active session. Start one first.');
+      return;
+    }
+    state2.sessions[chatId].name = name;
+    if (!state2.session_names) state2.session_names = {};
+    state2.session_names[state2.sessions[chatId].id] = name;
+    saveState(state2);
+    await bot.sendMessage(chatId, `Session named: ${name}`);
+    return;
+  }
+
   if (text === '/session') {
     const session = getSession(chatId);
     if (!session) {
       await bot.sendMessage(chatId, 'No active session. Send any message to start one.');
     } else {
-      await bot.sendMessage(chatId, `Session: ${session.id.slice(0, 8)}...\nWorkdir: ${session.cwd}\nStarted: ${session.created}`);
+      const nameTag = session.name ? ` [${session.name}]` : '';
+      await bot.sendMessage(chatId, `Session: ${session.id.slice(0, 8)}...${nameTag}\nWorkdir: ${session.cwd}\nStarted: ${session.created}`);
     }
     return;
   }
@@ -796,9 +851,10 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   if (text.startsWith('/')) {
     await bot.sendMessage(chatId, [
       'Commands:',
-      '/new [path] — new session',
+      '/new [path] [name] — new session (optional name)',
       '/continue — resume last computer session',
-      '/resume <id> — resume specific session',
+      '/resume <name|id> — resume by name or session ID',
+      '/name <name> — name current session',
       '/cd <path> — change workdir',
       '/session — current session info',
       '/status /tasks /run /budget /quiet /reload',
@@ -865,8 +921,10 @@ function listRecentSessions(limit, cwd) {
  * Format a session entry into a short, readable label for buttons
  */
 function sessionLabel(s) {
+  const name = getSessionName(s.sessionId);
   const proj = s.projectPath ? path.basename(s.projectPath) : '';
   const date = new Date(s.modified).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+  if (name) return `${date} [${name}] ${proj}`;
   const title = (s.summary || '').slice(0, 28);
   return `${date} ${proj ? proj + ': ' : ''}${title}`;
 }
@@ -901,7 +959,7 @@ function getSession(chatId) {
   return state.sessions[chatId] || null;
 }
 
-function createSession(chatId, cwd) {
+function createSession(chatId, cwd, name) {
   const state = loadState();
   const sessionId = crypto.randomUUID();
   state.sessions[chatId] = {
@@ -910,9 +968,19 @@ function createSession(chatId, cwd) {
     created: new Date().toISOString(),
     started: false, // true after first message sent
   };
+  if (name) {
+    state.sessions[chatId].name = name;
+    if (!state.session_names) state.session_names = {};
+    state.session_names[sessionId] = name;
+  }
   saveState(state);
-  log('INFO', `New session for ${chatId}: ${sessionId} (cwd: ${state.sessions[chatId].cwd})`);
+  log('INFO', `New session for ${chatId}: ${sessionId}${name ? ' [' + name + ']' : ''} (cwd: ${state.sessions[chatId].cwd})`);
   return state.sessions[chatId];
+}
+
+function getSessionName(sessionId) {
+  const state = loadState();
+  return (state.session_names && state.session_names[sessionId]) || '';
 }
 
 function markSessionStarted(chatId) {
