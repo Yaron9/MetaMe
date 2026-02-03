@@ -689,16 +689,13 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     state2.sessions[chatId] = {
       id: s.sessionId,
       cwd: s.projectPath || HOME,
-      created: new Date().toISOString(),
       started: true,
     };
-    const existingName = getSessionName(s.sessionId);
-    if (existingName) state2.sessions[chatId].name = existingName;
     saveState(state2);
     // Display: [name] or summary, with short id suffix for clarity
-    // Priority: daemon name > Claude customTitle > summary > id
+    // Use Claude's customTitle (unified with /rename)
     const shortId = s.sessionId.slice(0, 4);
-    const name = existingName || s.customTitle;
+    const name = s.customTitle;
     let label;
     if (name) {
       label = `[${name}] #${shortId}`;
@@ -745,16 +742,14 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     // Argument given → match by name, then by session ID prefix
     const allSessions = listRecentSessions(50);
     const argLower = arg.toLowerCase();
-    // 1. Match by name (from session_names map)
+    // 1. Match by customTitle (Claude's native session name)
     let fullMatch = allSessions.find(s => {
-      const n = getSessionName(s.sessionId);
-      return n && n.toLowerCase() === argLower;
+      return s.customTitle && s.customTitle.toLowerCase() === argLower;
     });
     // 2. Partial name match
     if (!fullMatch) {
       fullMatch = allSessions.find(s => {
-        const n = getSessionName(s.sessionId);
-        return n && n.toLowerCase().includes(argLower);
+        return s.customTitle && s.customTitle.toLowerCase().includes(argLower);
       });
     }
     // 3. Session ID prefix match
@@ -769,15 +764,10 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     state2.sessions[chatId] = {
       id: sessionId,
       cwd,
-      created: new Date().toISOString(),
       started: true,
     };
-    if (fullMatch) {
-      const n = getSessionName(sessionId);
-      if (n) state2.sessions[chatId].name = n;
-    }
     saveState(state2);
-    const name = getSessionName(sessionId);
+    const name = fullMatch ? fullMatch.customTitle : null;
     const label = name || (fullMatch ? (fullMatch.summary || fullMatch.firstPrompt || '').slice(0, 40) : sessionId.slice(0, 8));
     await bot.sendMessage(chatId, `Resumed: ${label}\nWorkdir: ${cwd}`);
     return;
@@ -810,34 +800,18 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       await bot.sendMessage(chatId, 'Usage: /name <session name>');
       return;
     }
-    const state2 = loadState();
-    if (!state2.sessions[chatId]) {
+    const session = getSession(chatId);
+    if (!session) {
       await bot.sendMessage(chatId, 'No active session. Start one first.');
       return;
     }
-    const sessionId = state2.sessions[chatId].id;
-    const cwd = state2.sessions[chatId].cwd;
 
-    // Write to Claude's session file (same format as /rename on computer)
-    try {
-      const projDirName = cwd.replace(/\//g, '-');
-      const sessionFile = path.join(CLAUDE_PROJECTS_DIR, projDirName, sessionId + '.jsonl');
-      if (fs.existsSync(sessionFile)) {
-        const entry = JSON.stringify({ type: 'custom-title', customTitle: name, sessionId }) + '\n';
-        fs.appendFileSync(sessionFile, entry, 'utf8');
-        log('INFO', `Named session ${sessionId.slice(0, 8)}: ${name} (wrote to Claude session file)`);
-      }
-    } catch (e) {
-      log('WARN', `Failed to write customTitle to session file: ${e.message}`);
+    // Write to Claude's session file (unified with /rename on desktop)
+    if (writeSessionName(session.id, session.cwd, name)) {
+      await bot.sendMessage(chatId, `✅ Session: [${name}]`);
+    } else {
+      await bot.sendMessage(chatId, `⚠️ Failed to save name, but session continues.`);
     }
-
-    // Also update daemon state for quick access
-    state2.sessions[chatId].name = name;
-    if (!state2.session_names) state2.session_names = {};
-    state2.session_names[sessionId] = name;
-    saveState(state2);
-
-    await bot.sendMessage(chatId, `✅ Session: [${name}]`);
     return;
   }
 
@@ -846,8 +820,9 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     if (!session) {
       await bot.sendMessage(chatId, 'No active session. Send any message to start one.');
     } else {
-      const nameTag = session.name ? ` [${session.name}]` : '';
-      await bot.sendMessage(chatId, `Session: ${session.id.slice(0, 8)}...${nameTag}\nWorkdir: ${session.cwd}\nStarted: ${session.created}`);
+      const name = getSessionName(session.id);
+      const nameTag = name ? ` [${name}]` : '';
+      await bot.sendMessage(chatId, `Session: ${session.id.slice(0, 8)}...${nameTag}\nWorkdir: ${session.cwd}`);
     }
     return;
   }
@@ -1022,10 +997,8 @@ function formatRelativeTime(dateStr) {
  * Enhanced: shows relative time, project, name/summary, and first message preview
  */
 function sessionLabel(s) {
-  // Priority: daemon name > Claude customTitle > summary > firstPrompt > id
-  const daemonName = getSessionName(s.sessionId);
-  const claudeName = s.customTitle;
-  const name = daemonName || claudeName;
+  // Use Claude's native customTitle (unified with /rename on desktop)
+  const name = s.customTitle;
 
   const proj = s.projectPath ? path.basename(s.projectPath) : '';
   // fileMtime is ms timestamp, modified is ISO string
@@ -1083,22 +1056,59 @@ function createSession(chatId, cwd, name) {
   state.sessions[chatId] = {
     id: sessionId,
     cwd: cwd || HOME,
-    created: new Date().toISOString(),
     started: false, // true after first message sent
   };
-  if (name) {
-    state.sessions[chatId].name = name;
-    if (!state.session_names) state.session_names = {};
-    state.session_names[sessionId] = name;
-  }
   saveState(state);
+
+  // If name provided, write to Claude's session file (same as /rename on desktop)
+  if (name) {
+    writeSessionName(sessionId, cwd || HOME, name);
+  }
+
   log('INFO', `New session for ${chatId}: ${sessionId}${name ? ' [' + name + ']' : ''} (cwd: ${state.sessions[chatId].cwd})`);
-  return state.sessions[chatId];
+  return { ...state.sessions[chatId], id: sessionId };
 }
 
+/**
+ * Get session name from Claude's sessions-index.json (unified with /rename)
+ */
 function getSessionName(sessionId) {
-  const state = loadState();
-  return (state.session_names && state.session_names[sessionId]) || '';
+  try {
+    if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return '';
+    const projects = fs.readdirSync(CLAUDE_PROJECTS_DIR);
+    for (const proj of projects) {
+      const indexFile = path.join(CLAUDE_PROJECTS_DIR, proj, 'sessions-index.json');
+      if (!fs.existsSync(indexFile)) continue;
+      const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+      if (data.entries) {
+        const entry = data.entries.find(e => e.sessionId === sessionId);
+        if (entry && entry.customTitle) return entry.customTitle;
+      }
+    }
+  } catch { /* ignore */ }
+  return '';
+}
+
+/**
+ * Write session name to Claude's session file (same format as /rename on desktop)
+ */
+function writeSessionName(sessionId, cwd, name) {
+  try {
+    const projDirName = cwd.replace(/\//g, '-');
+    const sessionFile = path.join(CLAUDE_PROJECTS_DIR, projDirName, sessionId + '.jsonl');
+    // Create directory if needed
+    const dir = path.dirname(sessionFile);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const entry = JSON.stringify({ type: 'custom-title', customTitle: name, sessionId }) + '\n';
+    fs.appendFileSync(sessionFile, entry, 'utf8');
+    log('INFO', `Named session ${sessionId.slice(0, 8)}: ${name}`);
+    return true;
+  } catch (e) {
+    log('WARN', `Failed to write session name: ${e.message}`);
+    return false;
+  }
 }
 
 function markSessionStarted(chatId) {
@@ -1111,9 +1121,9 @@ function markSessionStarted(chatId) {
 
 /**
  * Auto-generate a session name using Haiku (async, non-blocking).
- * Runs in background — failures are silent.
+ * Writes to Claude's session file (unified with /rename).
  */
-async function autoNameSession(chatId, sessionId, firstPrompt) {
+async function autoNameSession(chatId, sessionId, firstPrompt, cwd) {
   try {
     const namePrompt = `Generate a very short session name (2-5 Chinese characters, no punctuation, no quotes) that captures the essence of this user request:
 
@@ -1134,14 +1144,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       // Limit to reasonable length
       if (name.length > 12) name = name.slice(0, 12);
       if (name.length >= 2) {
-        const state = loadState();
-        if (state.sessions[chatId]) {
-          state.sessions[chatId].name = name;
-        }
-        if (!state.session_names) state.session_names = {};
-        state.session_names[sessionId] = name;
-        saveState(state);
-        log('INFO', `Auto-named session ${sessionId.slice(0, 8)}: ${name}`);
+        // Write to Claude's session file (unified with /rename on desktop)
+        writeSessionName(sessionId, cwd, name);
       }
     }
   } catch (e) {
@@ -1249,8 +1253,8 @@ async function askClaude(bot, chatId, prompt) {
     await bot.sendMarkdown(chatId, output);
 
     // Auto-name: if this was the first message and session has no name, generate one
-    if (wasNew && !session.name && !getSessionName(session.id)) {
-      autoNameSession(chatId, session.id, prompt).catch(() => {});
+    if (wasNew && !getSessionName(session.id)) {
+      autoNameSession(chatId, session.id, prompt, session.cwd).catch(() => {});
     }
   } else {
     const errMsg = error || 'Unknown error';
