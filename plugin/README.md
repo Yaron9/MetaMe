@@ -25,6 +25,7 @@ MetaMe builds a persistent cognitive profile (`~/.claude_profile.yaml`) that cap
 
 ## Slash Commands
 
+### Profile Commands
 | Command | Description |
 |---------|-------------|
 | `/metame:evolve "insight"` | Teach MetaMe a new insight about yourself |
@@ -33,6 +34,23 @@ MetaMe builds a persistent cognitive profile (`~/.claude_profile.yaml`) that cap
 | `/metame:quiet` | Silence mirror & reflections for 48 hours |
 | `/metame:insights` | Show detected behavioral patterns |
 | `/metame:mirror on\|off` | Toggle metacognition mirror |
+
+### Daemon Commands (Telegram/Feishu)
+| Command | Description |
+|---------|-------------|
+| `/metame:daemon` | Show daemon status and help |
+| `/metame:daemon-init` | Configure Telegram/Feishu (first-time setup) |
+| `/metame:daemon-start` | Start the daemon |
+| `/metame:daemon-stop` | Stop the daemon |
+| `/metame:daemon-logs` | Show recent logs |
+
+## Telegram/Feishu Setup
+
+The plugin includes full daemon support for mobile access via Telegram and Feishu.
+
+1. Run `/metame:daemon-init` and follow the setup wizard
+2. The daemon auto-starts on each Claude session (if configured)
+3. Use `/last` on your phone to resume the most recent session
 
 ## Profile Tiers
 
