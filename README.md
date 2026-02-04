@@ -16,11 +16,17 @@
 
 2. **Desktop-Bound** — Leave your computer, work stops. You can't continue that debugging session on your phone. You can't vibe with Claude on the train, in bed, or waiting in line.
 
-**MetaMe** solves both:
+**MetaMe** solves both — and more:
 
 **🧠 Cognitive Profile** — A persistent "Global Brain" (`~/.claude_profile.yaml`) that travels with you across every project. Unlike ChatGPT/Claude's built-in memory (which stores *facts* like "user lives in X"), MetaMe captures *how you think* — your decision style, cognitive load preferences, and communication traits. It's not a memory system; it's a **Cognitive Mirror**.
 
 **📱 Mobile Bridge** — Full Claude Code from your phone via Telegram or Feishu. Same tools, same files, same conversation history. Start on your computer, continue anywhere. `/cd last` syncs you to exactly where you left off.
+
+**🔔 Remote Wake** — Daemon runs in the background on your computer. Send a message from your phone, and it wakes up Claude Code to do real work — edit files, run commands, commit code — even while you're away from your desk.
+
+**📂 File Transfer** — Send files from your computer to your phone (ask Claude to send any project file). Send files from your phone to your computer (just attach them in chat). Seamless both ways.
+
+**⏰ Heartbeat Tasks** — Schedule Claude to run automatically. Daily summaries, automated workflows, multi-step skill chains — all running on your machine, pushing results to your phone.
 
 ## ✨ Key Features
 
