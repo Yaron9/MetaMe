@@ -947,17 +947,64 @@ function listRecentSessions(limit, cwd) {
   try {
     if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return [];
     const projects = fs.readdirSync(CLAUDE_PROJECTS_DIR);
-    let all = [];
+
+    // Build a map: sessionId -> entry (for deduplication)
+    const sessionMap = new Map();
+    // Cache: projDirName -> real projectPath (from index)
+    const projPathCache = new Map();
+
     for (const proj of projects) {
-      const indexFile = path.join(CLAUDE_PROJECTS_DIR, proj, 'sessions-index.json');
+      const projDir = path.join(CLAUDE_PROJECTS_DIR, proj);
+
+      // 1. Read from sessions-index.json (Claude's native index)
+      const indexFile = path.join(projDir, 'sessions-index.json');
       try {
-        if (!fs.existsSync(indexFile)) continue;
-        const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
-        if (data.entries) all = all.concat(data.entries);
+        if (fs.existsSync(indexFile)) {
+          const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+          if (data.entries && data.entries.length > 0) {
+            // Cache the real projectPath from any indexed session
+            const realPath = data.entries[0].projectPath;
+            if (realPath) projPathCache.set(proj, realPath);
+
+            for (const entry of data.entries) {
+              if (entry.messageCount >= 1) {
+                sessionMap.set(entry.sessionId, entry);
+              }
+            }
+          }
+        }
+      } catch { /* skip */ }
+
+      // 2. Direct scan of .jsonl files (hot reload: catches sessions not yet indexed)
+      try {
+        const files = fs.readdirSync(projDir).filter(f => f.endsWith('.jsonl'));
+        for (const file of files) {
+          const sessionId = file.replace('.jsonl', '');
+          const filePath = path.join(projDir, file);
+          const stat = fs.statSync(filePath);
+          const fileMtime = stat.mtimeMs;
+
+          // Only add if not already in map, or if file is newer
+          const existing = sessionMap.get(sessionId);
+          if (!existing || fileMtime > (existing.fileMtime || 0)) {
+            // Use cached real projectPath, or fall back to lossy decode
+            const projectPath = projPathCache.get(proj) || proj.slice(1).replace(/-/g, '/');
+            sessionMap.set(sessionId, {
+              sessionId,
+              projectPath,
+              fileMtime,
+              modified: new Date(fileMtime).toISOString(),
+              messageCount: 1, // Assume at least 1 if file exists
+              ...(existing || {}), // Preserve existing metadata like customTitle
+              fileMtime, // Override with real mtime
+            });
+          }
+        }
       } catch { /* skip */ }
     }
-    // Filter: must have at least 1 message
-    all = all.filter(s => s.messageCount >= 1);
+
+    let all = Array.from(sessionMap.values());
+
     // Filter by cwd if provided
     if (cwd) {
       const matched = all.filter(s => s.projectPath === cwd);
