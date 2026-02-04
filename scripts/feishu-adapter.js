@@ -112,6 +112,59 @@ function createBot(config) {
     },
 
     /**
+     * Download a file from Feishu to local disk
+     * @param {string} messageId - Message ID containing the file
+     * @param {string} fileKey - File key from message content
+     * @param {string} destPath - Local destination path
+     * @returns {Promise<string>} The destination path
+     */
+    async downloadFile(messageId, fileKey, destPath, msgType = 'file') {
+      try {
+        let res;
+        if (msgType === 'image') {
+          // Images use im.image.get API
+          res = await client.im.image.get({
+            path: { image_key: fileKey },
+          });
+        } else {
+          // Files and media use im.messageResource.get API
+          // type: 'file' for documents, 'image' for images
+          res = await client.im.messageResource.get({
+            path: { message_id: messageId, file_key: fileKey },
+            params: { type: msgType === 'media' ? 'file' : msgType },
+          });
+        }
+
+        // res.data is a readable stream
+        if (res && res.data) {
+          const fileStream = fs.createWriteStream(destPath);
+          return new Promise((resolve, reject) => {
+            res.data.pipe(fileStream);
+            fileStream.on('finish', () => {
+              fileStream.close();
+              resolve(destPath);
+            });
+            fileStream.on('error', (err) => {
+              fs.unlink(destPath, () => {});
+              reject(err);
+            });
+          });
+        }
+        throw new Error('No data in response');
+      } catch (err) {
+        // Extract detailed error info - Feishu SDK errors have code/msg
+        let detail = err.message;
+        if (err.code !== undefined) {
+          detail = `code=${err.code}, msg=${err.msg || 'unknown'}`;
+        }
+        if (err.response?.status) {
+          detail += `, httpStatus=${err.response.status}`;
+        }
+        throw new Error(detail);
+      }
+    },
+
+    /**
      * Send a file/document
      * @param {string} chatId
      * @param {string} filePath - Local file path
@@ -228,6 +281,7 @@ function createBot(config) {
 
               const chatId = msg.chat_id;
               let text = '';
+              let fileInfo = null;
 
               if (msg.message_type === 'text') {
                 try {
@@ -236,14 +290,25 @@ function createBot(config) {
                 } catch {
                   text = msg.content || '';
                 }
+              } else if (msg.message_type === 'file' || msg.message_type === 'image' || msg.message_type === 'media') {
+                // File, image or media (video) message
+                try {
+                  const content = JSON.parse(msg.content);
+                  fileInfo = {
+                    messageId: msg.message_id,
+                    fileKey: content.file_key || content.image_key,
+                    fileName: content.file_name || content.image_key || `file_${Date.now()}`,
+                    msgType: msg.message_type, // 'file', 'image', or 'media'
+                  };
+                } catch {}
               }
 
               // Strip @mention prefix if present
               text = text.replace(/@_user_\d+\s*/g, '').trim();
 
-              if (text) {
+              if (text || fileInfo) {
                 // Fire-and-forget: don't block the event loop (SDK needs fast ack)
-                Promise.resolve().then(() => onMessage(chatId, text, data)).catch(() => {});
+                Promise.resolve().then(() => onMessage(chatId, text, data, fileInfo)).catch(() => {});
               }
             } catch (e) {
               // Non-fatal

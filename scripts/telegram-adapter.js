@@ -172,6 +172,46 @@ function createBot(token) {
     },
 
     /**
+     * Download a file from Telegram to local disk
+     * @param {string} fileId - Telegram file_id
+     * @param {string} destPath - Local destination path
+     * @returns {Promise<string>} The destination path
+     */
+    async downloadFile(fileId, destPath) {
+      // 1. Get file path from Telegram
+      const fileInfo = await apiRequest(token, 'getFile', { file_id: fileId });
+      if (!fileInfo.file_path) {
+        throw new Error('Failed to get file path from Telegram');
+      }
+
+      // 2. Download file using stream (zero memory overhead)
+      const fileUrl = `${API_BASE}/file/bot${token}/${fileInfo.file_path}`;
+      return new Promise((resolve, reject) => {
+        const urlObj = new URL(fileUrl);
+        https.get({
+          hostname: urlObj.hostname,
+          path: urlObj.pathname,
+          timeout: 60000,
+        }, (res) => {
+          if (res.statusCode !== 200) {
+            reject(new Error(`Download failed: ${res.statusCode}`));
+            return;
+          }
+          const fileStream = fs.createWriteStream(destPath);
+          res.pipe(fileStream);
+          fileStream.on('finish', () => {
+            fileStream.close();
+            resolve(destPath);
+          });
+          fileStream.on('error', (err) => {
+            fs.unlink(destPath, () => {});
+            reject(err);
+          });
+        }).on('error', reject);
+      });
+    },
+
+    /**
      * Send a file/document
      * @param {number|string} chatId - Target chat ID
      * @param {string} filePath - Local file path
