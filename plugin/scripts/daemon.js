@@ -962,6 +962,91 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
+  if (text === '/undo') {
+    // Stop running task first
+    const proc = activeProcesses.get(chatId);
+    if (proc && proc.child) {
+      proc.aborted = true;
+      proc.child.kill('SIGINT');
+    }
+
+    const session = getSession(chatId);
+    if (!session || !session.id || !session.cwd) {
+      await bot.sendMessage(chatId, 'No active session to undo.');
+      return;
+    }
+
+    // Find session .jsonl file
+    const projDirName = session.cwd.replace(/\//g, '-');
+    const sessionFile = path.join(HOME, '.claude', 'projects', projDirName, session.id + '.jsonl');
+    if (!fs.existsSync(sessionFile)) {
+      await bot.sendMessage(chatId, 'Session file not found.');
+      return;
+    }
+
+    try {
+      // Read all lines, find last file-history-snapshot
+      const content = fs.readFileSync(sessionFile, 'utf8');
+      const lines = content.split('\n').filter(l => l.trim());
+      let lastSnapshotIdx = -1;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const obj = JSON.parse(lines[i]);
+          if (obj.type === 'file-history-snapshot') {
+            lastSnapshotIdx = i;
+            break;
+          }
+        } catch {}
+      }
+
+      if (lastSnapshotIdx <= 0) {
+        await bot.sendMessage(chatId, 'Nothing to undo (no previous turn found).');
+        return;
+      }
+
+      // Extract files modified in the last turn (Write/Edit tool_use)
+      const modifiedFiles = new Set();
+      for (let i = lastSnapshotIdx; i < lines.length; i++) {
+        try {
+          const obj = JSON.parse(lines[i]);
+          const content = obj.message && obj.message.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block.type === 'tool_use' && (block.name === 'Write' || block.name === 'Edit')) {
+                const fp = block.input && block.input.file_path;
+                if (fp) modifiedFiles.add(fp);
+              }
+            }
+          }
+        } catch {}
+      }
+
+      // Truncate session: keep everything before the last snapshot
+      const kept = lines.slice(0, lastSnapshotIdx);
+      fs.writeFileSync(sessionFile, kept.join('\n') + '\n', 'utf8');
+
+      // Git restore only the files Claude modified in this turn
+      let restored = 0;
+      if (modifiedFiles.size > 0) {
+        for (const fp of modifiedFiles) {
+          try {
+            execSync(`git checkout -- "${fp}"`, { cwd: session.cwd, stdio: 'ignore' });
+            restored++;
+          } catch { /* file may be new or not tracked */ }
+        }
+      }
+
+      const removed = lines.length - lastSnapshotIdx;
+      const fileList = modifiedFiles.size > 0
+        ? [...modifiedFiles].map(f => path.basename(f)).join(', ')
+        : 'none';
+      await bot.sendMessage(chatId, `⏪ Undo: 回退了最后一轮 (${removed} 条记录)\n📁 恢复文件: ${fileList}`);
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ Undo failed: ${e.message}`);
+    }
+    return;
+  }
+
   if (text === '/quiet') {
     try {
       const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
@@ -1034,7 +1119,8 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       '/name <name> — 命名当前会话',
       '/cd <path> — 切换工作目录',
       '/session — 查看当前会话',
-      '/stop — 中断当前任务',
+      '/stop — 中断当前任务 (ESC)',
+      '/undo — 回退上一轮操作 (ESC×2)',
       '',
       `⚙️ /model [${currentModel}] /status /tasks /run /budget /reload`,
       '',
