@@ -45,6 +45,7 @@ budget:
   warning_threshold: 0.8
 
 daemon:
+  model: sonnet  # sonnet, opus, haiku — model for mobile sessions
   log_max_size: 1048576
   heartbeat_check_interval: 60
   # Pre-authorize tools for mobile sessions (no permission prompts)
