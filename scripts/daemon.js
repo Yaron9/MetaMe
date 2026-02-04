@@ -950,6 +950,18 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
+  if (text === '/stop') {
+    const proc = activeProcesses.get(chatId);
+    if (proc && proc.child) {
+      proc.aborted = true;
+      proc.child.kill('SIGINT');
+      await bot.sendMessage(chatId, '⏹ Stopping Claude...');
+    } else {
+      await bot.sendMessage(chatId, 'No active task to stop.');
+    }
+    return;
+  }
+
   if (text === '/quiet') {
     try {
       const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
@@ -1022,6 +1034,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       '/name <name> — 命名当前会话',
       '/cd <path> — 切换工作目录',
       '/session — 查看当前会话',
+      '/stop — 中断当前任务',
       '',
       `⚙️ /model [${currentModel}] /status /tasks /run /budget /reload`,
       '',
@@ -1403,6 +1416,9 @@ const CONTENT_EXTENSIONS = new Set([
   '.html', '.htm',                                // Web content
 ]);
 
+// Active Claude processes per chat (for /stop)
+const activeProcesses = new Map(); // chatId -> { child, aborted }
+
 // File cache for button callbacks (shortId -> fullPath)
 const fileCache = new Map();
 const FILE_CACHE_TTL = 1800000; // 30 minutes
@@ -1433,7 +1449,7 @@ function isContentFile(filePath) {
  * Calls onStatus callback when tool usage is detected.
  * Returns { output, error } after process exits.
  */
-function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000) {
+function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, chatId = null) {
   return new Promise((resolve) => {
     // Add stream-json output format (requires --verbose)
     const streamArgs = [...args, '--output-format', 'stream-json', '--verbose'];
@@ -1443,6 +1459,11 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000) {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env },
     });
+
+    // Track active process for /stop
+    if (chatId) {
+      activeProcesses.set(chatId, { child, aborted: false });
+    }
 
     let buffer = '';
     let stderr = '';
@@ -1555,7 +1576,14 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000) {
         } catch { /* ignore */ }
       }
 
-      if (killed) {
+      // Clean up active process tracking
+      const proc = chatId ? activeProcesses.get(chatId) : null;
+      const wasAborted = proc && proc.aborted;
+      if (chatId) activeProcesses.delete(chatId);
+
+      if (wasAborted) {
+        resolve({ output: finalResult || null, error: 'Stopped by user', files: writtenFiles });
+      } else if (killed) {
         resolve({ output: finalResult || null, error: 'Timeout: Claude took too long', files: writtenFiles });
       } else if (code !== 0) {
         resolve({ output: finalResult || null, error: stderr || `Exit code ${code}`, files: writtenFiles });
@@ -1566,6 +1594,7 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000) {
 
     child.on('error', (err) => {
       clearTimeout(timer);
+      if (chatId) activeProcesses.delete(chatId);
       resolve({ output: null, error: err.message, files: [] });
     });
 
@@ -1648,7 +1677,7 @@ async function askClaude(bot, chatId, prompt) {
     } catch { /* ignore status send failures */ }
   };
 
-  const { output, error, files } = await spawnClaudeStreaming(args, fullPrompt, session.cwd, onStatus);
+  const { output, error, files } = await spawnClaudeStreaming(args, fullPrompt, session.cwd, onStatus, 600000, chatId);
   clearInterval(typingTimer);
 
   if (output) {
