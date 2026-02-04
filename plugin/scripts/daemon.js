@@ -669,22 +669,6 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
-  if (text === '/continue') {
-    // Continue the most recent conversation in current workdir
-    const session = getSession(chatId);
-    const cwd = session ? session.cwd : HOME;
-    const state2 = loadState();
-    state2.sessions[chatId] = {
-      id: '__continue__',
-      cwd,
-      created: new Date().toISOString(),
-      started: true,
-    };
-    saveState(state2);
-    await bot.sendMessage(chatId, `Resuming last conversation in ${cwd}`);
-    return;
-  }
-
   // /file <shortId> — send cached file (from button callback)
   if (text.startsWith('/file ')) {
     const shortId = text.slice(6).trim();

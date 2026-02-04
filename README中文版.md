@@ -161,7 +161,6 @@ metame daemon install-launchd         # macOS 自启动（开机自启 + 崩溃�
 | `/new <path> [name]` | 在指定路径新建会话，可选命名 |
 | `/resume` | 恢复会话——可点击列表，显示会话名 + 实时时间戳 |
 | `/resume <name>` | 按名称恢复（支持模糊匹配，跨项目搜索） |
-| `/continue` | 继续电脑上最近一次终端会话 |
 | `/name <name>` | 为当前会话命名（与桌面端 `/rename` 同步） |
 | `/cd` | 切换工作目录——带目录浏览器 |
 | `/cd last` | **同步到电脑** — 跳转到最近 session 所在目录 |
