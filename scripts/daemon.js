@@ -20,6 +20,7 @@ const { execSync, spawn } = require('child_process');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
+const UPLOADS_DIR = path.join(METAME_DIR, 'uploads');
 const CONFIG_FILE = path.join(METAME_DIR, 'daemon.yaml');
 const STATE_FILE = path.join(METAME_DIR, 'daemon_state.json');
 const PID_FILE = path.join(METAME_DIR, 'daemon.pid');
@@ -492,6 +493,33 @@ async function startTelegramBridge(config, executeTaskByName) {
             continue;
           }
 
+          // File/document message → download and pass to Claude
+          if (msg.document || msg.photo) {
+            const fileId = msg.document ? msg.document.file_id : msg.photo[msg.photo.length - 1].file_id;
+            const fileName = msg.document ? msg.document.file_name : `photo_${Date.now()}.jpg`;
+            const caption = msg.caption || '';
+
+            // Save to ~/.metame/uploads/
+            if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+            const destPath = path.join(UPLOADS_DIR, `${Date.now()}_${fileName}`);
+
+            try {
+              await bot.sendMessage(chatId, `📥 Downloading ${fileName}...`);
+              await bot.downloadFile(fileId, destPath);
+
+              // Build prompt for Claude
+              const prompt = caption
+                ? `User sent a file and said: "${caption}"\n\nFile path: ${destPath}\nPlease process this file.`
+                : `User sent a file: ${destPath}\nPlease read and process this file.`;
+
+              await handleCommand(bot, chatId, prompt, config, executeTaskByName);
+            } catch (err) {
+              log('ERROR', `File download failed: ${err.message}`);
+              await bot.sendMessage(chatId, `❌ Download failed: ${err.message}`);
+            }
+            continue;
+          }
+
           // Text message (commands or natural language)
           if (msg.text) {
             await handleCommand(bot, chatId, msg.text.trim(), config, executeTaskByName);
@@ -802,11 +830,26 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       await sendDirPicker(bot, chatId, 'cd', 'Switch workdir:');
       return;
     }
-    // /cd last — jump to the most recent session's directory globally
+    // /cd last — sync to computer: switch to most recent session AND its directory
     if (newCwd === 'last') {
-      const recent = listRecentSessions(1);
-      if (recent.length > 0 && recent[0].projectPath) {
-        newCwd = recent[0].projectPath;
+      const currentSession = getSession(chatId);
+      const excludeId = currentSession?.id;
+      const recent = listRecentSessions(10);
+      const filtered = excludeId ? recent.filter(s => s.sessionId !== excludeId) : recent;
+      if (filtered.length > 0 && filtered[0].projectPath) {
+        const target = filtered[0];
+        // Switch to that session (like /resume) AND its directory
+        const state2 = loadState();
+        state2.sessions[chatId] = {
+          id: target.sessionId,
+          cwd: target.projectPath,
+          started: true,
+        };
+        saveState(state2);
+        const name = target.customTitle || target.summary || '';
+        const label = name ? name.slice(0, 40) : target.sessionId.slice(0, 8);
+        await bot.sendMessage(chatId, `🔄 Synced to: ${label}\n📁 ${path.basename(target.projectPath)}`);
+        return;
       } else {
         await bot.sendMessage(chatId, 'No recent session found.');
         return;
@@ -1657,15 +1700,40 @@ async function startFeishuBridge(config, executeTaskByName) {
   const allowedIds = config.feishu.allowed_chat_ids || [];
 
   try {
-    const receiver = await bot.startReceiving((chatId, text, event) => {
+    const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo) => {
       // Security: check whitelist (empty = allow all)
       if (allowedIds.length > 0 && !allowedIds.includes(chatId)) {
         log('WARN', `Feishu: rejected message from ${chatId}`);
         return;
       }
 
-      log('INFO', `Feishu message from ${chatId}: ${text.slice(0, 50)}`);
-      handleCommand(bot, chatId, text, config, executeTaskByName);
+      // Handle file message
+      if (fileInfo && fileInfo.fileKey) {
+        log('INFO', `Feishu file from ${chatId}: ${fileInfo.fileName} (key: ${fileInfo.fileKey}, msgId: ${fileInfo.messageId}, type: ${fileInfo.msgType})`);
+        if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+        const destPath = path.join(UPLOADS_DIR, `${Date.now()}_${fileInfo.fileName}`);
+
+        try {
+          await bot.sendMessage(chatId, `📥 Downloading ${fileInfo.fileName}...`);
+          await bot.downloadFile(fileInfo.messageId, fileInfo.fileKey, destPath, fileInfo.msgType);
+
+          const prompt = text
+            ? `User sent a file and said: "${text}"\n\nFile path: ${destPath}\nPlease process this file.`
+            : `User sent a file: ${destPath}\nPlease read and process this file.`;
+
+          handleCommand(bot, chatId, prompt, config, executeTaskByName);
+        } catch (err) {
+          log('ERROR', `Feishu file download failed: ${err.message}`);
+          await bot.sendMessage(chatId, `❌ Download failed: ${err.message}`);
+        }
+        return;
+      }
+
+      // Handle text message
+      if (text) {
+        log('INFO', `Feishu message from ${chatId}: ${text.slice(0, 50)}`);
+        handleCommand(bot, chatId, text, config, executeTaskByName);
+      }
     });
 
     log('INFO', 'Feishu bot connected (WebSocket long connection)');
