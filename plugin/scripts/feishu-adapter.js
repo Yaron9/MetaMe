@@ -128,18 +128,21 @@ function createBot(config) {
           });
         } else {
           // Files and media use im.messageResource.get API
-          // type: 'file' for documents, 'image' for images
           res = await client.im.messageResource.get({
             path: { message_id: messageId, file_key: fileKey },
-            params: { type: msgType === 'media' ? 'file' : msgType },
+            params: { type: 'file' },
           });
         }
 
-        // res.data is a readable stream
-        if (res && res.data) {
+        // SDK returns writeFile method or getReadableStream
+        if (res && res.writeFile) {
+          await res.writeFile(destPath);
+          return destPath;
+        } else if (res && res.getReadableStream) {
+          const stream = res.getReadableStream();
           const fileStream = fs.createWriteStream(destPath);
           return new Promise((resolve, reject) => {
-            res.data.pipe(fileStream);
+            stream.pipe(fileStream);
             fileStream.on('finish', () => {
               fileStream.close();
               resolve(destPath);
@@ -150,16 +153,9 @@ function createBot(config) {
             });
           });
         }
-        throw new Error('No data in response');
+        throw new Error('No writeFile or stream in response');
       } catch (err) {
-        // Extract detailed error info - Feishu SDK errors have code/msg
-        let detail = err.message;
-        if (err.code !== undefined) {
-          detail = `code=${err.code}, msg=${err.msg || 'unknown'}`;
-        }
-        if (err.response?.status) {
-          detail += `, httpStatus=${err.response.status}`;
-        }
+        const detail = err.message || String(err);
         throw new Error(detail);
       }
     },

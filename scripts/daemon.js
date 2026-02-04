@@ -20,7 +20,6 @@ const { execSync, spawn } = require('child_process');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
-const UPLOADS_DIR = path.join(METAME_DIR, 'uploads');
 const CONFIG_FILE = path.join(METAME_DIR, 'daemon.yaml');
 const STATE_FILE = path.join(METAME_DIR, 'daemon_state.json');
 const PID_FILE = path.join(METAME_DIR, 'daemon.pid');
@@ -499,18 +498,21 @@ async function startTelegramBridge(config, executeTaskByName) {
             const fileName = msg.document ? msg.document.file_name : `photo_${Date.now()}.jpg`;
             const caption = msg.caption || '';
 
-            // Save to ~/.metame/uploads/
-            if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-            const destPath = path.join(UPLOADS_DIR, `${Date.now()}_${fileName}`);
+            // Save to project's upload/ folder
+            const session = getSession(chatId);
+            const cwd = session?.cwd || HOME;
+            const uploadDir = path.join(cwd, 'upload');
+            if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+            const destPath = path.join(uploadDir, fileName);
 
             try {
-              await bot.sendMessage(chatId, `📥 Downloading ${fileName}...`);
               await bot.downloadFile(fileId, destPath);
+              await bot.sendMessage(chatId, `📥 Saved: ${fileName}`);
 
-              // Build prompt for Claude
+              // Build prompt - don't ask Claude to read large files automatically
               const prompt = caption
-                ? `User sent a file and said: "${caption}"\n\nFile path: ${destPath}\nPlease process this file.`
-                : `User sent a file: ${destPath}\nPlease read and process this file.`;
+                ? `User uploaded a file to the project: ${destPath}\nUser says: "${caption}"`
+                : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
 
               await handleCommand(bot, chatId, prompt, config, executeTaskByName);
             } catch (err) {
@@ -860,13 +862,27 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       return;
     }
     const state2 = loadState();
-    if (!state2.sessions[chatId]) {
+    // Try to find existing session in this directory
+    const recentInDir = listRecentSessions(1, newCwd);
+    if (recentInDir.length > 0 && recentInDir[0].sessionId) {
+      // Attach to existing session in this directory
+      const target = recentInDir[0];
+      state2.sessions[chatId] = {
+        id: target.sessionId,
+        cwd: newCwd,
+        started: true,
+      };
+      saveState(state2);
+      const label = target.customTitle || target.summary?.slice(0, 30) || target.sessionId.slice(0, 8);
+      await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)}\n🔄 Attached: ${label}`);
+    } else if (!state2.sessions[chatId]) {
       createSession(chatId, newCwd);
+      await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)} (new session)`);
     } else {
       state2.sessions[chatId].cwd = newCwd;
       saveState(state2);
+      await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)}`);
     }
-    await bot.sendMessage(chatId, `Workdir: ${newCwd}`);
     return;
   }
 
@@ -1561,7 +1577,22 @@ async function askClaude(bot, chatId, prompt) {
 
   let session = getSession(chatId);
   if (!session) {
-    session = createSession(chatId);
+    // Auto-attach to most recent Claude session (unified session management)
+    const recent = listRecentSessions(1);
+    if (recent.length > 0 && recent[0].sessionId && recent[0].projectPath) {
+      const target = recent[0];
+      const state = loadState();
+      state.sessions[chatId] = {
+        id: target.sessionId,
+        cwd: target.projectPath,
+        started: true,  // Already has history
+      };
+      saveState(state);
+      session = state.sessions[chatId];
+      log('INFO', `Auto-attached ${chatId} to recent session: ${target.sessionId.slice(0, 8)} (${path.basename(target.projectPath)})`);
+    } else {
+      session = createSession(chatId);
+    }
   }
 
   // Build claude command
@@ -1710,16 +1741,21 @@ async function startFeishuBridge(config, executeTaskByName) {
       // Handle file message
       if (fileInfo && fileInfo.fileKey) {
         log('INFO', `Feishu file from ${chatId}: ${fileInfo.fileName} (key: ${fileInfo.fileKey}, msgId: ${fileInfo.messageId}, type: ${fileInfo.msgType})`);
-        if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-        const destPath = path.join(UPLOADS_DIR, `${Date.now()}_${fileInfo.fileName}`);
+        // Save to project's upload/ folder
+        const session = getSession(chatId);
+        const cwd = session?.cwd || HOME;
+        const uploadDir = path.join(cwd, 'upload');
+        if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+        const destPath = path.join(uploadDir, fileInfo.fileName);
 
         try {
-          await bot.sendMessage(chatId, `📥 Downloading ${fileInfo.fileName}...`);
           await bot.downloadFile(fileInfo.messageId, fileInfo.fileKey, destPath, fileInfo.msgType);
+          await bot.sendMessage(chatId, `📥 Saved: ${fileInfo.fileName}`);
 
+          // Build prompt - don't ask Claude to read large files automatically
           const prompt = text
-            ? `User sent a file and said: "${text}"\n\nFile path: ${destPath}\nPlease process this file.`
-            : `User sent a file: ${destPath}\nPlease read and process this file.`;
+            ? `User uploaded a file to the project: ${destPath}\nUser says: "${text}"`
+            : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
 
           handleCommand(bot, chatId, prompt, config, executeTaskByName);
         } catch (err) {
