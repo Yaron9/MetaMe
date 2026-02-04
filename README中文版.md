@@ -165,6 +165,7 @@ metame daemon install-launchd         # macOS 自启动（开机自启 + 崩溃�
 | `/cd` | 切换工作目录——带目录浏览器 |
 | `/cd last` | **同步到电脑** — 跳转到最近 session 所在目录 |
 | `/session` | 查看当前会话信息 |
+| `/stop` | 中断当前任务（相当于终端按 ESC） |
 
 直接打字即可对话——每条消息都在同一个 Claude Code 会话中，保持完整上下文。
 
