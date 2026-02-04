@@ -661,7 +661,10 @@ if (isDaemon) {
     console.log("     → Set mode to 'Long Connection' (使用长连接接收事件)");
     console.log("     → Add event: im.message.receive_v1 (接收消息)");
     console.log("  5. In 'Permissions' (权限管理), add:");
-    console.log("     → im:message, im:message:send_as_bot, im:chat");
+    console.log("     → im:message         (read messages)");
+    console.log("     → im:message:send_as_bot (send messages)");
+    console.log("     → im:chat            (chat info)");
+    console.log("     → im:resource        (file download - for file transfer)");
     console.log("  6. Publish the app version (创建版本 → 申请发布)");
     console.log("");
 
