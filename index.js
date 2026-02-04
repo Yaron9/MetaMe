@@ -571,6 +571,7 @@ if (isDaemon) {
   const DAEMON_SCRIPT = path.join(METAME_DIR, 'daemon.js');
 
   if (subCmd === 'init') {
+    (async () => {
     const readline = require('readline');
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     const ask = (q) => new Promise(r => rl.question(q, r));
@@ -694,6 +695,8 @@ if (isDaemon) {
 
     rl.close();
     process.exit(0);
+    })();
+    return; // Prevent further execution while async runs
   }
 
   if (subCmd === 'install-launchd') {
