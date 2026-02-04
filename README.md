@@ -182,6 +182,25 @@ Each chat gets a persistent session via `claude -p --resume <session-id>`. This 
 
 **Parallel request handling:** The daemon uses async spawning, so multiple users or overlapping requests don't block each other. Each Claude call runs in a non-blocking subprocess.
 
+**Streaming status (v1.3.7):** See what Claude is doing in real-time:
+
+```
+📖 Read: 「config.yaml」
+✏️ Edit: 「daemon.js」
+💻 Bash: 「git status」
+🔍 Grep: 「pattern...」
+```
+
+**File sending (v1.3.7):** Request files from your phone — Claude finds them and sends download buttons:
+
+```
+You: 把 report.md 发过来
+Claude: 请查收~!
+        [📎 report.md]  ← tap to download
+```
+
+Works for any file type (documents, audio, images). Claude uses `[[FILE:/path]]` tags internally, parsed by daemon into clickable buttons. File links valid for 30 minutes.
+
 **Other commands:**
 
 | Command | Description |
