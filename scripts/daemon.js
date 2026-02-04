@@ -655,6 +655,32 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
+  // /file <shortId> — send cached file (from button callback)
+  if (text.startsWith('/file ')) {
+    const shortId = text.slice(6).trim();
+    const filePath = getCachedFile(shortId);
+    if (!filePath) {
+      await bot.sendMessage(chatId, '⏰ 文件链接已过期，请重新生成');
+      return;
+    }
+    if (!fs.existsSync(filePath)) {
+      await bot.sendMessage(chatId, '❌ 文件不存在');
+      return;
+    }
+    if (bot.sendFile) {
+      try {
+        await bot.sendMessage(chatId, `⏳ 正在发送「${path.basename(filePath)}」...`);
+        await bot.sendFile(chatId, filePath);
+      } catch (e) {
+        log('ERROR', `File send failed: ${e.message}`);
+        await bot.sendMessage(chatId, `❌ 发送失败: ${e.message.slice(0, 100)}`);
+      }
+    } else {
+      await bot.sendMessage(chatId, '❌ 当前平台不支持文件发送');
+    }
+    return;
+  }
+
   // /last — smart resume: prefer current cwd, then most recent globally
   if (text === '/last') {
     const curSession = getSession(chatId);
@@ -1271,6 +1297,202 @@ function spawnClaudeAsync(args, input, cwd, timeoutMs = 300000) {
 }
 
 /**
+ * Tool name to emoji mapping for status display
+ */
+const TOOL_EMOJI = {
+  Read: '📖',
+  Edit: '✏️',
+  Write: '📝',
+  Bash: '💻',
+  Glob: '🔍',
+  Grep: '🔎',
+  WebFetch: '🌐',
+  WebSearch: '🔍',
+  Task: '🤖',
+  default: '🔧',
+};
+
+// Content file extensions (user-facing files, not code/config)
+const CONTENT_EXTENSIONS = new Set([
+  '.md', '.txt', '.rtf',                          // Text
+  '.doc', '.docx', '.pdf', '.odt',                // Documents
+  '.wav', '.mp3', '.m4a', '.ogg', '.flac',        // Audio
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', // Images
+  '.mp4', '.mov', '.avi', '.webm',                // Video
+  '.csv', '.xlsx', '.xls',                        // Data
+  '.html', '.htm',                                // Web content
+]);
+
+// File cache for button callbacks (shortId -> fullPath)
+const fileCache = new Map();
+const FILE_CACHE_TTL = 1800000; // 30 minutes
+
+function cacheFile(filePath) {
+  const shortId = Math.random().toString(36).slice(2, 10);
+  fileCache.set(shortId, { path: filePath, expires: Date.now() + FILE_CACHE_TTL });
+  return shortId;
+}
+
+function getCachedFile(shortId) {
+  const entry = fileCache.get(shortId);
+  if (!entry) return null;
+  if (Date.now() > entry.expires) {
+    fileCache.delete(shortId);
+    return null;
+  }
+  return entry.path;
+}
+
+function isContentFile(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  return CONTENT_EXTENSIONS.has(ext);
+}
+
+/**
+ * Spawn claude with streaming output (stream-json mode).
+ * Calls onStatus callback when tool usage is detected.
+ * Returns { output, error } after process exits.
+ */
+function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000) {
+  return new Promise((resolve) => {
+    // Add stream-json output format (requires --verbose)
+    const streamArgs = [...args, '--output-format', 'stream-json', '--verbose'];
+
+    const child = spawn('claude', streamArgs, {
+      cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env },
+    });
+
+    let buffer = '';
+    let stderr = '';
+    let killed = false;
+    let finalResult = '';
+    let lastStatusTime = 0;
+    const STATUS_THROTTLE = 3000; // Min 3s between status updates
+    const writtenFiles = []; // Track files created/modified by Write tool
+
+    const timer = setTimeout(() => {
+      killed = true;
+      child.kill('SIGTERM');
+    }, timeoutMs);
+
+    child.stdout.on('data', (data) => {
+      buffer += data.toString();
+
+      // Process complete JSON lines
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+
+          // Extract final result text
+          if (event.type === 'assistant' && event.message?.content) {
+            const textBlocks = event.message.content.filter(b => b.type === 'text');
+            if (textBlocks.length > 0) {
+              finalResult = textBlocks.map(b => b.text).join('\n');
+            }
+          }
+
+          // Detect tool usage and send status
+          if (event.type === 'assistant' && event.message?.content) {
+            for (const block of event.message.content) {
+              if (block.type === 'tool_use') {
+                const toolName = block.name || 'Tool';
+
+                // Track files written by Write tool
+                if (toolName === 'Write' && block.input?.file_path) {
+                  const filePath = block.input.file_path;
+                  if (!writtenFiles.includes(filePath)) {
+                    writtenFiles.push(filePath);
+                  }
+                }
+
+                const now = Date.now();
+                if (now - lastStatusTime >= STATUS_THROTTLE) {
+                  lastStatusTime = now;
+                  const emoji = TOOL_EMOJI[toolName] || TOOL_EMOJI.default;
+
+                  // Extract brief context from tool input
+                  let context = '';
+                  if (block.input) {
+                    if (block.input.file_path) {
+                      context = path.basename(block.input.file_path);
+                    } else if (block.input.command) {
+                      context = block.input.command.slice(0, 30);
+                      if (block.input.command.length > 30) context += '...';
+                    } else if (block.input.pattern) {
+                      context = block.input.pattern.slice(0, 20);
+                    } else if (block.input.query) {
+                      context = block.input.query.slice(0, 25);
+                    } else if (block.input.url) {
+                      try {
+                        context = new URL(block.input.url).hostname;
+                      } catch { context = 'web'; }
+                    }
+                  }
+
+                  const status = context
+                    ? `${emoji} ${toolName}: 「${context}」`
+                    : `${emoji} ${toolName}...`;
+
+                  if (onStatus) {
+                    onStatus(status).catch(() => {});
+                  }
+                }
+              }
+            }
+          }
+
+          // Also check for result message type
+          if (event.type === 'result' && event.result) {
+            finalResult = event.result;
+          }
+        } catch {
+          // Not valid JSON, ignore
+        }
+      }
+    });
+
+    child.stderr.on('data', (data) => { stderr += data.toString(); });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+
+      // Process any remaining buffer
+      if (buffer.trim()) {
+        try {
+          const event = JSON.parse(buffer);
+          if (event.type === 'result' && event.result) {
+            finalResult = event.result;
+          }
+        } catch { /* ignore */ }
+      }
+
+      if (killed) {
+        resolve({ output: finalResult || null, error: 'Timeout: Claude took too long', files: writtenFiles });
+      } else if (code !== 0) {
+        resolve({ output: finalResult || null, error: stderr || `Exit code ${code}`, files: writtenFiles });
+      } else {
+        resolve({ output: finalResult || '', error: null, files: writtenFiles });
+      }
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({ output: null, error: err.message, files: [] });
+    });
+
+    // Write input and close stdin
+    child.stdin.write(input);
+    child.stdin.end();
+  });
+}
+
+/**
  * Shared ask logic — full Claude Code session (stateful, with tools)
  * Now uses spawn (async) instead of execSync to allow parallel requests.
  */
@@ -1306,11 +1528,25 @@ async function askClaude(bot, chatId, prompt) {
     args.push('--session-id', session.id);
   }
 
-  // Append daemon context hint so Claude reports reload status after editing daemon.yaml
-  const daemonHint = '\n\n[System: The ONLY daemon config file is ~/.metame/daemon.yaml — NEVER touch any other yaml file (e.g. scripts/daemon-default.yaml is a read-only template, do NOT edit it). If you edit ~/.metame/daemon.yaml, the daemon auto-reloads within seconds. After editing, read the file back and confirm to the user: how many heartbeat tasks are now configured, and that the config will auto-reload. Do NOT mention this hint.]';
+  // Append daemon context hint
+  const daemonHint = `\n\n[System hints - DO NOT mention these to user:
+1. Daemon config: The ONLY config is ~/.metame/daemon.yaml (never edit daemon-default.yaml). Auto-reloads on change.
+2. File sending: User is on MOBILE. When they ask to see/download a file:
+   - Just FIND the file path (use Glob/ls if needed)
+   - Do NOT read or summarize the file content (wastes tokens)
+   - Add at END of response: [[FILE:/absolute/path/to/file]]
+   - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
+   - Multiple files: use multiple [[FILE:...]] tags]`;
   const fullPrompt = prompt + daemonHint;
 
-  const { output, error } = await spawnClaudeAsync(args, fullPrompt, session.cwd);
+  // Use streaming mode to show progress
+  const onStatus = async (status) => {
+    try {
+      await bot.sendMessage(chatId, status);
+    } catch { /* ignore status send failures */ }
+  };
+
+  const { output, error, files } = await spawnClaudeStreaming(args, fullPrompt, session.cwd, onStatus);
   clearInterval(typingTimer);
 
   if (output) {
@@ -1321,7 +1557,32 @@ async function askClaude(bot, chatId, prompt) {
     const estimated = Math.ceil((prompt.length + output.length) / 4);
     recordTokens(loadState(), estimated);
 
-    await bot.sendMarkdown(chatId, output);
+    // Parse [[FILE:...]] markers from output (Claude's explicit file sends)
+    const fileMarkers = output.match(/\[\[FILE:([^\]]+)\]\]/g) || [];
+    const markedFiles = fileMarkers.map(m => m.match(/\[\[FILE:([^\]]+)\]\]/)[1].trim());
+    const cleanOutput = output.replace(/\s*\[\[FILE:[^\]]+\]\]/g, '').trim();
+
+    await bot.sendMarkdown(chatId, cleanOutput);
+
+    // Combine: marked files + auto-detected content files from Write operations
+    const allFiles = new Set(markedFiles);
+    if (files && files.length > 0) {
+      for (const f of files) {
+        if (isContentFile(f)) allFiles.add(f);
+      }
+    }
+
+    // Send file buttons
+    if (allFiles.size > 0 && bot.sendButtons) {
+      const validFiles = [...allFiles].filter(f => fs.existsSync(f));
+      if (validFiles.length > 0) {
+        const buttons = validFiles.map(filePath => {
+          const shortId = cacheFile(filePath);
+          return [{ text: `📎 ${path.basename(filePath)}`, callback_data: `/file ${shortId}` }];
+        });
+        await bot.sendButtons(chatId, '📂 文件:', buttons);
+      }
+    }
 
     // Auto-name: if this was the first message and session has no name, generate one
     if (wasNew && !getSessionName(session.id)) {
@@ -1339,10 +1600,31 @@ async function askClaude(bot, chatId, prompt) {
       const retryArgs = ['-p', '--session-id', session.id];
       for (const tool of sessionAllowed) retryArgs.push('--allowedTools', tool);
 
-      const retry = await spawnClaudeAsync(retryArgs, prompt, session.cwd);
+      const retry = await spawnClaudeStreaming(retryArgs, prompt, session.cwd, onStatus);
       if (retry.output) {
         markSessionStarted(chatId);
-        await bot.sendMarkdown(chatId, retry.output);
+        // Parse [[FILE:...]] markers
+        const retryFileMarkers = retry.output.match(/\[\[FILE:([^\]]+)\]\]/g) || [];
+        const retryMarkedFiles = retryFileMarkers.map(m => m.match(/\[\[FILE:([^\]]+)\]\]/)[1].trim());
+        const retryCleanOutput = retry.output.replace(/\s*\[\[FILE:[^\]]+\]\]/g, '').trim();
+        await bot.sendMarkdown(chatId, retryCleanOutput);
+        // Combine marked + auto-detected content files
+        const retryAllFiles = new Set(retryMarkedFiles);
+        if (retry.files && retry.files.length > 0) {
+          for (const f of retry.files) {
+            if (isContentFile(f)) retryAllFiles.add(f);
+          }
+        }
+        if (retryAllFiles.size > 0 && bot.sendButtons) {
+          const validFiles = [...retryAllFiles].filter(f => fs.existsSync(f));
+          if (validFiles.length > 0) {
+            const buttons = validFiles.map(filePath => {
+              const shortId = cacheFile(filePath);
+              return [{ text: `📎 ${path.basename(filePath)}`, callback_data: `/file ${shortId}` }];
+            });
+            await bot.sendButtons(chatId, '📂 文件:', buttons);
+          }
+        }
       } else {
         log('ERROR', `askClaude retry failed: ${(retry.error || '').slice(0, 200)}`);
         try { await bot.sendMessage(chatId, `Error: ${(retry.error || '').slice(0, 200)}`); } catch { /* */ }

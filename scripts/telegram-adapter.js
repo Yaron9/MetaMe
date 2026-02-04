@@ -7,6 +7,8 @@
 'use strict';
 
 const https = require('https');
+const fs = require('fs');
+const path = require('path');
 
 const API_BASE = 'https://api.telegram.org';
 
@@ -166,6 +168,71 @@ function createBot(token) {
     async answerCallback(callbackQueryId) {
       await apiRequest(token, 'answerCallbackQuery', {
         callback_query_id: callbackQueryId,
+      });
+    },
+
+    /**
+     * Send a file/document
+     * @param {number|string} chatId - Target chat ID
+     * @param {string} filePath - Local file path
+     * @param {string} [caption] - Optional caption
+     */
+    async sendFile(chatId, filePath, caption) {
+      if (!fs.existsSync(filePath)) {
+        throw new Error(`File not found: ${filePath}`);
+      }
+      const fileName = path.basename(filePath);
+      const fileContent = fs.readFileSync(filePath);
+      const boundary = '----MetaMeBoundary' + Date.now();
+
+      // Build multipart form-data
+      let body = '';
+      body += `--${boundary}\r\n`;
+      body += `Content-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`;
+      if (caption) {
+        body += `--${boundary}\r\n`;
+        body += `Content-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`;
+      }
+      body += `--${boundary}\r\n`;
+      body += `Content-Disposition: form-data; name="document"; filename="${fileName}"\r\n`;
+      body += `Content-Type: application/octet-stream\r\n\r\n`;
+
+      const bodyStart = Buffer.from(body, 'utf8');
+      const bodyEnd = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+      const fullBody = Buffer.concat([bodyStart, fileContent, bodyEnd]);
+
+      return new Promise((resolve, reject) => {
+        const url = `${API_BASE}/bot${token}/sendDocument`;
+        const urlObj = new URL(url);
+        const options = {
+          hostname: urlObj.hostname,
+          path: urlObj.pathname,
+          method: 'POST',
+          headers: {
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': fullBody.length,
+          },
+          timeout: 60000,
+        };
+
+        const req = https.request(options, (res) => {
+          let data = '';
+          res.on('data', (chunk) => { data += chunk; });
+          res.on('end', () => {
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.ok) resolve(parsed.result);
+              else reject(new Error(`Telegram API error: ${parsed.description || 'unknown'}`));
+            } catch (e) {
+              reject(new Error(`Failed to parse response: ${e.message}`));
+            }
+          });
+        });
+
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(); reject(new Error('Upload timed out')); });
+        req.write(fullBody);
+        req.end();
       });
     },
 
