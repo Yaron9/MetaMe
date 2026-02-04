@@ -669,7 +669,11 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     }
     if (bot.sendFile) {
       try {
-        await bot.sendMessage(chatId, `⏳ 正在发送「${path.basename(filePath)}」...`);
+        // Insert zero-width space before extension to prevent link parsing
+        const basename = path.basename(filePath);
+        const dotIdx = basename.lastIndexOf('.');
+        const safeBasename = dotIdx > 0 ? basename.slice(0, dotIdx) + '\u200B' + basename.slice(dotIdx) : basename;
+        await bot.sendMessage(chatId, `⏳ 正在发送「${safeBasename}」...`);
         await bot.sendFile(chatId, filePath);
       } catch (e) {
         log('ERROR', `File send failed: ${e.message}`);
@@ -1420,7 +1424,10 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000) {
                   let context = '';
                   if (block.input) {
                     if (block.input.file_path) {
-                      context = path.basename(block.input.file_path);
+                      // Insert zero-width space before extension to prevent link parsing
+                      const basename = path.basename(block.input.file_path);
+                      const dotIdx = basename.lastIndexOf('.');
+                      context = dotIdx > 0 ? basename.slice(0, dotIdx) + '\u200B' + basename.slice(dotIdx) : basename;
                     } else if (block.input.command) {
                       context = block.input.command.slice(0, 30);
                       if (block.input.command.length > 30) context += '...';
