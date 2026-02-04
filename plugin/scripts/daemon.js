@@ -904,17 +904,22 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
 
   if (text.startsWith('/')) {
     await bot.sendMessage(chatId, [
-      'Commands:',
-      '/last — ⚡ 一键继续最近的 session',
-      '/new [path] [name] — new session',
-      '/resume [name] — 选择/搜索 session',
-      '/continue — resume last in current dir',
-      '/name <name> — name current session',
-      '/cd <path|last> — change workdir (last=最近目录)',
-      '/session — current session info',
-      '/status /tasks /budget /reload',
+      '📱 手机端 Claude Code',
       '',
-      'Or just type naturally.',
+      '⚡ 快速同步电脑工作:',
+      '/last — 继续电脑上最近的对话',
+      '/cd last — 切到电脑最近的项目目录',
+      '',
+      '📂 Session 管理:',
+      '/new [path] [name] — 新建会话',
+      '/resume [name] — 选择/恢复会话',
+      '/name <name> — 命名当前会话',
+      '/cd <path> — 切换工作目录',
+      '/session — 查看当前会话',
+      '',
+      '⚙️ /status /tasks /budget /reload',
+      '',
+      '直接打字即可对话 💬',
     ].join('\n'));
     return;
   }
