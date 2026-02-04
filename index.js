@@ -598,10 +598,15 @@ if (isDaemon) {
 
     // --- Telegram Setup ---
     console.log("━━━ 📱 Telegram Setup ━━━");
-    console.log("Steps:");
-    console.log("  1. Open Telegram, search @BotFather");
-    console.log("  2. Send /newbot, follow prompts to create a bot");
-    console.log("  3. Copy the bot token (looks like: 123456:ABC-DEF...)");
+    console.log("");
+    console.log("Step 1: Create a Bot");
+    console.log("  • Open Telegram app on your phone or desktop");
+    console.log("  • Search for @BotFather (official Telegram bot)");
+    console.log("  • Send /newbot command");
+    console.log("  • Enter a display name (e.g., 'My MetaMe Bot')");
+    console.log("  • Enter a username (must end in 'bot', e.g., 'my_metame_bot')");
+    console.log("  • BotFather will reply with your bot token");
+    console.log("    (looks like: 123456789:ABCdefGHI-jklMNOpqrSTUvwxYZ)");
     console.log("");
 
     const tgToken = (await ask("Paste your Telegram bot token (Enter to skip): ")).trim();
@@ -652,21 +657,38 @@ if (isDaemon) {
 
     // --- Feishu Setup ---
     console.log("━━━ 📘 Feishu (Lark) Setup ━━━");
-    console.log("Steps:");
-    console.log("  1. Go to: https://open.feishu.cn/app");
-    console.log("     → Create App (企业自建应用)");
-    console.log("  2. In 'Credentials' (凭证与基础信息), copy App ID & App Secret");
-    console.log("  3. In 'Bot' (机器人), enable bot capability");
-    console.log("  4. In 'Event Subscription' (事件订阅):");
-    console.log("     → Set mode to 'Long Connection' (使用长连接接收事件)");
-    console.log("     → Add event: im.message.receive_v1 (接收消息)");
-    console.log("  5. In 'Permissions' (权限管理), add:");
-    console.log("     → im:message                    (获取与发送单聊、群组消息)");
-    console.log("     → im:message.p2p_msg:readonly   (读取用户发给机器人的单聊消息)");
-    console.log("     → im:message.group_at_msg:readonly (接收群聊中@机器人消息事件)");
-    console.log("     → im:message:send_as_bot        (以应用的身份发消息)");
-    console.log("     → im:resource                   (获取与上传图片或文件资源)");
-    console.log("  6. Publish the app version (创建版本 → 申请发布)");
+    console.log("");
+    console.log("Step 1: Create an App");
+    console.log("  • Go to: https://open.feishu.cn/app");
+    console.log("  • Click '创建企业自建应用' (Create Enterprise App)");
+    console.log("  • Fill in app name and description");
+    console.log("");
+    console.log("Step 2: Get Credentials");
+    console.log("  • In left sidebar → '凭证与基础信息' (Credentials)");
+    console.log("  • Copy App ID and App Secret");
+    console.log("");
+    console.log("Step 3: Enable Bot");
+    console.log("  • In left sidebar → '应用能力' → '机器人' (Bot)");
+    console.log("  • Enable the bot capability");
+    console.log("");
+    console.log("Step 4: Configure Events");
+    console.log("  • In left sidebar → '事件订阅' (Event Subscription)");
+    console.log("  • Choose '使用长连接接收事件' (Long Connection mode) — important!");
+    console.log("  • Add event: im.message.receive_v1 (接收消息)");
+    console.log("");
+    console.log("Step 5: Add Permissions");
+    console.log("  • In left sidebar → '权限管理' (Permissions)");
+    console.log("  • Search and enable these 5 permissions:");
+    console.log("    → im:message                       (获取与发送单聊、群组消息)");
+    console.log("    → im:message.p2p_msg:readonly      (读取用户发给机器人的单聊消息)");
+    console.log("    → im:message.group_at_msg:readonly (接收群聊中@机器人消息事件)");
+    console.log("    → im:message:send_as_bot           (以应用的身份发消息)");
+    console.log("    → im:resource                      (文件上传下载 - for file transfer)");
+    console.log("");
+    console.log("Step 6: Publish");
+    console.log("  • In left sidebar → '版本管理与发布' (Version Management)");
+    console.log("  • Click '创建版本' → fill version (e.g., 1.0.0)");
+    console.log("  • Click '申请发布' (Apply for Release)");
     console.log("");
 
     const feishuAppId = (await ask("Paste your Feishu App ID (Enter to skip): ")).trim();
