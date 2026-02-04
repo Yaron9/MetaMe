@@ -990,7 +990,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       '/cd <path> — 切换工作目录',
       '/session — 查看当前会话',
       '',
-      '⚙️ /status /tasks /budget /reload',
+      '⚙️ /status /tasks /run <name> /budget /reload',
       '',
       '直接打字即可对话 💬',
     ].join('\n'));
