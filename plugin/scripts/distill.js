@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 
 /**
- * MetaMe Plugin — Distillation Engine
+ * MetaMe Passive Distiller
  *
  * Reads raw signal buffer, calls Claude (haiku, non-interactive)
  * to extract persistent preferences/identity, merges into profile.
  *
- * Bundled in the plugin for standalone use. Resolves schema and
- * pending-traits from the same directory.
+ * Runs automatically before each MetaMe session launch.
  */
 
 const fs = require('fs');
@@ -23,7 +22,12 @@ const LOCK_FILE = path.join(HOME, '.metame', 'distill.lock');
 const { hasKey, isLocked, getTier, getAllowedKeysForPrompt, estimateTokens, TOKEN_BUDGET } = require('./schema');
 const { loadPending, savePending, upsertPending, getPromotable, removePromoted } = require('./pending-traits');
 
+/**
+ * Main distillation process.
+ * Returns { updated: boolean, summary: string }
+ */
 function distill() {
+  // 1. Check if buffer exists and has content
   if (!fs.existsSync(BUFFER_FILE)) {
     return { updated: false, behavior: null, summary: 'No signals to process.' };
   }
@@ -38,17 +42,19 @@ function distill() {
     return { updated: false, behavior: null, summary: 'No signals to process.' };
   }
 
-  // Prevent concurrent distillation
+  // 2. Prevent concurrent distillation
   if (fs.existsSync(LOCK_FILE)) {
     const lockAge = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
-    if (lockAge < 120000) {
+    if (lockAge < 120000) { // 2 min timeout
       return { updated: false, behavior: null, summary: 'Distillation already in progress.' };
     }
+    // Stale lock, remove it
     fs.unlinkSync(LOCK_FILE);
   }
   fs.writeFileSync(LOCK_FILE, process.pid.toString());
 
   try {
+    // 3. Parse signals (preserve confidence from signal-capture)
     const signals = [];
     let highConfidenceCount = 0;
     for (const line of lines) {
@@ -58,7 +64,9 @@ function distill() {
           signals.push(entry.prompt);
           if (entry.confidence === 'high') highConfidenceCount++;
         }
-      } catch { /* skip malformed */ }
+      } catch {
+        // Skip malformed lines
+      }
     }
 
     if (signals.length === 0) {
@@ -66,6 +74,7 @@ function distill() {
       return { updated: false, behavior: null, summary: 'No valid signals.' };
     }
 
+    // 4. Read current profile
     let currentProfile = '';
     try {
       currentProfile = fs.readFileSync(BRAIN_FILE, 'utf8');
@@ -73,7 +82,11 @@ function distill() {
       currentProfile = '(empty profile)';
     }
 
-    const userMessages = signals.map((s, i) => `${i + 1}. "${s}"`).join('\n');
+    // 5. Build distillation prompt
+    const userMessages = signals
+      .map((s, i) => `${i + 1}. "${s}"`)
+      .join('\n');
+
     const allowedKeys = getAllowedKeysForPrompt();
 
     const distillPrompt = `You are a MetaMe cognitive profile distiller. Your job is to extract COGNITIVE TRAITS and PREFERENCES — how the user thinks, decides, and communicates. You are NOT a memory system. Do NOT store facts ("user lives in X"). Only store cognitive patterns and preferences.
@@ -98,20 +111,22 @@ INSTRUCTIONS:
 6. For enum fields, you MUST use one of the listed values.
 
 EPISODIC MEMORY — TWO EXCEPTIONS to the "no facts" rule:
-7. context.anti_patterns (max 5): If the user encountered a REPEATED technical failure or expressed strong frustration about a specific technical approach, record it as an anti-pattern.
-8. context.milestones (max 3): If the user completed a significant milestone or made a key decision, record it.
+7. context.anti_patterns (max 5): If the user encountered a REPEATED technical failure or expressed strong frustration about a specific technical approach, record it as an anti-pattern. Format: "topic — what failed and why". Only cross-project generalizable lessons, NOT project-specific bugs.
+   Example: ["async/await deadlock — Promise.all rejects all on single failure, use Promise.allSettled", "CSS Grid in email templates — no support, use tables"]
+8. context.milestones (max 3): If the user completed a significant milestone or made a key decision, record it. Only the 3 most recent. Format: short description string.
+   Example: ["MetaMe v1.3 published", "Switched from REST to GraphQL"]
 
 COGNITIVE BIAS PREVENTION:
 - A single observation is a STATE, not a TRAIT. Do NOT infer T3 cognition fields from one message.
 - Never infer cognitive style from identity/demographics.
-- If a new signal contradicts an existing profile value, do NOT output the field.
+- If a new signal contradicts an existing profile value, do NOT output the field — contradictions need accumulation.
 - Signal weight hierarchy:
   L1 Surface (word choice, tone) → low weight, needs 5+ observations
   L2 Behavior (question patterns, decision patterns) → medium weight, needs 3 observations
   L3 Self-declaration ("I prefer...", "以后一律...") → high weight, can write directly
 
 CONFIDENCE TAGGING:
-- If a message contains strong directives, mark as HIGH.
+- If a message contains strong directives (以后一律/永远/always/never/记住/from now on), mark as HIGH.
 - Add a _confidence block mapping field keys to "high" or "normal".
 - Add a _source block mapping field keys to the quote that triggered the extraction.
 
@@ -119,38 +134,56 @@ OUTPUT FORMAT — respond with ONLY a YAML code block:
 \`\`\`yaml
 preferences:
   code_style: concise
+context:
+  focus: "API redesign"
 _confidence:
   preferences.code_style: high
+  context.focus: normal
 _source:
   preferences.code_style: "以后代码一律简洁风格"
+  context.focus: "我现在在做API重构"
 \`\`\`
 
-BEHAVIORAL PATTERN DETECTION:
-Output a _behavior block:
+BEHAVIORAL PATTERN DETECTION (Phase C):
+In addition to cognitive traits, analyze the messages for behavioral patterns in THIS session.
+Output a _behavior block with these fields (use null if not enough signal):
   decision_pattern: premature_closure | exploratory | iterative | null
   cognitive_load: low | medium | high | null
   zone: comfort | stretch | panic | null
-  avoidance_topics: []
+  avoidance_topics: []           # topics mentioned but not acted on
   emotional_response: analytical | blame_external | blame_self | withdrawal | null
-  topics: []
+  topics: []                     # main topics discussed (max 5 keywords)
 
-IMPORTANT: _behavior is ALWAYS output, even if no profile updates.
+Example _behavior block:
+\`\`\`yaml
+_behavior:
+  decision_pattern: iterative
+  cognitive_load: medium
+  zone: stretch
+  avoidance_topics: ["testing"]
+  emotional_response: analytical
+  topics: ["rust", "error-handling"]
+\`\`\`
+
+IMPORTANT: _behavior is ALWAYS output, even if no profile updates. If there are no profile updates but behavior was detected, output ONLY the _behavior block (do NOT output NO_UPDATE in that case).
 
 If nothing worth saving AND no behavior detected: respond with exactly NO_UPDATE
 Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
 
+    // 6. Call Claude in print mode with haiku
     let result;
     try {
       result = execSync(
-        `claude -p --model haiku`,
+        `claude -p --model haiku --no-session-persistence`,
         {
           input: distillPrompt,
           encoding: 'utf8',
-          timeout: 60000,
+          timeout: 60000, // 60s — runs in background, no rush
           stdio: ['pipe', 'pipe', 'pipe']
         }
       ).trim();
     } catch (err) {
+      // Don't cleanup buffer on API failure — retry next launch
       try { fs.unlinkSync(LOCK_FILE); } catch {}
       const isTimeout = err.killed || (err.signal === 'SIGTERM');
       if (isTimeout) {
@@ -159,11 +192,13 @@ Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
       return { updated: false, behavior: null, summary: 'Skipped — Claude not available. Will retry next launch.' };
     }
 
+    // 7. Parse result
     if (!result || result === 'NO_UPDATE') {
       cleanup();
       return { updated: false, behavior: null, summary: `Analyzed ${signals.length} messages — no persistent insights found.` };
     }
 
+    // Extract YAML block from response — require explicit code block, no fallback
     const yamlMatch = result.match(/```yaml\n([\s\S]*?)```/) || result.match(/```\n([\s\S]*?)```/);
     if (!yamlMatch) {
       cleanup();
@@ -176,6 +211,7 @@ Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
       return { updated: false, behavior: null, summary: 'Distiller returned empty result.' };
     }
 
+    // 8. Validate against schema + merge into profile
     try {
       const yaml = require('js-yaml');
       const updates = yaml.load(yamlContent);
@@ -184,33 +220,41 @@ Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
         return { updated: false, behavior: null, summary: 'Distiller returned invalid data.' };
       }
 
+      // Extract _behavior block before filtering (it's not a profile field)
       const behavior = updates._behavior || null;
       delete updates._behavior;
 
+      // Schema whitelist filter: drop any keys not in schema or locked
       const filtered = filterBySchema(updates);
       if (Object.keys(filtered).length === 0 && !behavior) {
         cleanup();
         return { updated: false, behavior: null, summary: `Analyzed ${signals.length} messages — all extracted fields rejected by schema.` };
       }
 
+      // If only behavior detected but no profile updates
       if (Object.keys(filtered).length === 0 && behavior) {
         cleanup();
         return { updated: false, behavior, signalCount: signals.length, summary: `Analyzed ${signals.length} messages — behavior logged, no profile changes.` };
       }
 
       const profile = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
+
+      // Auto-expire anti_patterns older than 60 days
       expireAntiPatterns(profile);
 
+      // Read raw content to find locked lines and comments
       const rawProfile = fs.readFileSync(BRAIN_FILE, 'utf8');
       const lockedKeys = extractLockedKeys(rawProfile);
       const inlineComments = extractInlineComments(rawProfile);
 
+      // Strategic merge: tier-aware upsert with pending traits
       const pendingTraits = loadPending();
       const confidenceMap = updates._confidence || {};
       const sourceMap = updates._source || {};
       const merged = strategicMerge(profile, filtered, lockedKeys, pendingTraits, confidenceMap, sourceMap);
       savePending(pendingTraits);
 
+      // Add distillation log entry (keep last 10, compact format)
       if (!merged.evolution) merged.evolution = {};
       if (!merged.evolution.auto_distill) merged.evolution.auto_distill = [];
       merged.evolution.auto_distill.push({
@@ -218,15 +262,19 @@ Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
         signals: signals.length,
         fields: Object.keys(filtered).join(', ')
       });
+      // Cap at 10 entries
       if (merged.evolution.auto_distill.length > 10) {
         merged.evolution.auto_distill = merged.evolution.auto_distill.slice(-10);
       }
 
+      // Dump and restore comments (yaml.dump strips all comments)
       let dumped = yaml.dump(merged, { lineWidth: -1 });
       let restored = restoreComments(dumped, inlineComments);
 
+      // A3: Token budget check — degrade gracefully if over budget
       let tokens = estimateTokens(restored);
       if (tokens > TOKEN_BUDGET) {
+        // Step 1: Clear evolution.recent_changes
         if (merged.evolution.recent_changes) {
           merged.evolution.recent_changes = [];
         }
@@ -235,17 +283,20 @@ Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
         tokens = estimateTokens(restored);
       }
       if (tokens > TOKEN_BUDGET) {
+        // Step 2: Truncate all arrays to half
         truncateArrays(merged);
         dumped = yaml.dump(merged, { lineWidth: -1 });
         restored = restoreComments(dumped, inlineComments);
         tokens = estimateTokens(restored);
       }
       if (tokens > TOKEN_BUDGET) {
+        // Step 3: Reject write entirely, keep previous version
         cleanup();
-        return { updated: false, behavior, signalCount: signals.length, summary: `Profile too large (${tokens} tokens > ${TOKEN_BUDGET}). Write rejected.` };
+        return { updated: false, behavior, signalCount: signals.length, summary: `Profile too large (${tokens} tokens > ${TOKEN_BUDGET}). Write rejected to prevent bloat.` };
       }
 
       fs.writeFileSync(BRAIN_FILE, restored, 'utf8');
+
       cleanup();
       return {
         updated: true,
@@ -265,53 +316,92 @@ Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
   }
 }
 
+/**
+ * Extract keys that are on lines marked with # [LOCKED]
+ */
 function extractLockedKeys(rawYaml) {
   const locked = new Set();
-  for (const line of rawYaml.split('\n')) {
+  const lines = rawYaml.split('\n');
+  for (const line of lines) {
     if (line.includes('# [LOCKED]')) {
       const match = line.match(/^\s*([\w_]+)\s*:/);
-      if (match) locked.add(match[1]);
+      if (match) {
+        locked.add(match[1]);
+      }
     }
   }
   return locked;
 }
 
+/**
+ * Extract inline comments from original YAML (key → comment mapping)
+ * e.g. "  nickname: 3D # [LOCKED]" → { "nickname: 3D": "# [LOCKED]" }
+ */
 function extractInlineComments(rawYaml) {
   const comments = new Map();
   for (const line of rawYaml.split('\n')) {
     const commentMatch = line.match(/^(\s*[\w_]+\s*:.+?)\s+(#.+)$/);
     if (commentMatch) {
-      comments.set(commentMatch[1].trim(), commentMatch[2]);
+      // Key: the content part (trimmed), Value: the comment
+      const content = commentMatch[1].trim();
+      const comment = commentMatch[2];
+      comments.set(content, comment);
     }
+    // Also handle top-level keys with comments but no value on same line
     const keyCommentMatch = line.match(/^(\s*[\w_]+\s*:)\s+(#.+)$/);
     if (keyCommentMatch) {
-      comments.set(keyCommentMatch[1].trim(), keyCommentMatch[2]);
+      const content = keyCommentMatch[1].trim();
+      const comment = keyCommentMatch[2];
+      comments.set(content, comment);
     }
   }
   return comments;
 }
 
+/**
+ * Restore inline comments to dumped YAML output
+ */
 function restoreComments(dumpedYaml, comments) {
   const lines = dumpedYaml.split('\n');
-  return lines.map(line => {
+  const restored = lines.map(line => {
     const trimmed = line.trim();
     for (const [content, comment] of comments) {
       if (trimmed === content || trimmed.startsWith(content)) {
-        if (!line.includes('#')) return `${line} ${comment}`;
+        // Only restore if the comment isn't already present
+        if (!line.includes('#')) {
+          return `${line} ${comment}`;
+        }
       }
     }
     return line;
-  }).join('\n');
+  });
+  return restored.join('\n');
 }
 
+/**
+ * Strategic merge: tier-aware upsert with pending trait support.
+ *
+ * - T1/T2: Never auto-write (locked)
+ * - T3: High confidence → direct write; Normal → pending accumulation
+ * - T4: Direct overwrite
+ * - T5: Direct overwrite (system-managed)
+ *
+ * Also promotes mature pending traits (count >= 3 or high confidence).
+ */
 function strategicMerge(profile, updates, lockedKeys, pendingTraits, confidenceMap, sourceMap) {
-  const result = JSON.parse(JSON.stringify(profile));
-  const flat = flattenObject(updates);
+  const result = JSON.parse(JSON.stringify(profile)); // deep clone
 
+  // Walk flat entries from updates
+  const flat = flattenObject(updates);
   for (const [key, value] of Object.entries(flat)) {
+    // Skip internal metadata keys
     if (key.startsWith('_')) continue;
+
+    // Schema check already done by filterBySchema, but double-check locks
     if (lockedKeys.has(key.split('.')[0])) continue;
     if (isLocked(key)) continue;
+
+    // Null/empty protection — never delete existing values
     if (value === null || value === '') continue;
 
     const tier = getTier(key);
@@ -320,7 +410,7 @@ function strategicMerge(profile, updates, lockedKeys, pendingTraits, confidenceM
     switch (tier) {
       case 'T1':
       case 'T2':
-        continue;
+        continue; // Never auto-write
 
       case 'T3': {
         const confidence = confidenceMap[key] || 'normal';
@@ -334,6 +424,7 @@ function strategicMerge(profile, updates, lockedKeys, pendingTraits, confidenceM
       }
 
       case 'T4':
+        // Stamp added date on anti_pattern entries for auto-expiry
         if (key === 'context.anti_patterns' && Array.isArray(value)) {
           const today = new Date().toISOString().slice(0, 10);
           const existing = getNested(result, key) || [];
@@ -345,6 +436,7 @@ function strategicMerge(profile, updates, lockedKeys, pendingTraits, confidenceM
         } else {
           setNested(result, key, value);
         }
+        // Auto-set focus_since when focus changes
         if (key === 'context.focus') {
           setNested(result, 'context.focus_since', new Date().toISOString().slice(0, 10));
         }
@@ -356,6 +448,7 @@ function strategicMerge(profile, updates, lockedKeys, pendingTraits, confidenceM
     }
   }
 
+  // Promote mature pending traits
   const promotable = getPromotable(pendingTraits);
   for (const { key, value } of promotable) {
     setNested(result, key, value);
@@ -365,6 +458,10 @@ function strategicMerge(profile, updates, lockedKeys, pendingTraits, confidenceM
   return result;
 }
 
+/**
+ * Flatten a nested object into dot-path keys.
+ * { preferences: { code_style: 'concise' } } → { 'preferences.code_style': 'concise' }
+ */
 function flattenObject(obj, parentKey = '', result = {}) {
   for (const key of Object.keys(obj)) {
     const fullKey = parentKey ? `${parentKey}.${key}` : key;
@@ -378,6 +475,9 @@ function flattenObject(obj, parentKey = '', result = {}) {
   return result;
 }
 
+/**
+ * Get a nested property by dot-path key.
+ */
 function getNested(obj, dotPath) {
   const keys = dotPath.split('.');
   let current = obj;
@@ -388,6 +488,9 @@ function getNested(obj, dotPath) {
   return current;
 }
 
+/**
+ * Set a nested property by dot-path key.
+ */
 function setNested(obj, dotPath, value) {
   const keys = dotPath.split('.');
   let current = obj;
@@ -400,21 +503,34 @@ function setNested(obj, dotPath, value) {
   current[keys[keys.length - 1]] = value;
 }
 
+/**
+ * Filter updates object: only keep keys that exist in schema and are not locked.
+ * Walks nested objects and builds dot-path keys for checking.
+ */
 function filterBySchema(obj, parentKey = '') {
   const result = {};
   for (const key of Object.keys(obj)) {
     const fullKey = parentKey ? `${parentKey}.${key}` : key;
     const value = obj[key];
+
     if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
       const nested = filterBySchema(value, fullKey);
-      if (Object.keys(nested).length > 0) result[key] = nested;
+      if (Object.keys(nested).length > 0) {
+        result[key] = nested;
+      }
     } else {
-      if (hasKey(fullKey) && !isLocked(fullKey)) result[key] = value;
+      // Check schema whitelist — allow if key exists and is not locked
+      if (hasKey(fullKey) && !isLocked(fullKey)) {
+        result[key] = value;
+      }
     }
   }
   return result;
 }
 
+/**
+ * Truncate all arrays in the profile to half their length.
+ */
 function truncateArrays(obj) {
   for (const key of Object.keys(obj)) {
     if (Array.isArray(obj[key]) && obj[key].length > 1) {
@@ -425,39 +541,59 @@ function truncateArrays(obj) {
   }
 }
 
+/**
+ * Auto-expire anti_patterns older than 60 days.
+ * Each entry is stored as { text: "...", added: "2026-01-15" } internally.
+ * If legacy string entries exist, they are kept (no added date = never expire).
+ */
 function expireAntiPatterns(profile) {
   if (!profile.context || !Array.isArray(profile.context.anti_patterns)) return;
   const now = Date.now();
   const SIXTY_DAYS = 60 * 24 * 60 * 60 * 1000;
   profile.context.anti_patterns = profile.context.anti_patterns.filter(entry => {
-    if (typeof entry === 'string') return true;
-    if (entry.added) return (now - new Date(entry.added).getTime()) < SIXTY_DAYS;
+    if (typeof entry === 'string') return true; // legacy, keep
+    if (entry.added) {
+      return (now - new Date(entry.added).getTime()) < SIXTY_DAYS;
+    }
     return true;
   });
 }
 
+/**
+ * Clean up: remove buffer and lock
+ */
 function cleanup() {
   try { fs.unlinkSync(BUFFER_FILE); } catch {}
   try { fs.unlinkSync(LOCK_FILE); } catch {}
 }
 
-// Session log (same as main distill.js)
+// ---------------------------------------------------------
+// SESSION LOG — records behavioral patterns per distill cycle
+// ---------------------------------------------------------
 const SESSION_LOG_FILE = path.join(HOME, '.metame', 'session_log.yaml');
 const MAX_SESSION_LOG = 30;
 
+/**
+ * Write a session entry to session_log.yaml.
+ * @param {object} behavior - The _behavior block from Haiku
+ * @param {number} signalCount - Number of signals processed
+ */
 function writeSessionLog(behavior, signalCount) {
   if (!behavior) return;
+
   const yaml = require('js-yaml');
   let log = { sessions: [] };
   try {
     if (fs.existsSync(SESSION_LOG_FILE)) {
       log = yaml.load(fs.readFileSync(SESSION_LOG_FILE, 'utf8')) || { sessions: [] };
     }
-  } catch { log = { sessions: [] }; }
+  } catch {
+    log = { sessions: [] };
+  }
 
   if (!Array.isArray(log.sessions)) log.sessions = [];
 
-  log.sessions.push({
+  const entry = {
     ts: new Date().toISOString().slice(0, 10),
     topics: behavior.topics || [],
     zone: behavior.zone || null,
@@ -466,8 +602,11 @@ function writeSessionLog(behavior, signalCount) {
     emotional_response: behavior.emotional_response || null,
     avoidance: behavior.avoidance_topics || [],
     signal_count: signalCount,
-  });
+  };
 
+  log.sessions.push(entry);
+
+  // FIFO: keep only most recent entries
   if (log.sessions.length > MAX_SESSION_LOG) {
     log.sessions = log.sessions.slice(-MAX_SESSION_LOG);
   }
@@ -475,12 +614,24 @@ function writeSessionLog(behavior, signalCount) {
   fs.writeFileSync(SESSION_LOG_FILE, yaml.dump(log, { lineWidth: -1 }), 'utf8');
 }
 
+// ---------------------------------------------------------
+// PATTERN DETECTION — every 5th distill, analyze session_log
+// ---------------------------------------------------------
+
+/**
+ * Detect repeated behavioral patterns from session history.
+ * Called when distill_count % 5 === 0 and there are enough sessions.
+ * Writes results to profile growth.patterns (max 3).
+ */
 function detectPatterns() {
   const yaml = require('js-yaml');
+
+  // Read session log
   if (!fs.existsSync(SESSION_LOG_FILE)) return;
   const log = yaml.load(fs.readFileSync(SESSION_LOG_FILE, 'utf8'));
   if (!log || !Array.isArray(log.sessions) || log.sessions.length < 5) return;
 
+  // Read current profile to check distill_count
   if (!fs.existsSync(BRAIN_FILE)) return;
   const profile = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8'));
   if (!profile) return;
@@ -488,6 +639,7 @@ function detectPatterns() {
   const distillCount = (profile.evolution && profile.evolution.distill_count) || 0;
   if (distillCount % 5 !== 0 || distillCount === 0) return;
 
+  // Take last 20 sessions
   const recent = log.sessions.slice(-20);
   const sessionSummary = recent.map((s, i) =>
     `${i + 1}. [${s.ts}] topics=${(s.topics || []).join(',')} zone=${s.zone || '?'} decision=${s.decision_pattern || '?'} load=${s.cognitive_load || '?'} avoidance=[${(s.avoidance || []).join(',')}]`
@@ -502,12 +654,12 @@ Find at most 2 patterns from these categories:
 1. Avoidance: topics mentioned repeatedly but never acted on
 2. Energy: what task types correlate with high/low cognitive load
 3. Zone: consecutive comfort zone? frequent panic?
-4. Growth: areas where user went from asking questions to giving commands
+4. Growth: areas where user went from asking questions to giving commands (mastery signal)
 
 RULES:
-- Only report patterns with confidence > 0.7
-- Each pattern must appear in at least 3 sessions
-- Be specific and concise
+- Only report patterns with confidence > 0.7 (based on frequency/consistency)
+- Each pattern must appear in at least 3 sessions to count
+- Be specific and concise (one sentence per pattern)
 
 OUTPUT FORMAT — respond with ONLY a YAML code block:
 \`\`\`yaml
@@ -521,8 +673,13 @@ If no clear patterns found: respond with exactly NO_PATTERNS`;
 
   try {
     const result = execSync(
-      `claude -p --model haiku`,
-      { input: patternPrompt, encoding: 'utf8', timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'] }
+      `claude -p --model haiku --no-session-persistence`,
+      {
+        input: patternPrompt,
+        encoding: 'utf8',
+        timeout: 30000,
+        stdio: ['pipe', 'pipe', 'pipe']
+      }
     ).trim();
 
     if (!result || result.includes('NO_PATTERNS')) return;
@@ -533,6 +690,7 @@ If no clear patterns found: respond with exactly NO_PATTERNS`;
     const parsed = yaml.load(yamlMatch[1].trim());
     if (!parsed || !Array.isArray(parsed.patterns)) return;
 
+    // Validate and cap at 3 patterns
     const validated = parsed.patterns
       .filter(p => p.type && p.summary && p.confidence >= 0.7)
       .slice(0, 3)
@@ -546,36 +704,44 @@ If no clear patterns found: respond with exactly NO_PATTERNS`;
 
     if (validated.length === 0) return;
 
+    // Write to profile growth.patterns
     const rawProfile = fs.readFileSync(BRAIN_FILE, 'utf8');
     const freshProfile = yaml.load(rawProfile) || {};
     if (!freshProfile.growth) freshProfile.growth = {};
     freshProfile.growth.patterns = validated;
 
-    const zoneHistory = recent.slice(-10).map(s => {
-      if (s.zone === 'comfort') return 'C';
-      if (s.zone === 'stretch') return 'S';
-      if (s.zone === 'panic') return 'P';
-      return '?';
-    });
+    // Also update zone_history from recent sessions
+    const zoneHistory = recent.slice(-10)
+      .map(s => {
+        if (s.zone === 'comfort') return 'C';
+        if (s.zone === 'stretch') return 'S';
+        if (s.zone === 'panic') return 'P';
+        return '?';
+      });
     freshProfile.growth.zone_history = zoneHistory;
 
     fs.writeFileSync(BRAIN_FILE, yaml.dump(freshProfile, { lineWidth: -1 }), 'utf8');
+
   } catch {
-    // Non-fatal
+    // Non-fatal — pattern detection failure shouldn't break anything
   }
 }
 
+// Export for use in index.js
 module.exports = { distill, writeSessionLog, detectPatterns };
 
+// Also allow direct execution
 if (require.main === module) {
   const result = distill();
+  // Write session log if behavior was detected
   if (result.behavior) {
     writeSessionLog(result.behavior, result.signalCount || 0);
   }
+  // Run pattern detection (only triggers every 5th distill)
   detectPatterns();
   if (result.updated) {
-    console.log(`${result.summary}`);
+    console.log(`🧠 ${result.summary}`);
   } else {
-    console.log(`${result.summary}`);
+    console.log(`💤 ${result.summary}`);
   }
 }
