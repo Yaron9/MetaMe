@@ -1,6 +1,6 @@
 # MetaMe — Claude Code Plugin
 
-Cognitive Profile Layer for Claude Code. Knows how you think, not just what you said.
+Cognitive Profile Layer for Claude Code. Knows how you think. Works wherever you are.
 
 ## Install
 
@@ -62,15 +62,38 @@ The plugin includes full daemon support for mobile access via Telegram and Feish
 | `/resume <name>` | Resume by name (partial match, cross-project) |
 | `/name <name>` | Name current session (syncs with desktop `/rename`) |
 | `/cd` | Change working directory (with picker) |
-| `/cd last` | **Sync to computer** — jump to most recent directory |
+| `/cd last` | **Sync to computer** — jump to most recent session + directory |
 | `/session` | Current session info |
 
 **Features:**
 - Full Claude Code engine on your phone (file editing, bash, code search)
+- **Remote Wake** — daemon runs in background; phone wakes up Claude Code on your computer
+- **File Transfer** — send files from computer to phone, or phone to computer (saved to `<project>/upload/`)
 - Session naming uses Claude's native `customTitle` — syncs everywhere
-- Real file mtime for accurate "刚刚/X分钟前" timestamps
+- Auto-attach: first message on phone continues your computer's latest session
 - Parallel request handling (async spawning, non-blocking)
 - Daemon takeover: new instance auto-kills old (no conflicts)
+
+**Feishu Permissions Required:**
+- `im:message` (获取与发送消息)
+- `im:message.p2p_msg:readonly` (单聊消息)
+- `im:message.group_at_msg:readonly` (群聊@机器人)
+- `im:message:send_as_bot` (发消息)
+- `im:resource` (文件上传下载)
+
+## Heartbeat Tasks
+
+Schedule Claude to run automatically:
+
+```yaml
+# ~/.metame/daemon.yaml
+heartbeat:
+  tasks:
+    - name: "daily-summary"
+      prompt: "Summarize today's git commits"
+      interval: "24h"
+      notify: true   # push results to phone
+```
 
 ## Profile Tiers
 
