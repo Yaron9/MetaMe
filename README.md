@@ -6,15 +6,21 @@
 
 > **The Cognitive Profile Layer for Claude Code.**
 >
-> *Not a memory system — a cognitive mirror. It knows how you think, decide, and communicate, and it protects your core values.*
+> *Knows how you think. Works wherever you are.*
 
 ## 📖 Introduction
 
-**Claude Code** is a powerful tool, but it suffers from "Project Amnesia." Every time you switch folders, it forgets who you are, your communication style, and your specific constraints.
+**Claude Code** is powerful, but it has two pain points:
 
-**MetaMe** solves this by wrapping Claude in a  **Cognitive Profile Layer** . It creates a persistent "Global Brain" that travels with you across every project. Unlike ChatGPT/Claude/Gemini's built-in memory (which stores *facts* like "user lives in X"), MetaMe captures *how you think* — your decision style, cognitive load preferences, motivation patterns, and communication traits.
+1. **Project Amnesia** — Switch folders, and it forgets who you are. Your communication style, coding preferences, constraints — gone. Every project, you start from scratch.
 
-It is not a memory system; it is a  **Cognitive Mirror** .
+2. **Desktop-Bound** — Leave your computer, work stops. You can't continue that debugging session on your phone. You can't vibe with Claude on the train, in bed, or waiting in line.
+
+**MetaMe** solves both:
+
+**🧠 Cognitive Profile** — A persistent "Global Brain" (`~/.claude_profile.yaml`) that travels with you across every project. Unlike ChatGPT/Claude's built-in memory (which stores *facts* like "user lives in X"), MetaMe captures *how you think* — your decision style, cognitive load preferences, and communication traits. It's not a memory system; it's a **Cognitive Mirror**.
+
+**📱 Mobile Bridge** — Full Claude Code from your phone via Telegram or Feishu. Same tools, same files, same conversation history. Start on your computer, continue anywhere. `/cd last` syncs you to exactly where you left off.
 
 ## ✨ Key Features
 
