@@ -988,32 +988,32 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       const fileContent = fs.readFileSync(sessionFile, 'utf8');
       const lines = fileContent.split('\n').filter(l => l.trim());
 
-      // Collect all turns: each turn starts with a file-history-snapshot
-      const turns = []; // { snapshotIdx, userPrompt, timestamp }
+      // Session structure: user → assistant(s) → snapshot(s)
+      // A "turn" = a user message. The snapshot BEFORE it = file state before that turn.
+      let lastSnapshotIdx = -1;
+      const turns = []; // { lineIdx, userPrompt, timestamp, preSnapshotIdx }
       for (let i = 0; i < lines.length; i++) {
         try {
           const obj = JSON.parse(lines[i]);
           if (obj.type === 'file-history-snapshot') {
-            const ts = (obj.snapshot && obj.snapshot.timestamp) || '';
-            // Find the user message right after the snapshot
-            let userPrompt = '';
-            for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
-              try {
-                const next = JSON.parse(lines[j]);
-                if (next.type === 'user' && next.message && next.message.content) {
-                  const content = next.message.content;
-                  if (typeof content === 'string') {
-                    userPrompt = content.slice(0, 50);
-                  } else if (Array.isArray(content)) {
-                    for (const b of content) {
-                      if (b.type === 'text') { userPrompt = b.text.slice(0, 50); break; }
-                    }
-                  }
-                  break;
-                }
-              } catch {}
+            lastSnapshotIdx = i;
+          } else if (obj.type === 'user') {
+            const m = obj.message || {};
+            const c = m.content || '';
+            let text = '';
+            if (typeof c === 'string') text = c;
+            else if (Array.isArray(c)) {
+              for (const b of c) { if (b.type === 'text') { text = b.text; break; } }
             }
-            turns.push({ snapshotIdx: i, userPrompt, timestamp: ts });
+            // Skip system/internal messages
+            if (text && !text.startsWith('<task-notification') && !text.startsWith('[Request interrupted')) {
+              turns.push({
+                lineIdx: i,
+                userPrompt: text.slice(0, 50),
+                timestamp: obj.timestamp || '',
+                preSnapshotIdx: lastSnapshotIdx,
+              });
+            }
           }
         } catch {}
       }
@@ -1029,68 +1029,100 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       if (!arg) {
         const recent = turns.slice(-6).reverse(); // last 6, newest first
         if (bot.sendButtons) {
-          const buttons = recent.map((t, i) => {
+          const buttons = recent.map((t) => {
             const ago = t.timestamp ? formatRelativeTime(t.timestamp) : '';
-            const label = `${t.userPrompt || 'Turn ' + (turns.indexOf(t) + 1)}`;
+            const label = t.userPrompt || '...';
             const display = ago ? `${label} (${ago})` : label;
-            return [{ text: `⏪ ${display}`, callback_data: `/undo ${t.snapshotIdx}` }];
+            return [{ text: `⏪ ${display}`, callback_data: `/undo ${t.lineIdx}` }];
           });
           await bot.sendButtons(chatId, '回退到哪一轮？点击回退该轮及之后的所有操作:', buttons);
         } else {
           let msg = '回退到哪一轮？回复 /undo <编号>\n\n';
-          const recent6 = turns.slice(-6).reverse();
-          recent6.forEach((t, i) => {
+          recent.forEach((t) => {
             const ago = t.timestamp ? formatRelativeTime(t.timestamp) : '';
-            msg += `${t.snapshotIdx}. ${t.userPrompt || '...'} ${ago ? '(' + ago + ')' : ''}\n`;
+            msg += `${t.lineIdx}. ${t.userPrompt || '...'} ${ago ? '(' + ago + ')' : ''}\n`;
           });
           await bot.sendMessage(chatId, msg);
         }
         return;
       }
 
-      // /undo <snapshotIdx> — execute undo to that point
-      const targetIdx = parseInt(arg, 10);
-      const targetTurn = turns.find(t => t.snapshotIdx === targetIdx);
+      // /undo <lineIdx> — execute undo to that point
+      const targetLineIdx = parseInt(arg, 10);
+      const targetTurn = turns.find(t => t.lineIdx === targetLineIdx);
       if (!targetTurn) {
         await bot.sendMessage(chatId, 'Invalid undo target.');
         return;
       }
 
-      // Extract files modified from targetIdx onwards
-      const modifiedFiles = new Set();
-      for (let i = targetIdx; i < lines.length; i++) {
+      // File restoration: diff the pre-turn snapshot vs the last snapshot
+      const fileHistoryDir = path.join(HOME, '.claude', 'file-history', session.id);
+
+      // Pre-turn snapshot = file state before the undone turns
+      let targetBackups = {};
+      if (targetTurn.preSnapshotIdx >= 0) {
+        try {
+          const obj = JSON.parse(lines[targetTurn.preSnapshotIdx]);
+          targetBackups = (obj.snapshot && obj.snapshot.trackedFileBackups) || {};
+        } catch {}
+      }
+
+      // Current snapshot = file state now (last snapshot in the file)
+      let currentBackups = {};
+      for (let i = lines.length - 1; i >= 0; i--) {
         try {
           const obj = JSON.parse(lines[i]);
-          const msgContent = obj.message && obj.message.content;
-          if (Array.isArray(msgContent)) {
-            for (const block of msgContent) {
-              if (block.type === 'tool_use' && (block.name === 'Write' || block.name === 'Edit')) {
-                const fp = block.input && block.input.file_path;
-                if (fp) modifiedFiles.add(fp);
-              }
-            }
+          if (obj.type === 'file-history-snapshot') {
+            currentBackups = (obj.snapshot && obj.snapshot.trackedFileBackups) || {};
+            break;
           }
         } catch {}
       }
 
-      // Truncate session: keep everything before the target snapshot
-      const kept = lines.slice(0, targetIdx);
+      // Truncate session: keep everything before the target user message
+      const kept = lines.slice(0, targetLineIdx);
       fs.writeFileSync(sessionFile, kept.join('\n') + '\n', 'utf8');
 
-      // Git restore modified files
-      if (modifiedFiles.size > 0) {
-        for (const fp of modifiedFiles) {
+      // Restore files by snapshot diff (same mechanism as Claude Code ESC×2)
+      const restored = [];
+      const deleted = [];
+
+      for (const [fp, info] of Object.entries(currentBackups)) {
+        const targetInfo = targetBackups[fp];
+        if (!targetInfo) {
+          // File newly tracked after target → delete
+          try { if (fs.existsSync(fp)) { fs.unlinkSync(fp); deleted.push(fp); } } catch {}
+        } else if (targetInfo.backupFileName !== info.backupFileName) {
+          // File changed → restore to target version
+          const backupPath = path.join(fileHistoryDir, targetInfo.backupFileName);
           try {
-            execSync(`git checkout -- "${fp}"`, { cwd: session.cwd, stdio: 'ignore' });
-          } catch { /* file may be new or not tracked */ }
+            if (fs.existsSync(backupPath)) {
+              fs.writeFileSync(fp, fs.readFileSync(backupPath));
+              restored.push(fp);
+            }
+          } catch {}
         }
       }
 
-      const turnsRemoved = turns.filter(t => t.snapshotIdx >= targetIdx).length;
-      const fileList = modifiedFiles.size > 0
-        ? [...modifiedFiles].map(f => path.basename(f)).join(', ')
+      // Files deleted during undone turns → restore from target backup
+      for (const [fp, info] of Object.entries(targetBackups)) {
+        if (!currentBackups[fp] && info.backupFileName) {
+          const backupPath = path.join(fileHistoryDir, info.backupFileName);
+          try {
+            if (fs.existsSync(backupPath)) {
+              fs.writeFileSync(fp, fs.readFileSync(backupPath));
+              restored.push(fp);
+            }
+          } catch {}
+        }
+      }
+
+      const turnsRemoved = turns.filter(t => t.lineIdx >= targetLineIdx).length;
+      const allAffected = [...restored, ...deleted];
+      const fileList = allAffected.length > 0
+        ? allAffected.map(f => path.basename(f)).join(', ')
         : 'none';
-      await bot.sendMessage(chatId, `⏪ Undo: 回退了 ${turnsRemoved} 轮对话\n📁 恢复文件: ${fileList}`);
+      await bot.sendMessage(chatId, `⏪ 回退了 ${turnsRemoved} 轮对话\n📁 恢复 ${restored.length} / 删除 ${deleted.length}: ${fileList}`);
     } catch (e) {
       await bot.sendMessage(chatId, `❌ Undo failed: ${e.message}`);
     }
