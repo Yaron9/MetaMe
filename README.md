@@ -237,6 +237,7 @@ Uploaded files are saved to `<project>/upload/`. Claude won't read large files a
 | `/status` | Daemon status + profile summary |
 | `/tasks` | List scheduled heartbeat tasks |
 | `/run <name>` | Run a task immediately |
+| `/model [name]` | View/switch model (sonnet, opus, haiku) |
 | `/budget` | Today's token usage |
 | `/quiet` | Silence mirror/reflections for 48h |
 | `/reload` | Manually reload daemon.yaml (also auto-reloads on file change) |

@@ -975,7 +975,40 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
+  // /model [sonnet|opus|haiku] — switch model
+  if (text === '/model' || text.startsWith('/model ')) {
+    const arg = text.slice(6).trim().toLowerCase();
+    const validModels = ['sonnet', 'opus', 'haiku'];
+    const currentModel = (config.daemon && config.daemon.model) || 'sonnet';
+
+    if (!arg) {
+      await bot.sendMessage(chatId, `🤖 当前模型: ${currentModel}\n\n可选: sonnet, opus, haiku\n用法: /model opus`);
+      return;
+    }
+
+    if (!validModels.includes(arg)) {
+      await bot.sendMessage(chatId, `❌ 无效模型: ${arg}\n可选: sonnet, opus, haiku`);
+      return;
+    }
+
+    // Update config file
+    try {
+      const yaml = require('js-yaml');
+      const configPath = path.join(METAME_DIR, 'daemon.yaml');
+      const configContent = fs.readFileSync(configPath, 'utf8');
+      const cfg = yaml.load(configContent) || {};
+      if (!cfg.daemon) cfg.daemon = {};
+      cfg.daemon.model = arg;
+      fs.writeFileSync(configPath, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+      await bot.sendMessage(chatId, `✅ 模型已切换: ${currentModel} → ${arg}`);
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ 切换失败: ${e.message}`);
+    }
+    return;
+  }
+
   if (text.startsWith('/')) {
+    const currentModel = (config.daemon && config.daemon.model) || 'sonnet';
     await bot.sendMessage(chatId, [
       '📱 手机端 Claude Code',
       '',
@@ -990,7 +1023,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       '/cd <path> — 切换工作目录',
       '/session — 查看当前会话',
       '',
-      '⚙️ /status /tasks /run <name> /budget /reload',
+      `⚙️ /model [${currentModel}] /status /tasks /run /budget /reload`,
       '',
       '直接打字即可对话 💬',
     ].join('\n'));
@@ -1581,8 +1614,12 @@ async function askClaude(bot, chatId, prompt) {
 
   // Build claude command
   const args = ['-p'];
+  // Model from daemon config (default: sonnet)
+  const daemonCfg = loadConfig().daemon || {};
+  const model = daemonCfg.model || 'sonnet';
+  args.push('--model', model);
   // Per-session allowed tools from daemon config
-  const sessionAllowed = (loadConfig().daemon && loadConfig().daemon.session_allowed_tools) || [];
+  const sessionAllowed = daemonCfg.session_allowed_tools || [];
   for (const tool of sessionAllowed) args.push('--allowedTools', tool);
   if (session.id === '__continue__') {
     // /continue — resume most recent conversation in cwd
