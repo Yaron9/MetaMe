@@ -174,7 +174,7 @@ Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
     let result;
     try {
       result = execSync(
-        `claude -p --model haiku`,
+        `claude -p --model haiku --no-session-persistence`,
         {
           input: distillPrompt,
           encoding: 'utf8',
@@ -673,7 +673,7 @@ If no clear patterns found: respond with exactly NO_PATTERNS`;
 
   try {
     const result = execSync(
-      `claude -p --model haiku`,
+      `claude -p --model haiku --no-session-persistence`,
       {
         input: patternPrompt,
         encoding: 'utf8',
