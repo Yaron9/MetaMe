@@ -19,7 +19,7 @@ It is not a memory system; it is a  **Cognitive Mirror** .
 ## ✨ Key Features
 
 * **🧠 Global Brain (`~/.claude_profile.yaml`):** A single, portable source of truth — your identity, cognitive traits, and preferences travel with you across every project.
-* **🧬 Cognitive Evolution Engine:** MetaMe learns how you think through three channels: (1) **Passive** — silently captures your messages and distills cognitive traits via Haiku on next launch; (2) **Manual** — `!metame evolve` for explicit teaching; (3) **Confidence gates** — strong directives ("always"/"以后一律") write immediately, normal observations need 3+ consistent sightings before promotion. Schema-enforced (41 fields, 5 tiers, 800 token budget) to prevent bloat.
+* **🧬 Cognitive Evolution Engine:** MetaMe learns how you think through three channels: (1) **Passive** — silently captures your messages and distills cognitive traits via Haiku on next launch; (2) **Manual** — `!metame evolve` for explicit teaching; (3) **Confidence gates** — strong directives ("always"/"from now on") write immediately, normal observations need 3+ consistent sightings before promotion. Schema-enforced (41 fields, 5 tiers, 800 token budget) to prevent bloat.
 * **🛡️ Auto-Lock:** Mark any value with `# [LOCKED]` — treated as a constitution, never auto-modified.
 * **🪞 Metacognition Layer (v1.3):** MetaMe now observes *how* you think, not just *what* you say. Behavioral pattern detection runs inside the existing Haiku distill call (zero extra cost). It tracks decision patterns, cognitive load, comfort zones, and avoidance topics across sessions. When persistent patterns emerge, MetaMe injects a one-line mirror observation — e.g., *"You tend to avoid testing until forced"* — with a 14-day cooldown per pattern. Conditional reflection prompts appear only when triggered (every 7th distill or 3x consecutive comfort zone). All injection logic runs in Node.js; Claude receives only pre-decided directives, never rules to self-evaluate.
 * **📱 Remote Claude Code (v1.3):** Full Claude Code from your phone via Telegram or Feishu (Lark). Stateful sessions with `--resume` — same conversation history, tool use, and file editing as your terminal. Interactive buttons for project/session picking, directory browser, and macOS launchd auto-start.
@@ -93,7 +93,7 @@ metame interview
 
 MetaMe learns who you are through two paths:
 
-**Automatic (zero effort):** A global hook captures your messages. On next launch, Haiku distills cognitive traits in the background. Strong directives ("always"/"以后一律") write immediately; normal observations need 3+ consistent sightings. All writes are schema-validated (41 fields, 800 token budget). You'll see:
+**Automatic (zero effort):** A global hook captures your messages. On next launch, Haiku distills cognitive traits in the background. Strong directives ("always"/"from now on") write immediately; normal observations need 3+ consistent sightings. All writes are schema-validated (41 fields, 800 token budget). You'll see:
 
 ```
 🧠 MetaMe: Distilling 7 moments in background...
@@ -161,9 +161,9 @@ metame daemon install-launchd         # macOS auto-start (RunAtLoad + KeepAlive)
 
 | Command | Description |
 |---------|-------------|
-| `/last` | **Quick resume** — 优先当前目录最近 session，否则全局最近 |
+| `/last` | **Quick resume** — prefers current directory's recent session, falls back to global recent |
 | `/new` | Start new session — pick project directory from button list |
-| `/new <name>` | Start new session with a name (e.g., `/new API重构`) |
+| `/new <name>` | Start new session with a name (e.g., `/new API Refactor`) |
 | `/resume` | Resume a session — clickable list, shows session names + real-time timestamps |
 | `/resume <name>` | Resume by name (supports partial match, cross-project) |
 | `/name <name>` | Name the current session (syncs with computer's `/rename`) |
@@ -193,8 +193,8 @@ Each chat gets a persistent session via `claude -p --resume <session-id>`. This 
 **File sending (v1.3.7):** Ask Claude to send any file to your phone:
 
 ```
-You: 把 report.md 发过来
-Claude: 请查收~!
+You: Send me report.md
+Claude: Here you go!
         [📎 report.md]  ← tap to download
 ```
 
