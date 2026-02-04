@@ -1044,6 +1044,11 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   }
 
   // --- Natural language → Claude Code session ---
+  // Block if a task is already running (prevent session conflict)
+  if (activeProcesses.has(chatId)) {
+    await bot.sendMessage(chatId, '⏳ 任务进行中，请等待完成或发 /stop 中断');
+    return;
+  }
   const cd = checkCooldown(chatId);
   if (!cd.ok) { await bot.sendMessage(chatId, `${cd.wait}s`); return; }
   if (!checkBudget(loadConfig(), loadState())) {
