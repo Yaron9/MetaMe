@@ -962,7 +962,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
-  if (text === '/undo') {
+  if (text === '/undo' || text.startsWith('/undo ')) {
     // Stop running task first
     const proc = activeProcesses.get(chatId);
     if (proc && proc.child) {
@@ -985,33 +985,85 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     }
 
     try {
-      // Read all lines, find last file-history-snapshot
-      const content = fs.readFileSync(sessionFile, 'utf8');
-      const lines = content.split('\n').filter(l => l.trim());
-      let lastSnapshotIdx = -1;
-      for (let i = lines.length - 1; i >= 0; i--) {
+      const fileContent = fs.readFileSync(sessionFile, 'utf8');
+      const lines = fileContent.split('\n').filter(l => l.trim());
+
+      // Collect all turns: each turn starts with a file-history-snapshot
+      const turns = []; // { snapshotIdx, userPrompt, timestamp }
+      for (let i = 0; i < lines.length; i++) {
         try {
           const obj = JSON.parse(lines[i]);
           if (obj.type === 'file-history-snapshot') {
-            lastSnapshotIdx = i;
-            break;
+            const ts = (obj.snapshot && obj.snapshot.timestamp) || '';
+            // Find the user message right after the snapshot
+            let userPrompt = '';
+            for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
+              try {
+                const next = JSON.parse(lines[j]);
+                if (next.type === 'user' && next.message && next.message.content) {
+                  const content = next.message.content;
+                  if (typeof content === 'string') {
+                    userPrompt = content.slice(0, 50);
+                  } else if (Array.isArray(content)) {
+                    for (const b of content) {
+                      if (b.type === 'text') { userPrompt = b.text.slice(0, 50); break; }
+                    }
+                  }
+                  break;
+                }
+              } catch {}
+            }
+            turns.push({ snapshotIdx: i, userPrompt, timestamp: ts });
           }
         } catch {}
       }
 
-      if (lastSnapshotIdx <= 0) {
-        await bot.sendMessage(chatId, 'Nothing to undo (no previous turn found).');
+      if (turns.length === 0) {
+        await bot.sendMessage(chatId, 'Nothing to undo.');
         return;
       }
 
-      // Extract files modified in the last turn (Write/Edit tool_use)
+      const arg = text.slice(5).trim();
+
+      // /undo (no arg) — show recent turns to pick from
+      if (!arg) {
+        const recent = turns.slice(-6).reverse(); // last 6, newest first
+        if (bot.sendButtons) {
+          const buttons = recent.map((t, i) => {
+            const ago = t.timestamp ? formatRelativeTime(t.timestamp) : '';
+            const label = `${t.userPrompt || 'Turn ' + (turns.indexOf(t) + 1)}`;
+            const display = ago ? `${label} (${ago})` : label;
+            return [{ text: `⏪ ${display}`, callback_data: `/undo ${t.snapshotIdx}` }];
+          });
+          await bot.sendButtons(chatId, '回退到哪一轮？点击回退该轮及之后的所有操作:', buttons);
+        } else {
+          let msg = '回退到哪一轮？回复 /undo <编号>\n\n';
+          const recent6 = turns.slice(-6).reverse();
+          recent6.forEach((t, i) => {
+            const ago = t.timestamp ? formatRelativeTime(t.timestamp) : '';
+            msg += `${t.snapshotIdx}. ${t.userPrompt || '...'} ${ago ? '(' + ago + ')' : ''}\n`;
+          });
+          await bot.sendMessage(chatId, msg);
+        }
+        return;
+      }
+
+      // /undo <snapshotIdx> — execute undo to that point
+      const targetIdx = parseInt(arg, 10);
+      const targetTurn = turns.find(t => t.snapshotIdx === targetIdx);
+      if (!targetTurn) {
+        await bot.sendMessage(chatId, 'Invalid undo target.');
+        return;
+      }
+
+      // Extract files modified from targetIdx onwards
       const modifiedFiles = new Set();
-      for (let i = lastSnapshotIdx; i < lines.length; i++) {
+      for (let i = targetIdx; i < lines.length; i++) {
         try {
           const obj = JSON.parse(lines[i]);
-          const content = obj.message && obj.message.content;
-          if (Array.isArray(content)) {
-            for (const block of content) {
+          const msgContent = obj.message && obj.message.content;
+          if (Array.isArray(msgContent)) {
+            for (const block of msgContent) {
               if (block.type === 'tool_use' && (block.name === 'Write' || block.name === 'Edit')) {
                 const fp = block.input && block.input.file_path;
                 if (fp) modifiedFiles.add(fp);
@@ -1021,26 +1073,24 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
         } catch {}
       }
 
-      // Truncate session: keep everything before the last snapshot
-      const kept = lines.slice(0, lastSnapshotIdx);
+      // Truncate session: keep everything before the target snapshot
+      const kept = lines.slice(0, targetIdx);
       fs.writeFileSync(sessionFile, kept.join('\n') + '\n', 'utf8');
 
-      // Git restore only the files Claude modified in this turn
-      let restored = 0;
+      // Git restore modified files
       if (modifiedFiles.size > 0) {
         for (const fp of modifiedFiles) {
           try {
             execSync(`git checkout -- "${fp}"`, { cwd: session.cwd, stdio: 'ignore' });
-            restored++;
           } catch { /* file may be new or not tracked */ }
         }
       }
 
-      const removed = lines.length - lastSnapshotIdx;
+      const turnsRemoved = turns.filter(t => t.snapshotIdx >= targetIdx).length;
       const fileList = modifiedFiles.size > 0
         ? [...modifiedFiles].map(f => path.basename(f)).join(', ')
         : 'none';
-      await bot.sendMessage(chatId, `⏪ Undo: 回退了最后一轮 (${removed} 条记录)\n📁 恢复文件: ${fileList}`);
+      await bot.sendMessage(chatId, `⏪ Undo: 回退了 ${turnsRemoved} 轮对话\n📁 恢复文件: ${fileList}`);
     } catch (e) {
       await bot.sendMessage(chatId, `❌ Undo failed: ${e.message}`);
     }
