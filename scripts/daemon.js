@@ -1904,6 +1904,27 @@ async function main() {
     }, 1000);
   });
 
+  // Auto-restart: watch daemon.js for code changes (hot restart)
+  const DAEMON_SCRIPT = path.join(METAME_DIR, 'daemon.js');
+  let _restartDebounce = null;
+  fs.watchFile(DAEMON_SCRIPT, { interval: 3000 }, (curr, prev) => {
+    if (curr.mtimeMs === prev.mtimeMs) return;
+    if (_restartDebounce) clearTimeout(_restartDebounce);
+    _restartDebounce = setTimeout(async () => {
+      log('INFO', 'daemon.js changed on disk — auto-restarting...');
+      await notifyFn('🔄 Code updated, daemon restarting...').catch(() => {});
+      // Spawn new daemon process, then exit
+      const { spawn } = require('child_process');
+      const newDaemon = spawn(process.execPath, [DAEMON_SCRIPT], {
+        detached: true,
+        stdio: 'ignore',
+        env: { ...process.env, METAME_ROOT: process.env.METAME_ROOT || path.dirname(__dirname) },
+      });
+      newDaemon.unref();
+      setTimeout(() => process.exit(0), 500);
+    }, 2000);
+  });
+
   // Start bridges (both can run simultaneously)
   telegramBridge = await startTelegramBridge(config, executeTaskByName);
   feishuBridge = await startFeishuBridge(config, executeTaskByName);
@@ -1912,6 +1933,7 @@ async function main() {
   const shutdown = () => {
     log('INFO', 'Daemon shutting down...');
     fs.unwatchFile(CONFIG_FILE);
+    fs.unwatchFile(DAEMON_SCRIPT);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (telegramBridge) telegramBridge.stop();
     if (feishuBridge) feishuBridge.stop();
