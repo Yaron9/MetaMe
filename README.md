@@ -186,6 +186,7 @@ metame daemon install-launchd         # macOS auto-start (RunAtLoad + KeepAlive)
 | `/cd` | Change working directory — with directory browser |
 | `/cd last` | **Sync to computer** — jump to the most recent session's directory |
 | `/session` | Current session info |
+| `/stop` | Interrupt current Claude task (like pressing ESC in terminal) |
 
 Just type naturally for conversation — every message stays in the same Claude Code session with full context.
 
