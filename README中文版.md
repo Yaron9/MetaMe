@@ -155,16 +155,15 @@ metame daemon install-launchd         # macOS 自启动（开机自启 + 崩溃�
 
 每个聊天绑定一个持久会话，通过 `claude -p --resume <session-id>` 调用。这是和终端完全相同的 Claude Code 引擎——相同的工具（文件编辑、bash、代码搜索）、相同的对话历史。你可以在电脑上开始工作，手机上 `/resume` 继续，反之亦然。
 
-**实时状态显示 (v1.3.7)：** 看 Claude 正在做什么：
+**实时状态显示 (v1.3.7)：** 手机上实时看到 Claude 的工作进度：
 
 ```
 📖 Read: 「config.yaml」
 ✏️ Edit: 「daemon.js」
 💻 Bash: 「git status」
-🔍 Grep: 「pattern...」
 ```
 
-**文件发送 (v1.3.7)：** 手机上直接要文件——Claude 找到后生成下载按钮：
+**文件发送 (v1.3.7)：** 让 Claude 把任何文件发到手机：
 
 ```
 你: 把 report.md 发过来
@@ -172,7 +171,10 @@ Claude: 请查收~!
         [📎 report.md]  ← 点击下载
 ```
 
-支持任何文件类型（文档、音频、图片）。Claude 内部用 `[[FILE:/path]]` 标记，daemon 解析成可点击按钮。链接 30 分钟有效。
+支持文档、音频、图片等任意文件。点击按钮即可下载，链接 30 分钟有效。
+
+- **Telegram:** 开箱即用
+- **飞书:** 需要在应用权限中添加 `im:resource`
 
 **其他命令：**
 
