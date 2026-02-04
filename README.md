@@ -46,15 +46,19 @@ MetaMe is a wrapper around **Claude Code**. You must have Node.js and the offici
 
 ## 📦 Installation
 
-Install MetaMe globally via NPM:
+**Option A: NPM (recommended)** — full CLI with daemon, mobile bridge, interview
 
-**Bash**
-
-```
+```bash
 npm install -g metame-cli
 ```
 
-*(Note: If you encounter permission errors on Mac/Linux, use `sudo npm install -g metame-cli`)*
+**Option B: Claude Code Plugin** — lightweight, profile injection + slash commands
+
+```bash
+claude plugin install github:Yaron9/MetaMe/plugin
+```
+
+*(NPM note: If you encounter permission errors on Mac/Linux, use `sudo npm install -g metame-cli`)*
 
 ## 🚀 Usage
 

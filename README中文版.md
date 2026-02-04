@@ -46,13 +46,19 @@ MetaMe 是 **Claude Code** 的外壳。你必须先安装 Node.js 和官方的 C
 
 ## 📦 安装
 
-通过 NPM 全局安装：
+**方式 A: NPM（推荐）** — 完整 CLI，含 daemon、移动桥接、访谈
 
 ```bash
 npm install -g metame-cli
 ```
 
-*(Mac/Linux 如遇权限错误，使用 `sudo npm install -g metame-cli`)*
+**方式 B: Claude Code Plugin** — 轻量级，档案注入 + 斜杠命令
+
+```bash
+claude plugin install github:Yaron9/MetaMe/plugin
+```
+
+*(NPM 注：Mac/Linux 如遇权限错误，使用 `sudo npm install -g metame-cli`)*
 
 ## 🚀 使用指南
 
