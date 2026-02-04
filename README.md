@@ -190,7 +190,9 @@ Each chat gets a persistent session via `claude -p --resume <session-id>`. This 
 💻 Bash: 「git status」
 ```
 
-**File sending (v1.3.7):** Ask Claude to send any file to your phone:
+**File transfer (v1.3.8):** Seamlessly move files between your phone and computer.
+
+*Computer → Phone (download):* Ask Claude to send any project file:
 
 ```
 You: Send me report.md
@@ -200,8 +202,18 @@ Claude: Here you go!
 
 Works for documents, audio, images, etc. Click button to download. Links valid for 30 minutes.
 
+*Phone → Computer (upload):* Send files directly to your project:
+
+```
+[📎 You send a PDF, image, or any file]
+Claude: 📥 Saved: document.pdf
+        File is in your project's upload/ folder.
+```
+
+Uploaded files are saved to `<project>/upload/`. Claude won't read large files automatically — just tell it when you want it to process them.
+
 - **Telegram:** Works out of the box
-- **Feishu:** Requires `im:resource` permission in app settings
+- **Feishu:** Requires `im:resource` + `im:message` permissions in app settings
 
 **Other commands:**
 
