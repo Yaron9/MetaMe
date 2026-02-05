@@ -194,6 +194,28 @@ metame daemon stop                    # Shutdown
 metame daemon install-launchd         # macOS auto-start (RunAtLoad + KeepAlive)
 ```
 
+**macOS auto-start (recommended):** If you want the daemon to survive sleep/wake and start on boot:
+
+```bash
+metame daemon install-launchd
+launchctl load ~/Library/LaunchAgents/com.metame.daemon.plist
+```
+
+Once loaded, the daemon auto-starts on login, auto-restarts after sleep/wake or crash. No need to run `metame daemon start` manually anymore.
+
+> **Important:** Choose one management method — either launchd or manual (`metame daemon start/stop`). Don't mix them, or you'll get duplicate processes.
+
+```bash
+# Check status (works with both methods)
+metame daemon status
+
+# Disable auto-start
+launchctl unload ~/Library/LaunchAgents/com.metame.daemon.plist
+
+# Remove completely
+rm ~/Library/LaunchAgents/com.metame.daemon.plist
+```
+
 **Session commands (interactive buttons on Telegram & Feishu):**
 
 | Command | Description |
