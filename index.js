@@ -23,7 +23,7 @@ if (!fs.existsSync(METAME_DIR)) {
 }
 
 // Auto-deploy bundled scripts to ~/.metame/
-const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml'];
+const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js'];
 const scriptsDir = path.join(__dirname, 'scripts');
 
 for (const script of BUNDLED_SCRIPTS) {
@@ -557,7 +557,173 @@ if (isMirror) {
 }
 
 // ---------------------------------------------------------
-// 5.6 DAEMON SUBCOMMANDS
+// 5.6 PROVIDER SUBCOMMANDS
+// ---------------------------------------------------------
+const isProvider = process.argv.includes('provider');
+if (isProvider) {
+  const providers = require(path.join(__dirname, 'scripts', 'providers.js'));
+  const providerIndex = process.argv.indexOf('provider');
+  const subCmd = process.argv[providerIndex + 1];
+
+  if (!subCmd || subCmd === 'list') {
+    const active = providers.getActiveProvider();
+    console.log(`🔌 MetaMe Providers (active: ${active ? active.name : 'anthropic'})`);
+    console.log(providers.listFormatted());
+    process.exit(0);
+  }
+
+  if (subCmd === 'use') {
+    const name = process.argv[providerIndex + 2];
+    if (!name) {
+      console.error("❌ Usage: metame provider use <name>");
+      process.exit(1);
+    }
+    try {
+      providers.setActive(name);
+      const p = providers.getActiveProvider();
+      console.log(`✅ Provider switched → ${name} (${p.label || name})`);
+      if (name !== 'anthropic') {
+        console.log(`   Base URL: ${p.base_url || 'not set'}`);
+      }
+    } catch (e) {
+      console.error(`❌ ${e.message}`);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
+
+  if (subCmd === 'add') {
+    const name = process.argv[providerIndex + 2];
+    if (!name) {
+      console.error("❌ Usage: metame provider add <name>");
+      process.exit(1);
+    }
+    const readline = require('readline');
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const ask = (q) => new Promise(r => rl.question(q, r));
+
+    (async () => {
+      console.log(`\n🔌 Add Provider: ${name}\n`);
+      console.log("The relay must accept Anthropic Messages API format.");
+      console.log("(Most quality relays like OpenRouter, OneAPI, etc. support this.)\n");
+
+      const label = (await ask("Display name (e.g. OpenRouter): ")).trim() || name;
+      const base_url = (await ask("Base URL (e.g. https://openrouter.ai/api/v1): ")).trim();
+      const api_key = (await ask("API Key: ")).trim();
+
+      if (!base_url) {
+        console.error("❌ Base URL is required.");
+        rl.close();
+        process.exit(1);
+      }
+
+      const config = { label };
+      if (base_url) config.base_url = base_url;
+      if (api_key) config.api_key = api_key;
+
+      try {
+        providers.addProvider(name, config);
+        console.log(`\n✅ Provider "${name}" added.`);
+        console.log(`   Switch to it: metame provider use ${name}`);
+      } catch (e) {
+        console.error(`❌ ${e.message}`);
+      }
+      rl.close();
+      process.exit(0);
+    })();
+    return; // Prevent further execution while async runs
+  }
+
+  if (subCmd === 'remove') {
+    const name = process.argv[providerIndex + 2];
+    if (!name) {
+      console.error("❌ Usage: metame provider remove <name>");
+      process.exit(1);
+    }
+    try {
+      providers.removeProvider(name);
+      console.log(`✅ Provider "${name}" removed.`);
+    } catch (e) {
+      console.error(`❌ ${e.message}`);
+    }
+    process.exit(0);
+  }
+
+  if (subCmd === 'set-role') {
+    const role = process.argv[providerIndex + 2]; // distill | daemon
+    const name = process.argv[providerIndex + 3]; // provider name or empty to clear
+    if (!role) {
+      console.error("❌ Usage: metame provider set-role <distill|daemon> [provider-name]");
+      console.error("   Omit provider name to reset to active provider.");
+      process.exit(1);
+    }
+    try {
+      providers.setRole(role, name || null);
+      console.log(`✅ ${role} provider ${name ? `set to "${name}"` : 'reset to active'}.`);
+    } catch (e) {
+      console.error(`❌ ${e.message}`);
+    }
+    process.exit(0);
+  }
+
+  if (subCmd === 'test') {
+    const targetName = process.argv[providerIndex + 2];
+    const prov = providers.loadProviders();
+    const name = targetName || prov.active;
+    const p = prov.providers[name];
+    if (!p) {
+      console.error(`❌ Provider "${name}" not found.`);
+      process.exit(1);
+    }
+
+    console.log(`🔍 Testing provider: ${name} (${p.label || name})`);
+    if (name === 'anthropic') {
+      console.log("   Using official Anthropic endpoint — testing via claude CLI...");
+    } else {
+      console.log(`   Base URL: ${p.base_url || 'not set'}`);
+    }
+
+    try {
+      const env = { ...process.env, ...providers.buildEnv(name) };
+      const { execSync } = require('child_process');
+      const start = Date.now();
+      const result = execSync(
+        'claude -p --model haiku --no-session-persistence',
+        {
+          input: 'Respond with exactly: PROVIDER_OK',
+          encoding: 'utf8',
+          timeout: 30000,
+          env,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }
+      ).trim();
+      const elapsed = Date.now() - start;
+
+      if (result.includes('PROVIDER_OK')) {
+        console.log(`   ✅ Connected (${elapsed}ms)`);
+      } else {
+        console.log(`   ⚠️  Response received (${elapsed}ms) but unexpected: ${result.slice(0, 80)}`);
+      }
+    } catch (e) {
+      console.error(`   ❌ Failed: ${e.message.split('\n')[0]}`);
+    }
+    process.exit(0);
+  }
+
+  // Unknown subcommand — show help
+  console.log("🔌 MetaMe Provider Commands:");
+  console.log("   metame provider              — list providers");
+  console.log("   metame provider use <name>   — switch active provider");
+  console.log("   metame provider add <name>   — add a new provider");
+  console.log("   metame provider remove <name> — remove provider");
+  console.log("   metame provider test [name]  — test connectivity");
+  console.log("   metame provider set-role <distill|daemon> [name]");
+  console.log("                                — assign provider for background tasks");
+  process.exit(0);
+}
+
+// ---------------------------------------------------------
+// 5.7 DAEMON SUBCOMMANDS
 // ---------------------------------------------------------
 const isDaemon = process.argv.includes('daemon');
 if (isDaemon) {
@@ -951,9 +1117,10 @@ if (isSync) {
   }
 
   console.log(`\n🔄 Resuming session ${bestSession.id.slice(0, 8)}...\n`);
+  const providerEnv = (() => { try { return require(path.join(__dirname, 'scripts', 'providers.js')).buildActiveEnv(); } catch { return {}; } })();
   const syncChild = spawn('claude', ['--resume', bestSession.id], {
     stdio: 'inherit',
-    env: { ...process.env, METAME_ACTIVE_SESSION: 'true' }
+    env: { ...process.env, ...providerEnv, METAME_ACTIVE_SESSION: 'true' }
   });
   syncChild.on('error', () => {
     console.error("Could not launch 'claude'. Is Claude Code installed?");
@@ -977,10 +1144,17 @@ if (process.env.METAME_ACTIVE_SESSION === 'true') {
 // ---------------------------------------------------------
 // 7. LAUNCH CLAUDE
 // ---------------------------------------------------------
-// Spawn the official claude tool with our marker
+// Load provider env (zero-overhead for official Anthropic — returns {})
+const activeProviderEnv = (() => { try { return require(path.join(__dirname, 'scripts', 'providers.js')).buildActiveEnv(); } catch { return {}; } })();
+const activeProviderName = (() => { try { return require(path.join(__dirname, 'scripts', 'providers.js')).getActiveName(); } catch { return 'anthropic'; } })();
+if (activeProviderName !== 'anthropic') {
+  console.log(`🔌 Provider: ${activeProviderName}`);
+}
+
+// Spawn the official claude tool with our marker + provider env
 const child = spawn('claude', process.argv.slice(2), {
   stdio: 'inherit',
-  env: { ...process.env, METAME_ACTIVE_SESSION: 'true' }
+  env: { ...process.env, ...activeProviderEnv, METAME_ACTIVE_SESSION: 'true' }
 });
 
 child.on('error', () => {
