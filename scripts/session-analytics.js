@@ -291,11 +291,86 @@ function formatGoalContext(profilePath) {
   } catch { return ''; }
 }
 
+/**
+ * Extract pivot points (key moments) from a session JSONL.
+ * Only called for long sessions (>20min + >15 tools).
+ * Returns array of pivot descriptions (max 3).
+ */
+function extractPivotPoints(jsonlPath) {
+  const content = fs.readFileSync(jsonlPath, 'utf8');
+  const lines = content.split('\n').filter(l => l.trim());
+
+  const pivots = [];
+  let lastUserIntent = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    try {
+      const entry = JSON.parse(lines[i]);
+      const type = entry.type;
+
+      // Track user direction changes
+      if (type === 'user') {
+        const msg = entry.message;
+        if (!msg || !msg.content) continue;
+
+        const content = typeof msg.content === 'string' ? msg.content :
+          (Array.isArray(msg.content) ? msg.content.find(c => c.type === 'text')?.text : null);
+
+        if (!content || content.length < 20) continue;
+
+        // Detect intent shifts
+        const keywords = ['改成', '换成', '不对', '重新', '算了', '还是', '改主意', 'change to', 'switch to', 'actually', 'wait', 'no', 'instead'];
+        const hasShift = keywords.some(k => content.toLowerCase().includes(k.toLowerCase()));
+
+        if (hasShift && lastUserIntent && pivots.length < 3) {
+          pivots.push(`Shift: "${lastUserIntent.slice(0, 40)}" → "${content.slice(0, 40)}"`);
+        }
+
+        lastUserIntent = content.slice(0, 80);
+      }
+
+      // Track tool failures (simplified — only catch explicit error mentions)
+      if (type === 'tool_result' && pivots.length < 3) {
+        const result = entry.message;
+        if (result && result.is_error) {
+          const toolName = entry.message.tool_use_id || 'Tool';
+          pivots.push(`${toolName} error`);
+        }
+      }
+    } catch {
+      // Skip malformed lines
+    }
+  }
+
+  return pivots;
+}
+
+/**
+ * Generate a lightweight summary for long sessions.
+ * Only called for sessions with duration > 20min AND tool_calls > 15.
+ * Returns { intent, pivots, outcome } or null.
+ */
+function summarizeSession(skeleton, jsonlPath) {
+  // Trigger condition: long + complex session
+  if (skeleton.duration_min < 20 || skeleton.total_tool_calls < 15) {
+    return null;
+  }
+
+  const pivots = extractPivotPoints(jsonlPath);
+
+  return {
+    intent: skeleton.intent || 'Unknown',
+    pivots: pivots.slice(0, 3),
+    outcome: skeleton.git_committed ? 'committed' : 'exploratory'
+  };
+}
+
 module.exports = {
   findLatestUnanalyzedSession,
   extractSkeleton,
   formatForPrompt,
   formatGoalContext,
+  summarizeSession,
   markAnalyzed,
 };
 

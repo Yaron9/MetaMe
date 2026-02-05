@@ -90,12 +90,15 @@ function distill() {
     // 3b. Extract session skeleton (local, zero API cost)
     let sessionContext = '';
     let skeleton = null;
+    let sessionSummary = null;
     if (sessionAnalytics) {
       try {
         const latest = sessionAnalytics.findLatestUnanalyzedSession();
         if (latest) {
           skeleton = sessionAnalytics.extractSkeleton(latest.path);
           sessionContext = sessionAnalytics.formatForPrompt(skeleton);
+          // For long sessions, extract pivot points
+          sessionSummary = sessionAnalytics.summarizeSession(skeleton, latest.path);
         }
       } catch { /* non-fatal */ }
     }
@@ -116,9 +119,17 @@ function distill() {
     const writableKeys = getWritableKeysForPrompt();
 
     // Session context section (only when skeleton exists, ~60 tokens)
-    const sessionSection = sessionContext
+    let sessionSection = sessionContext
       ? `\nSESSION CONTEXT (what actually happened in the latest coding session):\n${sessionContext}\n`
       : '';
+
+    // Add summary for long sessions (~30 tokens when present)
+    if (sessionSummary) {
+      const pivotText = sessionSummary.pivots.length > 0
+        ? `\nPivots: ${sessionSummary.pivots.join('; ')}`
+        : '';
+      sessionSection += `Summary: ${sessionSummary.intent} → ${sessionSummary.outcome}${pivotText}\n`;
+    }
 
     // Goal context section (~11 tokens when present)
     let goalContext = '';
@@ -310,6 +321,7 @@ Do NOT repeat existing unchanged values.`;
         updated: true,
         behavior,
         skeleton,
+        sessionSummary,
         signalCount: signals.length,
         summary: `${Object.keys(filtered).length} new trait${Object.keys(filtered).length > 1 ? 's' : ''} absorbed. (${tokens} tokens)`
       };
@@ -587,8 +599,9 @@ const MAX_SESSION_LOG = 30;
  * @param {object} behavior - The _behavior block from Haiku
  * @param {number} signalCount - Number of signals processed
  * @param {object} [skeleton] - Optional session skeleton from session-analytics
+ * @param {object} [summary] - Optional session summary (for long sessions)
  */
-function writeSessionLog(behavior, signalCount, skeleton) {
+function writeSessionLog(behavior, signalCount, skeleton, summary) {
   if (!behavior) return;
 
   const yaml = require('js-yaml');
@@ -624,6 +637,11 @@ function writeSessionLog(behavior, signalCount, skeleton) {
       project: skeleton.project || null,
       branch: skeleton.branch || null,
       intent: skeleton.intent || null,
+    } : {}),
+    // Summary for long sessions
+    ...(summary ? {
+      pivots: summary.pivots,
+      summary_outcome: summary.outcome,
     } : {}),
   };
 
@@ -781,7 +799,7 @@ if (require.main === module) {
   const result = distill();
   // Write session log if behavior was detected
   if (result.behavior) {
-    writeSessionLog(result.behavior, result.signalCount || 0, result.skeleton || null);
+    writeSessionLog(result.behavior, result.signalCount || 0, result.skeleton || null, result.sessionSummary || null);
   }
   // Run pattern detection (only triggers every 5th distill)
   detectPatterns();
