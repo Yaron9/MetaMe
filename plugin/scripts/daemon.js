@@ -51,6 +51,22 @@ try {
   }
 }
 
+// Provider env for daemon tasks (relay support)
+let providerMod = null;
+try {
+  providerMod = require('./providers');
+} catch { /* providers.js not available — use defaults */ }
+
+function getDaemonProviderEnv() {
+  if (!providerMod) return {};
+  try { return providerMod.buildDaemonEnv(); } catch { return {}; }
+}
+
+function getActiveProviderEnv() {
+  if (!providerMod) return {};
+  try { return providerMod.buildActiveEnv(); } catch { return {}; }
+}
+
 // ---------------------------------------------------------
 // LOGGING
 // ---------------------------------------------------------
@@ -267,6 +283,7 @@ function executeTask(task, config) {
         encoding: 'utf8',
         timeout: 120000, // 2 min timeout
         maxBuffer: 1024 * 1024,
+        env: { ...process.env, ...getDaemonProviderEnv() },
       }
     ).trim();
 
@@ -351,7 +368,7 @@ function executeWorkflow(task, config) {
     log('INFO', `Workflow ${task.name} step ${i + 1}/${steps.length}: ${step.skill || 'prompt'}`);
     try {
       const output = execSync(`claude ${args.join(' ')}`, {
-        input: prompt, encoding: 'utf8', timeout: step.timeout || 300000, maxBuffer: 5 * 1024 * 1024, cwd,
+        input: prompt, encoding: 'utf8', timeout: step.timeout || 300000, maxBuffer: 5 * 1024 * 1024, cwd, env: { ...process.env, ...getDaemonProviderEnv() },
       }).trim();
       const tk = Math.ceil((prompt.length + output.length) / 4);
       totalTokens += tk;
@@ -1186,8 +1203,31 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
+  // /provider [name] — list or switch provider
+  if (text === '/provider' || text.startsWith('/provider ')) {
+    if (!providerMod) {
+      await bot.sendMessage(chatId, '❌ Provider module not available.');
+      return;
+    }
+    const arg = text.slice(9).trim();
+    if (!arg) {
+      const list = providerMod.listFormatted();
+      await bot.sendMessage(chatId, `🔌 Providers:\n${list}\n\n用法: /provider <name>`);
+      return;
+    }
+    try {
+      providerMod.setActive(arg);
+      const p = providerMod.getActiveProvider();
+      await bot.sendMessage(chatId, `✅ Provider: ${arg} (${p.label || arg})`);
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ ${e.message}`);
+    }
+    return;
+  }
+
   if (text.startsWith('/')) {
     const currentModel = (config.daemon && config.daemon.model) || 'sonnet';
+    const currentProvider = providerMod ? providerMod.getActiveName() : 'anthropic';
     await bot.sendMessage(chatId, [
       '📱 手机端 Claude Code',
       '',
@@ -1204,7 +1244,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       '/stop — 中断当前任务 (ESC)',
       '/undo — 回退上一轮操作 (ESC×2)',
       '',
-      `⚙️ /model [${currentModel}] /status /tasks /run /budget /reload`,
+      `⚙️ /model [${currentModel}] /provider [${currentProvider}] /status /tasks /run /budget /reload`,
       '',
       '直接打字即可对话 💬',
     ].join('\n'));
@@ -1525,7 +1565,7 @@ function spawnClaudeAsync(args, input, cwd, timeoutMs = 300000) {
     const child = spawn('claude', args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: { ...process.env, ...getActiveProviderEnv() },
     });
 
     let stdout = '';
@@ -1630,7 +1670,7 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
     const child = spawn('claude', streamArgs, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: { ...process.env, ...getActiveProviderEnv() },
     });
 
     // Track active process for /stop
