@@ -173,6 +173,28 @@ metame daemon stop                    # 停止
 metame daemon install-launchd         # macOS 自启动（开机自启 + 崩溃重启）
 ```
 
+**macOS 自启动（推荐）：** 让 daemon 在睡眠唤醒、开机后自动恢复：
+
+```bash
+metame daemon install-launchd
+launchctl load ~/Library/LaunchAgents/com.metame.daemon.plist
+```
+
+加载后，daemon 开机自启、睡眠唤醒自动恢复、崩溃自动重启。不再需要手动 `metame daemon start`。
+
+> **注意：** 二选一 —— 要么用 launchd 管理，要么手动管理（`metame daemon start/stop`）。不要混用，否则会产生重复进程。
+
+```bash
+# 查看状态（两种方式都可以用）
+metame daemon status
+
+# 关闭自启动
+launchctl unload ~/Library/LaunchAgents/com.metame.daemon.plist
+
+# 彻底删除
+rm ~/Library/LaunchAgents/com.metame.daemon.plist
+```
+
 **会话命令（Telegram 和飞书均支持可点击按钮）：**
 
 | 命令 | 说明 |
