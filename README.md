@@ -36,7 +36,7 @@
 * **🪞 Metacognition Layer (v1.3):** MetaMe now observes *how* you think, not just *what* you say. Behavioral pattern detection runs inside the existing Haiku distill call (zero extra cost). It tracks decision patterns, cognitive load, comfort zones, and avoidance topics across sessions. When persistent patterns emerge, MetaMe injects a one-line mirror observation — e.g., *"You tend to avoid testing until forced"* — with a 14-day cooldown per pattern. Conditional reflection prompts appear only when triggered (every 7th distill or 3x consecutive comfort zone). All injection logic runs in Node.js; Claude receives only pre-decided directives, never rules to self-evaluate.
 * **📱 Remote Claude Code (v1.3):** Full Claude Code from your phone via Telegram or Feishu (Lark). Stateful sessions with `--resume` — same conversation history, tool use, and file editing as your terminal. Interactive buttons for project/session picking, directory browser, and macOS launchd auto-start.
 * **🔄 Workflow Engine (v1.3):** Define multi-step skill chains as heartbeat tasks. Each workflow runs in a single Claude Code session via `--resume`, so step outputs flow as context to the next step. Example: `deep-research` → `tech-writing` → `wechat-publisher` — fully automated content pipeline.
-* **⏹ Full Terminal Control from Mobile (v1.3.9):** `/stop` (ESC), `/undo` (ESC×2) with native file-history restoration, `/model` to switch between sonnet/opus/haiku, concurrent task protection, and daemon auto-restart on code changes.
+* **⏹ Full Terminal Control from Mobile (v1.3.9):** `/stop` (ESC), `/undo` (ESC×2) with native file-history restoration, `/model` to switch models, concurrent task protection, daemon auto-restart, and `!metame continue` for seamless mobile-to-desktop sync.
 
 ## 🛠 Prerequisites
 
@@ -130,6 +130,15 @@ metame evolve "I prefer functional programming patterns"
 
 **Anti-bias safeguards:** single observations ≠ traits, contradictions are tracked not overwritten, pending traits expire after 30 days, context fields auto-clear on staleness.
 
+**In-session commands (type inside Claude Code):**
+
+| Command | Description |
+|---------|-------------|
+| `!metame continue` | Reload session with mobile messages (auto-exit + restart) |
+| `!metame refresh` | Re-inject profile into current session |
+| `!metame evolve "..."` | Teach MetaMe a new insight |
+| `!metame set-trait key value` | Update a specific profile field |
+
 **Metacognition controls:**
 
 ```bash
@@ -197,6 +206,19 @@ Just type naturally for conversation — every message stays in the same Claude 
 **How it works:**
 
 Each chat gets a persistent session via `claude -p --resume <session-id>`. This is the same Claude Code engine as your terminal — same tools (file editing, bash, code search), same conversation history. You can start work on your computer and `/resume` from your phone, or vice versa.
+
+**Seamless switching between desktop and mobile (v1.3.9):**
+
+The same session works on both desktop and mobile, but there's an asymmetry:
+
+* **Desktop → Mobile:** Automatic. Mobile spawns a fresh `claude -p --resume` for each message, so it always reads the latest session file. Just keep chatting.
+* **Mobile → Desktop:** Requires a sync. Desktop Claude Code holds the session in memory — it won't see messages added by the mobile daemon. Run:
+
+```
+Inside Claude Code, type: !metame continue
+```
+
+Claude auto-exits and restarts with the full session (including all mobile messages). One command, zero manual steps. Also works as `!metame sync`.
 
 **Parallel request handling:** The daemon uses async spawning, so multiple users or overlapping requests don't block each other. Each Claude call runs in a non-blocking subprocess.
 
