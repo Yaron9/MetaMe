@@ -1000,16 +1000,16 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
           } else if (obj.type === 'user') {
             const m = obj.message || {};
             const c = m.content || '';
-            let text = '';
-            if (typeof c === 'string') text = c;
+            let userText = '';
+            if (typeof c === 'string') userText = c;
             else if (Array.isArray(c)) {
-              for (const b of c) { if (b.type === 'text') { text = b.text; break; } }
+              for (const b of c) { if (b.type === 'text') { userText = b.text; break; } }
             }
             // Skip system/internal messages
-            if (text && !text.startsWith('<task-notification') && !text.startsWith('[Request interrupted')) {
+            if (userText && !userText.startsWith('<task-notification') && !userText.startsWith('[Request interrupted')) {
               turns.push({
                 lineIdx: i,
-                userPrompt: text.slice(0, 50),
+                userPrompt: userText.slice(0, 30),
                 timestamp: obj.timestamp || '',
                 preSnapshotIdx: lastSnapshotIdx,
               });

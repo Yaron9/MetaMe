@@ -35,6 +35,7 @@ const CORE_PROTOCOL = `
    *   **TOOLS:**
        1. **Log Insight:** \`!metame evolve "Insight"\` (For additive knowledge).
        2. **Surgical Update:** \`!metame set-trait key value\` (For overwriting specific fields, e.g., \`!metame set-trait status.focus "API Design"\`).
+       3. **Mobile Sync:** \`!metame continue\` (Reload session to include mobile messages — exits and auto-restarts Claude).
    *   **RULE:** Only use these tools when the User **EXPLICITLY** instructs you.
    *   **REMINDER:** If the User expresses a strong persistent preference, you may gently ask *at the end of the task*: "Should I save this preference to your MetaMe profile?"
 ---
