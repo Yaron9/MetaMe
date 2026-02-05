@@ -23,7 +23,7 @@ if (!fs.existsSync(METAME_DIR)) {
 }
 
 // Auto-deploy bundled scripts to ~/.metame/
-const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js'];
+const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js'];
 const scriptsDir = path.join(__dirname, 'scripts');
 
 for (const script of BUNDLED_SCRIPTS) {
@@ -319,6 +319,27 @@ try {
         candidate.surfaced = new Date().toISOString().slice(0, 10);
         fs.writeFileSync(BRAIN_FILE, yaml.dump(brainDoc, { lineWidth: -1 }), 'utf8');
       }
+
+      // Drift mirror fallback — when no pattern candidate, check recent session drift
+      if (!candidate) {
+        const sessionLogFile = path.join(METAME_DIR, 'session_log.yaml');
+        if (fs.existsSync(sessionLogFile)) {
+          const log = yaml.load(fs.readFileSync(sessionLogFile, 'utf8'));
+          if (log && Array.isArray(log.sessions)) {
+            const recent = log.sessions.slice(-3);
+            const driftCount = recent.filter(s =>
+              s.goal_alignment === 'drifted' || s.goal_alignment === 'partial'
+            ).length;
+            if (driftCount >= 2 && recent.length >= 2) {
+              const projects = [...new Set(recent.map(s => s.project).filter(Boolean))];
+              const declaredFocus = brainDoc.status?.focus || brainDoc.context?.focus;
+              if (declaredFocus && projects.length > 0) {
+                mirrorLine = `\n[MetaMe observation: 最近${driftCount}个session都在${projects.join(',')}上，和声明的目标"${declaredFocus}"有偏差。不要主动提起，只在用户自然提到相关话题时温和回应。]\n`;
+              }
+            }
+          }
+        }
+      }
     }
   }
 } catch {
@@ -350,9 +371,31 @@ try {
       const lastThree = zoneHistory.slice(-3);
       const triggerComfort = lastThree.length === 3 && lastThree.every(z => z === 'C');
 
-      if (trigger7th || triggerComfort) {
+      // Trigger 3: Persistent goal drift (2+ drifted in last 3 sessions)
+      let triggerDrift = false;
+      let driftDeclaredFocus = null;
+      try {
+        const sessionLogFile = path.join(METAME_DIR, 'session_log.yaml');
+        if (fs.existsSync(sessionLogFile)) {
+          const driftLog = yaml.load(fs.readFileSync(sessionLogFile, 'utf8'));
+          if (driftLog && Array.isArray(driftLog.sessions)) {
+            const recentSessions = driftLog.sessions.slice(-3);
+            const driftCount = recentSessions.filter(s =>
+              s.goal_alignment === 'drifted' || s.goal_alignment === 'partial'
+            ).length;
+            if (driftCount >= 2 && recentSessions.length >= 2) {
+              driftDeclaredFocus = refDoc.status?.focus || refDoc.context?.focus;
+              if (driftDeclaredFocus) triggerDrift = true;
+            }
+          }
+        }
+      } catch { /* non-fatal */ }
+
+      if (triggerDrift || triggerComfort || trigger7th) {
         let hint = '';
-        if (triggerComfort) {
+        if (triggerDrift) {
+          hint = `最近几个session的方向和"${driftDeclaredFocus}"有偏差。如果session自然结束，可以温和地问：🪞 是方向有意调整了，还是不小心偏了？`;
+        } else if (triggerComfort) {
           hint = '连续几次都在熟悉领域。如果用户在session结束时自然停顿，可以温和地问：🪞 准备好探索拉伸区了吗？';
         } else {
           hint = '这是第' + distillCount + '次session。如果session自然结束，可以附加一句：🪞 一个词形容这次session的感受？';

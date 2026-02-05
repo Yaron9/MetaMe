@@ -176,6 +176,28 @@ function getAllowedKeysForPrompt() {
 }
 
 /**
+ * Get only writable keys (T3-T5) as a formatted list for the distill prompt.
+ * Saves ~150 tokens by omitting T1/T2 LOCKED fields the distiller can't write anyway.
+ */
+function getWritableKeysForPrompt() {
+  const lines = [];
+  let currentTier = '';
+  for (const [key, def] of Object.entries(SCHEMA)) {
+    if (def.tier === 'T1' || def.tier === 'T2') continue;
+    if (def.tier !== currentTier) {
+      currentTier = def.tier;
+      lines.push(`\n# ${currentTier}:`);
+    }
+    let desc = `  ${key}: ${def.type}`;
+    if (def.values) desc += ` [${def.values.join('|')}]`;
+    if (def.maxChars) desc += ` (max ${def.maxChars} chars)`;
+    if (def.maxItems) desc += ` (max ${def.maxItems} items)`;
+    lines.push(desc);
+  }
+  return lines.join('\n');
+}
+
+/**
  * Estimate token count for a YAML string (conservative for mixed zh/en).
  */
 function estimateTokens(yamlString) {
@@ -192,6 +214,7 @@ module.exports = {
   isLocked,
   validate,
   getAllowedKeysForPrompt,
+  getWritableKeysForPrompt,
   estimateTokens,
   TOKEN_BUDGET,
 };

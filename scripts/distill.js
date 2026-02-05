@@ -19,8 +19,14 @@ const BUFFER_FILE = path.join(HOME, '.metame', 'raw_signals.jsonl');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const LOCK_FILE = path.join(HOME, '.metame', 'distill.lock');
 
-const { hasKey, isLocked, getTier, getAllowedKeysForPrompt, estimateTokens, TOKEN_BUDGET } = require('./schema');
+const { hasKey, isLocked, getTier, getWritableKeysForPrompt, estimateTokens, TOKEN_BUDGET } = require('./schema');
 const { loadPending, savePending, upsertPending, getPromotable, removePromoted } = require('./pending-traits');
+
+// Session analytics — local skeleton extraction (zero API cost)
+let sessionAnalytics = null;
+try {
+  sessionAnalytics = require('./session-analytics');
+} catch { /* session-analytics.js not available — graceful fallback */ }
 
 // Provider env for distillation (cheap relay for background tasks)
 let distillEnv = {};
@@ -81,6 +87,19 @@ function distill() {
       return { updated: false, behavior: null, summary: 'No valid signals.' };
     }
 
+    // 3b. Extract session skeleton (local, zero API cost)
+    let sessionContext = '';
+    let skeleton = null;
+    if (sessionAnalytics) {
+      try {
+        const latest = sessionAnalytics.findLatestUnanalyzedSession();
+        if (latest) {
+          skeleton = sessionAnalytics.extractSkeleton(latest.path);
+          sessionContext = sessionAnalytics.formatForPrompt(skeleton);
+        }
+      } catch { /* non-fatal */ }
+    }
+
     // 4. Read current profile
     let currentProfile = '';
     try {
@@ -89,93 +108,66 @@ function distill() {
       currentProfile = '(empty profile)';
     }
 
-    // 5. Build distillation prompt
+    // 5. Build distillation prompt (compact + session-aware)
     const userMessages = signals
       .map((s, i) => `${i + 1}. "${s}"`)
       .join('\n');
 
-    const allowedKeys = getAllowedKeysForPrompt();
+    const writableKeys = getWritableKeysForPrompt();
 
-    const distillPrompt = `You are a MetaMe cognitive profile distiller. Your job is to extract COGNITIVE TRAITS and PREFERENCES — how the user thinks, decides, and communicates. You are NOT a memory system. Do NOT store facts ("user lives in X"). Only store cognitive patterns and preferences.
+    // Session context section (only when skeleton exists, ~60 tokens)
+    const sessionSection = sessionContext
+      ? `\nSESSION CONTEXT (what actually happened in the latest coding session):\n${sessionContext}\n`
+      : '';
+
+    // Goal context section (~11 tokens when present)
+    let goalContext = '';
+    if (sessionAnalytics) {
+      try { goalContext = sessionAnalytics.formatGoalContext(BRAIN_FILE); } catch {}
+    }
+    const goalSection = goalContext ? `\n${goalContext}\n` : '';
+
+    const distillPrompt = `You are a MetaMe cognitive profile distiller. Extract COGNITIVE TRAITS and PREFERENCES — how the user thinks, decides, and communicates. NOT a memory system. Do NOT store facts.
 
 CURRENT PROFILE:
 \`\`\`yaml
 ${currentProfile}
 \`\`\`
 
-ALLOWED FIELDS (you may ONLY output keys from this list):
-${allowedKeys}
+WRITABLE FIELDS (T1/T2 are LOCKED and omitted — you may ONLY output keys from this list):
+${writableKeys}
 
 RECENT USER MESSAGES:
 ${userMessages}
+${sessionSection}${goalSection}
+RULES:
+1. Extract ONLY cognitive traits, preferences, behavioral patterns — NOT facts or events.
+2. IGNORE task-specific messages. Only extract what persists across ALL sessions.
+3. Only output fields from WRITABLE FIELDS. Any other key will be rejected.
+4. For enum fields, use one of the listed values.
+5. Episodic exceptions: context.anti_patterns (max 5, cross-project lessons only), context.milestones (max 3).
+6. Strong directives (以后一律/always/never/from now on) → _confidence: high. Otherwise: normal.
+7. Add _confidence and _source blocks mapping field keys to confidence level and triggering quote.
 
-INSTRUCTIONS:
-1. Extract ONLY cognitive traits, preferences, and behavioral patterns — NOT facts or events.
-2. IGNORE task-specific messages (e.g., "fix this bug", "add a button").
-3. Only extract things that should persist across ALL future sessions.
-4. You may ONLY output fields from ALLOWED FIELDS. Any other key will be rejected.
-5. Fields marked [LOCKED] must NEVER be changed (T1 and T2 tiers).
-6. For enum fields, you MUST use one of the listed values.
+BIAS PREVENTION:
+- Single observation = STATE, not TRAIT. T3 cognition needs 3+ observations.
+- L1 Surface → needs 5+, L2 Behavior → needs 3, L3 Self-declaration → direct write.
+- Contradiction with existing value → do NOT output (needs accumulation).
 
-EPISODIC MEMORY — TWO EXCEPTIONS to the "no facts" rule:
-7. context.anti_patterns (max 5): If the user encountered a REPEATED technical failure or expressed strong frustration about a specific technical approach, record it as an anti-pattern. Format: "topic — what failed and why". Only cross-project generalizable lessons, NOT project-specific bugs.
-   Example: ["async/await deadlock — Promise.all rejects all on single failure, use Promise.allSettled", "CSS Grid in email templates — no support, use tables"]
-8. context.milestones (max 3): If the user completed a significant milestone or made a key decision, record it. Only the 3 most recent. Format: short description string.
-   Example: ["MetaMe v1.3 published", "Switched from REST to GraphQL"]
-
-COGNITIVE BIAS PREVENTION:
-- A single observation is a STATE, not a TRAIT. Do NOT infer T3 cognition fields from one message.
-- Never infer cognitive style from identity/demographics.
-- If a new signal contradicts an existing profile value, do NOT output the field — contradictions need accumulation.
-- Signal weight hierarchy:
-  L1 Surface (word choice, tone) → low weight, needs 5+ observations
-  L2 Behavior (question patterns, decision patterns) → medium weight, needs 3 observations
-  L3 Self-declaration ("I prefer...", "以后一律...") → high weight, can write directly
-
-CONFIDENCE TAGGING:
-- If a message contains strong directives (以后一律/永远/always/never/记住/from now on), mark as HIGH.
-- Add a _confidence block mapping field keys to "high" or "normal".
-- Add a _source block mapping field keys to the quote that triggered the extraction.
-
-OUTPUT FORMAT — respond with ONLY a YAML code block:
-\`\`\`yaml
-preferences:
-  code_style: concise
-context:
-  focus: "API redesign"
-_confidence:
-  preferences.code_style: high
-  context.focus: normal
-_source:
-  preferences.code_style: "以后代码一律简洁风格"
-  context.focus: "我现在在做API重构"
-\`\`\`
-
-BEHAVIORAL PATTERN DETECTION (Phase C):
-In addition to cognitive traits, analyze the messages for behavioral patterns in THIS session.
-Output a _behavior block with these fields (use null if not enough signal):
+BEHAVIORAL ANALYSIS — _behavior block (always output, use null if insufficient signal):
   decision_pattern: premature_closure | exploratory | iterative | null
   cognitive_load: low | medium | high | null
   zone: comfort | stretch | panic | null
-  avoidance_topics: []           # topics mentioned but not acted on
+  avoidance_topics: []
   emotional_response: analytical | blame_external | blame_self | withdrawal | null
-  topics: []                     # main topics discussed (max 5 keywords)
-
-Example _behavior block:
-\`\`\`yaml
-_behavior:
-  decision_pattern: iterative
-  cognitive_load: medium
-  zone: stretch
-  avoidance_topics: ["testing"]
-  emotional_response: analytical
-  topics: ["rust", "error-handling"]
-\`\`\`
-
-IMPORTANT: _behavior is ALWAYS output, even if no profile updates. If there are no profile updates but behavior was detected, output ONLY the _behavior block (do NOT output NO_UPDATE in that case).
-
-If nothing worth saving AND no behavior detected: respond with exactly NO_UPDATE
-Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
+  topics: []
+  session_outcome: completed | abandoned | blocked | pivoted | null
+  friction: []                   # max 3 keywords describing pain points
+  goal_alignment: aligned | partial | drifted | null
+  drift_note: "max 30 char explanation" or null
+${sessionContext ? '\nHint: high tool_calls + routine messages → zone likely higher. If DECLARED_GOALS exist, assess goal_alignment.' : ''}
+OUTPUT — respond with ONLY a YAML code block. If nothing worth saving AND no behavior: respond with exactly NO_UPDATE.
+Do NOT repeat existing unchanged values.`;
 
     // 6. Call Claude in print mode with haiku (+ provider env for relay support)
     let result;
@@ -242,7 +234,10 @@ Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
       // If only behavior detected but no profile updates
       if (Object.keys(filtered).length === 0 && behavior) {
         cleanup();
-        return { updated: false, behavior, signalCount: signals.length, summary: `Analyzed ${signals.length} messages — behavior logged, no profile changes.` };
+        if (skeleton && sessionAnalytics) {
+          try { sessionAnalytics.markAnalyzed(skeleton.session_id); } catch {}
+        }
+        return { updated: false, behavior, skeleton, signalCount: signals.length, summary: `Analyzed ${signals.length} messages — behavior logged, no profile changes.` };
       }
 
       const profile = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
@@ -305,10 +300,16 @@ Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
 
       fs.writeFileSync(BRAIN_FILE, restored, 'utf8');
 
+      // Mark session as analyzed after successful distill
+      if (skeleton && sessionAnalytics) {
+        try { sessionAnalytics.markAnalyzed(skeleton.session_id); } catch {}
+      }
+
       cleanup();
       return {
         updated: true,
         behavior,
+        skeleton,
         signalCount: signals.length,
         summary: `${Object.keys(filtered).length} new trait${Object.keys(filtered).length > 1 ? 's' : ''} absorbed. (${tokens} tokens)`
       };
@@ -585,8 +586,9 @@ const MAX_SESSION_LOG = 30;
  * Write a session entry to session_log.yaml.
  * @param {object} behavior - The _behavior block from Haiku
  * @param {number} signalCount - Number of signals processed
+ * @param {object} [skeleton] - Optional session skeleton from session-analytics
  */
-function writeSessionLog(behavior, signalCount) {
+function writeSessionLog(behavior, signalCount, skeleton) {
   if (!behavior) return;
 
   const yaml = require('js-yaml');
@@ -610,6 +612,19 @@ function writeSessionLog(behavior, signalCount) {
     emotional_response: behavior.emotional_response || null,
     avoidance: behavior.avoidance_topics || [],
     signal_count: signalCount,
+    session_outcome: behavior.session_outcome || null,
+    friction: behavior.friction || [],
+    goal_alignment: behavior.goal_alignment || null,
+    drift_note: behavior.drift_note || null,
+    // From skeleton (if available)
+    ...(skeleton ? {
+      duration_min: skeleton.duration_min,
+      tool_calls: skeleton.total_tool_calls,
+      tools: skeleton.tool_counts,
+      project: skeleton.project || null,
+      branch: skeleton.branch || null,
+      intent: skeleton.intent || null,
+    } : {}),
   };
 
   log.sessions.push(entry);
@@ -649,20 +664,42 @@ function detectPatterns() {
 
   // Take last 20 sessions
   const recent = log.sessions.slice(-20);
-  const sessionSummary = recent.map((s, i) =>
-    `${i + 1}. [${s.ts}] topics=${(s.topics || []).join(',')} zone=${s.zone || '?'} decision=${s.decision_pattern || '?'} load=${s.cognitive_load || '?'} avoidance=[${(s.avoidance || []).join(',')}]`
-  ).join('\n');
+  const sessionSummary = recent.map((s, i) => {
+    const parts = [`${i + 1}. [${s.ts}]`];
+    if (s.project) parts.push(`proj=${s.project}`);
+    parts.push(`topics=${(s.topics || []).join(',')}`);
+    parts.push(`zone=${s.zone || '?'}`);
+    if (s.goal_alignment) parts.push(`goal=${s.goal_alignment}`);
+    if (s.drift_note) parts.push(`drift="${s.drift_note}"`);
+    if (s.session_outcome) parts.push(`outcome=${s.session_outcome}`);
+    if (s.friction && s.friction.length) parts.push(`friction=[${s.friction.join(',')}]`);
+    if (s.tool_calls) parts.push(`tools=${s.tool_calls}`);
+    if (s.duration_min) parts.push(`${s.duration_min}min`);
+    parts.push(`load=${s.cognitive_load || '?'}`);
+    parts.push(`avoidance=[${(s.avoidance || []).join(',')}]`);
+    return parts.join(' ');
+  }).join('\n');
+
+  // Read declared goals for pattern context
+  let declaredGoals = '';
+  if (sessionAnalytics) {
+    try { declaredGoals = sessionAnalytics.formatGoalContext(BRAIN_FILE); } catch {}
+  }
+  const goalLine = declaredGoals ? `\nUSER'S ${declaredGoals}\n` : '';
 
   const patternPrompt = `You are a metacognition pattern detector. Analyze these ${recent.length} session summaries and find repeated behavioral patterns.
 
 SESSION HISTORY:
 ${sessionSummary}
-
+${goalLine}
 Find at most 2 patterns from these categories:
 1. Avoidance: topics mentioned repeatedly but never acted on
 2. Energy: what task types correlate with high/low cognitive load
 3. Zone: consecutive comfort zone? frequent panic?
 4. Growth: areas where user went from asking questions to giving commands (mastery signal)
+5. Friction: recurring pain points across sessions
+6. Efficiency: workflow patterns, underutilized tools
+7. Drift: sessions where goal_alignment is drifted/partial for 3+ consecutive sessions
 
 RULES:
 - Only report patterns with confidence > 0.7 (based on frequency/consistency)
@@ -672,7 +709,7 @@ RULES:
 OUTPUT FORMAT — respond with ONLY a YAML code block:
 \`\`\`yaml
 patterns:
-  - type: avoidance|energy|zone|growth
+  - type: avoidance|energy|zone|growth|friction|efficiency|drift
     summary: "one sentence description"
     confidence: 0.7-1.0
 \`\`\`
@@ -744,7 +781,7 @@ if (require.main === module) {
   const result = distill();
   // Write session log if behavior was detected
   if (result.behavior) {
-    writeSessionLog(result.behavior, result.signalCount || 0);
+    writeSessionLog(result.behavior, result.signalCount || 0, result.skeleton || null);
   }
   // Run pattern detection (only triggers every 5th distill)
   detectPatterns();
