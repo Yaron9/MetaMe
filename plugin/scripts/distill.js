@@ -22,6 +22,13 @@ const LOCK_FILE = path.join(HOME, '.metame', 'distill.lock');
 const { hasKey, isLocked, getTier, getAllowedKeysForPrompt, estimateTokens, TOKEN_BUDGET } = require('./schema');
 const { loadPending, savePending, upsertPending, getPromotable, removePromoted } = require('./pending-traits');
 
+// Provider env for distillation (cheap relay for background tasks)
+let distillEnv = {};
+try {
+  const { buildDistillEnv } = require('./providers');
+  distillEnv = buildDistillEnv();
+} catch { /* providers.js not available — use defaults */ }
+
 /**
  * Main distillation process.
  * Returns { updated: boolean, summary: string }
@@ -170,7 +177,7 @@ IMPORTANT: _behavior is ALWAYS output, even if no profile updates. If there are 
 If nothing worth saving AND no behavior detected: respond with exactly NO_UPDATE
 Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
 
-    // 6. Call Claude in print mode with haiku
+    // 6. Call Claude in print mode with haiku (+ provider env for relay support)
     let result;
     try {
       result = execSync(
@@ -179,7 +186,8 @@ Do NOT repeat existing unchanged values. Only output NEW or CHANGED fields.`;
           input: distillPrompt,
           encoding: 'utf8',
           timeout: 60000, // 60s — runs in background, no rush
-          stdio: ['pipe', 'pipe', 'pipe']
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, ...distillEnv },
         }
       ).trim();
     } catch (err) {
@@ -678,7 +686,8 @@ If no clear patterns found: respond with exactly NO_PATTERNS`;
         input: patternPrompt,
         encoding: 'utf8',
         timeout: 30000,
-        stdio: ['pipe', 'pipe', 'pipe']
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, ...distillEnv },
       }
     ).trim();
 

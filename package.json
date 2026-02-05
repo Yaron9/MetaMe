@@ -12,7 +12,7 @@
     ],
     "scripts": {
         "start": "node index.js",
-        "sync:plugin": "cp scripts/schema.js scripts/pending-traits.js scripts/signal-capture.js scripts/distill.js scripts/daemon.js scripts/telegram-adapter.js scripts/feishu-adapter.js scripts/daemon-default.yaml plugin/scripts/ && echo '✅ Plugin scripts synced'",
+        "sync:plugin": "cp scripts/schema.js scripts/pending-traits.js scripts/signal-capture.js scripts/distill.js scripts/daemon.js scripts/telegram-adapter.js scripts/feishu-adapter.js scripts/daemon-default.yaml scripts/providers.js plugin/scripts/ && echo '✅ Plugin scripts synced'",
         "restart:daemon": "node index.js daemon stop 2>/dev/null; sleep 1; node index.js daemon start 2>/dev/null || echo '⚠️  Daemon not running or restart failed'",
         "precommit": "npm run sync:plugin && npm run restart:daemon"
     },
