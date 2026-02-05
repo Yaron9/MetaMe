@@ -4,6 +4,17 @@
   <img src="./logo.png" alt="MetaMe Logo" width="200"/>
 </p>
 
+<p align="center">
+  <a href="https://www.npmjs.com/package/metame-cli"><img src="https://img.shields.io/npm/v/metame-cli.svg" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/metame-cli"><img src="https://img.shields.io/npm/dm/metame-cli.svg" alt="npm downloads"></a>
+  <a href="https://nodejs.org"><img src="https://img.shields.io/node/v/metame-cli.svg" alt="node version"></a>
+  <a href="https://github.com/Yaron9/MetaMe/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/metame-cli.svg" alt="license"></a>
+</p>
+
+<p align="center">
+  <a href="./README.md">English</a> | <a href="./README中文版.md">中文</a>
+</p>
+
 > **Claude Code 的"认知画像"层 (The Cognitive Profile Layer)**
 >
 > *懂你怎么想，陪你到处走。*
@@ -37,6 +48,7 @@
 * **📱 远程 Claude Code (v1.3)：** 手机端完整 Claude Code 体验，支持 Telegram 和飞书。有状态会话（`--resume`）——和终端一样的对话历史、工具调用、文件编辑。可点击按钮选择项目/会话/目录，支持 macOS launchd 自启动。
 * **🔄 工作流引擎 (v1.3)：** 将多步骤 Skill 链定义为心跳任务。每个工作流在单个 Claude Code 会话中通过 `--resume` 运行，上一步的输出自动成为下一步的上下文。示例：`deep-research` → `tech-writing` → `wechat-publisher`——全自动内容流水线。
 * **⏹ 手机端完整终端控制 (v1.3.10)：** `/stop`（ESC）、`/undo`（ESC×2，原生 file-history 恢复）、`/model` 切换模型、并发任务保护、代码变更自动热重启、`metame continue` 手机→电脑一键同步。
+* **🎯 目标对齐与偏离检测 (v1.3.11)：** MetaMe 现在能追踪你的 session 是否偏离声明目标。每次蒸馏自动评估 `goal_alignment`（aligned/partial/drifted），零额外 API 成本。连续 2 个 session 偏离时，镜像观察被动注入；连续 3 个 session 后，反思提示温和地问："是方向有意调整了，还是不小心偏了？" Session 日志现在记录项目名、分支、意图和文件目录，提供更丰富的回顾分析。模式检测可发现跨 session 历史的持续偏离趋势。
 
 ## 🛠 前置要求
 

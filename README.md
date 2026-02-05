@@ -4,6 +4,17 @@
   <img src="./logo.png" alt="MetaMe Logo" width="200"/>
 </p>
 
+<p align="center">
+  <a href="https://www.npmjs.com/package/metame-cli"><img src="https://img.shields.io/npm/v/metame-cli.svg" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/metame-cli"><img src="https://img.shields.io/npm/dm/metame-cli.svg" alt="npm downloads"></a>
+  <a href="https://nodejs.org"><img src="https://img.shields.io/node/v/metame-cli.svg" alt="node version"></a>
+  <a href="https://github.com/Yaron9/MetaMe/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/metame-cli.svg" alt="license"></a>
+</p>
+
+<p align="center">
+  <a href="./README.md">English</a> | <a href="./README中文版.md">中文</a>
+</p>
+
 > **The Cognitive Profile Layer for Claude Code.**
 >
 > *Knows how you think. Works wherever you are.*
@@ -37,6 +48,7 @@
 * **📱 Remote Claude Code (v1.3):** Full Claude Code from your phone via Telegram or Feishu (Lark). Stateful sessions with `--resume` — same conversation history, tool use, and file editing as your terminal. Interactive buttons for project/session picking, directory browser, and macOS launchd auto-start.
 * **🔄 Workflow Engine (v1.3):** Define multi-step skill chains as heartbeat tasks. Each workflow runs in a single Claude Code session via `--resume`, so step outputs flow as context to the next step. Example: `deep-research` → `tech-writing` → `wechat-publisher` — fully automated content pipeline.
 * **⏹ Full Terminal Control from Mobile (v1.3.10):** `/stop` (ESC), `/undo` (ESC×2) with native file-history restoration, `/model` to switch models, concurrent task protection, daemon auto-restart, and `metame continue` for seamless mobile-to-desktop sync.
+* **🎯 Goal Alignment & Drift Detection (v1.3.11):** MetaMe now tracks whether your sessions align with your declared goals. Each distill assesses `goal_alignment` (aligned/partial/drifted) at zero extra API cost. When you drift for 2+ consecutive sessions, a mirror observation is injected passively; after 3+ sessions, a reflection prompt gently asks: "Was this an intentional pivot, or did you lose track?" Session logs now record project, branch, intent, and file directories for richer retrospective analysis. Pattern detection can spot sustained drift trends across your session history.
 
 ## 🛠 Prerequisites
 
