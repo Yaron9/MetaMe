@@ -23,7 +23,7 @@ if (!fs.existsSync(METAME_DIR)) {
 }
 
 // Auto-deploy bundled scripts to ~/.metame/
-const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'sync.js'];
+const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml'];
 const scriptsDir = path.join(__dirname, 'scripts');
 
 for (const script of BUNDLED_SCRIPTS) {
@@ -219,7 +219,6 @@ const CORE_PROTOCOL = `
    *   **TOOLS:**
        1. **Log Insight:** \`!metame evolve "Insight"\` (For additive knowledge).
        2. **Surgical Update:** \`!metame set-trait key value\` (For overwriting specific fields, e.g., \`!metame set-trait status.focus "API Design"\`).
-       3. **Mobile Sync:** \`!metame continue\` (Reload session to include mobile messages — exits and auto-restarts Claude).
    *   **RULE:** Only use these tools when the User **EXPLICITLY** instructs you.
    *   **REMINDER:** If the User expresses a strong persistent preference, you may gently ask *at the end of the task*: "Should I save this preference to your MetaMe profile?"
 ---
@@ -918,15 +917,15 @@ if (isDaemon) {
 }
 
 // ---------------------------------------------------------
-// 5.8 CONTINUE/SYNC — resume latest session (works from terminal or inside Claude)
+// 5.8 CONTINUE/SYNC — resume latest session from terminal
 // ---------------------------------------------------------
+// Usage: exit Claude first, then run `metame continue` from terminal.
+// Finds the most recent session and launches Claude with --resume.
 const isSync = process.argv.includes('sync') || process.argv.includes('continue');
 if (isSync) {
-  // Find latest session across all project dirs
   const projectsRoot = path.join(HOME_DIR, '.claude', 'projects');
   let bestSession = null;
   try {
-    // Try current project dir first
     const cwd = process.cwd();
     const projDir = path.join(projectsRoot, cwd.replace(/\//g, '-'));
     const findLatest = (dir) => {
@@ -938,7 +937,6 @@ if (isSync) {
       } catch { return null; }
     };
     bestSession = findLatest(projDir);
-    // Fallback: scan all project dirs
     if (!bestSession) {
       for (const d of fs.readdirSync(projectsRoot)) {
         const s = findLatest(path.join(projectsRoot, d));
@@ -952,33 +950,15 @@ if (isSync) {
     process.exit(1);
   }
 
-  // Check if Claude is running (inside-Claude case)
-  const pidFile = path.join(METAME_DIR, '.claude_pid');
-  let claudeRunning = false;
-  try {
-    const pid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
-    if (pid && !isNaN(pid)) {
-      process.kill(pid, 0); // throws if process doesn't exist
-      claudeRunning = true;
-      // Set flag and kill — metame wrapper will relaunch
-      fs.writeFileSync(path.join(METAME_DIR, '.sync_pending'), bestSession.id);
-      process.kill(pid, 'SIGTERM');
-      console.log(`🔄 Syncing session ${bestSession.id.slice(0, 8)}...`);
-    }
-  } catch {}
-
-  if (claudeRunning) {
-    process.exit(0); // wrapper's child.on('close') will handle relaunch
-  }
-
-  // From terminal: launch Claude directly with --resume
   console.log(`\n🔄 Resuming session ${bestSession.id.slice(0, 8)}...\n`);
   const syncChild = spawn('claude', ['--resume', bestSession.id], {
     stdio: 'inherit',
     env: { ...process.env, METAME_ACTIVE_SESSION: 'true' }
   });
+  syncChild.on('error', () => {
+    console.error("Could not launch 'claude'. Is Claude Code installed?");
+  });
   syncChild.on('close', (c) => process.exit(c || 0));
-  // Block further execution — syncChild handles everything
   return;
 }
 
@@ -1003,45 +983,13 @@ const child = spawn('claude', process.argv.slice(2), {
   env: { ...process.env, METAME_ACTIVE_SESSION: 'true' }
 });
 
-// Write PID so !metame sync can find and kill the Claude process
-const PID_FILE = path.join(METAME_DIR, '.claude_pid');
-if (child.pid) fs.writeFileSync(PID_FILE, String(child.pid));
-
-child.on('error', (err) => {
+child.on('error', () => {
   console.error("\n❌ Error: Could not launch 'claude'.");
   console.error("   Please make sure Claude Code is installed globally:");
   console.error("   npm install -g @anthropic-ai/claude-code");
 });
 
-child.on('close', (code) => {
-  // Cleanup PID file
-  try { fs.unlinkSync(PID_FILE); } catch {}
-
-  // Check for sync flag: !metame sync sets this before killing Claude
-  const SYNC_FLAG = path.join(METAME_DIR, '.sync_pending');
-  if (fs.existsSync(SYNC_FLAG)) {
-    let sessionId;
-    try { sessionId = fs.readFileSync(SYNC_FLAG, 'utf8').trim(); } catch {}
-    try { fs.unlinkSync(SYNC_FLAG); } catch {}
-
-    const resumeArgs = sessionId ? ['--resume', sessionId] : ['--continue'];
-    console.log('\n🔄 Syncing — reloading session with mobile messages...\n');
-
-    const newChild = spawn('claude', resumeArgs, {
-      stdio: 'inherit',
-      env: { ...process.env, METAME_ACTIVE_SESSION: 'true' }
-    });
-    // Update PID so subsequent !metame continue works
-    if (newChild.pid) fs.writeFileSync(PID_FILE, String(newChild.pid));
-    newChild.on('close', (c) => {
-      try { fs.unlinkSync(PID_FILE); } catch {}
-      process.exit(c || 0);
-    });
-    return;
-  }
-
-  process.exit(code || 0);
-});
+child.on('close', (code) => process.exit(code || 0));
 
 // Launch background distillation AFTER Claude starts — no blocking
 spawnDistillBackground();

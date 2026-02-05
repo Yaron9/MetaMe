@@ -36,7 +36,7 @@
 * **🪞 元认知层 (v1.3)：** MetaMe 不只观察你*说什么*，还观察你*怎么想*。行为模式检测复用现有的 Haiku 蒸馏调用（零额外成本），跨会话追踪决策模式、认知负荷、舒适区和回避主题。当持续模式出现时，注入一行镜像观察——例如"你倾向于拖延测试直到被迫"——每个模式 14 天冷却。反思提示仅在触发条件下出现（每 7 次蒸馏或连续 3 次舒适区）。所有注入逻辑在 Node.js 中运行，Claude 只收到已决策的指令。
 * **📱 远程 Claude Code (v1.3)：** 手机端完整 Claude Code 体验，支持 Telegram 和飞书。有状态会话（`--resume`）——和终端一样的对话历史、工具调用、文件编辑。可点击按钮选择项目/会话/目录，支持 macOS launchd 自启动。
 * **🔄 工作流引擎 (v1.3)：** 将多步骤 Skill 链定义为心跳任务。每个工作流在单个 Claude Code 会话中通过 `--resume` 运行，上一步的输出自动成为下一步的上下文。示例：`deep-research` → `tech-writing` → `wechat-publisher`——全自动内容流水线。
-* **⏹ 手机端完整终端控制 (v1.3.9)：** `/stop`（ESC）、`/undo`（ESC×2，原生 file-history 恢复）、`/model` 切换模型、并发任务保护、代码变更自动热重启、`!metame continue` 手机→电脑一键同步。
+* **⏹ 手机端完整终端控制 (v1.3.9)：** `/stop`（ESC）、`/undo`（ESC×2，原生 file-history 恢复）、`/model` 切换模型、并发任务保护、代码变更自动热重启、`metame continue` 手机→电脑一键同步。
 
 ## 🛠 前置要求
 
@@ -113,7 +113,6 @@ metame evolve "我更喜欢函数式编程"
 
 | 命令 | 说明 |
 |------|------|
-| `!metame continue` | 加载手机端对话（自动退出 + 重启） |
 | `!metame refresh` | 重新注入个人档案到当前会话 |
 | `!metame evolve "..."` | 教 MetaMe 一个新洞察 |
 | `!metame set-trait key value` | 更新某个档案字段 |
@@ -189,13 +188,13 @@ metame daemon install-launchd         # macOS 自启动（开机自启 + 崩溃�
 同一个 session 在桌面和手机上共用，但有一个不对称性：
 
 * **电脑 → 手机：** 自动同步。手机端每条消息都会启动新的 `claude -p --resume`，自动读取最新的 session 文件。直接打字即可。
-* **手机 → 电脑：** 需要同步。桌面 Claude Code 会话在内存中运行，不会自动读取手机新增的对话。运行：
+* **手机 → 电脑：** 需要同步。桌面 Claude Code 会话在内存中运行，不会自动读取手机新增的对话。先退出 Claude（Ctrl+C），然后：
 
-```
-在 Claude Code 中输入: !metame continue
+```bash
+metame continue
 ```
 
-Claude 自动退出并重启，加载完整 session（包含手机上的所有对话）。一条命令，零手动操作。也可以用 `!metame sync`。
+自动恢复最新 session，包含手机上的所有对话。也可以用 `metame sync`。
 
 **实时状态显示 (v1.3.7)：** 手机上实时看到 Claude 的工作进度：
 
