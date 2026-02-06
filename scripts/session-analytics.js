@@ -265,6 +265,48 @@ function formatForPrompt(skeleton) {
 }
 
 /**
+ * Find all unanalyzed sessions across all projects, sorted by mtime descending.
+ * Returns array of { path, session_id, mtime }. Capped at `limit`.
+ */
+function findAllUnanalyzedSessions(limit = 30) {
+  const state = loadState();
+  const results = [];
+
+  try {
+    const projectDirs = fs.readdirSync(PROJECTS_ROOT);
+    for (const dir of projectDirs) {
+      const fullDir = path.join(PROJECTS_ROOT, dir);
+      let stat;
+      try { stat = fs.statSync(fullDir); } catch { continue; }
+      if (!stat.isDirectory()) continue;
+
+      let files;
+      try { files = fs.readdirSync(fullDir); } catch { continue; }
+
+      for (const file of files) {
+        if (!file.endsWith('.jsonl')) continue;
+        const sessionId = file.replace('.jsonl', '');
+        if (state.analyzed[sessionId]) continue;
+
+        const fullPath = path.join(fullDir, file);
+        let fstat;
+        try { fstat = fs.statSync(fullPath); } catch { continue; }
+
+        if (fstat.size > MAX_FILE_SIZE || fstat.size < MIN_FILE_SIZE) continue;
+
+        results.push({ path: fullPath, session_id: sessionId, mtime: fstat.mtimeMs });
+      }
+    }
+  } catch {
+    return [];
+  }
+
+  // Sort by mtime descending (newest first), take `limit`
+  results.sort((a, b) => b.mtime - a.mtime);
+  return results.slice(0, limit);
+}
+
+/**
  * Mark a session as analyzed.
  */
 function markAnalyzed(sessionId) {
@@ -367,6 +409,7 @@ function summarizeSession(skeleton, jsonlPath) {
 
 module.exports = {
   findLatestUnanalyzedSession,
+  findAllUnanalyzedSessions,
   extractSkeleton,
   formatForPrompt,
   formatGoalContext,
