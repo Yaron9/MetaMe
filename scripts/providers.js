@@ -25,25 +25,7 @@ const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
 const PROVIDERS_FILE = path.join(METAME_DIR, 'providers.yaml');
 
-// Resolve js-yaml (same pattern as daemon.js)
-let yaml;
-try {
-  yaml = require('js-yaml');
-} catch {
-  const metameRoot = process.env.METAME_ROOT;
-  if (metameRoot) {
-    try { yaml = require(path.join(metameRoot, 'node_modules', 'js-yaml')); } catch {}
-  }
-  if (!yaml) {
-    const candidates = [
-      path.resolve(__dirname, '..', 'node_modules', 'js-yaml'),
-      path.resolve(__dirname, 'node_modules', 'js-yaml'),
-    ];
-    for (const p of candidates) {
-      try { yaml = require(p); break; } catch {}
-    }
-  }
-}
+const yaml = require('./resolve-yaml');
 
 // ---------------------------------------------------------
 // DEFAULT CONFIG

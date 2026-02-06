@@ -47,8 +47,10 @@
 * **🪞 元认知层 (v1.3)：** MetaMe 不只观察你*说什么*，还观察你*怎么想*。行为模式检测复用现有的 Haiku 蒸馏调用（零额外成本），跨会话追踪决策模式、认知负荷、舒适区和回避主题。当持续模式出现时，注入一行镜像观察——例如"你倾向于拖延测试直到被迫"——每个模式 14 天冷却。反思提示仅在触发条件下出现（每 7 次蒸馏或连续 3 次舒适区）。所有注入逻辑在 Node.js 中运行，Claude 只收到已决策的指令。
 * **📱 远程 Claude Code (v1.3)：** 手机端完整 Claude Code 体验，支持 Telegram 和飞书。有状态会话（`--resume`）——和终端一样的对话历史、工具调用、文件编辑。可点击按钮选择项目/会话/目录，支持 macOS launchd 自启动。
 * **🔄 工作流引擎 (v1.3)：** 将多步骤 Skill 链定义为心跳任务。每个工作流在单个 Claude Code 会话中通过 `--resume` 运行，上一步的输出自动成为下一步的上下文。示例：`deep-research` → `tech-writing` → `wechat-publisher`——全自动内容流水线。
-* **⏹ 手机端完整终端控制 (v1.3.10)：** `/stop`（ESC）、`/undo`（ESC×2，原生 file-history 恢复）、`/model` 切换模型、并发任务保护、代码变更自动热重启、`metame continue` 手机→电脑一键同步。
+* **⏹ 手机端完整终端控制 (v1.3.13)：** `/stop`（ESC）、`/undo`（ESC×2，原生 file-history 恢复）、`/model` 交互式模型切换、并发任务保护、代码变更自动热重启、`metame continue` 手机→电脑一键同步。
+* **🏥 应急恢复 (v1.3.13)：** `/doctor` 交互式诊断 + 一键修复、`/sh` 手机直接执行电脑 shell 命令（完全绕过 Claude，断线时的最后生命线）、配置修改前自动备份、`/fix` 一键恢复上次正常配置。
 * **🎯 目标对齐与偏离检测 (v1.3.11)：** MetaMe 现在能追踪你的 session 是否偏离声明目标。每次蒸馏自动评估 `goal_alignment`（aligned/partial/drifted），零额外 API 成本。连续 2 个 session 偏离时，镜像观察被动注入；连续 3 个 session 后，反思提示温和地问："是方向有意调整了，还是不小心偏了？" Session 日志现在记录项目名、分支、意图和文件目录，提供更丰富的回顾分析。模式检测可发现跨 session 历史的持续偏离趋势。
+* **📊 会话历史冷启动 (v1.3.12)：** 解决冷启动问题——此前 MetaMe 需要 5-7 个 session 才能产生可感知的反馈。现在首次启动即自动从现有 Claude Code JSONL 会话记录中批量补全历史（零 API 成本）。三层互补数据架构：**骨架层**（本地提取的结构事实——工具调用、时长、项目、分支、意图）、**切片层**（`/insights` 提供的交互质量——outcome、friction、satisfaction，有则用无则跳过）、**Haiku 层**（元认知判断——认知负荷、舒适区、目标对齐，复用已有蒸馏调用）。从你的第一个 MetaMe session 起就能看到模式检测和镜像观察。
 
 ## 🛠 前置要求
 
@@ -166,10 +168,10 @@ feishu:
 **启动守护进程：**
 
 ```bash
-metame daemon start                   # 后台运行
-metame daemon status                  # 查看状态
-metame daemon logs                    # 查看日志
-metame daemon stop                    # 停止
+metame start                          # 后台运行
+metame status                         # 查看状态
+metame logs                           # 查看日志
+metame stop                           # 停止
 metame daemon install-launchd         # macOS 自启动（开机自启 + 崩溃重启）
 ```
 
@@ -180,13 +182,13 @@ metame daemon install-launchd
 launchctl load ~/Library/LaunchAgents/com.metame.daemon.plist
 ```
 
-加载后，daemon 开机自启、睡眠唤醒自动恢复、崩溃自动重启。不再需要手动 `metame daemon start`。
+加载后，daemon 开机自启、睡眠唤醒自动恢复、崩溃自动重启。不再需要手动 `metame start`。
 
-> **注意：** 二选一 —— 要么用 launchd 管理，要么手动管理（`metame daemon start/stop`）。不要混用，否则会产生重复进程。
+> **注意：** 二选一 —— 要么用 launchd 管理，要么手动管理（`metame start/stop`）。不要混用，否则会产生重复进程。
 
 ```bash
 # 查看状态（两种方式都可以用）
-metame daemon status
+metame status
 
 # 关闭自启动
 launchctl unload ~/Library/LaunchAgents/com.metame.daemon.plist
@@ -217,7 +219,7 @@ rm ~/Library/LaunchAgents/com.metame.daemon.plist
 
 每个聊天绑定一个持久会话，通过 `claude -p --resume <session-id>` 调用。这是和终端完全相同的 Claude Code 引擎——相同的工具（文件编辑、bash、代码搜索）、相同的对话历史。你可以在电脑上开始工作，手机上 `/resume` 继续，反之亦然。
 
-**桌面与手机无缝切换 (v1.3.10)：**
+**桌面与手机无缝切换 (v1.3.13)：**
 
 同一个 session 在桌面和手机上共用，但有一个不对称性：
 
@@ -263,7 +265,7 @@ Claude: 📥 已保存: document.pdf
 - **Telegram:** 开箱即用
 - **飞书:** 需要在应用权限中添加 `im:resource` + `im:message`
 
-**任务控制 (v1.3.10)：** 手机端完整复刻终端操控能力。
+**任务控制 (v1.3.13)：** 手机端完整复刻终端操控能力。
 
 *`/stop` — 等同于 ESC：* 向正在运行的 Claude 进程发送 SIGINT，立即中断，和终端按 ESC 完全一样。
 
@@ -279,7 +281,16 @@ Bot: 回退到哪一轮？
 
 **并发任务保护：** 如果已有 Claude 任务在运行，新消息会被拦截，提示等待或 `/stop`。防止会话冲突。
 
-**热重启 (v1.3.10)：** 守护进程监听自身代码变化。当你更新 MetaMe（通过 npm 或 git）时，daemon 自动用新代码重启——无需手动操作。重启后推送通知确认。
+**热重启 (v1.3.13)：** 守护进程监听自身代码变化。当你更新 MetaMe（通过 npm 或 git）时，daemon 自动用新代码重启——无需手动操作。重启后推送通知确认。
+
+**应急与诊断 (v1.3.13)：**
+
+| 命令 | 说明 |
+|------|------|
+| `/sh <命令>` | 手机直接执行电脑 shell 命令——完全绕过 Claude。模型坏了时的最后生命线。 |
+| `/doctor` | 交互式诊断：检查配置、模型、CLI、备份。有问题显示修复按钮。 |
+| `/fix` | 从上次备份恢复 daemon.yaml |
+| `/reset` | 重置模型为 opus |
 
 **其他命令：**
 
@@ -288,7 +299,7 @@ Bot: 回退到哪一轮？
 | `/status` | 守护进程状态 + 画像摘要 |
 | `/tasks` | 列出心跳任务 |
 | `/run <名称>` | 立即执行某个任务 |
-| `/model [名称]` | 查看/切换模型（sonnet, opus, haiku）|
+| `/model [名称]` | 交互式模型切换，带按钮选择（sonnet, opus, haiku），切换前自动备份 |
 | `/budget` | 今日 token 用量 |
 | `/quiet` | 静默镜像/反思 48 小时 |
 | `/reload` | 手动重载 daemon.yaml（文件变化时也会自动重载） |
@@ -447,7 +458,7 @@ rm ~/.claude_profile.yaml
 ### 3. 停止守护进程
 
 ```bash
-metame daemon stop
+metame stop
 launchctl unload ~/Library/LaunchAgents/com.metame.daemon.plist 2>/dev/null
 rm -f ~/Library/LaunchAgents/com.metame.daemon.plist
 ```

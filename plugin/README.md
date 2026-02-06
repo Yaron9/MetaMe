@@ -95,6 +95,16 @@ heartbeat:
       notify: true   # push results to phone
 ```
 
+## Session History Bootstrap (v1.3.12)
+
+On first launch, MetaMe auto-bootstraps your session history from existing Claude Code JSONL transcripts — zero API cost. Three data layers:
+
+- **Skeleton** — structural facts (tools, duration, project, branch, intent) extracted locally
+- **Facets** — interaction quality (outcome, friction) from `/insights`, when available
+- **Haiku** — metacognitive judgments (cognitive load, zones, goal alignment) from the existing distill call
+
+Patterns and mirror observations can appear from your very first session, no warm-up needed.
+
 ## Profile Tiers
 
 - **T1 — Identity** (LOCKED): nickname, role
