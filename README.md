@@ -47,8 +47,10 @@
 * **🪞 Metacognition Layer (v1.3):** MetaMe now observes *how* you think, not just *what* you say. Behavioral pattern detection runs inside the existing Haiku distill call (zero extra cost). It tracks decision patterns, cognitive load, comfort zones, and avoidance topics across sessions. When persistent patterns emerge, MetaMe injects a one-line mirror observation — e.g., *"You tend to avoid testing until forced"* — with a 14-day cooldown per pattern. Conditional reflection prompts appear only when triggered (every 7th distill or 3x consecutive comfort zone). All injection logic runs in Node.js; Claude receives only pre-decided directives, never rules to self-evaluate.
 * **📱 Remote Claude Code (v1.3):** Full Claude Code from your phone via Telegram or Feishu (Lark). Stateful sessions with `--resume` — same conversation history, tool use, and file editing as your terminal. Interactive buttons for project/session picking, directory browser, and macOS launchd auto-start.
 * **🔄 Workflow Engine (v1.3):** Define multi-step skill chains as heartbeat tasks. Each workflow runs in a single Claude Code session via `--resume`, so step outputs flow as context to the next step. Example: `deep-research` → `tech-writing` → `wechat-publisher` — fully automated content pipeline.
-* **⏹ Full Terminal Control from Mobile (v1.3.10):** `/stop` (ESC), `/undo` (ESC×2) with native file-history restoration, `/model` to switch models, concurrent task protection, daemon auto-restart, and `metame continue` for seamless mobile-to-desktop sync.
+* **⏹ Full Terminal Control from Mobile (v1.3.13):** `/stop` (ESC), `/undo` (ESC×2) with native file-history restoration, `/model` interactive model switcher, concurrent task protection, daemon auto-restart, and `metame continue` for seamless mobile-to-desktop sync.
+* **🏥 Emergency Recovery (v1.3.13):** `/doctor` interactive diagnostics with one-tap fix buttons, `/sh` direct shell access from your phone (bypasses Claude entirely — the lifeline when everything else is broken), automatic config backup before any setting change, `/fix` to restore last known good config.
 * **🎯 Goal Alignment & Drift Detection (v1.3.11):** MetaMe now tracks whether your sessions align with your declared goals. Each distill assesses `goal_alignment` (aligned/partial/drifted) at zero extra API cost. When you drift for 2+ consecutive sessions, a mirror observation is injected passively; after 3+ sessions, a reflection prompt gently asks: "Was this an intentional pivot, or did you lose track?" Session logs now record project, branch, intent, and file directories for richer retrospective analysis. Pattern detection can spot sustained drift trends across your session history.
+* **📊 Session History Bootstrap (v1.3.12):** Solves the cold-start problem — MetaMe previously needed 5-7 sessions before producing any visible feedback. Now, on first launch it auto-bootstraps your session history from existing Claude Code JSONL transcripts (zero API cost). Three complementary data layers: **Skeleton** (structural facts extracted locally — tools, duration, project, branch, intent), **Facets** (interaction quality from `/insights` — outcome, friction, satisfaction, when available), and **Haiku** (metacognitive judgments — cognitive load, zones, goal alignment, from the existing distill call). Patterns and mirror observations can appear from your very first MetaMe session.
 
 ## 🛠 Prerequisites
 
@@ -187,10 +189,10 @@ feishu:
 **Start the daemon:**
 
 ```bash
-metame daemon start                   # Background process
-metame daemon status                  # Check if running
-metame daemon logs                    # Tail the log
-metame daemon stop                    # Shutdown
+metame start                          # Background process
+metame status                         # Check if running
+metame logs                           # Tail the log
+metame stop                           # Shutdown
 metame daemon install-launchd         # macOS auto-start (RunAtLoad + KeepAlive)
 ```
 
@@ -201,13 +203,13 @@ metame daemon install-launchd
 launchctl load ~/Library/LaunchAgents/com.metame.daemon.plist
 ```
 
-Once loaded, the daemon auto-starts on login, auto-restarts after sleep/wake or crash. No need to run `metame daemon start` manually anymore.
+Once loaded, the daemon auto-starts on login, auto-restarts after sleep/wake or crash. No need to run `metame start` manually anymore.
 
-> **Important:** Choose one management method — either launchd or manual (`metame daemon start/stop`). Don't mix them, or you'll get duplicate processes.
+> **Important:** Choose one management method — either launchd or manual (`metame start/stop`). Don't mix them, or you'll get duplicate processes.
 
 ```bash
 # Check status (works with both methods)
-metame daemon status
+metame status
 
 # Disable auto-start
 launchctl unload ~/Library/LaunchAgents/com.metame.daemon.plist
@@ -240,7 +242,7 @@ Just type naturally for conversation — every message stays in the same Claude 
 
 Each chat gets a persistent session via `claude -p --resume <session-id>`. This is the same Claude Code engine as your terminal — same tools (file editing, bash, code search), same conversation history. You can start work on your computer and `/resume` from your phone, or vice versa.
 
-**Seamless switching between desktop and mobile (v1.3.10):**
+**Seamless switching between desktop and mobile (v1.3.13):**
 
 The same session works on both desktop and mobile, but there's an asymmetry:
 
@@ -288,7 +290,7 @@ Uploaded files are saved to `<project>/upload/`. Claude won't read large files a
 - **Telegram:** Works out of the box
 - **Feishu:** Requires `im:resource` + `im:message` permissions in app settings
 
-**Task control (v1.3.10):** Full terminal-equivalent control from your phone.
+**Task control (v1.3.13):** Full terminal-equivalent control from your phone.
 
 *`/stop` — ESC equivalent:* Sends SIGINT to the running Claude process. Instant interruption, just like pressing ESC in your terminal.
 
@@ -304,7 +306,16 @@ Bot: 回退到哪一轮？
 
 **Concurrent task protection:** If a Claude task is already running, new messages are blocked with a hint to wait or `/stop`. Prevents session conflicts.
 
-**Auto-restart (v1.3.10):** The daemon watches its own code for changes. When you update MetaMe (via npm or git), the daemon automatically restarts with the new code — no manual restart needed. A notification is pushed to confirm.
+**Auto-restart (v1.3.13):** The daemon watches its own code for changes. When you update MetaMe (via npm or git), the daemon automatically restarts with the new code — no manual restart needed. A notification is pushed to confirm.
+
+**Emergency & diagnostics (v1.3.13):**
+
+| Command | Description |
+|---------|-------------|
+| `/sh <cmd>` | Run shell command directly on your computer — bypasses Claude entirely. Emergency lifeline when the model is broken. |
+| `/doctor` | Interactive diagnostics: checks config, model validity, Claude CLI, backups. Shows fix buttons if issues found. |
+| `/fix` | Restore `daemon.yaml` from last backup |
+| `/reset` | Reset model to opus |
 
 **Other commands:**
 
@@ -313,7 +324,7 @@ Bot: 回退到哪一轮？
 | `/status` | Daemon status + profile summary |
 | `/tasks` | List scheduled heartbeat tasks |
 | `/run <name>` | Run a task immediately |
-| `/model [name]` | View/switch model (sonnet, opus, haiku) |
+| `/model [name]` | Interactive model switcher with buttons (sonnet, opus, haiku). Auto-backs up config before switching. |
 | `/budget` | Today's token usage |
 | `/quiet` | Silence mirror/reflections for 48h |
 | `/reload` | Manually reload daemon.yaml (also auto-reloads on file change) |
@@ -477,7 +488,7 @@ rm ~/.claude_profile.yaml
 ### 3. Stop the Daemon (if running)
 
 ```bash
-metame daemon stop
+metame stop
 launchctl unload ~/Library/LaunchAgents/com.metame.daemon.plist 2>/dev/null
 rm -f ~/Library/LaunchAgents/com.metame.daemon.plist
 ```
