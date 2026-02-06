@@ -16,7 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync, spawn } = require('child_process');
+const { execSync, execFileSync, spawn } = require('child_process');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
@@ -70,6 +70,11 @@ function getActiveProviderEnv() {
 // ---------------------------------------------------------
 // LOGGING
 // ---------------------------------------------------------
+let _logMaxSize = 1048576; // cached, refreshed on config reload
+function refreshLogMaxSize(cfg) {
+  _logMaxSize = (cfg && cfg.daemon && cfg.daemon.log_max_size) || 1048576;
+}
+
 function log(level, msg) {
   const ts = new Date().toISOString();
   const line = `[${ts}] [${level}] ${msg}\n`;
@@ -77,9 +82,7 @@ function log(level, msg) {
     // Rotate if over max size
     if (fs.existsSync(LOG_FILE)) {
       const stat = fs.statSync(LOG_FILE);
-      const config = loadConfig();
-      const maxSize = (config.daemon && config.daemon.log_max_size) || 1048576;
-      if (stat.size > maxSize) {
+      if (stat.size > _logMaxSize) {
         const bakFile = LOG_FILE + '.bak';
         if (fs.existsSync(bakFile)) fs.unlinkSync(bakFile);
         fs.renameSync(LOG_FILE, bakFile);
@@ -103,7 +106,24 @@ function loadConfig() {
   }
 }
 
-function loadState() {
+function backupConfig() {
+  const bak = CONFIG_FILE + '.bak';
+  try { fs.copyFileSync(CONFIG_FILE, bak); } catch {}
+}
+
+function restoreConfig() {
+  const bak = CONFIG_FILE + '.bak';
+  if (fs.existsSync(bak)) {
+    fs.copyFileSync(bak, CONFIG_FILE);
+    config = loadConfig();
+    return true;
+  }
+  return false;
+}
+
+let _cachedState = null;
+
+function _readStateFromDisk() {
   try {
     const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
     if (!s.sessions) s.sessions = {};
@@ -119,8 +139,18 @@ function loadState() {
   }
 }
 
+function loadState() {
+  if (!_cachedState) _cachedState = _readStateFromDisk();
+  return _cachedState;
+}
+
 function saveState(state) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+  _cachedState = state;
+  try {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+  } catch (e) {
+    log('ERROR', `Failed to save state: ${e.message}`);
+  }
 }
 
 // ---------------------------------------------------------
@@ -170,6 +200,7 @@ function recordTokens(state, tokens) {
   state.budget.tokens_used += tokens;
   saveState(state);
 }
+
 
 function getBudgetWarning(config, state) {
   const limit = (config.budget && config.budget.daily_limit) || 50000;
@@ -272,20 +303,18 @@ function executeTask(task, config) {
   }
   const fullPrompt = preamble + taskPrompt;
 
-  const allowedArgs = (task.allowedTools || []).map(t => `--allowedTools ${t}`).join(' ');
+  const claudeArgs = ['-p', '--model', model];
+  for (const t of (task.allowedTools || [])) claudeArgs.push('--allowedTools', t);
   log('INFO', `Executing task: ${task.name} (model: ${model})`);
 
   try {
-    const output = execSync(
-      `claude -p --model ${model}${allowedArgs ? ' ' + allowedArgs : ''}`,
-      {
-        input: fullPrompt,
-        encoding: 'utf8',
-        timeout: 120000, // 2 min timeout
-        maxBuffer: 1024 * 1024,
-        env: { ...process.env, ...getDaemonProviderEnv() },
-      }
-    ).trim();
+    const output = execFileSync('claude', claudeArgs, {
+      input: fullPrompt,
+      encoding: 'utf8',
+      timeout: 120000, // 2 min timeout
+      maxBuffer: 1024 * 1024,
+      env: { ...process.env, ...getDaemonProviderEnv() },
+    }).trim();
 
     // Rough token estimate: ~4 chars per token for input + output
     const estimatedTokens = Math.ceil((fullPrompt.length + output.length) / 4);
@@ -485,7 +514,7 @@ async function startTelegramBridge(config, executeTaskByName) {
             const chatId = cb.message && cb.message.chat.id;
             bot.answerCallback(cb.id).catch(() => {});
             if (chatId && cb.data) {
-              if (allowedIds.length > 0 && !allowedIds.includes(chatId)) continue;
+              if (!allowedIds.includes(chatId)) continue;
               // callback_data is a command string, e.g. "/resume <session-id>"
               await handleCommand(bot, chatId, cb.data, config, executeTaskByName);
             }
@@ -497,8 +526,8 @@ async function startTelegramBridge(config, executeTaskByName) {
           const msg = update.message;
           const chatId = msg.chat.id;
 
-          // Security: check whitelist
-          if (allowedIds.length > 0 && !allowedIds.includes(chatId)) {
+          // Security: check whitelist (empty = deny all)
+          if (!allowedIds.includes(chatId)) {
             log('WARN', `Rejected message from unauthorized chat: ${chatId}`);
             continue;
           }
@@ -552,7 +581,13 @@ async function startTelegramBridge(config, executeTaskByName) {
     }
   };
 
-  pollLoop();
+  const startPoll = () => {
+    pollLoop().catch(e => {
+      log('ERROR', `pollLoop crashed: ${e.message} — restarting in 5s`);
+      if (running) setTimeout(startPoll, 5000);
+    });
+  };
+  startPoll();
 
   return {
     stop() { running = false; },
@@ -953,10 +988,51 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   if (text.startsWith('/run ')) {
     const cd = checkCooldown(chatId);
     if (!cd.ok) { await bot.sendMessage(chatId, `Cooldown: ${cd.wait}s`); return; }
+    if (activeProcesses.has(chatId)) {
+      await bot.sendMessage(chatId, '⏳ 任务进行中，/stop 中断');
+      return;
+    }
     const taskName = text.slice(5).trim();
-    await bot.sendMessage(chatId, `Running: ${taskName}...`);
-    const result = executeTaskByName(taskName);
-    await bot.sendMessage(chatId, result.success ? `${taskName}\n\n${result.output}` : `Error: ${result.error}`);
+    const tasks = (config.heartbeat && config.heartbeat.tasks) || [];
+    const task = tasks.find(t => t.name === taskName);
+    if (!task) { await bot.sendMessage(chatId, `❌ Task "${taskName}" not found`); return; }
+
+    // Script tasks: quick, run inline
+    if (task.type === 'script') {
+      await bot.sendMessage(chatId, `Running: ${taskName}...`);
+      const result = executeTaskByName(taskName);
+      await bot.sendMessage(chatId, result.success ? `${taskName}\n\n${result.output}` : `Error: ${result.error}`);
+      return;
+    }
+
+    // Claude tasks: run async via spawn
+    const precheck = checkPrecondition(task);
+    if (!precheck.pass) {
+      await bot.sendMessage(chatId, `${taskName}: skipped (no activity)`);
+      return;
+    }
+    const preamble = buildProfilePreamble();
+    let taskPrompt = task.prompt;
+    if (precheck.context) taskPrompt += `\n\n以下是相关原始数据:\n\`\`\`\n${precheck.context}\n\`\`\``;
+    const fullPrompt = preamble + taskPrompt;
+    const model = task.model || 'haiku';
+    const claudeArgs = ['-p', '--model', model];
+    for (const t of (task.allowedTools || [])) claudeArgs.push('--allowedTools', t);
+
+    await bot.sendMessage(chatId, `Running: ${taskName} (${model})...`);
+    const { output, error } = await spawnClaudeAsync(claudeArgs, fullPrompt, HOME, 120000);
+    if (error) {
+      await bot.sendMessage(chatId, `❌ ${taskName}: ${error}`);
+    } else {
+      const est = Math.ceil((fullPrompt.length + (output || '').length) / 4);
+      recordTokens(loadState(), est);
+      const st = loadState();
+      st.tasks[taskName] = { last_run: new Date().toISOString(), status: 'success', output_preview: (output || '').slice(0, 200) };
+      saveState(st);
+      let reply = output || '(no output)';
+      if (reply.length > 4000) reply = reply.slice(0, 4000) + '\n... (truncated)';
+      await bot.sendMessage(chatId, `${taskName}\n\n${reply}`);
+    }
     return;
   }
 
@@ -975,6 +1051,38 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       await bot.sendMessage(chatId, '⏹ Stopping Claude...');
     } else {
       await bot.sendMessage(chatId, 'No active task to stop.');
+    }
+    return;
+  }
+
+  // /sh [command] — direct shell execution (emergency lifeline)
+  if (text === '/sh' || text.startsWith('/sh ')) {
+    const command = text.slice(3).trim();
+    if (!command) {
+      if (bot.sendButtons) {
+        await bot.sendButtons(chatId, '💻 应急命令', [
+          [{ text: '📝 最近日志', callback_data: '/sh tail -30 ~/.metame/daemon.log' }],
+          [{ text: '📋 原始配置', callback_data: '/sh cat ~/.metame/daemon.yaml' }],
+        ]);
+      } else {
+        await bot.sendMessage(chatId, '用法: /sh <command>');
+      }
+      return;
+    }
+    try {
+      const child = spawn('sh', ['-c', command], { timeout: 30000 });
+      let stdout = '', stderr = '';
+      child.stdout.on('data', d => { stdout += d; });
+      child.stderr.on('data', d => { stderr += d; });
+      await new Promise((resolve) => {
+        child.on('close', resolve);
+        child.on('error', resolve);
+      });
+      let output = (stdout + stderr).trim() || '(no output)';
+      if (output.length > 4000) output = output.slice(0, 4000) + '\n... (truncated)';
+      await bot.sendMessage(chatId, `💻 $ ${command}\n${output}`);
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ ${e.message}`);
     }
     return;
   }
@@ -1171,14 +1279,97 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
-  // /model [sonnet|opus|haiku] — switch model
+  // /doctor — diagnostics; /fix — restore backup; /reset — reset model to sonnet
+  if (text === '/fix') {
+    if (restoreConfig()) {
+      await bot.sendMessage(chatId, '✅ 已从备份恢复配置');
+    } else {
+      await bot.sendMessage(chatId, '❌ 无备份文件');
+    }
+    return;
+  }
+  if (text === '/reset') {
+    try {
+      backupConfig();
+      const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
+      if (!cfg.daemon) cfg.daemon = {};
+      cfg.daemon.model = 'opus';
+      fs.writeFileSync(CONFIG_FILE, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+      config = loadConfig();
+      await bot.sendMessage(chatId, '✅ 模型已重置为 opus');
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ ${e.message}`);
+    }
+    return;
+  }
+  if (text === '/doctor') {
+    const validModels = ['sonnet', 'opus', 'haiku'];
+    const checks = [];
+    let issues = 0;
+
+    let cfg = null;
+    try {
+      cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8'));
+      checks.push('✅ 配置可解析');
+    } catch {
+      checks.push('❌ 配置解析失败');
+      issues++;
+    }
+
+    const m = (cfg && cfg.daemon && cfg.daemon.model) || 'opus';
+    if (validModels.includes(m)) {
+      checks.push(`✅ 模型: ${m}`);
+    } else {
+      checks.push(`❌ 模型: ${m} (无效)`);
+      issues++;
+    }
+
+    try {
+      execSync('which claude', { encoding: 'utf8' });
+      checks.push('✅ Claude CLI');
+    } catch {
+      checks.push('❌ Claude CLI 未找到');
+      issues++;
+    }
+
+    const bakFile = CONFIG_FILE + '.bak';
+    const hasBak = fs.existsSync(bakFile);
+    checks.push(hasBak ? '✅ 有备份' : '⚠️ 无备份');
+
+    let msg = `🏥 诊断\n${checks.join('\n')}`;
+    if (issues > 0) {
+      if (bot.sendButtons) {
+        const buttons = [];
+        if (hasBak) buttons.push([{ text: '🔧 恢复备份', callback_data: '/fix' }]);
+        buttons.push([{ text: '🔄 重置opus', callback_data: '/reset' }]);
+        await bot.sendButtons(chatId, msg, buttons);
+      } else {
+        msg += '\n/fix 恢复备份 /reset 重置opus';
+        await bot.sendMessage(chatId, msg);
+      }
+    } else {
+      await bot.sendMessage(chatId, msg + '\n\n全部正常 ✅');
+    }
+    return;
+  }
+
+  // /model [sonnet|opus|haiku] — switch model (interactive)
   if (text === '/model' || text.startsWith('/model ')) {
     const arg = text.slice(6).trim().toLowerCase();
     const validModels = ['sonnet', 'opus', 'haiku'];
-    const currentModel = (config.daemon && config.daemon.model) || 'sonnet';
+    const currentModel = (config.daemon && config.daemon.model) || 'opus';
 
     if (!arg) {
-      await bot.sendMessage(chatId, `🤖 当前模型: ${currentModel}\n\n可选: sonnet, opus, haiku\n用法: /model opus`);
+      // Interactive: show current model + buttons
+      if (bot.sendButtons) {
+        const buttons = validModels.map(m => [{
+          text: m === currentModel ? `${m} ✓` : m,
+          callback_data: `/model ${m}`,
+        }]);
+        await bot.sendButtons(chatId, `🤖 当前模型: ${currentModel}`, buttons);
+      } else {
+        await bot.sendMessage(chatId, `🤖 当前模型: ${currentModel}\n\n可选: sonnet, opus, haiku\n用法: /model opus`);
+      }
       return;
     }
 
@@ -1187,15 +1378,19 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       return;
     }
 
+    if (arg === currentModel) {
+      await bot.sendMessage(chatId, `🤖 已经是 ${arg}`);
+      return;
+    }
+
     // Update config file
     try {
-      const yaml = require('js-yaml');
-      const configPath = path.join(METAME_DIR, 'daemon.yaml');
-      const configContent = fs.readFileSync(configPath, 'utf8');
-      const cfg = yaml.load(configContent) || {};
+      backupConfig();
+      const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
       if (!cfg.daemon) cfg.daemon = {};
       cfg.daemon.model = arg;
-      fs.writeFileSync(configPath, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+      fs.writeFileSync(CONFIG_FILE, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+      config = loadConfig();
       await bot.sendMessage(chatId, `✅ 模型已切换: ${currentModel} → ${arg}`);
     } catch (e) {
       await bot.sendMessage(chatId, `❌ 切换失败: ${e.message}`);
@@ -1216,6 +1411,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       return;
     }
     try {
+      backupConfig();
       providerMod.setActive(arg);
       const p = providerMod.getActiveProvider();
       await bot.sendMessage(chatId, `✅ Provider: ${arg} (${p.label || arg})`);
@@ -1226,7 +1422,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   }
 
   if (text.startsWith('/')) {
-    const currentModel = (config.daemon && config.daemon.model) || 'sonnet';
+    const currentModel = (config.daemon && config.daemon.model) || 'opus';
     const currentProvider = providerMod ? providerMod.getActiveName() : 'anthropic';
     await bot.sendMessage(chatId, [
       '📱 手机端 Claude Code',
@@ -1245,6 +1441,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       '/undo — 回退上一轮操作 (ESC×2)',
       '',
       `⚙️ /model [${currentModel}] /provider [${currentProvider}] /status /tasks /run /budget /reload`,
+      '🔧 /doctor /fix /reset /sh <cmd>',
       '',
       '直接打字即可对话 💬',
     ].join('\n'));
@@ -1274,45 +1471,40 @@ const CLAUDE_PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
 
 /**
  * Scan all project session indexes, return most recent N sessions.
- * Filters out trivial sessions (no summary, < 3 messages).
+ * Results cached for 10 seconds to avoid repeated directory scans.
  */
-/**
- * @param {number} limit
- * @param {string} [cwd] - if provided, only return sessions whose projectPath matches
- */
-function listRecentSessions(limit, cwd) {
+let _sessionCache = null;
+let _sessionCacheTime = 0;
+const SESSION_CACHE_TTL = 10000; // 10s
+
+function invalidateSessionCache() { _sessionCache = null; }
+
+function _scanAllSessions() {
+  if (_sessionCache && (Date.now() - _sessionCacheTime < SESSION_CACHE_TTL)) return _sessionCache;
   try {
-    if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return [];
+    if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) { _sessionCache = []; _sessionCacheTime = Date.now(); return []; }
     const projects = fs.readdirSync(CLAUDE_PROJECTS_DIR);
 
-    // Build a map: sessionId -> entry (for deduplication)
     const sessionMap = new Map();
-    // Cache: projDirName -> real projectPath (from index)
     const projPathCache = new Map();
 
     for (const proj of projects) {
       const projDir = path.join(CLAUDE_PROJECTS_DIR, proj);
 
-      // 1. Read from sessions-index.json (Claude's native index)
       const indexFile = path.join(projDir, 'sessions-index.json');
       try {
         if (fs.existsSync(indexFile)) {
           const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
           if (data.entries && data.entries.length > 0) {
-            // Cache the real projectPath from any indexed session
             const realPath = data.entries[0].projectPath;
             if (realPath) projPathCache.set(proj, realPath);
-
             for (const entry of data.entries) {
-              if (entry.messageCount >= 1) {
-                sessionMap.set(entry.sessionId, entry);
-              }
+              if (entry.messageCount >= 1) sessionMap.set(entry.sessionId, entry);
             }
           }
         }
       } catch { /* skip */ }
 
-      // 2. Direct scan of .jsonl files (hot reload: catches sessions not yet indexed)
       try {
         const files = fs.readdirSync(projDir).filter(f => f.endsWith('.jsonl'));
         for (const file of files) {
@@ -1320,44 +1512,42 @@ function listRecentSessions(limit, cwd) {
           const filePath = path.join(projDir, file);
           const stat = fs.statSync(filePath);
           const fileMtime = stat.mtimeMs;
-
-          // Only add if not already in map, or if file is newer
           const existing = sessionMap.get(sessionId);
           if (!existing || fileMtime > (existing.fileMtime || 0)) {
-            // Use cached real projectPath, or fall back to lossy decode
             const projectPath = projPathCache.get(proj) || proj.slice(1).replace(/-/g, '/');
             sessionMap.set(sessionId, {
-              sessionId,
-              projectPath,
-              fileMtime,
+              sessionId, projectPath, fileMtime,
               modified: new Date(fileMtime).toISOString(),
-              messageCount: 1, // Assume at least 1 if file exists
-              ...(existing || {}), // Preserve existing metadata like customTitle
-              fileMtime, // Override with real mtime
+              messageCount: 1,
+              ...(existing || {}),
+              fileMtime,
             });
           }
         }
       } catch { /* skip */ }
     }
 
-    let all = Array.from(sessionMap.values());
-
-    // Filter by cwd if provided
-    if (cwd) {
-      const matched = all.filter(s => s.projectPath === cwd);
-      if (matched.length > 0) all = matched;
-      // else fallback to all projects
-    }
-    // Sort by fileMtime (most accurate), fall back to modified
+    const all = Array.from(sessionMap.values());
     all.sort((a, b) => {
       const aTime = a.fileMtime || new Date(a.modified).getTime();
       const bTime = b.fileMtime || new Date(b.modified).getTime();
       return bTime - aTime;
     });
-    return all.slice(0, limit || 10);
+    _sessionCache = all;
+    _sessionCacheTime = Date.now();
+    return all;
   } catch {
     return [];
   }
+}
+
+function listRecentSessions(limit, cwd) {
+  let all = _scanAllSessions();
+  if (cwd) {
+    const matched = all.filter(s => s.projectPath === cwd);
+    if (matched.length > 0) all = matched;
+  }
+  return all.slice(0, limit || 10);
 }
 
 /**
@@ -1462,6 +1652,7 @@ function createSession(chatId, cwd, name) {
     started: false, // true after first message sent
   };
   saveState(state);
+  invalidateSessionCache();
 
   // If name provided, write to Claude's session file (same as /rename on desktop)
   if (name) {
@@ -1823,12 +2014,14 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
  */
 async function askClaude(bot, chatId, prompt) {
   log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
+  // Send a single status message, updated in-place, deleted on completion
+  let statusMsgId = null;
   try {
-    await bot.sendMessage(chatId, '🤔');
+    const msg = await bot.sendMessage(chatId, '🤔');
+    if (msg && msg.message_id) statusMsgId = msg.message_id;
   } catch (e) {
     log('ERROR', `Failed to send ack to ${chatId}: ${e.message}`);
   }
-  // Send typing immediately (await to ensure it registers), then refresh every 4s
   await bot.sendTyping(chatId).catch(() => {});
   const typingTimer = setInterval(() => {
     bot.sendTyping(chatId).catch(() => {});
@@ -1856,9 +2049,9 @@ async function askClaude(bot, chatId, prompt) {
 
   // Build claude command
   const args = ['-p'];
-  // Model from daemon config (default: sonnet)
+  // Model from daemon config (default: opus)
   const daemonCfg = loadConfig().daemon || {};
-  const model = daemonCfg.model || 'sonnet';
+  const model = daemonCfg.model || 'opus';
   args.push('--model', model);
   // Per-session allowed tools from daemon config
   const sessionAllowed = daemonCfg.session_allowed_tools || [];
@@ -1883,15 +2076,21 @@ async function askClaude(bot, chatId, prompt) {
    - Multiple files: use multiple [[FILE:...]] tags]`;
   const fullPrompt = prompt + daemonHint;
 
-  // Use streaming mode to show progress
+  // Use streaming mode to show progress (edit status msg in-place)
   const onStatus = async (status) => {
     try {
-      await bot.sendMessage(chatId, status);
-    } catch { /* ignore status send failures */ }
+      if (statusMsgId && bot.editMessage) {
+        await bot.editMessage(chatId, statusMsgId, status);
+      }
+    } catch { /* ignore status update failures */ }
   };
 
   const { output, error, files } = await spawnClaudeStreaming(args, fullPrompt, session.cwd, onStatus, 600000, chatId);
   clearInterval(typingTimer);
+  // Clean up status message
+  if (statusMsgId && bot.deleteMessage) {
+    bot.deleteMessage(chatId, statusMsgId).catch(() => {});
+  }
 
   if (output) {
     // Mark session as started after first successful call
@@ -1995,8 +2194,8 @@ async function startFeishuBridge(config, executeTaskByName) {
 
   try {
     const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo) => {
-      // Security: check whitelist (empty = allow all)
-      if (allowedIds.length > 0 && !allowedIds.includes(chatId)) {
+      // Security: check whitelist (empty = deny all)
+      if (!allowedIds.includes(chatId)) {
         log('WARN', `Feishu: rejected message from ${chatId}`);
         return;
       }
@@ -2020,7 +2219,7 @@ async function startFeishuBridge(config, executeTaskByName) {
             ? `User uploaded a file to the project: ${destPath}\nUser says: "${text}"`
             : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
 
-          handleCommand(bot, chatId, prompt, config, executeTaskByName);
+          await handleCommand(bot, chatId, prompt, config, executeTaskByName);
         } catch (err) {
           log('ERROR', `Feishu file download failed: ${err.message}`);
           await bot.sendMessage(chatId, `❌ Download failed: ${err.message}`);
@@ -2031,7 +2230,7 @@ async function startFeishuBridge(config, executeTaskByName) {
       // Handle text message
       if (text) {
         log('INFO', `Feishu message from ${chatId}: ${text.slice(0, 50)}`);
-        handleCommand(bot, chatId, text, config, executeTaskByName);
+        await handleCommand(bot, chatId, text, config, executeTaskByName);
       }
     });
 
@@ -2086,6 +2285,7 @@ function sleep(ms) {
 // ---------------------------------------------------------
 async function main() {
   let config = loadConfig();
+  refreshLogMaxSize(config);
   if (!config || Object.keys(config).length === 0) {
     console.error('No daemon config found. Run: metame daemon init');
     process.exit(1);
@@ -2141,6 +2341,7 @@ async function main() {
     const newConfig = loadConfig();
     if (!newConfig) return { success: false, error: 'Failed to read config' };
     config = newConfig;
+    refreshLogMaxSize(config);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     heartbeatTimer = startHeartbeat(config, notifyFn);
     log('INFO', `Config reloaded: ${(config.heartbeat && config.heartbeat.tasks || []).length} tasks`);

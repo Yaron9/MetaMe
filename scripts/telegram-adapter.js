@@ -98,12 +98,14 @@ function createBot(token) {
     async sendMessage(chatId, text) {
       // Telegram max message length is 4096
       const chunks = splitMessage(text, 4096);
+      let lastResult = null;
       for (const chunk of chunks) {
-        await apiRequest(token, 'sendMessage', {
+        lastResult = await apiRequest(token, 'sendMessage', {
           chat_id: chatId,
           text: chunk,
         });
       }
+      return lastResult; // returns message object (has message_id)
     },
 
     /**
@@ -159,6 +161,32 @@ function createBot(token) {
         chat_id: chatId,
         text,
         reply_markup: JSON.stringify({ inline_keyboard: buttons }),
+      });
+    },
+
+    /**
+     * Edit an existing message's text
+     * @param {number|string} chatId
+     * @param {number} messageId
+     * @param {string} text
+     */
+    async editMessage(chatId, messageId, text) {
+      await apiRequest(token, 'editMessageText', {
+        chat_id: chatId,
+        message_id: messageId,
+        text: text.slice(0, 4096),
+      });
+    },
+
+    /**
+     * Delete a message
+     * @param {number|string} chatId
+     * @param {number} messageId
+     */
+    async deleteMessage(chatId, messageId) {
+      await apiRequest(token, 'deleteMessage', {
+        chat_id: chatId,
+        message_id: messageId,
       });
     },
 
