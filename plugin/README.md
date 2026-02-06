@@ -64,11 +64,19 @@ The plugin includes full daemon support for mobile access via Telegram and Feish
 | `/cd` | Change working directory (with picker) |
 | `/cd last` | **Sync to computer** — jump to most recent session + directory |
 | `/session` | Current session info |
+| `/stop` | Interrupt current Claude task (ESC equivalent) |
+| `/undo` | Undo turns with file restoration (ESC×2 equivalent) |
+| `/model` | Interactive model switcher with auto-backup |
+| `/doctor` | Interactive diagnostics with one-tap fix buttons |
+| `/sh <cmd>` | Run shell command directly — bypasses Claude entirely |
+| `/fix` | Restore `daemon.yaml` from last backup |
 
 **Features:**
 - Full Claude Code engine on your phone (file editing, bash, code search)
 - **Remote Wake** — daemon runs in background; phone wakes up Claude Code on your computer
 - **File Transfer** — send files from computer to phone, or phone to computer (saved to `<project>/upload/`)
+- **Provider Relay** — route through any Anthropic-compatible relay for third-party models
+- **Emergency Recovery** — `/doctor` diagnostics, `/sh` direct shell, `/fix` config restore
 - Session naming uses Claude's native `customTitle` — syncs everywhere
 - Auto-attach: first message on phone continues your computer's latest session
 - Parallel request handling (async spawning, non-blocking)
