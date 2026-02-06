@@ -97,14 +97,33 @@ function shouldDistill() {
   return content.length > 0;
 }
 
+function needsBootstrap() {
+  try {
+    const sessionLogFile = path.join(METAME_DIR, 'session_log.yaml');
+    if (!fs.existsSync(sessionLogFile)) return true;
+    const yaml = require('js-yaml');
+    const log = yaml.load(fs.readFileSync(sessionLogFile, 'utf8'));
+    return !log || !Array.isArray(log.sessions) || log.sessions.length < 5;
+  } catch { return true; }
+}
+
 function spawnDistillBackground() {
   const distillPath = path.join(METAME_DIR, 'distill.js');
   if (!fs.existsSync(distillPath)) return;
-  if (!shouldDistill()) return;
 
-  const bufferFile = path.join(METAME_DIR, 'raw_signals.jsonl');
-  const lines = fs.readFileSync(bufferFile, 'utf8').trim().split('\n').filter(l => l.trim());
-  console.log(`🧠 MetaMe: Distilling ${lines.length} moment${lines.length > 1 ? 's' : ''} in background...`);
+  const hasSignals = shouldDistill();
+  const bootstrap = needsBootstrap();
+
+  if (!hasSignals && !bootstrap) return;
+
+  if (hasSignals) {
+    const bufferFile = path.join(METAME_DIR, 'raw_signals.jsonl');
+    const lines = fs.readFileSync(bufferFile, 'utf8').trim().split('\n').filter(l => l.trim());
+    console.log(`🧠 MetaMe: Distilling ${lines.length} moment${lines.length > 1 ? 's' : ''} in background...`);
+  }
+  if (bootstrap) {
+    console.log('📊 MetaMe: Bootstrapping session history...');
+  }
 
   // Spawn as detached background process — won't block Claude launch
   const bg = spawn('node', [distillPath], {
@@ -394,13 +413,14 @@ try {
       if (triggerDrift || triggerComfort || trigger7th) {
         let hint = '';
         if (triggerDrift) {
-          hint = `最近几个session的方向和"${driftDeclaredFocus}"有偏差。如果session自然结束，可以温和地问：🪞 是方向有意调整了，还是不小心偏了？`;
+          hint = `最近几个session的方向和"${driftDeclaredFocus}"有偏差。请在对话开始时温和地问：🪞 是方向有意调整了，还是不小心偏了？`;
         } else if (triggerComfort) {
           hint = '连续几次都在熟悉领域。如果用户在session结束时自然停顿，可以温和地问：🪞 准备好探索拉伸区了吗？';
         } else {
           hint = '这是第' + distillCount + '次session。如果session自然结束，可以附加一句：🪞 一个词形容这次session的感受？';
         }
-        reflectionLine = `\n[MetaMe reflection: ${hint} 只在session即将结束时说一次。如果用户没回应就不要追问。]\n`;
+        const timing = triggerDrift ? '在对话开始时就问一次' : '只在session即将结束时说一次';
+        reflectionLine = `\n[MetaMe reflection: ${hint} ${timing}。如果用户没回应就不要追问。]\n`;
       }
     }
   }

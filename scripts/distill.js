@@ -656,15 +656,135 @@ function writeSessionLog(behavior, signalCount, skeleton, summary) {
 }
 
 // ---------------------------------------------------------
+// BOOTSTRAP — one-time batch fill of session_log from history
+// ---------------------------------------------------------
+
+/**
+ * Bootstrap session_log from historical session JSONLs.
+ * Called when session_log has fewer than 5 entries.
+ * Merges: skeleton (local, FREE) + /insights facets (if available, FREE).
+ * Returns number of sessions bootstrapped.
+ */
+function bootstrapSessionLog() {
+  if (!sessionAnalytics) return 0;
+
+  const yaml = require('js-yaml');
+  let log = { sessions: [] };
+  try {
+    if (fs.existsSync(SESSION_LOG_FILE)) {
+      log = yaml.load(fs.readFileSync(SESSION_LOG_FILE, 'utf8')) || { sessions: [] };
+    }
+  } catch {
+    log = { sessions: [] };
+  }
+  if (!Array.isArray(log.sessions)) log.sessions = [];
+
+  // Only bootstrap when we have too few entries
+  if (log.sessions.length >= 5) return 0;
+
+  // Load /insights facets if available (pre-computed by `claude /insights`)
+  const facetsDir = path.join(HOME, '.claude', 'usage-data', 'facets');
+  const facets = {};
+  try {
+    if (fs.existsSync(facetsDir)) {
+      for (const file of fs.readdirSync(facetsDir)) {
+        if (!file.endsWith('.json')) continue;
+        try {
+          const data = JSON.parse(fs.readFileSync(path.join(facetsDir, file), 'utf8'));
+          if (data.session_id) facets[data.session_id] = data;
+        } catch { /* skip corrupt facets */ }
+      }
+    }
+  } catch { /* facets not available */ }
+
+  const allSessions = sessionAnalytics.findAllUnanalyzedSessions(30);
+  if (allSessions.length === 0) return 0;
+
+  let count = 0;
+  for (const session of allSessions) {
+    try {
+      const skeleton = sessionAnalytics.extractSkeleton(session.path);
+
+      // Skip trivial sessions (< 2 messages or < 1 min)
+      if (skeleton.message_count < 2 && skeleton.duration_min < 1) {
+        sessionAnalytics.markAnalyzed(skeleton.session_id);
+        continue;
+      }
+
+      const ts = skeleton.first_ts
+        ? new Date(skeleton.first_ts).toISOString().slice(0, 10)
+        : new Date(session.mtime).toISOString().slice(0, 10);
+
+      // Merge /insights facet if available for this session
+      const facet = facets[skeleton.session_id] || null;
+
+      // Map facet outcome to our session_outcome enum
+      let sessionOutcome = null;
+      if (facet) {
+        const o = facet.outcome;
+        if (o === 'fully_achieved') sessionOutcome = 'completed';
+        else if (o === 'partially_achieved') sessionOutcome = 'pivoted';
+        else if (o === 'not_achieved') sessionOutcome = 'blocked';
+        else if (o === 'abandoned') sessionOutcome = 'abandoned';
+      }
+
+      // Extract friction keywords from facet
+      let friction = [];
+      if (facet && facet.friction_counts) {
+        friction = Object.keys(facet.friction_counts).slice(0, 3);
+      }
+
+      log.sessions.push({
+        ts,
+        topics: [],
+        zone: null,
+        decision_pattern: null,
+        cognitive_load: null,
+        emotional_response: null,
+        avoidance: [],
+        signal_count: 0,
+        session_outcome: sessionOutcome,
+        friction,
+        goal_alignment: null,
+        drift_note: null,
+        duration_min: skeleton.duration_min,
+        tool_calls: skeleton.total_tool_calls,
+        tools: skeleton.tool_counts,
+        project: skeleton.project || null,
+        branch: skeleton.branch || null,
+        intent: facet ? facet.underlying_goal || skeleton.intent : skeleton.intent || null,
+      });
+
+      sessionAnalytics.markAnalyzed(skeleton.session_id);
+      count++;
+    } catch {
+      // Skip individual session failures
+    }
+  }
+
+  if (count === 0) return 0;
+
+  // Sort by date, keep most recent MAX_SESSION_LOG
+  log.sessions.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+  if (log.sessions.length > MAX_SESSION_LOG) {
+    log.sessions = log.sessions.slice(-MAX_SESSION_LOG);
+  }
+
+  fs.writeFileSync(SESSION_LOG_FILE, yaml.dump(log, { lineWidth: -1 }), 'utf8');
+  return count;
+}
+
+// ---------------------------------------------------------
 // PATTERN DETECTION — every 5th distill, analyze session_log
 // ---------------------------------------------------------
 
 /**
  * Detect repeated behavioral patterns from session history.
  * Called when distill_count % 5 === 0 and there are enough sessions.
+ * Also force-runs after bootstrap (regardless of distill_count).
  * Writes results to profile growth.patterns (max 3).
  */
-function detectPatterns() {
+function detectPatterns(forceRun) {
   const yaml = require('js-yaml');
 
   // Read session log
@@ -678,7 +798,7 @@ function detectPatterns() {
   if (!profile) return;
 
   const distillCount = (profile.evolution && profile.evolution.distill_count) || 0;
-  if (distillCount % 5 !== 0 || distillCount === 0) return;
+  if (!forceRun && (distillCount % 5 !== 0 || distillCount === 0)) return;
 
   // Take last 20 sessions
   const recent = log.sessions.slice(-20);
@@ -792,17 +912,25 @@ If no clear patterns found: respond with exactly NO_PATTERNS`;
 }
 
 // Export for use in index.js
-module.exports = { distill, writeSessionLog, detectPatterns };
+module.exports = { distill, writeSessionLog, bootstrapSessionLog, detectPatterns };
 
 // Also allow direct execution
 if (require.main === module) {
+  // Bootstrap: if session_log is thin, batch-fill from history
+  const bootstrapped = bootstrapSessionLog();
+  if (bootstrapped > 0) {
+    console.log(`📊 MetaMe: Bootstrapped ${bootstrapped} historical sessions.`);
+    // Force pattern detection immediately after bootstrap
+    detectPatterns(true);
+  }
+
   const result = distill();
   // Write session log if behavior was detected
   if (result.behavior) {
     writeSessionLog(result.behavior, result.signalCount || 0, result.skeleton || null, result.sessionSummary || null);
   }
   // Run pattern detection (only triggers every 5th distill)
-  detectPatterns();
+  if (!bootstrapped) detectPatterns();
   if (result.updated) {
     console.log(`🧠 ${result.summary}`);
   } else {

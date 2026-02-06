@@ -60,30 +60,35 @@ function defaultConfig() {
 }
 
 // ---------------------------------------------------------
-// LOAD / SAVE
+// LOAD / SAVE (cached — file rarely changes)
 // ---------------------------------------------------------
+let _providersCache = null;
+
 function loadProviders() {
+  if (_providersCache) return _providersCache;
   try {
-    if (!fs.existsSync(PROVIDERS_FILE)) return defaultConfig();
+    if (!fs.existsSync(PROVIDERS_FILE)) { _providersCache = defaultConfig(); return _providersCache; }
     const data = yaml.load(fs.readFileSync(PROVIDERS_FILE, 'utf8'));
-    if (!data || typeof data !== 'object') return defaultConfig();
-    // Ensure anthropic always exists
+    if (!data || typeof data !== 'object') { _providersCache = defaultConfig(); return _providersCache; }
     if (!data.providers) data.providers = {};
     if (!data.providers.anthropic) data.providers.anthropic = { label: 'Anthropic (Official)' };
-    return {
+    _providersCache = {
       active: data.active || 'anthropic',
       providers: data.providers,
       distill_provider: data.distill_provider || null,
       daemon_provider: data.daemon_provider || null,
     };
+    return _providersCache;
   } catch {
-    return defaultConfig();
+    _providersCache = defaultConfig();
+    return _providersCache;
   }
 }
 
 function saveProviders(config) {
   if (!fs.existsSync(METAME_DIR)) fs.mkdirSync(METAME_DIR, { recursive: true });
   fs.writeFileSync(PROVIDERS_FILE, yaml.dump(config, { lineWidth: -1 }), 'utf8');
+  _providersCache = null; // invalidate on write
 }
 
 // ---------------------------------------------------------
