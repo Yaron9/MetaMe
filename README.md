@@ -47,10 +47,11 @@
 * **🪞 Metacognition Layer (v1.3):** MetaMe now observes *how* you think, not just *what* you say. Behavioral pattern detection runs inside the existing Haiku distill call (zero extra cost). It tracks decision patterns, cognitive load, comfort zones, and avoidance topics across sessions. When persistent patterns emerge, MetaMe injects a one-line mirror observation — e.g., *"You tend to avoid testing until forced"* — with a 14-day cooldown per pattern. Conditional reflection prompts appear only when triggered (every 7th distill or 3x consecutive comfort zone). All injection logic runs in Node.js; Claude receives only pre-decided directives, never rules to self-evaluate.
 * **📱 Remote Claude Code (v1.3):** Full Claude Code from your phone via Telegram or Feishu (Lark). Stateful sessions with `--resume` — same conversation history, tool use, and file editing as your terminal. Interactive buttons for project/session picking, directory browser, and macOS launchd auto-start.
 * **🔄 Workflow Engine (v1.3):** Define multi-step skill chains as heartbeat tasks. Each workflow runs in a single Claude Code session via `--resume`, so step outputs flow as context to the next step. Example: `deep-research` → `tech-writing` → `wechat-publisher` — fully automated content pipeline.
-* **⏹ Full Terminal Control from Mobile (v1.3.13):** `/stop` (ESC), `/undo` (ESC×2) with native file-history restoration, `/model` interactive model switcher, concurrent task protection, daemon auto-restart, and `metame continue` for seamless mobile-to-desktop sync.
-* **🏥 Emergency Recovery (v1.3.13):** `/doctor` interactive diagnostics with one-tap fix buttons, `/sh` direct shell access from your phone (bypasses Claude entirely — the lifeline when everything else is broken), automatic config backup before any setting change, `/fix` to restore last known good config.
+* **⏹ Full Terminal Control from Mobile (v1.3.10):** `/stop` (ESC), `/undo` (ESC×2) with native file-history restoration, concurrent task protection, daemon auto-restart, and `metame continue` for seamless mobile-to-desktop sync.
 * **🎯 Goal Alignment & Drift Detection (v1.3.11):** MetaMe now tracks whether your sessions align with your declared goals. Each distill assesses `goal_alignment` (aligned/partial/drifted) at zero extra API cost. When you drift for 2+ consecutive sessions, a mirror observation is injected passively; after 3+ sessions, a reflection prompt gently asks: "Was this an intentional pivot, or did you lose track?" Session logs now record project, branch, intent, and file directories for richer retrospective analysis. Pattern detection can spot sustained drift trends across your session history.
+* **🔌 Provider Relay (v1.3.11):** Use any Anthropic-compatible API relay as your backend — no file mutation, no invasion. MetaMe injects `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` at spawn time. Separate provider roles for `active`, `distill`, and `daemon` tasks. CLI: `metame provider add/use/remove/test`. Config stored in `~/.metame/providers.yaml`.
 * **📊 Session History Bootstrap (v1.3.12):** Solves the cold-start problem — MetaMe previously needed 5-7 sessions before producing any visible feedback. Now, on first launch it auto-bootstraps your session history from existing Claude Code JSONL transcripts (zero API cost). Three complementary data layers: **Skeleton** (structural facts extracted locally — tools, duration, project, branch, intent), **Facets** (interaction quality from `/insights` — outcome, friction, satisfaction, when available), and **Haiku** (metacognitive judgments — cognitive load, zones, goal alignment, from the existing distill call). Patterns and mirror observations can appear from your very first MetaMe session.
+* **🏥 Emergency Recovery (v1.3.13):** `/doctor` interactive diagnostics with one-tap fix buttons, `/sh` direct shell access from your phone (bypasses Claude entirely — the lifeline when everything else is broken), automatic config backup before any setting change, `/fix` to restore last known good config. `/model` interactive model switcher with auto-backup.
 
 ## 🛠 Prerequisites
 
@@ -386,6 +387,41 @@ Each step runs in the same Claude Code session. Step outputs automatically becom
 * `~/.metame/` directory set to mode 700
 * Bot tokens stored locally, never transmitted
 
+### Provider Relay — Third-Party Model Support (v1.3.11)
+
+MetaMe supports any Anthropic-compatible API relay as a backend. This means you can route Claude Code through a third-party relay that maps `sonnet`/`opus`/`haiku` to any model (GPT-4, DeepSeek, Gemini, etc.) — MetaMe passes standard model names and the relay handles translation.
+
+**How it works:** At spawn time, MetaMe injects `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` environment variables. Zero file mutation — `~/.claude/settings.json` is never touched.
+
+**CLI commands:**
+
+```bash
+metame provider                         # List all providers
+metame provider add <name>              # Add a relay (prompts for URL & key)
+metame provider use <name>              # Switch active provider
+metame provider remove <name>           # Remove a provider (can't remove 'anthropic')
+metame provider test [name]             # Test connectivity
+metame provider set-role distill <name> # Use a different provider for background distill
+metame provider set-role daemon <name>  # Use a different provider for daemon tasks
+```
+
+**Configuration** (`~/.metame/providers.yaml`):
+
+```yaml
+active: 'anthropic'
+providers:
+  anthropic:
+    label: 'Anthropic (Official)'
+  my-relay:
+    label: 'My Relay'
+    base_url: 'https://api.relay.example.com/v1'
+    api_key: 'sk-xxx'
+distill_provider: null          # null = use active
+daemon_provider: null           # null = use active
+```
+
+Three independent provider roles let you optimize cost: e.g., use an official Anthropic key for active work, a cheaper relay for background distill, and another for daemon heartbeat tasks.
+
 ### Hot Reload (Refresh)
 
 If you update your profile or need to fix a broken context **without restarting your session**:
@@ -543,6 +579,18 @@ A: No. It *prepends* its meta-cognitive protocol to your existing `CLAUDE.md`. Y
 
 **Q: Is my data sent to a third party?**
 A: No. Your profile stays local at `~/.claude_profile.yaml`. MetaMe simply passes text to the official Claude Code tool.
+
+## 📋 Changelog
+
+| Version | Highlights |
+|---------|------------|
+| **v1.3.13** | `/doctor` diagnostics, `/sh` direct shell, `/fix` config restore, `/model` interactive switcher with auto-backup, daemon state caching & config backup/restore |
+| **v1.3.12** | Session history bootstrap (cold-start fix), three-layer data architecture (Skeleton + Facets + Haiku), session summary extraction |
+| **v1.3.11** | Goal alignment & drift detection, provider relay system for third-party models, `/insights` facet integration |
+| **v1.3.10** | `/stop`, `/undo` with file restoration, `/model`, concurrent task protection, `metame continue`, daemon auto-restart on code change |
+| **v1.3.8** | Bidirectional file transfer (phone ↔ computer) |
+| **v1.3.7** | Real-time streaming status on mobile |
+| **v1.3** | Metacognition layer, remote Claude Code (Telegram & Feishu), workflow engine, heartbeat tasks, launchd auto-start |
 
 ## 📄 License
 

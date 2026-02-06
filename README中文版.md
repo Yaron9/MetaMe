@@ -47,10 +47,11 @@
 * **🪞 元认知层 (v1.3)：** MetaMe 不只观察你*说什么*，还观察你*怎么想*。行为模式检测复用现有的 Haiku 蒸馏调用（零额外成本），跨会话追踪决策模式、认知负荷、舒适区和回避主题。当持续模式出现时，注入一行镜像观察——例如"你倾向于拖延测试直到被迫"——每个模式 14 天冷却。反思提示仅在触发条件下出现（每 7 次蒸馏或连续 3 次舒适区）。所有注入逻辑在 Node.js 中运行，Claude 只收到已决策的指令。
 * **📱 远程 Claude Code (v1.3)：** 手机端完整 Claude Code 体验，支持 Telegram 和飞书。有状态会话（`--resume`）——和终端一样的对话历史、工具调用、文件编辑。可点击按钮选择项目/会话/目录，支持 macOS launchd 自启动。
 * **🔄 工作流引擎 (v1.3)：** 将多步骤 Skill 链定义为心跳任务。每个工作流在单个 Claude Code 会话中通过 `--resume` 运行，上一步的输出自动成为下一步的上下文。示例：`deep-research` → `tech-writing` → `wechat-publisher`——全自动内容流水线。
-* **⏹ 手机端完整终端控制 (v1.3.13)：** `/stop`（ESC）、`/undo`（ESC×2，原生 file-history 恢复）、`/model` 交互式模型切换、并发任务保护、代码变更自动热重启、`metame continue` 手机→电脑一键同步。
-* **🏥 应急恢复 (v1.3.13)：** `/doctor` 交互式诊断 + 一键修复、`/sh` 手机直接执行电脑 shell 命令（完全绕过 Claude，断线时的最后生命线）、配置修改前自动备份、`/fix` 一键恢复上次正常配置。
+* **⏹ 手机端完整终端控制 (v1.3.10)：** `/stop`（ESC）、`/undo`（ESC×2，原生 file-history 恢复）、并发任务保护、代码变更自动热重启、`metame continue` 手机→电脑一键同步。
 * **🎯 目标对齐与偏离检测 (v1.3.11)：** MetaMe 现在能追踪你的 session 是否偏离声明目标。每次蒸馏自动评估 `goal_alignment`（aligned/partial/drifted），零额外 API 成本。连续 2 个 session 偏离时，镜像观察被动注入；连续 3 个 session 后，反思提示温和地问："是方向有意调整了，还是不小心偏了？" Session 日志现在记录项目名、分支、意图和文件目录，提供更丰富的回顾分析。模式检测可发现跨 session 历史的持续偏离趋势。
+* **🔌 第三方模型中继 (v1.3.11)：** 支持任何 Anthropic 兼容 API 中继作为后端——零文件污染、零侵入。MetaMe 在进程启动时注入 `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` 环境变量。支持按任务类型分配不同 provider（`active` / `distill` / `daemon`）。CLI: `metame provider add/use/remove/test`。配置存储于 `~/.metame/providers.yaml`。
 * **📊 会话历史冷启动 (v1.3.12)：** 解决冷启动问题——此前 MetaMe 需要 5-7 个 session 才能产生可感知的反馈。现在首次启动即自动从现有 Claude Code JSONL 会话记录中批量补全历史（零 API 成本）。三层互补数据架构：**骨架层**（本地提取的结构事实——工具调用、时长、项目、分支、意图）、**切片层**（`/insights` 提供的交互质量——outcome、friction、satisfaction，有则用无则跳过）、**Haiku 层**（元认知判断——认知负荷、舒适区、目标对齐，复用已有蒸馏调用）。从你的第一个 MetaMe session 起就能看到模式检测和镜像观察。
+* **🏥 应急恢复 (v1.3.13)：** `/doctor` 交互式诊断 + 一键修复、`/sh` 手机直接执行电脑 shell 命令（完全绕过 Claude，断线时的最后生命线）、配置修改前自动备份、`/fix` 一键恢复上次正常配置。`/model` 交互式模型切换，切换前自动备份。
 
 ## 🛠 前置要求
 
@@ -361,6 +362,41 @@ heartbeat:
 * `~/.metame/` 目录权限 700
 * Bot token 仅存本地，不外传
 
+### 第三方模型中继 — Provider Relay (v1.3.11)
+
+MetaMe 支持任何 Anthropic 兼容 API 中继作为后端。你可以将 Claude Code 的请求通过中继转发到任意模型（GPT-4、DeepSeek、Gemini 等）——MetaMe 传递标准模型名，中继负责翻译映射。
+
+**原理：** 进程启动时注入 `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` 环境变量。零文件污染——`~/.claude/settings.json` 永远不会被修改。
+
+**CLI 命令：**
+
+```bash
+metame provider                         # 列出所有 provider
+metame provider add <名称>               # 添加中继（交互式输入 URL 和 Key）
+metame provider use <名称>               # 切换当前 provider
+metame provider remove <名称>            # 删除 provider（不能删除 'anthropic'）
+metame provider test [名称]              # 测试连通性
+metame provider set-role distill <名称>  # 为后台蒸馏指定不同 provider
+metame provider set-role daemon <名称>   # 为 daemon 任务指定不同 provider
+```
+
+**配置文件** (`~/.metame/providers.yaml`)：
+
+```yaml
+active: 'anthropic'
+providers:
+  anthropic:
+    label: 'Anthropic (Official)'
+  my-relay:
+    label: '我的中继'
+    base_url: 'https://api.relay.example.com/v1'
+    api_key: 'sk-xxx'
+distill_provider: null          # null = 跟随 active
+daemon_provider: null           # null = 跟随 active
+```
+
+三个独立的 provider 角色可以按需优化成本：例如主力工作用官方 Anthropic Key，后台蒸馏用便宜的中继，daemon 心跳任务用另一个。
+
 ### 热刷新 (Refresh)
 
 如果你更新了个人档案，或者需要修复断开的上下文连接，而**不想重启会话**：
@@ -506,6 +542,18 @@ A: 不会。它只是将元认知协议 *插入* 到你现有 `CLAUDE.md` 的最
 
 **Q: 我的数据会被发送给第三方吗？**
 A: 不会。你的档案只保存在本地的 `~/.claude_profile.yaml` 中。MetaMe 只是将文本传递给官方的 Claude Code 工具。
+
+## 📋 版本历史
+
+| 版本 | 主要更新 |
+|------|----------|
+| **v1.3.13** | `/doctor` 交互式诊断、`/sh` 直接 shell、`/fix` 配置恢复、`/model` 交互式切换 + 自动备份、daemon 状态缓存与配置备份/恢复 |
+| **v1.3.12** | 会话历史冷启动（解决冷启动问题）、三层数据架构（骨架 + 切片 + Haiku）、会话摘要提取 |
+| **v1.3.11** | 目标对齐与偏离检测、第三方模型中继（Provider Relay）、`/insights` 切片集成 |
+| **v1.3.10** | `/stop`、`/undo` 带文件恢复、`/model`、并发任务保护、`metame continue`、代码变更自动热重启 |
+| **v1.3.8** | 双向文件互传（手机 ↔ 电脑） |
+| **v1.3.7** | 手机端实时流式状态显示 |
+| **v1.3** | 元认知层、远程 Claude Code（Telegram & 飞书）、工作流引擎、心跳任务、launchd 自启动 |
 
 ## 📄 许可证
 
