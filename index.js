@@ -23,7 +23,7 @@ if (!fs.existsSync(METAME_DIR)) {
 }
 
 // Auto-deploy bundled scripts to ~/.metame/
-const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js'];
+const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js'];
 const scriptsDir = path.join(__dirname, 'scripts');
 
 for (const script of BUNDLED_SCRIPTS) {
