@@ -788,6 +788,11 @@ if (isProvider) {
 // ---------------------------------------------------------
 // 5.7 DAEMON SUBCOMMANDS
 // ---------------------------------------------------------
+// Shorthand aliases: `metame start` → `metame daemon start`, etc.
+const DAEMON_SHORTCUTS = ['start', 'stop', 'status', 'logs'];
+if (DAEMON_SHORTCUTS.includes(process.argv[2])) {
+  process.argv.splice(2, 0, 'daemon');
+}
 const isDaemon = process.argv.includes('daemon');
 if (isDaemon) {
   const daemonIndex = process.argv.indexOf('daemon');
@@ -942,8 +947,8 @@ if (isDaemon) {
     console.log("━━━ ✅ Setup Complete ━━━");
     console.log(`Config saved: ${DAEMON_CONFIG}`);
     console.log("\nNext steps:");
-    console.log("  metame daemon start         — start the daemon");
-    console.log("  metame daemon status        — check status");
+    console.log("  metame start                — start the daemon");
+    console.log("  metame status               — check status");
     if (process.platform === 'darwin') {
       console.log("  metame daemon install-launchd — auto-start on login");
     }
@@ -1034,8 +1039,8 @@ if (isDaemon) {
     });
     bg.unref();
     console.log(`✅ MetaMe daemon started (PID: ${bg.pid})`);
-    console.log("   Logs: metame daemon logs");
-    console.log("   Stop: metame daemon stop");
+    console.log("   Logs: metame logs");
+    console.log("   Stop: metame stop");
     process.exit(0);
   }
 
@@ -1133,11 +1138,11 @@ if (isDaemon) {
 
   // Unknown subcommand
   console.log("📖 MetaMe Daemon Commands:");
-  console.log("   metame daemon init           — initialize config");
-  console.log("   metame daemon start           — start background daemon");
-  console.log("   metame daemon stop            — stop daemon");
-  console.log("   metame daemon status          — show status & budget");
-  console.log("   metame daemon logs            — tail log file");
+  console.log("   metame start                  — start background daemon");
+  console.log("   metame stop                   — stop daemon");
+  console.log("   metame status                 — show status & budget");
+  console.log("   metame logs                   — tail log file");
+  console.log("   metame daemon init            — initialize config");
   console.log("   metame daemon run <name>      — run a task once");
   if (process.platform === 'darwin') {
     console.log("   metame daemon install-launchd — auto-start on macOS");

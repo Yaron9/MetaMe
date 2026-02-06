@@ -1,6 +1,6 @@
 {
     "name": "metame-cli",
-    "version": "1.3.12",
+    "version": "1.3.13",
     "description": "The Cognitive Profile Layer for Claude Code. Knows how you think, not just what you said.",
     "main": "index.js",
     "bin": {
@@ -11,9 +11,10 @@
         "scripts/"
     ],
     "scripts": {
+        "test": "node --test scripts/*.test.js",
         "start": "node index.js",
-        "sync:plugin": "cp scripts/schema.js scripts/pending-traits.js scripts/signal-capture.js scripts/distill.js scripts/daemon.js scripts/telegram-adapter.js scripts/feishu-adapter.js scripts/daemon-default.yaml scripts/providers.js plugin/scripts/ && echo '✅ Plugin scripts synced'",
-        "restart:daemon": "node index.js daemon stop 2>/dev/null; sleep 1; node index.js daemon start 2>/dev/null || echo '⚠️  Daemon not running or restart failed'",
+        "sync:plugin": "cp scripts/schema.js scripts/pending-traits.js scripts/signal-capture.js scripts/distill.js scripts/daemon.js scripts/telegram-adapter.js scripts/feishu-adapter.js scripts/daemon-default.yaml scripts/providers.js scripts/utils.js plugin/scripts/ && echo '✅ Plugin scripts synced'",
+        "restart:daemon": "node index.js stop 2>/dev/null; sleep 1; node index.js start 2>/dev/null || echo '⚠️  Daemon not running or restart failed'",
         "precommit": "npm run sync:plugin && npm run restart:daemon"
     },
     "keywords": [

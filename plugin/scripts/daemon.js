@@ -26,29 +26,11 @@ const PID_FILE = path.join(METAME_DIR, 'daemon.pid');
 const LOG_FILE = path.join(METAME_DIR, 'daemon.log');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 
-let yaml;
-try {
-  yaml = require('js-yaml');
-} catch {
-  // When deployed to ~/.metame/, resolve js-yaml via METAME_ROOT env
-  const metameRoot = process.env.METAME_ROOT;
-  if (metameRoot) {
-    try { yaml = require(path.join(metameRoot, 'node_modules', 'js-yaml')); } catch { /* fallthrough */ }
-  }
-  if (!yaml) {
-    // Try common paths
-    const candidates = [
-      path.resolve(__dirname, '..', 'node_modules', 'js-yaml'),
-      path.resolve(__dirname, 'node_modules', 'js-yaml'),
-    ];
-    for (const p of candidates) {
-      try { yaml = require(p); break; } catch { /* next */ }
-    }
-  }
-  if (!yaml) {
-    console.error('Cannot find js-yaml module. Ensure metame-cli is installed.');
-    process.exit(1);
-  }
+const yaml = require('./resolve-yaml');
+const { parseInterval, formatRelativeTime, createPathMap } = require('./utils');
+if (!yaml) {
+  console.error('Cannot find js-yaml module. Ensure metame-cli is installed.');
+  process.exit(1);
 }
 
 // Provider env for daemon tasks (relay support)
@@ -342,22 +324,7 @@ function executeTask(task, config) {
   }
 }
 
-// ---------------------------------------------------------
-// INTERVAL PARSING
-// ---------------------------------------------------------
-function parseInterval(str) {
-  const match = String(str).match(/^(\d+)(s|m|h|d)$/);
-  if (!match) return 3600; // default 1h
-  const val = parseInt(match[1], 10);
-  const unit = match[2];
-  switch (unit) {
-    case 's': return val;
-    case 'm': return val * 60;
-    case 'h': return val * 3600;
-    case 'd': return val * 86400;
-    default: return 3600;
-  }
-}
+// parseInterval — imported from ./utils
 
 // ---------------------------------------------------------
 // WORKFLOW EXECUTION (multi-step skill chain via --resume)
@@ -610,6 +577,9 @@ function checkCooldown(chatId) {
   return { ok: true };
 }
 
+// Path shortener — imported from ./utils
+const { shortenPath, expandPath } = createPathMap();
+
 /**
  * Send directory picker: recent projects + Browse button
  * @param {string} mode - 'new' or 'cd' (determines callback command)
@@ -618,8 +588,8 @@ async function sendDirPicker(bot, chatId, mode, title) {
   const dirs = listProjectDirs();
   const cmd = mode === 'new' ? '/new' : '/cd';
   if (bot.sendButtons) {
-    const buttons = dirs.map(d => [{ text: d.label, callback_data: `${cmd} ${d.path}` }]);
-    buttons.push([{ text: 'Browse...', callback_data: `/browse ${mode} ${HOME}` }]);
+    const buttons = dirs.map(d => [{ text: d.label, callback_data: `${cmd} ${shortenPath(d.path)}` }]);
+    buttons.push([{ text: 'Browse...', callback_data: `/browse ${mode} ${shortenPath(HOME)}` }]);
     await bot.sendButtons(chatId, title, buttons);
   } else {
     let msg = `${title}\n`;
@@ -645,16 +615,16 @@ async function sendBrowse(bot, chatId, mode, dirPath) {
     if (bot.sendButtons) {
       const buttons = [];
       // Select this directory
-      buttons.push([{ text: `>> Use this dir`, callback_data: `${cmd} ${dirPath}` }]);
+      buttons.push([{ text: `>> Use this dir`, callback_data: `${cmd} ${shortenPath(dirPath)}` }]);
       // Subdirectories
       for (const name of subdirs) {
         const full = path.join(dirPath, name);
-        buttons.push([{ text: `${name}/`, callback_data: `/browse ${mode} ${full}` }]);
+        buttons.push([{ text: `${name}/`, callback_data: `/browse ${mode} ${shortenPath(full)}` }]);
       }
       // Parent
       const parent = path.dirname(dirPath);
       if (parent !== dirPath) {
-        buttons.push([{ text: '.. back', callback_data: `/browse ${mode} ${parent}` }]);
+        buttons.push([{ text: '.. back', callback_data: `/browse ${mode} ${shortenPath(parent)}` }]);
       }
       await bot.sendButtons(chatId, dirPath, buttons);
     } else {
@@ -680,7 +650,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   if (text.startsWith('/browse ')) {
     const parts = text.slice(8).trim().split(' ');
     const mode = parts[0]; // 'new' or 'cd'
-    const dirPath = parts.slice(1).join(' ');
+    const dirPath = expandPath(parts.slice(1).join(' '));
     if (mode && dirPath && fs.existsSync(dirPath)) {
       await sendBrowse(bot, chatId, mode, dirPath);
     } else {
@@ -698,7 +668,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       return;
     }
     // Parse: /new <path> [name] — if arg contains a space after a valid path, rest is name
-    let dirPath = arg;
+    let dirPath = expandPath(arg);
     let sessionName = '';
     // Try full arg as path first; if not, split on spaces to find path + name
     if (!fs.existsSync(dirPath)) {
@@ -863,7 +833,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   }
 
   if (text === '/cd' || text.startsWith('/cd ')) {
-    let newCwd = text.slice(3).trim();
+    let newCwd = expandPath(text.slice(3).trim());
     if (!newCwd) {
       await sendDirPicker(bot, chatId, 'cd', 'Switch workdir:');
       return;
@@ -1112,6 +1082,18 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     try {
       const fileContent = fs.readFileSync(sessionFile, 'utf8');
       const lines = fileContent.split('\n').filter(l => l.trim());
+
+      // Validate format: first line should be parseable with a known type
+      try {
+        const first = JSON.parse(lines[0]);
+        if (!first.type) {
+          await bot.sendMessage(chatId, '⚠️ Session 格式不兼容，Claude Code 可能已升级');
+          return;
+        }
+      } catch {
+        await bot.sendMessage(chatId, '⚠️ Session 文件损坏');
+        return;
+      }
 
       // Session structure: user → assistant(s) → snapshot(s)
       // A "turn" = a user message. The snapshot BEFORE it = file state before that turn.
@@ -1565,24 +1547,7 @@ function getSessionFileMtime(sessionId, projectPath) {
   return null;
 }
 
-/**
- * Format relative time (e.g., "5分钟前", "2小时前", "昨天")
- */
-function formatRelativeTime(dateStr) {
-  const now = Date.now();
-  const then = new Date(dateStr).getTime();
-  const diffMs = now - then;
-  const diffMin = Math.floor(diffMs / 60000);
-  const diffHour = Math.floor(diffMs / 3600000);
-  const diffDay = Math.floor(diffMs / 86400000);
-
-  if (diffMin < 1) return '刚刚';
-  if (diffMin < 60) return `${diffMin}分钟前`;
-  if (diffHour < 24) return `${diffHour}小时前`;
-  if (diffDay === 1) return '昨天';
-  if (diffDay < 7) return `${diffDay}天前`;
-  return new Date(dateStr).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
-}
+// formatRelativeTime — imported from ./utils
 
 /**
  * Format a session entry into a short, readable label for buttons
@@ -2289,6 +2254,22 @@ async function main() {
   if (!config || Object.keys(config).length === 0) {
     console.error('No daemon config found. Run: metame daemon init');
     process.exit(1);
+  }
+
+  // Config validation: warn on unknown/suspect fields
+  const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'heartbeat', 'budget'];
+  const KNOWN_DAEMON = ['model', 'log_max_size', 'heartbeat_check_interval', 'session_allowed_tools', 'cooldown_seconds'];
+  const VALID_MODELS = ['sonnet', 'opus', 'haiku'];
+  for (const key of Object.keys(config)) {
+    if (!KNOWN_SECTIONS.includes(key)) log('WARN', `Config: unknown section "${key}" (typo?)`);
+  }
+  if (config.daemon) {
+    for (const key of Object.keys(config.daemon)) {
+      if (!KNOWN_DAEMON.includes(key)) log('WARN', `Config: unknown daemon.${key} (typo?)`);
+    }
+    if (config.daemon.model && !VALID_MODELS.includes(config.daemon.model)) {
+      log('WARN', `Config: daemon.model="${config.daemon.model}" is not a known model`);
+    }
   }
 
   // Takeover: kill any existing daemon
