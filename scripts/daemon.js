@@ -1266,10 +1266,9 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       return;
     }
 
-    // Find session .jsonl file
-    const projDirName = session.cwd.replace(/\//g, '-');
-    const sessionFile = path.join(HOME, '.claude', 'projects', projDirName, session.id + '.jsonl');
-    if (!fs.existsSync(sessionFile)) {
+    // Find session .jsonl file (scan Claude's native projects directory)
+    const sessionFile = findSessionFile(session.id);
+    if (!sessionFile) {
       await bot.sendMessage(chatId, 'Session file not found.');
       return;
     }
@@ -1421,10 +1420,13 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
 
       const turnsRemoved = turns.filter(t => t.lineIdx >= targetLineIdx).length;
       const allAffected = [...restored, ...deleted];
-      const fileList = allAffected.length > 0
-        ? allAffected.map(f => path.basename(f)).join(', ')
-        : 'none';
-      await bot.sendMessage(chatId, `⏪ 回退了 ${turnsRemoved} 轮对话\n📁 恢复 ${restored.length} / 删除 ${deleted.length}: ${fileList}`);
+      const turnsMsg = `⏪ 回退了 ${turnsRemoved} 轮对话`;
+      if (allAffected.length > 0) {
+        const fileList = allAffected.map(f => path.basename(f)).join(', ');
+        await bot.sendMessage(chatId, `${turnsMsg}\n📁 恢复 ${restored.length} / 删除 ${deleted.length}: ${fileList}`);
+      } else {
+        await bot.sendMessage(chatId, `${turnsMsg}\n📁 无文件变更需要恢复`);
+      }
     } catch (e) {
       await bot.sendMessage(chatId, `❌ Undo failed: ${e.message}`);
     }
@@ -1681,6 +1683,30 @@ const crypto = require('crypto');
 const CLAUDE_PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
 
 /**
+ * Find a session's .jsonl file by scanning Claude's native projects directory.
+ * This avoids guessing the directory naming convention — we just search for the file.
+ * Results cached for 30s to avoid repeated directory scans in loops.
+ */
+const _sessionFileCache = new Map(); // sessionId -> { path, ts }
+function findSessionFile(sessionId) {
+  if (!sessionId || !fs.existsSync(CLAUDE_PROJECTS_DIR)) return null;
+  const cached = _sessionFileCache.get(sessionId);
+  if (cached && Date.now() - cached.ts < 30000) return cached.path;
+  const target = sessionId + '.jsonl';
+  try {
+    for (const proj of fs.readdirSync(CLAUDE_PROJECTS_DIR)) {
+      const candidate = path.join(CLAUDE_PROJECTS_DIR, proj, target);
+      if (fs.existsSync(candidate)) {
+        _sessionFileCache.set(sessionId, { path: candidate, ts: Date.now() });
+        return candidate;
+      }
+    }
+  } catch { /* ignore */ }
+  _sessionFileCache.set(sessionId, { path: null, ts: Date.now() });
+  return null;
+}
+
+/**
  * Scan all project session indexes, return most recent N sessions.
  * Results cached for 10 seconds to avoid repeated directory scans.
  */
@@ -1766,10 +1792,9 @@ function listRecentSessions(limit, cwd) {
  */
 function getSessionFileMtime(sessionId, projectPath) {
   try {
-    if (!projectPath) return null;
-    const projDirName = projectPath.replace(/\//g, '-');
-    const sessionFile = path.join(CLAUDE_PROJECTS_DIR, projDirName, sessionId + '.jsonl');
-    if (fs.existsSync(sessionFile)) {
+    if (!sessionId) return null;
+    const sessionFile = findSessionFile(sessionId);
+    if (sessionFile) {
       return fs.statSync(sessionFile).mtimeMs;
     }
   } catch { /* ignore */ }
@@ -1882,12 +1907,10 @@ function getSessionName(sessionId) {
  */
 function writeSessionName(sessionId, cwd, name) {
   try {
-    const projDirName = cwd.replace(/\//g, '-');
-    const sessionFile = path.join(CLAUDE_PROJECTS_DIR, projDirName, sessionId + '.jsonl');
-    // Create directory if needed
-    const dir = path.dirname(sessionFile);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+    const sessionFile = findSessionFile(sessionId);
+    if (!sessionFile) {
+      log('WARN', `writeSessionName: session file not found for ${sessionId.slice(0, 8)}`);
+      return;
     }
     const entry = JSON.stringify({ type: 'custom-title', customTitle: name, sessionId }) + '\n';
     fs.appendFileSync(sessionFile, entry, 'utf8');
