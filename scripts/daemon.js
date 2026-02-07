@@ -1155,6 +1155,39 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
+  // /publish <otp> — npm publish with OTP (zero latency, no Claude)
+  if (text.startsWith('/publish ')) {
+    const otp = text.slice(9).trim();
+    if (!otp || !/^\d{6}$/.test(otp)) {
+      await bot.sendMessage(chatId, '用法: /publish 123456');
+      return;
+    }
+    const session = getSession(chatId);
+    const cwd = session?.cwd || HOME;
+    await bot.sendMessage(chatId, `📦 npm publish --otp=${otp} ...`);
+    try {
+      const child = spawn('npm', ['publish', `--otp=${otp}`], { cwd, timeout: 60000 });
+      let stdout = '', stderr = '';
+      child.stdout.on('data', d => { stdout += d; });
+      child.stderr.on('data', d => { stderr += d; });
+      await new Promise((resolve) => {
+        child.on('close', resolve);
+        child.on('error', resolve);
+      });
+      const output = (stdout + stderr).trim();
+      if (output.includes('+ metame-cli@') || output.includes('npm notice')) {
+        const ver = output.match(/metame-cli@([\d.]+)/);
+        await bot.sendMessage(chatId, `✅ Published${ver ? ' v' + ver[1] : ''}!`);
+      } else {
+        let msg = output.slice(0, 2000) || '(no output)';
+        await bot.sendMessage(chatId, `❌ ${msg}`);
+      }
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ ${e.message}`);
+    }
+    return;
+  }
+
   // /sh [command] — direct shell execution (emergency lifeline)
   if (text === '/sh' || text.startsWith('/sh ')) {
     const command = text.slice(3).trim();
