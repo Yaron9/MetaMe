@@ -1901,7 +1901,7 @@ const TOOL_EMOJI = {
   WebFetch: '🌐',
   WebSearch: '🔍',
   Task: '🤖',
-  Skill: '📦',
+  Skill: '🔧',
   TodoWrite: '📋',
   NotebookEdit: '📓',
   default: '🔧',
@@ -2040,7 +2040,7 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
                       displayName = 'Browser';
                       context = action.replace(/_/g, ' ');
                     } else {
-                      displayEmoji = '🔌';
+                      displayEmoji = '🔗';
                       displayName = `MCP:${server}`;
                       context = action.replace(/_/g, ' ').slice(0, 25);
                     }

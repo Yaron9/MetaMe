@@ -266,9 +266,9 @@ This resumes the latest session with all mobile messages included. Also works as
 📖 Read: 「config.yaml」
 ✏️ Edit: 「daemon.js」
 💻 Bash: 「git status」
-📦 Skill: 「wechat-publisher」
+🔧 Skill: 「wechat-publisher」
 🌐 Browser: 「navigate」
-🔌 MCP:server: 「action」
+🔗 MCP:server: 「action」
 ```
 
 **File transfer (v1.3.8):** Seamlessly move files between your phone and computer.
