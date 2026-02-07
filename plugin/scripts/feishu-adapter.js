@@ -121,18 +121,13 @@ function createBot(config) {
     async downloadFile(messageId, fileKey, destPath, msgType = 'file') {
       try {
         let res;
-        if (msgType === 'image') {
-          // Images use im.image.get API
-          res = await client.im.image.get({
-            path: { image_key: fileKey },
-          });
-        } else {
-          // Files and media use im.messageResource.get API
-          res = await client.im.messageResource.get({
-            path: { message_id: messageId, file_key: fileKey },
-            params: { type: 'file' },
-          });
-        }
+        // All message attachments (images, files, media) use messageResource.get
+        // im.image.get only works for images uploaded by the app itself
+        const resourceType = msgType === 'image' ? 'image' : 'file';
+        res = await client.im.messageResource.get({
+          path: { message_id: messageId, file_key: fileKey },
+          params: { type: resourceType },
+        });
 
         // SDK returns writeFile method or getReadableStream
         if (res && res.writeFile) {
@@ -293,7 +288,7 @@ function createBot(config) {
                   fileInfo = {
                     messageId: msg.message_id,
                     fileKey: content.file_key || content.image_key,
-                    fileName: content.file_name || content.image_key || `file_${Date.now()}`,
+                    fileName: content.file_name || (content.image_key ? `image_${Date.now()}.png` : `file_${Date.now()}`),
                     msgType: msg.message_type, // 'file', 'image', or 'media'
                   };
                 } catch {}
