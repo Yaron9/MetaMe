@@ -1532,45 +1532,49 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
-  // /model [sonnet|opus|haiku] — switch model (interactive)
+  // /model [name] — switch model (interactive, accepts any name for custom providers)
   if (text === '/model' || text.startsWith('/model ')) {
-    const arg = text.slice(6).trim().toLowerCase();
-    const validModels = ['sonnet', 'opus', 'haiku'];
+    const arg = text.slice(6).trim();
+    const builtinModels = ['sonnet', 'opus', 'haiku'];
     const currentModel = (config.daemon && config.daemon.model) || 'opus';
+    const activeProvider = providerMod ? providerMod.getActiveName() : 'anthropic';
+    const isCustomProvider = activeProvider !== 'anthropic';
 
     if (!arg) {
-      // Interactive: show current model + buttons
+      const hint = isCustomProvider ? `\n💡 ${activeProvider} 可输入任意模型名` : '';
       if (bot.sendButtons) {
-        const buttons = validModels.map(m => [{
+        const buttons = builtinModels.map(m => [{
           text: m === currentModel ? `${m} ✓` : m,
           callback_data: `/model ${m}`,
         }]);
-        await bot.sendButtons(chatId, `🤖 当前模型: ${currentModel}`, buttons);
+        await bot.sendButtons(chatId, `🤖 当前模型: ${currentModel}${hint}`, buttons);
       } else {
-        await bot.sendMessage(chatId, `🤖 当前模型: ${currentModel}\n\n可选: sonnet, opus, haiku\n用法: /model opus`);
+        await bot.sendMessage(chatId, `🤖 当前模型: ${currentModel}\n可选: ${builtinModels.join(', ')}${hint}`);
       }
       return;
     }
 
-    if (!validModels.includes(arg)) {
-      await bot.sendMessage(chatId, `❌ 无效模型: ${arg}\n可选: sonnet, opus, haiku`);
+    const normalizedArg = arg.toLowerCase();
+    // Builtin providers only accept builtin model names
+    if (!isCustomProvider && !builtinModels.includes(normalizedArg)) {
+      await bot.sendMessage(chatId, `❌ 无效模型: ${arg}\n可选: ${builtinModels.join(', ')}\n💡 切换到自定义 provider 后可用任意模型名`);
       return;
     }
 
-    if (arg === currentModel) {
-      await bot.sendMessage(chatId, `🤖 已经是 ${arg}`);
+    const modelName = builtinModels.includes(normalizedArg) ? normalizedArg : arg;
+    if (modelName === currentModel) {
+      await bot.sendMessage(chatId, `🤖 已经是 ${modelName}`);
       return;
     }
 
-    // Update config file
     try {
       backupConfig();
       const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
       if (!cfg.daemon) cfg.daemon = {};
-      cfg.daemon.model = arg;
+      cfg.daemon.model = modelName;
       fs.writeFileSync(CONFIG_FILE, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
       config = loadConfig();
-      await bot.sendMessage(chatId, `✅ 模型已切换: ${currentModel} → ${arg}`);
+      await bot.sendMessage(chatId, `✅ 模型已切换: ${currentModel} → ${modelName}`);
     } catch (e) {
       await bot.sendMessage(chatId, `❌ 切换失败: ${e.message}`);
     }
@@ -1600,6 +1604,36 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
+  if (text === '/nosleep') {
+    if (process.platform !== 'darwin') {
+      await bot.sendMessage(chatId, '❌ /nosleep 仅支持 macOS');
+      return;
+    }
+    if (caffeinateProcess) {
+      // Turn off — kill caffeinate
+      try { caffeinateProcess.kill(); } catch { /* already dead */ }
+      caffeinateProcess = null;
+      log('INFO', 'Caffeinate stopped — system sleep re-enabled');
+      await bot.sendMessage(chatId, '😴 已关闭防睡眠，系统恢复正常休眠');
+    } else {
+      // Turn on — spawn caffeinate (prevent display+idle+system sleep)
+      try {
+        caffeinateProcess = spawn('caffeinate', ['-dis'], {
+          detached: true,
+          stdio: 'ignore',
+        });
+        caffeinateProcess.unref();
+        caffeinateProcess.on('exit', () => { caffeinateProcess = null; });
+        log('INFO', 'Caffeinate started — preventing system sleep');
+        await bot.sendMessage(chatId, '☕ 防睡眠已开启，合盖不休眠\n再次 /nosleep 关闭');
+      } catch (e) {
+        log('ERROR', `Failed to start caffeinate: ${e.message}`);
+        await bot.sendMessage(chatId, `❌ 启动失败: ${e.message}`);
+      }
+    }
+    return;
+  }
+
   if (text.startsWith('/')) {
     const currentModel = (config.daemon && config.daemon.model) || 'opus';
     const currentProvider = providerMod ? providerMod.getActiveName() : 'anthropic';
@@ -1621,7 +1655,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       '/quit — 结束会话，重新加载 MCP/配置',
       '',
       `⚙️ /model [${currentModel}] /provider [${currentProvider}] /status /tasks /run /budget /reload`,
-      '🔧 /doctor /fix /reset /sh <cmd>',
+      `🔧 /doctor /fix /reset /sh <cmd> /nosleep [${caffeinateProcess ? 'ON' : 'OFF'}]`,
       '',
       '直接打字即可对话 💬',
     ].join('\n'));
@@ -2046,6 +2080,9 @@ const activeProcesses = new Map(); // chatId -> { child, aborted }
 // Message queue for messages received while a task is running
 const messageQueue = new Map(); // chatId -> { messages: string[], notified: false }
 
+// Caffeinate process for /nosleep toggle (macOS only)
+let caffeinateProcess = null;
+
 // File cache for button callbacks (shortId -> fullPath)
 const fileCache = new Map();
 const FILE_CACHE_TTL = 1800000; // 30 minutes
@@ -2255,12 +2292,32 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
   });
 }
 
+// Lazy distill: run distill.js in background on first message, then every 4 hours
+let _lastDistillTime = 0;
+function lazyDistill() {
+  const now = Date.now();
+  if (now - _lastDistillTime < 4 * 60 * 60 * 1000) return; // 4h cooldown
+  const distillPath = path.join(HOME, '.metame', 'distill.js');
+  const signalsPath = path.join(HOME, '.metame', 'raw_signals.jsonl');
+  if (!fs.existsSync(distillPath)) return;
+  if (!fs.existsSync(signalsPath)) return;
+  const content = fs.readFileSync(signalsPath, 'utf8').trim();
+  if (!content) return;
+  _lastDistillTime = now;
+  const lines = content.split('\n').filter(l => l.trim()).length;
+  log('INFO', `Distilling ${lines} signal(s) in background...`);
+  const bg = spawn('node', [distillPath], { detached: true, stdio: 'ignore' });
+  bg.unref();
+}
+
 /**
  * Shared ask logic — full Claude Code session (stateful, with tools)
  * Now uses spawn (async) instead of execSync to allow parallel requests.
  */
 async function askClaude(bot, chatId, prompt) {
   log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
+  // Trigger background distill on first message / every 4h
+  try { lazyDistill(); } catch { /* non-fatal */ }
   // Send a single status message, updated in-place, deleted on completion
   let statusMsgId = null;
   try {
@@ -2343,6 +2400,27 @@ async function askClaude(bot, chatId, prompt) {
   }
 
   if (output) {
+    // Detect provider/model errors disguised as output (e.g., "model not found", API errors)
+    const activeProvCheck = providerMod ? providerMod.getActiveName() : 'anthropic';
+    const builtinModelsCheck = ['sonnet', 'opus', 'haiku'];
+    const looksLikeError = output.length < 300 && /\b(not found|invalid model|unauthorized|401|403|404|error|failed)\b/i.test(output);
+    if (looksLikeError && (activeProvCheck !== 'anthropic' || !builtinModelsCheck.includes(model))) {
+      log('WARN', `Custom provider/model may have failed (${activeProvCheck}/${model}), output: ${output.slice(0, 200)}`);
+      try {
+        if (providerMod && activeProvCheck !== 'anthropic') providerMod.setActive('anthropic');
+        const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
+        if (!cfg.daemon) cfg.daemon = {};
+        cfg.daemon.model = 'opus';
+        fs.writeFileSync(CONFIG_FILE, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+        config = loadConfig();
+        await bot.sendMessage(chatId, `⚠️ ${activeProvCheck}/${model} 疑似失败，已回退到 anthropic/opus\n输出: ${output.slice(0, 150)}`);
+      } catch (fbErr) {
+        log('ERROR', `Fallback failed: ${fbErr.message}`);
+        await bot.sendMarkdown(chatId, output);
+      }
+      return;
+    }
+
     // Mark session as started after first successful call
     const wasNew = !session.started;
     if (wasNew) markSessionStarted(chatId);
@@ -2426,7 +2504,26 @@ async function askClaude(bot, chatId, prompt) {
       // Interrupted by message queue — suppress error, queue timer will handle it
       log('INFO', `Task interrupted by new message for ${chatId}`);
     } else {
-      try { await bot.sendMessage(chatId, `Error: ${errMsg.slice(0, 200)}`); } catch { /* */ }
+      // Auto-fallback: if custom provider/model fails, revert to anthropic + opus
+      const activeProv = providerMod ? providerMod.getActiveName() : 'anthropic';
+      const builtinModels = ['sonnet', 'opus', 'haiku'];
+      if (activeProv !== 'anthropic' || !builtinModels.includes(model)) {
+        log('WARN', `Custom provider/model failed (${activeProv}/${model}), falling back to anthropic/opus`);
+        try {
+          if (providerMod && activeProv !== 'anthropic') providerMod.setActive('anthropic');
+          const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
+          if (!cfg.daemon) cfg.daemon = {};
+          cfg.daemon.model = 'opus';
+          fs.writeFileSync(CONFIG_FILE, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+          config = loadConfig();
+          await bot.sendMessage(chatId, `⚠️ ${activeProv}/${model} 失败，已回退到 anthropic/opus\n原因: ${errMsg.slice(0, 100)}`);
+        } catch (fallbackErr) {
+          log('ERROR', `Fallback failed: ${fallbackErr.message}`);
+          try { await bot.sendMessage(chatId, `Error: ${errMsg.slice(0, 200)}`); } catch { /* */ }
+        }
+      } else {
+        try { await bot.sendMessage(chatId, `Error: ${errMsg.slice(0, 200)}`); } catch { /* */ }
+      }
     }
   }
 }
@@ -2559,7 +2656,13 @@ async function main() {
       if (!KNOWN_DAEMON.includes(key)) log('WARN', `Config: unknown daemon.${key} (typo?)`);
     }
     if (config.daemon.model && !VALID_MODELS.includes(config.daemon.model)) {
-      log('WARN', `Config: daemon.model="${config.daemon.model}" is not a known model`);
+      // Custom model names are valid when using non-anthropic providers
+      const activeProv = providerMod ? providerMod.getActiveName() : 'anthropic';
+      if (activeProv === 'anthropic') {
+        log('WARN', `Config: daemon.model="${config.daemon.model}" is not a known model`);
+      } else {
+        log('INFO', `Config: custom model "${config.daemon.model}" for provider "${activeProv}"`);
+      }
     }
   }
 
