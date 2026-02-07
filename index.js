@@ -13,6 +13,7 @@ const BRAIN_FILE = path.join(HOME_DIR, '.claude_profile.yaml');
 const PROJECT_FILE = path.join(process.cwd(), 'CLAUDE.md');
 const METAME_DIR = path.join(HOME_DIR, '.metame');
 const CLAUDE_SETTINGS = path.join(HOME_DIR, '.claude', 'settings.json');
+const CLAUDE_MCP_CONFIG = path.join(HOME_DIR, '.claude', 'mcp.json');
 const SIGNAL_CAPTURE_SCRIPT = path.join(METAME_DIR, 'signal-capture.js');
 
 // ---------------------------------------------------------
@@ -86,6 +87,39 @@ function ensureHookInstalled() {
 }
 
 ensureHookInstalled();
+
+// ---------------------------------------------------------
+// 1.6b AUTO-REGISTER PLAYWRIGHT MCP (Browser Automation)
+// ---------------------------------------------------------
+function ensurePlaywrightMCP() {
+  try {
+    const claudeDir = path.join(HOME_DIR, '.claude');
+    if (!fs.existsSync(claudeDir)) {
+      fs.mkdirSync(claudeDir, { recursive: true });
+    }
+
+    let mcpConfig = {};
+    if (fs.existsSync(CLAUDE_MCP_CONFIG)) {
+      mcpConfig = JSON.parse(fs.readFileSync(CLAUDE_MCP_CONFIG, 'utf8'));
+    }
+
+    if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
+
+    if (!mcpConfig.mcpServers.playwright) {
+      mcpConfig.mcpServers.playwright = {
+        command: 'npx',
+        args: ['-y', '@playwright/mcp@latest', '--browser', 'chrome']
+      };
+      fs.writeFileSync(CLAUDE_MCP_CONFIG, JSON.stringify(mcpConfig, null, 2), 'utf8');
+      console.log("🌐 MetaMe: Playwright browser MCP registered.");
+    }
+  } catch (e) {
+    // Non-fatal: MCP registration failure shouldn't block launch
+    console.error("⚠️  Playwright MCP setup skipped:", e.message);
+  }
+}
+
+ensurePlaywrightMCP();
 
 // ---------------------------------------------------------
 // 1.7 PASSIVE DISTILLATION (Background, post-launch)
