@@ -482,8 +482,10 @@ async function startTelegramBridge(config, executeTaskByName) {
             bot.answerCallback(cb.id).catch(() => {});
             if (chatId && cb.data) {
               if (!allowedIds.includes(chatId)) continue;
-              // callback_data is a command string, e.g. "/resume <session-id>"
-              await handleCommand(bot, chatId, cb.data, config, executeTaskByName);
+              // Fire-and-forget: don't block poll loop (enables message queue)
+              handleCommand(bot, chatId, cb.data, config, executeTaskByName).catch(e => {
+                log('ERROR', `Telegram callback handler error: ${e.message}`);
+              });
             }
             continue;
           }
@@ -527,7 +529,10 @@ async function startTelegramBridge(config, executeTaskByName) {
                 ? `User uploaded a file to the project: ${destPath}\nUser says: "${caption}"`
                 : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
 
-              await handleCommand(bot, chatId, prompt, config, executeTaskByName);
+              // Fire-and-forget: don't block poll loop (enables message queue)
+              handleCommand(bot, chatId, prompt, config, executeTaskByName).catch(e => {
+                log('ERROR', `Telegram file handler error: ${e.message}`);
+              });
             } catch (err) {
               log('ERROR', `File download failed: ${err.message}`);
               await bot.sendMessage(chatId, `❌ Download failed: ${err.message}`);
@@ -537,7 +542,10 @@ async function startTelegramBridge(config, executeTaskByName) {
 
           // Text message (commands or natural language)
           if (msg.text) {
-            await handleCommand(bot, chatId, msg.text.trim(), config, executeTaskByName);
+            // Fire-and-forget: don't block poll loop (enables message queue)
+            handleCommand(bot, chatId, msg.text.trim(), config, executeTaskByName).catch(e => {
+              log('ERROR', `Telegram handler error: ${e.message}`);
+            });
           }
         }
       } catch (e) {
