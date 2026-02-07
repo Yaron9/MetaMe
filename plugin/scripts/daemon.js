@@ -1266,167 +1266,110 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       return;
     }
 
-    // Find session .jsonl file (scan Claude's native projects directory)
-    const sessionFile = findSessionFile(session.id);
-    if (!sessionFile) {
-      await bot.sendMessage(chatId, 'Session file not found.');
+    const cwd = session.cwd;
+    const arg = text.slice(5).trim();
+
+    // Git-based undo: list checkpoints or reset to one
+    const checkpoints = listCheckpoints(cwd);
+    if (checkpoints.length === 0) {
+      await bot.sendMessage(chatId, '⚠️ 没有可用的回退点（无 checkpoint commit）');
       return;
     }
 
-    try {
-      const fileContent = fs.readFileSync(sessionFile, 'utf8');
-      const lines = fileContent.split('\n').filter(l => l.trim());
-
-      // Validate format: first line should be parseable with a known type
-      try {
-        const first = JSON.parse(lines[0]);
-        if (!first.type) {
-          await bot.sendMessage(chatId, '⚠️ Session 格式不兼容，Claude Code 可能已升级');
-          return;
-        }
-      } catch {
-        await bot.sendMessage(chatId, '⚠️ Session 文件损坏');
-        return;
-      }
-
-      // Session structure: user → assistant(s) → snapshot(s)
-      // A "turn" = a user message. The snapshot BEFORE it = file state before that turn.
-      let lastSnapshotIdx = -1;
-      const turns = []; // { lineIdx, userPrompt, timestamp, preSnapshotIdx }
-      for (let i = 0; i < lines.length; i++) {
-        try {
-          const obj = JSON.parse(lines[i]);
-          if (obj.type === 'file-history-snapshot') {
-            lastSnapshotIdx = i;
-          } else if (obj.type === 'user') {
-            const m = obj.message || {};
-            const c = m.content || '';
-            let userText = '';
-            if (typeof c === 'string') userText = c;
-            else if (Array.isArray(c)) {
-              for (const b of c) { if (b.type === 'text') { userText = b.text; break; } }
-            }
-            // Skip system/internal messages
-            if (userText && !userText.startsWith('<task-notification') && !userText.startsWith('[Request interrupted')) {
-              turns.push({
-                lineIdx: i,
-                userPrompt: userText.slice(0, 30),
-                timestamp: obj.timestamp || '',
-                preSnapshotIdx: lastSnapshotIdx,
-              });
-            }
-          }
-        } catch {}
-      }
-
-      if (turns.length === 0) {
-        await bot.sendMessage(chatId, 'Nothing to undo.');
-        return;
-      }
-
-      const arg = text.slice(5).trim();
-
-      // /undo (no arg) — show recent turns to pick from
-      if (!arg) {
-        const recent = turns.slice(-6).reverse(); // last 6, newest first
-        if (bot.sendButtons) {
-          const buttons = recent.map((t) => {
-            const ago = t.timestamp ? formatRelativeTime(t.timestamp) : '';
-            const label = t.userPrompt || '...';
-            const display = ago ? `${label} (${ago})` : label;
-            return [{ text: `⏪ ${display}`, callback_data: `/undo ${t.lineIdx}` }];
-          });
-          await bot.sendButtons(chatId, '回退到哪一轮？点击回退该轮及之后的所有操作:', buttons);
-        } else {
-          let msg = '回退到哪一轮？回复 /undo <编号>\n\n';
-          recent.forEach((t) => {
-            const ago = t.timestamp ? formatRelativeTime(t.timestamp) : '';
-            msg += `${t.lineIdx}. ${t.userPrompt || '...'} ${ago ? '(' + ago + ')' : ''}\n`;
-          });
-          await bot.sendMessage(chatId, msg);
-        }
-        return;
-      }
-
-      // /undo <lineIdx> — execute undo to that point
-      const targetLineIdx = parseInt(arg, 10);
-      const targetTurn = turns.find(t => t.lineIdx === targetLineIdx);
-      if (!targetTurn) {
-        await bot.sendMessage(chatId, 'Invalid undo target.');
-        return;
-      }
-
-      // File restoration: diff the pre-turn snapshot vs the last snapshot
-      const fileHistoryDir = path.join(HOME, '.claude', 'file-history', session.id);
-
-      // Pre-turn snapshot = file state before the undone turns
-      let targetBackups = {};
-      if (targetTurn.preSnapshotIdx >= 0) {
-        try {
-          const obj = JSON.parse(lines[targetTurn.preSnapshotIdx]);
-          targetBackups = (obj.snapshot && obj.snapshot.trackedFileBackups) || {};
-        } catch {}
-      }
-
-      // Current snapshot = file state now (last snapshot in the file)
-      let currentBackups = {};
-      for (let i = lines.length - 1; i >= 0; i--) {
-        try {
-          const obj = JSON.parse(lines[i]);
-          if (obj.type === 'file-history-snapshot') {
-            currentBackups = (obj.snapshot && obj.snapshot.trackedFileBackups) || {};
-            break;
-          }
-        } catch {}
-      }
-
-      // Truncate session: keep everything before the target user message
-      const kept = lines.slice(0, targetLineIdx);
-      fs.writeFileSync(sessionFile, kept.join('\n') + '\n', 'utf8');
-
-      // Restore files by snapshot diff (same mechanism as Claude Code ESC×2)
-      const restored = [];
-      const deleted = [];
-
-      for (const [fp, info] of Object.entries(currentBackups)) {
-        const targetInfo = targetBackups[fp];
-        if (!targetInfo) {
-          // File newly tracked after target → delete
-          try { if (fs.existsSync(fp)) { fs.unlinkSync(fp); deleted.push(fp); } } catch {}
-        } else if (targetInfo.backupFileName !== info.backupFileName) {
-          // File changed → restore to target version
-          const backupPath = path.join(fileHistoryDir, targetInfo.backupFileName);
-          try {
-            if (fs.existsSync(backupPath)) {
-              fs.writeFileSync(fp, fs.readFileSync(backupPath));
-              restored.push(fp);
-            }
-          } catch {}
-        }
-      }
-
-      // Files deleted during undone turns → restore from target backup
-      for (const [fp, info] of Object.entries(targetBackups)) {
-        if (!currentBackups[fp] && info.backupFileName) {
-          const backupPath = path.join(fileHistoryDir, info.backupFileName);
-          try {
-            if (fs.existsSync(backupPath)) {
-              fs.writeFileSync(fp, fs.readFileSync(backupPath));
-              restored.push(fp);
-            }
-          } catch {}
-        }
-      }
-
-      const turnsRemoved = turns.filter(t => t.lineIdx >= targetLineIdx).length;
-      const allAffected = [...restored, ...deleted];
-      const turnsMsg = `⏪ 回退了 ${turnsRemoved} 轮对话`;
-      if (allAffected.length > 0) {
-        const fileList = allAffected.map(f => path.basename(f)).join(', ');
-        await bot.sendMessage(chatId, `${turnsMsg}\n📁 恢复 ${restored.length} / 删除 ${deleted.length}: ${fileList}`);
+    if (!arg) {
+      // /undo (no arg) — show recent checkpoints to pick from
+      const recent = checkpoints.slice(0, 6); // newest first (already sorted)
+      if (bot.sendButtons) {
+        const buttons = recent.map((cp, idx) => {
+          // Extract timestamp from message: "[metame-checkpoint] 2026-02-08T12-34-56"
+          const ts = cp.message.replace(CHECKPOINT_PREFIX, '').trim();
+          const label = ts || cp.hash.slice(0, 8);
+          return [{ text: `⏪ ${label}`, callback_data: `/undo ${cp.hash.slice(0, 10)}` }];
+        });
+        await bot.sendButtons(chatId, `📌 ${checkpoints.length} 个回退点 (git checkpoint):`, buttons);
       } else {
-        await bot.sendMessage(chatId, `${turnsMsg}\n📁 无文件变更需要恢复`);
+        let msg = '回退到哪个点？回复 /undo <hash>\n\n';
+        recent.forEach(cp => {
+          const ts = cp.message.replace(CHECKPOINT_PREFIX, '').trim();
+          msg += `${cp.hash.slice(0, 8)} ${ts}\n`;
+        });
+        await bot.sendMessage(chatId, msg);
       }
+      return;
+    }
+
+    // /undo <hash> — execute git reset
+    try {
+      // Verify the hash exists and is a checkpoint
+      const match = checkpoints.find(cp => cp.hash.startsWith(arg));
+      if (!match) {
+        await bot.sendMessage(chatId, `❌ 未找到 checkpoint: ${arg}`);
+        return;
+      }
+
+      // Get list of files that will change
+      let diffFiles = '';
+      try {
+        diffFiles = execSync(`git diff --name-only HEAD ${match.hash}`, { cwd, encoding: 'utf8', timeout: 5000 }).trim();
+      } catch { /* ignore */ }
+
+      // Reset working tree to checkpoint
+      execSync(`git reset --hard ${match.hash}`, { cwd, stdio: 'ignore', timeout: 10000 });
+
+      // Also truncate JSONL session history (best-effort, non-fatal)
+      try {
+        const sessionFile = findSessionFile(session.id);
+        if (sessionFile) {
+          const fileContent = fs.readFileSync(sessionFile, 'utf8');
+          const lines = fileContent.split('\n').filter(l => l.trim());
+          // Find the last user message that was sent BEFORE this checkpoint
+          // Use the checkpoint timestamp from the commit message
+          const cpTs = match.message.replace(CHECKPOINT_PREFIX, '').trim().replace(/-/g, (m, offset) => {
+            // Convert "2026-02-08T12-34-56" back to approximate ISO
+            if (offset === 4 || offset === 7) return '-'; // date separators
+            if (offset === 10) return 'T';
+            if (offset === 13 || offset === 16) return ':';
+            return m;
+          });
+          const cpTime = new Date(cpTs).getTime();
+          if (cpTime) {
+            // Find the first user message AFTER checkpoint time → truncate before it
+            let cutIdx = -1;
+            for (let i = lines.length - 1; i >= 0; i--) {
+              try {
+                const obj = JSON.parse(lines[i]);
+                if (obj.type === 'user' && obj.timestamp) {
+                  const msgTime = new Date(obj.timestamp).getTime();
+                  if (msgTime && msgTime >= cpTime) {
+                    cutIdx = i;
+                  } else {
+                    break; // Found a message before checkpoint, stop
+                  }
+                }
+              } catch {}
+            }
+            if (cutIdx > 0) {
+              const kept = lines.slice(0, cutIdx);
+              fs.writeFileSync(sessionFile, kept.join('\n') + '\n', 'utf8');
+              log('INFO', `Truncated session at line ${cutIdx} (${lines.length - cutIdx} lines removed)`);
+            }
+          }
+        }
+      } catch (truncErr) {
+        log('WARN', `Session truncation failed (non-fatal): ${truncErr.message}`);
+      }
+
+      const fileList = diffFiles ? diffFiles.split('\n').map(f => path.basename(f)).join(', ') : '';
+      const fileCount = diffFiles ? diffFiles.split('\n').length : 0;
+      const ts = match.message.replace(CHECKPOINT_PREFIX, '').trim();
+      let msg = `⏪ 已回退到 ${ts}\n🔀 git reset --hard ${match.hash.slice(0, 8)}`;
+      if (fileCount > 0) {
+        msg += `\n📁 ${fileCount} 个文件恢复: ${fileList}`;
+      }
+      await bot.sendMessage(chatId, msg);
+
+      // Cleanup old checkpoints in background
+      cleanupCheckpoints(cwd);
     } catch (e) {
       await bot.sendMessage(chatId, `❌ Undo failed: ${e.message}`);
     }
@@ -2083,6 +2026,67 @@ const messageQueue = new Map(); // chatId -> { messages: string[], notified: fal
 // Caffeinate process for /nosleep toggle (macOS only)
 let caffeinateProcess = null;
 
+// ── Git-based checkpoint for /undo ──────────────────────────────────
+const CHECKPOINT_PREFIX = '[metame-checkpoint]';
+const MAX_CHECKPOINTS = 20;
+
+/**
+ * Create a git checkpoint commit before a Claude turn.
+ * Returns the commit hash or null if nothing to commit / not a git repo.
+ */
+function gitCheckpoint(cwd) {
+  try {
+    // Quick check: is this a git repo?
+    execSync('git rev-parse --is-inside-work-tree', { cwd, stdio: 'ignore' });
+    // Stage all changes (respects .gitignore)
+    execSync('git add -A', { cwd, stdio: 'ignore', timeout: 5000 });
+    // Check if there's anything to commit
+    const status = execSync('git status --porcelain', { cwd, encoding: 'utf8', timeout: 5000 }).trim();
+    if (!status) return null; // Working tree clean, no checkpoint needed
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const msg = `${CHECKPOINT_PREFIX} ${ts}`;
+    execSync(`git commit -m "${msg}" --no-verify`, { cwd, stdio: 'ignore', timeout: 10000 });
+    const hash = execSync('git rev-parse HEAD', { cwd, encoding: 'utf8', timeout: 3000 }).trim();
+    log('INFO', `Git checkpoint: ${hash.slice(0, 8)} in ${path.basename(cwd)}`);
+    return hash;
+  } catch {
+    return null; // Not a git repo or git error — silently skip
+  }
+}
+
+/**
+ * List recent checkpoint commits (newest first).
+ */
+function listCheckpoints(cwd, limit = 20) {
+  try {
+    const raw = execSync(
+      `git log --oneline --all --grep="${CHECKPOINT_PREFIX}" -n ${limit} --format="%H %s"`,
+      { cwd, encoding: 'utf8', timeout: 5000 }
+    ).trim();
+    if (!raw) return [];
+    return raw.split('\n').map(line => {
+      const spaceIdx = line.indexOf(' ');
+      return { hash: line.slice(0, spaceIdx), message: line.slice(spaceIdx + 1) };
+    });
+  } catch { return []; }
+}
+
+/**
+ * Clean up old checkpoint commits beyond MAX_CHECKPOINTS.
+ * Uses interactive rebase alternative: reset + cherry-pick is too complex.
+ * Simple approach: just keep them — git gc handles storage. Only delete if > 50.
+ */
+function cleanupCheckpoints(cwd) {
+  try {
+    const all = listCheckpoints(cwd, 100);
+    if (all.length <= MAX_CHECKPOINTS) return;
+    // Soft cleanup: for commits older than the 20th, they stay in git history
+    // but we don't actively manage them. Git's gc will handle unreachable objects.
+    // The real concern is clutter in git log — but these only show with --grep.
+    log('INFO', `${all.length} checkpoints in ${path.basename(cwd)}, consider: git rebase -i`);
+  } catch { /* ignore */ }
+}
+
 // File cache for button callbacks (shortId -> fullPath)
 const fileCache = new Map();
 const FILE_CACHE_TTL = 1800000; // 30 minutes
@@ -2379,6 +2383,9 @@ async function askClaude(bot, chatId, prompt) {
    - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
    - Multiple files: use multiple [[FILE:...]] tags]`;
   const fullPrompt = prompt + daemonHint;
+
+  // Git checkpoint before Claude modifies files (for /undo)
+  gitCheckpoint(session.cwd);
 
   // Use streaming mode to show progress
   // Telegram: edit status msg in-place; Feishu/others: send new messages
