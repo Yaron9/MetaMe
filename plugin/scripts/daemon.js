@@ -1144,6 +1144,12 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   }
 
   if (text === '/stop') {
+    // Clear message queue (don't process queued messages after stop)
+    if (messageQueue.has(chatId)) {
+      const q = messageQueue.get(chatId);
+      if (q.timer) clearTimeout(q.timer);
+      messageQueue.delete(chatId);
+    }
     const proc = activeProcesses.get(chatId);
     if (proc && proc.child) {
       proc.aborted = true;
@@ -1152,6 +1158,26 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     } else {
       await bot.sendMessage(chatId, 'No active task to stop.');
     }
+    return;
+  }
+
+  // /quit — restart session process (reloads MCP/config, keeps same session)
+  if (text === '/quit') {
+    // Stop running task if any
+    if (messageQueue.has(chatId)) {
+      const q = messageQueue.get(chatId);
+      if (q.timer) clearTimeout(q.timer);
+      messageQueue.delete(chatId);
+    }
+    const proc = activeProcesses.get(chatId);
+    if (proc && proc.child) {
+      proc.aborted = true;
+      proc.child.kill('SIGINT');
+    }
+    const session = getSession(chatId);
+    const name = session ? getSessionName(session.id) : null;
+    const label = name || (session ? session.id.slice(0, 8) : 'none');
+    await bot.sendMessage(chatId, `🔄 Session restarted. MCP/config reloaded.\n📁 ${session ? path.basename(session.cwd) : '~'} [${label}]`);
     return;
   }
 
@@ -1221,6 +1247,12 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   }
 
   if (text === '/undo' || text.startsWith('/undo ')) {
+    // Clear message queue
+    if (messageQueue.has(chatId)) {
+      const q = messageQueue.get(chatId);
+      if (q.timer) clearTimeout(q.timer);
+      messageQueue.delete(chatId);
+    }
     // Stop running task first
     const proc = activeProcesses.get(chatId);
     if (proc && proc.child) {
@@ -1584,6 +1616,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       '/session — 查看当前会话',
       '/stop — 中断当前任务 (ESC)',
       '/undo — 回退上一轮操作 (ESC×2)',
+      '/quit — 结束会话，重新加载 MCP/配置',
       '',
       `⚙️ /model [${currentModel}] /provider [${currentProvider}] /status /tasks /run /budget /reload`,
       '🔧 /doctor /fix /reset /sh <cmd>',
@@ -1594,9 +1627,42 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   }
 
   // --- Natural language → Claude Code session ---
-  // Block if a task is already running (prevent session conflict)
+  // If a task is running: interrupt + collect + merge
   if (activeProcesses.has(chatId)) {
-    await bot.sendMessage(chatId, '⏳ 任务进行中，请等待完成或发 /stop 中断');
+    const isFirst = !messageQueue.has(chatId);
+    if (isFirst) {
+      messageQueue.set(chatId, { messages: [], timer: null });
+    }
+    const q = messageQueue.get(chatId);
+    q.messages.push(text);
+    // Only notify once (first message), subsequent ones silently queue
+    if (isFirst) {
+      await bot.sendMessage(chatId, '📝 收到，中断当前任务后一起处理');
+    }
+    // Interrupt the running Claude process
+    const proc = activeProcesses.get(chatId);
+    if (proc && proc.child && !proc.aborted) {
+      proc.aborted = true;
+      proc.child.kill('SIGINT');
+    }
+    // Debounce: wait 5s for more messages before processing
+    if (q.timer) clearTimeout(q.timer);
+    q.timer = setTimeout(async () => {
+      // Wait for active process to fully exit (up to 10s)
+      for (let i = 0; i < 20 && activeProcesses.has(chatId); i++) {
+        await sleep(500);
+      }
+      const msgs = q.messages.splice(0);
+      messageQueue.delete(chatId);
+      if (msgs.length === 0) return;
+      const combined = msgs.join('\n');
+      log('INFO', `Processing ${msgs.length} queued message(s) for ${chatId}`);
+      try {
+        await handleCommand(bot, chatId, combined, config, executeTaskByName);
+      } catch (e) {
+        log('ERROR', `Queue dispatch failed: ${e.message}`);
+      }
+    }, 5000);
     return;
   }
   const cd = checkCooldown(chatId);
@@ -1953,6 +2019,9 @@ const CONTENT_EXTENSIONS = new Set([
 
 // Active Claude processes per chat (for /stop)
 const activeProcesses = new Map(); // chatId -> { child, aborted }
+
+// Message queue for messages received while a task is running
+const messageQueue = new Map(); // chatId -> { messages: string[], notified: false }
 
 // File cache for button callbacks (shortId -> fullPath)
 const fileCache = new Map();
@@ -2330,6 +2399,9 @@ async function askClaude(bot, chatId, prompt) {
         log('ERROR', `askClaude retry failed: ${(retry.error || '').slice(0, 200)}`);
         try { await bot.sendMessage(chatId, `Error: ${(retry.error || '').slice(0, 200)}`); } catch { /* */ }
       }
+    } else if (errMsg === 'Stopped by user' && messageQueue.has(chatId)) {
+      // Interrupted by message queue — suppress error, queue timer will handle it
+      log('INFO', `Task interrupted by new message for ${chatId}`);
     } else {
       try { await bot.sendMessage(chatId, `Error: ${errMsg.slice(0, 200)}`); } catch { /* */ }
     }
