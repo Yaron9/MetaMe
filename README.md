@@ -300,7 +300,7 @@ Uploaded files are saved to `<project>/upload/`. Claude won't read large files a
 
 *`/stop` — ESC equivalent:* Sends SIGINT to the running Claude process. Instant interruption, just like pressing ESC in your terminal.
 
-*`/undo` — ESC×2 equivalent:* Interactive turn picker showing your actual messages. Select which turn to roll back to — session history is truncated and all modified files are restored using Claude's native `~/.claude/file-history/` backups (the exact same mechanism as pressing ESC twice in the terminal). Files created during undone turns are deleted; files deleted during undone turns are restored. Zero risk.
+*`/undo` — git-based code rollback (v1.3.16):* Before each Claude turn, the daemon auto-commits a `[metame-checkpoint]` to git. `/undo` lists recent checkpoints; tap one to `git reset --hard` back to that state. Session history is also truncated. Reliable across both `-p` mode and interactive sessions — no dependency on Claude CLI internals.
 
 ```
 You: /undo
@@ -310,7 +310,7 @@ Bot: 回退到哪一轮？
      ⏪ 添加测试用例 (30分钟前)
 ```
 
-**Concurrent task protection:** If a Claude task is already running, new messages are blocked with a hint to wait or `/stop`. Prevents session conflicts.
+**Message queue & interrupt (v1.3.16):** If a Claude task is already running, new messages interrupt the current task and queue up. After 5 seconds of no new input, all queued messages are merged and processed together. Works identically on both Telegram and Feishu.
 
 **Auto-restart (v1.3.13):** The daemon watches its own code for changes. When you update MetaMe (via npm or git), the daemon automatically restarts with the new code — no manual restart needed. A notification is pushed to confirm.
 
@@ -330,7 +330,7 @@ Bot: 回退到哪一轮？
 | `/status` | Daemon status + profile summary |
 | `/tasks` | List scheduled heartbeat tasks |
 | `/run <name>` | Run a task immediately |
-| `/model [name]` | Interactive model switcher with buttons (sonnet, opus, haiku). Auto-backs up config before switching. |
+| `/model [name]` | Interactive model switcher with buttons (sonnet, opus, haiku). Accepts any model name when using a custom provider. Auto-backs up config before switching. |
 | `/list` | File browser with clickable buttons — folders expand, files download. Zero tokens. |
 | `/budget` | Today's token usage |
 | `/quiet` | Silence mirror/reflections for 48h |
@@ -590,6 +590,7 @@ A: No. Your profile stays local at `~/.claude_profile.yaml`. MetaMe simply passe
 
 | Version | Highlights |
 |---------|------------|
+| **v1.3.16** | Git-based `/undo` (auto-checkpoint before each turn, `git reset --hard` rollback), `/nosleep` toggle (macOS caffeinate), custom provider model passthrough (`/model` accepts any name for non-anthropic providers), auto-fallback to anthropic/opus on provider failure, message queue works on Telegram (fire-and-forget poll loop), lazy background distill |
 | **v1.3.15** | Native Playwright MCP (browser automation for all users), `/list` interactive file browser with buttons, Feishu image download fix, Skill/MCP/Agent status push, hot restart reliability (single notification, no double instance) |
 | **v1.3.14** | Fix daemon crash on fresh install (missing bundled scripts) |
 | **v1.3.13** | `/doctor` diagnostics, `/sh` direct shell, `/fix` config restore, `/model` interactive switcher with auto-backup, daemon state caching & config backup/restore |
