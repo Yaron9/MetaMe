@@ -52,6 +52,8 @@
 * **🔌 Provider Relay (v1.3.11):** Use any Anthropic-compatible API relay as your backend — no file mutation, no invasion. MetaMe injects `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` at spawn time. Separate provider roles for `active`, `distill`, and `daemon` tasks. CLI: `metame provider add/use/remove/test`. Config stored in `~/.metame/providers.yaml`.
 * **📊 Session History Bootstrap (v1.3.12):** Solves the cold-start problem — MetaMe previously needed 5-7 sessions before producing any visible feedback. Now, on first launch it auto-bootstraps your session history from existing Claude Code JSONL transcripts (zero API cost). Three complementary data layers: **Skeleton** (structural facts extracted locally — tools, duration, project, branch, intent), **Facets** (interaction quality from `/insights` — outcome, friction, satisfaction, when available), and **Haiku** (metacognitive judgments — cognitive load, zones, goal alignment, from the existing distill call). Patterns and mirror observations can appear from your very first MetaMe session.
 * **🏥 Emergency Recovery (v1.3.13):** `/doctor` interactive diagnostics with one-tap fix buttons, `/sh` direct shell access from your phone (bypasses Claude entirely — the lifeline when everything else is broken), automatic config backup before any setting change, `/fix` to restore last known good config. `/model` interactive model switcher with auto-backup.
+* **🌐 Browser Automation (v1.3.15):** Native Playwright MCP integration — auto-registered on first run. Every MetaMe user gets browser control capability out of the box. Combined with Skills, enables workflows like automated podcast publishing, form filling, and web scraping.
+* **📂 Interactive File Browser (v1.3.15):** `/list` shows clickable button cards — folders expand inline, files download on tap. Folder buttons survive daemon restarts (absolute paths, no expiry). Zero token cost.
 
 ## 🛠 Prerequisites
 
@@ -264,6 +266,9 @@ This resumes the latest session with all mobile messages included. Also works as
 📖 Read: 「config.yaml」
 ✏️ Edit: 「daemon.js」
 💻 Bash: 「git status」
+📦 Skill: 「wechat-publisher」
+🌐 Browser: 「navigate」
+🔌 MCP:server: 「action」
 ```
 
 **File transfer (v1.3.8):** Seamlessly move files between your phone and computer.
@@ -326,6 +331,7 @@ Bot: 回退到哪一轮？
 | `/tasks` | List scheduled heartbeat tasks |
 | `/run <name>` | Run a task immediately |
 | `/model [name]` | Interactive model switcher with buttons (sonnet, opus, haiku). Auto-backs up config before switching. |
+| `/list` | File browser with clickable buttons — folders expand, files download. Zero tokens. |
 | `/budget` | Today's token usage |
 | `/quiet` | Silence mirror/reflections for 48h |
 | `/reload` | Manually reload daemon.yaml (also auto-reloads on file change) |
@@ -584,6 +590,8 @@ A: No. Your profile stays local at `~/.claude_profile.yaml`. MetaMe simply passe
 
 | Version | Highlights |
 |---------|------------|
+| **v1.3.15** | Native Playwright MCP (browser automation for all users), `/list` interactive file browser with buttons, Feishu image download fix, Skill/MCP/Agent status push, hot restart reliability (single notification, no double instance) |
+| **v1.3.14** | Fix daemon crash on fresh install (missing bundled scripts) |
 | **v1.3.13** | `/doctor` diagnostics, `/sh` direct shell, `/fix` config restore, `/model` interactive switcher with auto-backup, daemon state caching & config backup/restore |
 | **v1.3.12** | Session history bootstrap (cold-start fix), three-layer data architecture (Skeleton + Facets + Haiku), session summary extraction |
 | **v1.3.11** | Goal alignment & drift detection, provider relay system for third-party models, `/insights` facet integration |

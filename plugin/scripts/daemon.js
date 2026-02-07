@@ -640,6 +640,106 @@ async function sendBrowse(bot, chatId, mode, dirPath) {
   }
 }
 
+const DIR_LIST_TYPE_EMOJI = {
+  '.md': '📄', '.txt': '📄', '.pdf': '📕',
+  '.js': '⚙️', '.ts': '⚙️', '.py': '🐍', '.json': '📋', '.yaml': '📋', '.yml': '📋',
+  '.png': '🖼️', '.jpg': '🖼️', '.jpeg': '🖼️', '.gif': '🖼️', '.svg': '🖼️', '.webp': '🖼️',
+  '.wav': '🎵', '.mp3': '🎵', '.m4a': '🎵', '.flac': '🎵',
+  '.mp4': '🎬', '.mov': '🎬',
+  '.csv': '📊', '.xlsx': '📊',
+  '.html': '🌐', '.css': '🎨',
+  '.sh': '💻', '.bash': '💻',
+};
+
+/**
+ * List directory contents with file info + download buttons + folder nav buttons.
+ * Zero token cost — pure daemon fs operation.
+ */
+async function sendDirListing(bot, chatId, baseDir, arg) {
+  let targetDir = baseDir;
+  let globFilter = null;
+
+  if (arg) {
+    if (arg.includes('*')) {
+      globFilter = arg;
+    } else {
+      const sub = path.resolve(baseDir, arg);
+      if (fs.existsSync(sub) && fs.statSync(sub).isDirectory()) {
+        targetDir = sub;
+      } else {
+        await bot.sendMessage(chatId, `❌ Not found: ${arg}`);
+        return;
+      }
+    }
+  }
+
+  try {
+    let entries = fs.readdirSync(targetDir, { withFileTypes: true });
+    if (globFilter) {
+      const pattern = globFilter.replace(/\./g, '\\.').replace(/\*/g, '.*');
+      const re = new RegExp('^' + pattern + '$', 'i');
+      entries = entries.filter(e => re.test(e.name));
+    }
+    entries.sort((a, b) => {
+      if (a.isDirectory() && !b.isDirectory()) return -1;
+      if (!a.isDirectory() && b.isDirectory()) return 1;
+      return a.name.localeCompare(b.name);
+    });
+    entries = entries.filter(e => !e.name.startsWith('.'));
+
+    if (entries.length === 0) {
+      await bot.sendMessage(chatId, `📁 ${path.basename(targetDir)}/\n(empty)`);
+      return;
+    }
+
+    const allButtons = [];
+    const MAX_BUTTONS = 20;
+
+    for (const entry of entries.slice(0, MAX_BUTTONS)) {
+      const fullPath = path.join(targetDir, entry.name);
+      if (entry.isDirectory()) {
+        // Use absolute path directly for folders (survives daemon restart)
+        // Fall back to shortenPath only if path is too long for callback_data (64 byte limit)
+        const cbPath = fullPath.length <= 58 ? fullPath : shortenPath(fullPath);
+        allButtons.push([{ text: `📂 ${entry.name}/`, callback_data: `/list ${cbPath}` }]);
+      } else {
+        const ext = path.extname(entry.name).toLowerCase();
+        const emoji = DIR_LIST_TYPE_EMOJI[ext] || '📎';
+        let size = '';
+        try {
+          const stat = fs.statSync(fullPath);
+          const bytes = stat.size;
+          if (bytes < 1024) size = ` ${bytes}B`;
+          else if (bytes < 1048576) size = ` ${(bytes / 1024).toFixed(0)}KB`;
+          else size = ` ${(bytes / 1048576).toFixed(1)}MB`;
+        } catch { /* ignore */ }
+        if (isContentFile(fullPath)) {
+          const shortId = cacheFile(fullPath);
+          allButtons.push([{ text: `${emoji} ${entry.name}${size}`, callback_data: `/file ${shortId}` }]);
+        } else {
+          // Non-downloadable files shown as info-only buttons (no action)
+          allButtons.push([{ text: `${emoji} ${entry.name}${size}`, callback_data: 'noop' }]);
+        }
+      }
+    }
+
+    const header = `📁 ${path.basename(targetDir)}/` + (entries.length > MAX_BUTTONS ? ` (${MAX_BUTTONS}/${entries.length})` : '');
+    if (allButtons.length > 0 && bot.sendButtons) {
+      await bot.sendButtons(chatId, header, allButtons);
+    } else {
+      // Fallback for adapters without button support
+      const lines = [header];
+      for (const entry of entries.slice(0, MAX_BUTTONS)) {
+        const isDir = entry.isDirectory();
+        lines.push(isDir ? `  📂 ${entry.name}/` : `  📎 ${entry.name}`);
+      }
+      await bot.sendMessage(chatId, lines.join('\n'));
+    }
+  } catch (e) {
+    await bot.sendMessage(chatId, `❌ ${e.message}`);
+  }
+}
+
 /**
  * Unified command handler — shared by Telegram & Feishu
  */
@@ -653,6 +753,9 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     const dirPath = expandPath(parts.slice(1).join(' '));
     if (mode && dirPath && fs.existsSync(dirPath)) {
       await sendBrowse(bot, chatId, mode, dirPath);
+    } else if (/^p\d+$/.test(dirPath)) {
+      await bot.sendMessage(chatId, '⚠️ Button expired. Pick again:');
+      await sendDirPicker(bot, chatId, mode || 'cd', 'Switch workdir:');
     } else {
       await bot.sendMessage(chatId, 'Invalid browse path.');
     }
@@ -857,6 +960,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
         const name = target.customTitle || target.summary || '';
         const label = name ? name.slice(0, 40) : target.sessionId.slice(0, 8);
         await bot.sendMessage(chatId, `🔄 Synced to: ${label}\n📁 ${path.basename(target.projectPath)}`);
+        await sendDirListing(bot, chatId, target.projectPath, null);
         return;
       } else {
         await bot.sendMessage(chatId, 'No recent session found.');
@@ -864,7 +968,13 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       }
     }
     if (!fs.existsSync(newCwd)) {
-      await bot.sendMessage(chatId, `Path not found: ${newCwd}`);
+      // Likely an expired path shortcode (e.g. p16) from a daemon restart
+      if (/^p\d+$/.test(newCwd)) {
+        await bot.sendMessage(chatId, '⚠️ Button expired (daemon restarted). Pick again:');
+        await sendDirPicker(bot, chatId, 'cd', 'Switch workdir:');
+      } else {
+        await bot.sendMessage(chatId, `Path not found: ${newCwd}`);
+      }
       return;
     }
     const state2 = loadState();
@@ -888,6 +998,26 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       state2.sessions[chatId].cwd = newCwd;
       saveState(state2);
       await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)}`);
+    }
+    await sendDirListing(bot, chatId, newCwd, null);
+    return;
+  }
+
+  // /list [subdir|glob|fullpath] — list files (zero token, daemon-only)
+  if (text === '/list' || text.startsWith('/list ')) {
+    const session = getSession(chatId);
+    const cwd = session?.cwd || HOME;
+    const arg = text.slice(5).trim();
+    // If arg is an absolute or ~ path, list that directly
+    const expanded = arg ? expandPath(arg) : null;
+    if (expanded && /^p\d+$/.test(expanded)) {
+      // Expired shortcode from daemon restart
+      await bot.sendMessage(chatId, '⚠️ Button expired. Refreshing...');
+      await sendDirListing(bot, chatId, cwd, null);
+    } else if (expanded && path.isAbsolute(expanded) && fs.existsSync(expanded) && fs.statSync(expanded).isDirectory()) {
+      await sendDirListing(bot, chatId, expanded, null);
+    } else {
+      await sendDirListing(bot, chatId, cwd, arg || null);
     }
     return;
   }
@@ -1771,6 +1901,9 @@ const TOOL_EMOJI = {
   WebFetch: '🌐',
   WebSearch: '🔍',
   Task: '🤖',
+  Skill: '📦',
+  TodoWrite: '📋',
+  NotebookEdit: '📓',
   default: '🔧',
 };
 
@@ -1886,9 +2019,33 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
                   lastStatusTime = now;
                   const emoji = TOOL_EMOJI[toolName] || TOOL_EMOJI.default;
 
-                  // Extract brief context from tool input
+                  // Resolve display name and context for MCP/Skill/Task tools
+                  let displayName = toolName;
+                  let displayEmoji = emoji;
                   let context = '';
-                  if (block.input) {
+
+                  if (toolName === 'Skill' && block.input?.skill) {
+                    // Skill invocation: show skill name
+                    context = block.input.skill;
+                  } else if (toolName === 'Task' && block.input?.description) {
+                    // Agent task: show description
+                    context = block.input.description.slice(0, 30);
+                  } else if (toolName.startsWith('mcp__')) {
+                    // MCP tool: mcp__server__action → "MCP server: action"
+                    const parts = toolName.split('__');
+                    const server = parts[1] || 'unknown';
+                    const action = parts.slice(2).join('_') || '';
+                    if (server === 'playwright') {
+                      displayEmoji = '🌐';
+                      displayName = 'Browser';
+                      context = action.replace(/_/g, ' ');
+                    } else {
+                      displayEmoji = '🔌';
+                      displayName = `MCP:${server}`;
+                      context = action.replace(/_/g, ' ').slice(0, 25);
+                    }
+                  } else if (block.input) {
+                    // Standard tools: extract brief context
                     if (block.input.file_path) {
                       // Insert zero-width space before extension to prevent link parsing
                       const basename = path.basename(block.input.file_path);
@@ -1909,8 +2066,8 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
                   }
 
                   const status = context
-                    ? `${emoji} ${toolName}: 「${context}」`
-                    : `${emoji} ${toolName}...`;
+                    ? `${displayEmoji} ${displayName}: 「${context}」`
+                    : `${displayEmoji} ${displayName}...`;
 
                   if (onStatus) {
                     onStatus(status).catch(() => {});
@@ -2041,11 +2198,14 @@ async function askClaude(bot, chatId, prompt) {
    - Multiple files: use multiple [[FILE:...]] tags]`;
   const fullPrompt = prompt + daemonHint;
 
-  // Use streaming mode to show progress (edit status msg in-place)
+  // Use streaming mode to show progress
+  // Telegram: edit status msg in-place; Feishu/others: send new messages
   const onStatus = async (status) => {
     try {
       if (statusMsgId && bot.editMessage) {
         await bot.editMessage(chatId, statusMsgId, status);
+      } else {
+        await bot.sendMessage(chatId, status);
       }
     } catch { /* ignore status update failures */ }
   };
@@ -2219,8 +2379,11 @@ function killExistingDaemon() {
     if (oldPid && oldPid !== process.pid) {
       process.kill(oldPid, 'SIGTERM');
       log('INFO', `Killed existing daemon (PID: ${oldPid})`);
-      // Brief pause to let it clean up
-      require('child_process').execSync('sleep 1', { stdio: 'ignore' });
+      // Wait for old process to actually exit (up to 5s)
+      for (let i = 0; i < 10; i++) {
+        try { process.kill(oldPid, 0); } catch { break; } // throws if process gone
+        require('child_process').execSync('sleep 0.5', { stdio: 'ignore' });
+      }
     }
   } catch {
     // Process doesn't exist or already dead
@@ -2351,28 +2514,27 @@ async function main() {
 
   // Auto-restart: watch daemon.js for code changes (hot restart)
   const DAEMON_SCRIPT = path.join(METAME_DIR, 'daemon.js');
+  const _startTime = Date.now();
   let _restartDebounce = null;
   fs.watchFile(DAEMON_SCRIPT, { interval: 3000 }, (curr, prev) => {
     if (curr.mtimeMs === prev.mtimeMs) return;
+    // Ignore file changes within 10s of startup (avoids restart loop)
+    if (Date.now() - _startTime < 10000) return;
     if (_restartDebounce) clearTimeout(_restartDebounce);
-    _restartDebounce = setTimeout(async () => {
-      log('INFO', 'daemon.js changed on disk — auto-restarting...');
-      await notifyFn('🔄 Code updated, daemon restarting...').catch(() => {});
-      // Spawn new daemon process, then exit
-      const { spawn } = require('child_process');
-      const newDaemon = spawn(process.execPath, [DAEMON_SCRIPT], {
-        detached: true,
-        stdio: 'ignore',
-        env: { ...process.env, METAME_ROOT: process.env.METAME_ROOT || path.dirname(__dirname) },
-      });
-      newDaemon.unref();
-      setTimeout(() => process.exit(0), 500);
+    _restartDebounce = setTimeout(() => {
+      log('INFO', 'daemon.js changed on disk — exiting for restart...');
+      // Don't notify here — the NEW process will notify after startup
+      process.exit(0);
     }, 2000);
   });
 
   // Start bridges (both can run simultaneously)
   telegramBridge = await startTelegramBridge(config, executeTaskByName);
   feishuBridge = await startFeishuBridge(config, executeTaskByName);
+
+  // Notify once on startup (single message, no duplicates)
+  await sleep(1500); // Let polling settle
+  await notifyFn('✅ Daemon ready.').catch(() => {});
 
   // Graceful shutdown
   const shutdown = () => {
