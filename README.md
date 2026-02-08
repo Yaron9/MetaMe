@@ -590,6 +590,7 @@ A: No. Your profile stays local at `~/.claude_profile.yaml`. MetaMe simply passe
 
 | Version | Highlights |
 |---------|------------|
+| **v1.3.17** | Fix new-user onboarding (Genesis interview was never injected, CLAUDE.md content accumulated across runs). Marker-based CLAUDE.md cleanup, unified onboarding protocol with setup wizard (Telegram/Feishu auto-fetch chat ID), `--append-system-prompt` guarantees interview activation, full mobile permissions (`dangerously_skip_permissions`), fix `/publish` false-success on npm failure |
 | **v1.3.16** | Git-based `/undo` (auto-checkpoint before each turn, `git reset --hard` rollback), `/nosleep` toggle (macOS caffeinate), custom provider model passthrough (`/model` accepts any name for non-anthropic providers), auto-fallback to anthropic/opus on provider failure, message queue works on Telegram (fire-and-forget poll loop), lazy background distill |
 | **v1.3.15** | Native Playwright MCP (browser automation for all users), `/list` interactive file browser with buttons, Feishu image download fix, Skill/MCP/Agent status push, hot restart reliability (single notification, no double instance) |
 | **v1.3.14** | Fix daemon crash on fresh install (missing bundled scripts) |
