@@ -2369,9 +2369,14 @@ async function askClaude(bot, chatId, prompt) {
   const daemonCfg = loadConfig().daemon || {};
   const model = daemonCfg.model || 'opus';
   args.push('--model', model);
-  // Per-session allowed tools from daemon config
-  const sessionAllowed = daemonCfg.session_allowed_tools || [];
-  for (const tool of sessionAllowed) args.push('--allowedTools', tool);
+  // Permission mode: full access (mobile users can't click "allow")
+  if (daemonCfg.dangerously_skip_permissions) {
+    args.push('--dangerously-skip-permissions');
+  } else {
+    // Legacy: per-tool whitelist
+    const sessionAllowed = daemonCfg.session_allowed_tools || [];
+    for (const tool of sessionAllowed) args.push('--allowedTools', tool);
+  }
   if (session.id === '__continue__') {
     // /continue — resume most recent conversation in cwd
     args.push('--continue');
@@ -2484,7 +2489,11 @@ async function askClaude(bot, chatId, prompt) {
       session = createSession(chatId, session.cwd);
 
       const retryArgs = ['-p', '--session-id', session.id];
-      for (const tool of sessionAllowed) retryArgs.push('--allowedTools', tool);
+      if (daemonCfg.dangerously_skip_permissions) {
+        retryArgs.push('--dangerously-skip-permissions');
+      } else {
+        for (const tool of sessionAllowed) retryArgs.push('--allowedTools', tool);
+      }
 
       const retry = await spawnClaudeStreaming(retryArgs, prompt, session.cwd, onStatus);
       if (retry.output) {
@@ -2661,7 +2670,7 @@ async function main() {
 
   // Config validation: warn on unknown/suspect fields
   const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'heartbeat', 'budget'];
-  const KNOWN_DAEMON = ['model', 'log_max_size', 'heartbeat_check_interval', 'session_allowed_tools', 'cooldown_seconds'];
+  const KNOWN_DAEMON = ['model', 'log_max_size', 'heartbeat_check_interval', 'session_allowed_tools', 'dangerously_skip_permissions', 'cooldown_seconds'];
   const VALID_MODELS = ['sonnet', 'opus', 'haiku'];
   for (const key of Object.keys(config)) {
     if (!KNOWN_SECTIONS.includes(key)) log('WARN', `Config: unknown section "${key}" (typo?)`);
