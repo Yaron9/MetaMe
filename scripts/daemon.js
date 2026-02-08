@@ -1204,16 +1204,16 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       let stdout = '', stderr = '';
       child.stdout.on('data', d => { stdout += d; });
       child.stderr.on('data', d => { stderr += d; });
-      await new Promise((resolve) => {
-        child.on('close', resolve);
-        child.on('error', resolve);
+      const exitCode = await new Promise((resolve) => {
+        child.on('close', (code) => resolve(code));
+        child.on('error', () => resolve(1));
       });
       const output = (stdout + stderr).trim();
-      if (output.includes('+ metame-cli@') || output.includes('npm notice')) {
+      if (exitCode === 0 && output.includes('+ metame-cli@')) {
         const ver = output.match(/metame-cli@([\d.]+)/);
         await bot.sendMessage(chatId, `✅ Published${ver ? ' v' + ver[1] : ''}!`);
       } else {
-        let msg = output.slice(0, 2000) || '(no output)';
+        let msg = output.slice(0, 2000) || `(exit code ${exitCode}, no output)`;
         await bot.sendMessage(chatId, `❌ ${msg}`);
       }
     } catch (e) {
