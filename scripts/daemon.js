@@ -1189,6 +1189,51 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
+  // /compact — compress current session context to save tokens
+  if (text === '/compact') {
+    const session = getSession(chatId);
+    if (!session || !session.started) {
+      await bot.sendMessage(chatId, '❌ No active session to compact.');
+      return;
+    }
+    await bot.sendMessage(chatId, '🗜 Compacting session...');
+    const daemonCfg = loadConfig().daemon || {};
+    const model = daemonCfg.model || 'opus';
+    const compactArgs = ['-p', '--resume', session.id, '--model', model];
+    if (daemonCfg.dangerously_skip_permissions) compactArgs.push('--dangerously-skip-permissions');
+    const { output, error } = await spawnClaudeAsync(
+      compactArgs,
+      'Summarize our entire conversation so far into a compact context document. Include: what we were working on, key decisions made, current state of the work, and any pending tasks. Be concise but preserve all important context. Output ONLY the summary, no preamble.',
+      session.cwd,
+      120000
+    );
+    if (error || !output) {
+      await bot.sendMessage(chatId, `❌ Compact failed: ${error || 'no output'}`);
+      return;
+    }
+    // Create new session with the summary as first message
+    const oldName = getSessionName(session.id);
+    const newSession = createSession(chatId, session.cwd, oldName ? oldName + ' (compacted)' : '');
+    const initArgs = ['-p', '--session-id', newSession.id, '--model', model];
+    if (daemonCfg.dangerously_skip_permissions) initArgs.push('--dangerously-skip-permissions');
+    const preamble = buildProfilePreamble();
+    const initPrompt = preamble + `Here is the context from our previous session (compacted):\n\n${output}\n\nContext loaded. Ready to continue.`;
+    const { error: initErr } = await spawnClaudeAsync(initArgs, initPrompt, session.cwd, 60000);
+    if (initErr) {
+      await bot.sendMessage(chatId, `⚠️ Summary saved but new session init failed: ${initErr}`);
+      return;
+    }
+    // Mark as started
+    const state = loadState();
+    if (state.sessions[chatId]) {
+      state.sessions[chatId].started = true;
+      saveState(state);
+    }
+    const tokenEst = Math.round(output.length / 3.5);
+    await bot.sendMessage(chatId, `✅ Compacted! ~${tokenEst} tokens of context carried over.\nNew session: ${newSession.id.slice(0, 8)}`);
+    return;
+  }
+
   // /publish <otp> — npm publish with OTP (zero latency, no Claude)
   if (text.startsWith('/publish ')) {
     const otp = text.slice(9).trim();
