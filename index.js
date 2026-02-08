@@ -1115,6 +1115,73 @@ if (isDaemon) {
     process.exit(0);
   }
 
+  if (subCmd === 'install-systemd') {
+    if (process.platform === 'darwin') {
+      console.error("❌ Use 'metame daemon install-launchd' on macOS.");
+      process.exit(1);
+    }
+
+    // Check if systemd is available
+    try {
+      require('child_process').execSync('systemctl --user --no-pager status 2>/dev/null || true');
+    } catch {
+      console.error("❌ systemd not available.");
+      console.error("   WSL users: add [boot]\\nsystemd=true to /etc/wsl.conf, then restart WSL.");
+      process.exit(1);
+    }
+
+    const serviceDir = path.join(HOME_DIR, '.config', 'systemd', 'user');
+    if (!fs.existsSync(serviceDir)) fs.mkdirSync(serviceDir, { recursive: true });
+    const servicePath = path.join(serviceDir, 'metame-daemon.service');
+    const nodePath = process.execPath;
+    const currentPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin';
+    const serviceContent = `[Unit]
+Description=MetaMe Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${nodePath} ${DAEMON_SCRIPT}
+Restart=on-failure
+RestartSec=5
+Environment=HOME=${HOME_DIR}
+Environment=METAME_ROOT=${__dirname}
+Environment=PATH=${currentPath}
+StandardOutput=append:${DAEMON_LOG}
+StandardError=append:${DAEMON_LOG}
+
+[Install]
+WantedBy=default.target
+`;
+    fs.writeFileSync(servicePath, serviceContent, 'utf8');
+
+    // Enable and start
+    const { execSync: es } = require('child_process');
+    es('systemctl --user daemon-reload');
+    es('systemctl --user enable metame-daemon.service');
+    es('systemctl --user start metame-daemon.service');
+
+    // Enable lingering so service runs even when user is not logged in
+    try { es(`loginctl enable-linger ${process.env.USER || ''}`); } catch { /* may need root */ }
+
+    console.log(`✅ systemd service installed: ${servicePath}`);
+    console.log("   Status:  systemctl --user status metame-daemon");
+    console.log("   Logs:    journalctl --user -u metame-daemon -f");
+    console.log("   Disable: systemctl --user disable metame-daemon");
+
+    // WSL-specific guidance
+    const isWSL = fs.existsSync('/proc/version') &&
+      fs.readFileSync('/proc/version', 'utf8').toLowerCase().includes('microsoft');
+    if (isWSL) {
+      console.log("\n   📌 WSL auto-boot tip:");
+      console.log("   Add this to Windows Task Scheduler (run at login):");
+      console.log(`   wsl -d ${process.env.WSL_DISTRO_NAME || 'Ubuntu'} -- sh -c 'nohup sleep infinity &'`);
+      console.log("   This keeps WSL alive so the daemon stays running.");
+    }
+    process.exit(0);
+  }
+
   if (subCmd === 'start') {
     // Kill any lingering daemon.js processes to avoid Feishu WebSocket conflicts
     try {
@@ -1254,6 +1321,8 @@ if (isDaemon) {
   console.log("   metame daemon run <name>      — run a task once");
   if (process.platform === 'darwin') {
     console.log("   metame daemon install-launchd — auto-start on macOS");
+  } else {
+    console.log("   metame daemon install-systemd — auto-start on Linux/WSL");
   }
   process.exit(0);
 }

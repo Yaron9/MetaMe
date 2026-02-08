@@ -64,19 +64,30 @@ MetaMe is a wrapper around **Claude Code**. You must have Node.js and the offici
 
 ## 📦 Installation
 
-**Option A: NPM (recommended)** — full CLI with daemon, mobile bridge, interview
+**One-command install (recommended)** — installs Node.js, Claude Code, and MetaMe:
+
+macOS / Linux:
+```bash
+curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
+```
+
+Windows (PowerShell):
+```powershell
+irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
+```
+> Windows uses WSL (auto-installed if missing). After WSL install you'll need to reboot once, then re-run the command.
+
+**Manual install** — if you already have Node.js and Claude Code:
 
 ```bash
 npm install -g metame-cli
 ```
 
-**Option B: Claude Code Plugin** — lightweight, profile injection + slash commands
+**Claude Code Plugin** — lightweight alternative, profile injection + slash commands only:
 
 ```bash
 claude plugin install github:Yaron9/MetaMe/plugin
 ```
-
-*(NPM note: If you encounter permission errors on Mac/Linux, use `sudo npm install -g metame-cli`)*
 
 ## 🚀 Usage
 
@@ -186,7 +197,7 @@ feishu:
   enabled: true
   app_id: "YOUR_APP_ID"              # From Feishu Developer Console
   app_secret: "YOUR_APP_SECRET"
-  allowed_chat_ids: []                # Empty = allow all
+  allowed_chat_ids: []                # Empty = deny all (fill via setup wizard)
 ```
 
 **Start the daemon:**
@@ -196,30 +207,25 @@ metame start                          # Background process
 metame status                         # Check if running
 metame logs                           # Tail the log
 metame stop                           # Shutdown
-metame daemon install-launchd         # macOS auto-start (RunAtLoad + KeepAlive)
+metame daemon install-launchd         # macOS auto-start
+metame daemon install-systemd         # Linux/WSL auto-start
 ```
 
-**macOS auto-start (recommended):** If you want the daemon to survive sleep/wake and start on boot:
+**Auto-start (recommended):** The daemon survives reboots and auto-restarts on crash.
 
+macOS:
 ```bash
 metame daemon install-launchd
 launchctl load ~/Library/LaunchAgents/com.metame.daemon.plist
 ```
 
-Once loaded, the daemon auto-starts on login, auto-restarts after sleep/wake or crash. No need to run `metame start` manually anymore.
-
-> **Important:** Choose one management method — either launchd or manual (`metame start/stop`). Don't mix them, or you'll get duplicate processes.
-
+Linux / WSL:
 ```bash
-# Check status (works with both methods)
-metame status
-
-# Disable auto-start
-launchctl unload ~/Library/LaunchAgents/com.metame.daemon.plist
-
-# Remove completely
-rm ~/Library/LaunchAgents/com.metame.daemon.plist
+metame daemon install-systemd
 ```
+> WSL requires systemd enabled: add `[boot]\nsystemd=true` to `/etc/wsl.conf` and restart WSL.
+
+> **Important:** Choose one management method — either auto-start or manual (`metame start/stop`). Don't mix them, or you'll get duplicate processes.
 
 **Session commands (interactive buttons on Telegram & Feishu):**
 
@@ -388,8 +394,8 @@ Each step runs in the same Claude Code session. Step outputs automatically becom
 
 **Security:**
 
-* `allowed_chat_ids` whitelist — unauthorized users silently ignored
-* No `--dangerously-skip-permissions` — standard `-p` mode permissions
+* `allowed_chat_ids` whitelist — unauthorized users silently ignored (empty = deny all)
+* `dangerously_skip_permissions` enabled by default for mobile (users can't click "allow" on phone — security relies on the chat ID whitelist)
 * `~/.metame/` directory set to mode 700
 * Bot tokens stored locally, never transmitted
 
@@ -531,8 +537,14 @@ rm ~/.claude_profile.yaml
 
 ```bash
 metame stop
+
+# macOS: remove auto-start
 launchctl unload ~/Library/LaunchAgents/com.metame.daemon.plist 2>/dev/null
 rm -f ~/Library/LaunchAgents/com.metame.daemon.plist
+
+# Linux/WSL: remove auto-start
+systemctl --user disable metame-daemon 2>/dev/null
+rm -f ~/.config/systemd/user/metame-daemon.service
 ```
 
 ### 4. Remove Passive Distillation Data (Optional)
@@ -590,7 +602,7 @@ A: No. Your profile stays local at `~/.claude_profile.yaml`. MetaMe simply passe
 
 | Version | Highlights |
 |---------|------------|
-| **v1.3.17** | Fix new-user onboarding (Genesis interview was never injected, CLAUDE.md content accumulated across runs). Marker-based CLAUDE.md cleanup, unified onboarding protocol with setup wizard (Telegram/Feishu auto-fetch chat ID), `--append-system-prompt` guarantees interview activation, full mobile permissions (`dangerously_skip_permissions`), fix `/publish` false-success on npm failure |
+| **v1.3.17** | **Windows support** (WSL one-command installer), `install-systemd` for Linux/WSL daemon auto-start. Fix onboarding (Genesis interview was never injected, CLAUDE.md accumulated across runs). Marker-based cleanup, unified protocols, `--append-system-prompt` guarantees interview activation, Feishu auto-fetch chat ID, full mobile permissions, fix `/publish` false-success, auto-restart daemon on script update |
 | **v1.3.16** | Git-based `/undo` (auto-checkpoint before each turn, `git reset --hard` rollback), `/nosleep` toggle (macOS caffeinate), custom provider model passthrough (`/model` accepts any name for non-anthropic providers), auto-fallback to anthropic/opus on provider failure, message queue works on Telegram (fire-and-forget poll loop), lazy background distill |
 | **v1.3.15** | Native Playwright MCP (browser automation for all users), `/list` interactive file browser with buttons, Feishu image download fix, Skill/MCP/Agent status push, hot restart reliability (single notification, no double instance) |
 | **v1.3.14** | Fix daemon crash on fresh install (missing bundled scripts) |
