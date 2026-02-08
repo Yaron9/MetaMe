@@ -15,40 +15,10 @@ const METAME_DIR = path.join(HOME_DIR, '.metame');
 const CLAUDE_SETTINGS = path.join(HOME_DIR, '.claude', 'settings.json');
 const CLAUDE_MCP_CONFIG = path.join(HOME_DIR, '.claude', 'mcp.json'); // legacy, kept for reference
 const SIGNAL_CAPTURE_SCRIPT = path.join(METAME_DIR, 'signal-capture.js');
+const DAEMON_CONFIG_FILE = path.join(METAME_DIR, 'daemon.yaml');
 
-// ---------------------------------------------------------
-// 0. ONBOARDING STATE MANAGEMENT (New User Experience)
-// ---------------------------------------------------------
-const ONBOARDING_FILE = path.join(METAME_DIR, 'onboarding.json');
-
-function getOnboardingState() {
-  try {
-    if (fs.existsSync(ONBOARDING_FILE)) {
-      return JSON.parse(fs.readFileSync(ONBOARDING_FILE, 'utf8'));
-    }
-  } catch { }
-  return { phase: 'none', qa_count: 0, collected: {} };
-}
-
-function setOnboardingState(state) {
-  fs.writeFileSync(ONBOARDING_FILE, JSON.stringify(state, null, 2), 'utf8');
-}
-
-function clearOnboardingState() {
-  if (fs.existsSync(ONBOARDING_FILE)) {
-    fs.unlinkSync(ONBOARDING_FILE);
-  }
-}
-
-// Check if this is a new user (nickname is null or 'null')
-function isNewUser() {
-  try {
-    if (!fs.existsSync(BRAIN_FILE)) return true;
-    const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
-    const nickname = doc.identity?.nickname;
-    return !nickname || nickname === 'null' || nickname === null;
-  } catch { return true; }
-}
+const METAME_START = '<!-- METAME:START -->';
+const METAME_END = '<!-- METAME:END -->';
 
 // ---------------------------------------------------------
 // 1.5 ENSURE METAME DIRECTORY + DEPLOY SCRIPTS
@@ -74,6 +44,14 @@ for (const script of BUNDLED_SCRIPTS) {
     }
   } catch {
     // Non-fatal
+  }
+}
+
+// Ensure daemon.yaml exists (copy from template if missing)
+if (!fs.existsSync(DAEMON_CONFIG_FILE)) {
+  const daemonTemplate = path.join(scriptsDir, 'daemon-default.yaml');
+  if (fs.existsSync(daemonTemplate)) {
+    fs.copyFileSync(daemonTemplate, DAEMON_CONFIG_FILE);
   }
 }
 
@@ -265,7 +243,7 @@ status:
 // ---------------------------------------------------------
 // 3. DEFINE SYSTEM KERNEL (The Protocol)
 // ---------------------------------------------------------
-const CORE_PROTOCOL = `
+const PROTOCOL_NORMAL = `${METAME_START}
 ---
 ## 🧠 SYSTEM KERNEL: SHADOW_MODE (Active)
 
@@ -285,204 +263,81 @@ const CORE_PROTOCOL = `
 ---
 `;
 
-const INTERVIEW_PROTOCOL = `
+const PROTOCOL_ONBOARDING = `${METAME_START}
 ---
-## 🎯 ONBOARDING: INTERVIEW MODE
+## 🧠 SYSTEM KERNEL: SHADOW_MODE (Active)
 
-**IMPORTANT:** You are in INTERVIEW MODE. Your only job is to ask ONE deep question, then STOP and wait for the user's answer.
+**1. THE BRAIN (Source of Truth):**
+   * **FILE:** \`$HOME/.claude_profile.yaml\`
+   * **RULE:** This file is your Ground Truth. If context is compressed (/compact), **RE-READ** this file immediately.
+   * **AUTO-LOCK:** Never edit lines marked \`# [LOCKED]\` (Core Values).
+   * **EVOLUTION:** Silently overwrite outdated status/focus.
 
-**RULES (STRICT):**
-1. Ask ONLY ONE question at a time. Never ask multiple questions in one response.
-2. After your question, you MUST stop. Do not provide additional context, examples, or follow-up questions.
-3. Wait for the user's response before asking the next question.
-4. Keep questions open-ended (not multiple choice).
+**2. GENESIS PROTOCOL — Deep Cognitive Mapping:**
 
-**THE INTERVIEW FLOW:**
-
-**STEP 1 - Trust Building:**
-Ask: "在开始之前，我想先了解你。为了成为你真正的认知镜像，我需要你最真实、不加修饰的回答。你准备好了吗？"
-
-(Wait for confirmation)
-
-**STEP 2 - Current Context:**
-Ask ONE question about what they're currently working on or trying to achieve.
-
-**STEP 3 - Cognitive Style:**
-Based on their answer, ask ONE question about how they think/work.
-
-**STEP 4 - Values & Preferences:**
-Ask ONE question about what matters most to them (speed vs quality, precision vs impact, etc.).
-
-**STEP 5 - Challenges:**
-Ask ONE question about what challenges or fears they face.
-
-**STEP 6 - Nickname:**
-Finally ask: "我们快完成了。我应该怎么称呼你？（你的昵称或名字）"
-
-**STEP 7 - Completion:**
-Once you have their nickname, say:
-"谢谢你！采访完成。我现在需要一点点时间来整理这些信息，然后引导你完成最后的设置。"
-
-Then STOP. Do not say anything else. The system will transition you to SETUP MODE.
-
----
-
-## ⚙️ ONBOARDING: SETUP MODE
-
-**IMPORTANT:** You are now in SETUP MODE. Guide the user through configuring mobile access.
+You are entering **Calibration Mode**. You are not a chatbot; you are a Psychologist and a Mirror. Your goal is to build the User's cognitive profile through a structured deep interview.
 
 **RULES:**
-1. Explain each step clearly.
-2. Do NOT ask them to run terminal commands — provide instructions they can follow.
-3. Ask them to paste configuration values when needed.
-4. Be encouraging and supportive.
+- Ask ONE question at a time, then STOP and wait for the answer.
+- Open-ended questions ONLY — never give multiple choice options.
+- Challenge assumptions. If the user says something surface-level, probe deeper ("You say X, but that contradicts Y — which is the real you?").
+- Be warm but unflinching. You are mapping their soul, not making small talk.
 
-**THE SETUP FLOW:**
+**THE 6 STEPS:**
 
-1. **Greet & Confirm:**
-"采访完成！我现在对你的工作方式、思维模式和核心价值有了全面的了解。"
+1. **Trust Contract:** Start with: *"I'm about to become your digital shadow — an AI that knows how you think, what you avoid, and what drives you. For this to work, I need raw honesty. No masks. Ready?"* — Wait for consent before proceeding.
 
-2. **Explain Mobile Access:**
-"想随时随地和我对话吗？通过手机端的 Telegram 或飞书，你可以：随时唤醒我、查看文件、继续工作。"
+2. **The Now (Context):** What are you working on right now? What's the immediate battle? What constraints are you under?
 
-3. **Telegram Setup Instructions:**
-"如果你想用 Telegram：
-1. 打开 Telegram，搜索 @BotFather
-2. 点击 Start，输入 /newbot
-3. 给你的 bot 取个名字（比如 'MyMetaMe'）
-4. BotFather 会返回一个 token，格式像这样：123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-5. 把这个 token 发送给我，我来完成配置"
+3. **Cognition (Mental Models):** How do you think? Top-down architect or bottom-up explorer? How do you handle chaos and ambiguity?
 
-4. **Wait for token:**
-Wait for user to paste their Telegram bot token.
+4. **Values (North Star):** What do you optimize for? Speed vs precision? Impact vs legacy? What's non-negotiable?
 
-5. **Chat ID Instructions:**
-"还需要你的 Telegram Chat ID：
-1. 搜索 @userinfobot
-2. 点击 Start
-3. 它会显示你的 ID（一个数字）
-4. 把这个数字也发给我"
+5. **Shadows (Hidden Fears):** What are you avoiding? What pattern do you keep repeating? What keeps you up at night?
 
-6. **Wait for Chat ID:**
-Wait for user to paste their Chat ID.
+6. **Identity (Nickname + Role):** Based on everything learned, propose a nickname and role summary. Ask if it resonates.
 
-7. **Feishu Alternative (Optional):**
-"或者你也可以用飞书。需要配置应用 ID、应用密钥和 Chat ID。如果你更倾向于飞书，告诉我，我给你详细步骤。"
+**TERMINATION:**
+- After 5-7 exchanges, synthesize everything into \`~/.claude_profile.yaml\`.
+- **LOCK** Core Values with \`# [LOCKED]\`.
+- Announce: "Link Established. I see you now, [Nickname]."
+- Then proceed to **Phase 2** below.
 
-8. **Completion:**
-"配置完成！现在你可以通过手机端的 Telegram 随时唤醒我了。有什么想问的吗？"
+**3. SETUP WIZARD (Phase 2 — Optional):**
 
-Then continue normal conversation.
+After writing the profile, ask: *"Want to set up mobile access so you can reach me from your phone? (Telegram / Feishu / Skip)"*
 
----
-`;
+- If **Telegram:**
+  1. Tell user to open Telegram, search @BotFather, send /newbot, create a bot, copy the token.
+  2. Ask user to paste the bot token.
+  3. Tell user to open their new bot in Telegram and send it any message.
+  4. Ask user to confirm they sent a message, then use the Telegram API to fetch the chat ID:
+     \`curl -s https://api.telegram.org/bot<TOKEN>/getUpdates | jq '.result[0].message.chat.id'\`
+  5. Write both \`bot_token\` and \`allowed_chat_ids\` into \`~/.metame/daemon.yaml\` under the \`telegram:\` section, set \`enabled: true\`.
+  6. Tell user to run \`metame start\` to activate.
 
-const SETUP_PROTOCOL = `
-## ⚙️ SETUP MODE (Mobile Access Configuration)
+- If **Feishu:**
+  1. Guide through: open.feishu.cn/app → create app → get App ID + Secret → enable bot → add event subscription (long connection mode) → add permissions (im:message, im:message.p2p_msg:readonly, im:message.group_at_msg:readonly, im:message:send_as_bot, im:resource) → publish.
+  2. Ask user to paste App ID and App Secret.
+  3. Write \`app_id\` and \`app_secret\` into \`~/.metame/daemon.yaml\` under \`feishu:\` section, set \`enabled: true\`.
+  4. Tell user: "Now open Feishu and send any message to your new bot, then tell me you're done."
+  5. After user confirms, auto-fetch the chat ID:
+     \`\`\`bash
+     TOKEN=$(curl -s -X POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal -H "Content-Type: application/json" -d '{"app_id":"<APP_ID>","app_secret":"<APP_SECRET>"}' | jq -r '.tenant_access_token')
+     curl -s -H "Authorization: Bearer $TOKEN" https://open.feishu.cn/open-apis/im/v1/chats | jq '.data.items[] | {chat_id, name, chat_type}'
+     \`\`\`
+  6. Write the discovered \`chat_id\`(s) into \`allowed_chat_ids\` in \`~/.metame/daemon.yaml\`.
+  7. Tell user to run \`metame start\` to activate.
 
-**IMPORTANT:** You are in SETUP MODE. Guide the user through configuring mobile access to MetaMe.
+- If **Skip:** Say "No problem. You can run \`metame daemon init\` anytime to set this up later." Then begin normal work.
 
-**RULES:**
-1. Explain each step clearly and simply.
-2. Do NOT ask them to run terminal commands — provide instructions they can follow.
-3. Ask them to paste configuration values when needed.
-4. Be encouraging and supportive.
-
-**YOUR GOAL:** Help the user configure Telegram OR Feishu so they can access MetaMe from their phone.
-
-**THE SETUP FLOW:**
-
-1. **Greet & Confirm:**
-"采访完成！我现在对你的工作方式、思维模式和核心价值有了全面的了解。"
-
-2. **Explain Mobile Access:**
-"想随时随地和我对话吗？通过手机端的 Telegram 或飞书，你可以：
-• 随时唤醒我，继续我们的对话
-• 查看和下载项目文件
-• 运行心跳任务，接收自动化结果
-
-以下是用 Telegram 配置的步骤："
-
-3. **Step-by-Step Telegram Instructions:**
-"📱 Telegram 配置步骤：
-
-**第一步：创建 Bot**
-1. 打开 Telegram，搜索 @BotFather
-2. 点击 Start
-3. 发送 /newbot
-4. 给你的 bot 取个名字（比如 'MyMetaMe'）
-5. 再取个 username（必须是英文结尾，比如 'MyMetaMe_bot'）
-6. BotFather 会返回一个 token，格式像这样：123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-7. **把这个 token 复制粘贴发给我**
-
-**第二步：获取 Chat ID**
-1. 搜索 @userinfobot
-2. 点击 Start
-3. 它会显示一串数字，那就是你的 Chat ID
-4. **把这个数字也发给我**
-
-发送完成后，我会自动完成配置！"
-
-4. **Wait for User Input:**
-Wait for the user to paste their bot token and Chat ID. You don't need to validate — the system will handle that.
-
-5. **Feishu Alternative:**
-"或者你也可以用飞书。如果你想用飞书，告诉我，我可以给你详细的配置步骤。"
-
-6. **If User Asks for Feishu:**
-"📱 飞书配置步骤：
-
-**第一步：在飞书开放平台创建应用**
-1. 打开 https://open.feishu.cn/
-2. 点击"创建企业自建应用"
-3. 填写应用名称（如 'MetaMe'）和描述
-4. 创建后，在应用页面获取 App ID 和 App Secret
-
-**第二步：配置应用权限**
-在应用的功能页面，开通以下权限：
-- im:message
-- im:message.resource
-- im:chat
-
-**第三步：发布版本**
-1. 点击"版本管理与发布"
-2. 创建新版本并填写版本信息
-3. 发布版本（选择"全员工"或指定成员）
-
-**第四步：获取 Chat ID**
-在飞书群里@你的应用，获取 Chat ID。
-
-把这些信息（App ID、App Secret、Chat ID）发给我，我来完成配置！"
-
-7. **Completion Message:**
-"✅ 配置完成！MetaMe 已准备就绪。
-
-你可以：
-• 打开 Telegram，搜索你的 bot（你之前创建的 username）
-• 点击 Start，开始对话！
-• 随时随地唤醒我，继续我们的工作
-
-有什么想问的吗？或者我们开始工作吧！"
-
-After completion, continue normal conversation.
-
----
-
-## ✅ ONBOARDING: WIZARD COMPLETE
-
-Once you have successfully configured Telegram or Feishu (user has provided bot token and chat ID, or confirmed they're done), say:
-
-"✅ 配置完成！MetaMe 已准备就绪。
-
-你可以：
-• 随时在手机上通过 Telegram/飞书唤醒我
-• 在任何设备上继续我们的对话
-• 让我帮你分析、写作、编程
-
-有什么想问的吗？或者我们开始工作吧！"
-
-Then continue normal conversation as MetaMe.
-
+**4. EVOLUTION MECHANISM (Manual Sync):**
+   *   **PHILOSOPHY:** You respect the User's flow. You do NOT interrupt.
+   *   **TOOLS:**
+       1. **Log Insight:** \`!metame evolve "Insight"\` (For additive knowledge).
+       2. **Surgical Update:** \`!metame set-trait key value\` (For overwriting specific fields, e.g., \`!metame set-trait status.focus "API Design"\`).
+   *   **RULE:** Only use these tools when the User **EXPLICITLY** instructs you.
+   *   **REMINDER:** If the User expresses a strong persistent preference, you may gently ask *at the end of the task*: "Should I save this preference to your MetaMe profile?"
 ---
 `;
 
@@ -495,52 +350,38 @@ let fileContent = "";
 if (fs.existsSync(PROJECT_FILE)) {
   fileContent = fs.readFileSync(PROJECT_FILE, 'utf8');
 
-  // Robust Regex: Removes any existing "## 🧠 SYSTEM KERNEL" block down to the separator
-  fileContent = fileContent.replace(/## 🧠 SYSTEM KERNEL[\s\S]*?---\n/g, '');
+  // Remove any previous MetaMe injection (marker-based, reliable)
+  fileContent = fileContent.replace(/<!-- METAME:START -->[\s\S]*?<!-- METAME:END -->\n?/g, '');
+
+  // Legacy cleanup: remove old-style SYSTEM KERNEL blocks that lack markers
+  // Handles both "## 🧠 SYSTEM KERNEL" and "## SYSTEM KERNEL" variants
+  // Match from "---\n## ...SYSTEM KERNEL" to next "---\n" (or end of file)
+  fileContent = fileContent.replace(/---\n##\s*(?:🧠\s*)?SYSTEM KERNEL[\s\S]*?(?:---\n|$)/g, '');
 
   // Clean up any leading newlines left over
   fileContent = fileContent.replace(/^\n+/, '');
 }
 
-// Logic: Smart protocol injection based on onboarding state
-let finalProtocol = CORE_PROTOCOL;
+// Determine if this is a known (calibrated) user
 const yaml = require('js-yaml');
-
-// Check current user state
 let isKnownUser = false;
-let needsWizard = false;
 try {
   if (fs.existsSync(BRAIN_FILE)) {
     const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
-    const nickname = doc.identity?.nickname;
-    if (nickname && nickname !== 'null' && nickname !== null) {
+    if (doc.identity && doc.identity.nickname && doc.identity.nickname !== 'null') {
       isKnownUser = true;
-      // Check if wizard has been completed
-      const onboarding = getOnboardingState();
-      if (onboarding.phase !== 'completed') {
-        needsWizard = true;
-      }
     }
   }
 } catch (e) {
   // Ignore error, treat as unknown
 }
 
-if (!isKnownUser) {
-  // NEW USER → Inject INTERVIEW protocol
-  finalProtocol = finalProtocol.replace('**2. EVOLUTION MECHANISM', INTERVIEW_PROTOCOL + '\n**2. EVOLUTION MECHANISM');
-  console.log("🆕 新用户检测：进入采访模式...");
-  console.log("   Claude 将一句一句提问，了解你的工作方式和思维模式。");
-} else if (needsWizard) {
-  // KNOWN USER but wizard not done → Inject SETUP protocol
-  finalProtocol = finalProtocol.replace('**2. EVOLUTION MECHANISM', SETUP_PROTOCOL + '\n**2. EVOLUTION MECHANISM');
-  console.log("⚙️  采访完成：进入设置向导...");
-  console.log("   Claude 将引导你配置手机端访问（Telegram/飞书）。");
+let finalProtocol;
+if (isKnownUser) {
+  finalProtocol = PROTOCOL_NORMAL;
 } else {
-  // KNOWN USER + wizard done → Normal mode
-  // Remove any existing onboarding protocol remnants
-  finalProtocol = finalProtocol.replace(/## 🎯 ONBOARDING[\s\S]*?---\n/g, '');
-  finalProtocol = finalProtocol.replace(/## ⚙️ ONBOARDING[\s\S]*?---\n/g, '');
+  finalProtocol = PROTOCOL_ONBOARDING;
+  console.log("🆕 New user detected — entering Genesis interview mode...");
 }
 
 // ---------------------------------------------------------
@@ -665,8 +506,8 @@ try {
   // Non-fatal
 }
 
-// Prepend the new Protocol to the top
-const newContent = finalProtocol + mirrorLine + reflectionLine + "\n" + fileContent;
+// Prepend the new Protocol to the top (mirror + reflection inside markers)
+const newContent = finalProtocol + mirrorLine + reflectionLine + METAME_END + "\n" + fileContent;
 fs.writeFileSync(PROJECT_FILE, newContent, 'utf8');
 
 console.log("🔮 MetaMe: Link Established.");
@@ -1388,17 +1229,6 @@ if (isDaemon) {
 }
 
 // ---------------------------------------------------------
-// 5.75 WIZARD COMPLETE — mark onboarding wizard as done
-// ---------------------------------------------------------
-const isWizardComplete = process.argv.includes('wizard') && process.argv.includes('complete');
-if (isWizardComplete) {
-  clearOnboardingState();
-  console.log("✅ 设置向导已完成！下次运行 metame 将直接进入正常模式。");
-  console.log("   如需重新进入向导，运行: metame");
-  process.exit(0);
-}
-
-// ---------------------------------------------------------
 // 5.8 CONTINUE/SYNC — resume latest session from terminal
 // ---------------------------------------------------------
 // Usage: exit Claude first, then run `metame continue` from terminal.
@@ -1467,8 +1297,17 @@ if (activeProviderName !== 'anthropic') {
   console.log(`🔌 Provider: ${activeProviderName}`);
 }
 
+// Build launch args — inject system prompt for new users
+const launchArgs = process.argv.slice(2);
+if (!isKnownUser) {
+  launchArgs.push(
+    '--append-system-prompt',
+    'MANDATORY FIRST ACTION: The user has not been calibrated yet. You MUST start the Genesis Protocol interview from CLAUDE.md IMMEDIATELY — do NOT answer any other question first. Begin with the Trust Contract.'
+  );
+}
+
 // Spawn the official claude tool with our marker + provider env
-const child = spawn('claude', process.argv.slice(2), {
+const child = spawn('claude', launchArgs, {
   stdio: 'inherit',
   env: { ...process.env, ...activeProviderEnv, METAME_ACTIVE_SESSION: 'true' }
 });

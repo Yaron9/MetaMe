@@ -48,10 +48,7 @@ daemon:
   model: sonnet  # sonnet, opus, haiku — model for mobile sessions
   log_max_size: 1048576
   heartbeat_check_interval: 60
-  # Pre-authorize tools for mobile sessions (no permission prompts)
-  # Examples: "Bash(git:*)" "Bash(npm:*)" "Edit" "Write" "WebFetch" "WebSearch"
-  session_allowed_tools:
-    - "WebFetch"
-    - "WebSearch"
-    - "Bash(git:*)"
-    - "Bash(npm:*)"
+  # Skip all permission prompts for mobile sessions (full access)
+  # Mobile users can't click "allow" — so we pre-authorize everything.
+  # Security relies on allowed_chat_ids whitelist, not tool restrictions.
+  dangerously_skip_permissions: true
