@@ -1,5 +1,6 @@
 node_modules
 .DS_Store
-CLAUDE.md
+# CLAUDE.md is tracked for this project (contains maintenance handbook)
+# Other projects should gitignore their CLAUDE.md
 .claude_profile.yaml
 ROADMAP_PHASE_B.md
