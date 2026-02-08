@@ -31,6 +31,7 @@ if (!fs.existsSync(METAME_DIR)) {
 const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js'];
 const scriptsDir = path.join(__dirname, 'scripts');
 
+let scriptsUpdated = false;
 for (const script of BUNDLED_SCRIPTS) {
   const src = path.join(scriptsDir, script);
   const dest = path.join(METAME_DIR, script);
@@ -40,10 +41,39 @@ for (const script of BUNDLED_SCRIPTS) {
       const destContent = fs.existsSync(dest) ? fs.readFileSync(dest, 'utf8') : '';
       if (srcContent !== destContent) {
         fs.writeFileSync(dest, srcContent, 'utf8');
+        scriptsUpdated = true;
       }
     }
   } catch {
     // Non-fatal
+  }
+}
+
+// Auto-restart daemon if scripts were updated and daemon is running
+if (scriptsUpdated) {
+  const DAEMON_PID_FILE = path.join(METAME_DIR, 'daemon.pid');
+  try {
+    if (fs.existsSync(DAEMON_PID_FILE)) {
+      const pid = parseInt(fs.readFileSync(DAEMON_PID_FILE, 'utf8').trim(), 10);
+      process.kill(pid, 0); // throws if not running
+      process.kill(pid, 'SIGTERM');
+      // Wait briefly for clean shutdown, then restart
+      setTimeout(() => {
+        try { process.kill(pid, 0); process.kill(pid, 'SIGKILL'); } catch { /* already dead */ }
+      }, 2000);
+      const DAEMON_SCRIPT = path.join(METAME_DIR, 'daemon.js');
+      setTimeout(() => {
+        const bg = spawn(process.execPath, [DAEMON_SCRIPT], {
+          detached: true,
+          stdio: 'ignore',
+          env: { ...process.env, HOME: HOME_DIR, METAME_ROOT: __dirname },
+        });
+        bg.unref();
+        console.log(`🔄 Daemon auto-restarted (PID: ${bg.pid}) — scripts updated.`);
+      }, 3000);
+    }
+  } catch {
+    // Daemon not running or restart failed — non-fatal
   }
 }
 
