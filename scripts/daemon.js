@@ -1197,21 +1197,76 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       return;
     }
     await bot.sendMessage(chatId, '🗜 Compacting session...');
+
+    // Step 1: Read conversation from JSONL (fast, no Claude needed)
+    const jsonlPath = findSessionFile(session.id);
+    if (!jsonlPath) {
+      await bot.sendMessage(chatId, '❌ Session file not found.');
+      return;
+    }
+    let messages = [];
+    try {
+      const lines = fs.readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean);
+      for (const line of lines) {
+        try {
+          const obj = JSON.parse(line);
+          if (obj.type === 'user' || obj.type === 'assistant') {
+            const msg = obj.message || {};
+            const content = msg.content;
+            let text_content = '';
+            if (typeof content === 'string') {
+              text_content = content;
+            } else if (Array.isArray(content)) {
+              text_content = content
+                .filter(c => c.type === 'text')
+                .map(c => c.text || '')
+                .join(' ');
+            }
+            if (text_content.trim()) {
+              messages.push({ role: obj.type, text: text_content.trim() });
+            }
+          }
+        } catch { /* skip malformed lines */ }
+      }
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ Cannot read session: ${e.message}`);
+      return;
+    }
+
+    if (messages.length === 0) {
+      await bot.sendMessage(chatId, '❌ No messages found in session.');
+      return;
+    }
+
+    // Step 2: Build a truncated conversation digest (keep under ~20k chars for haiku)
+    const MAX_DIGEST = 20000;
+    let digest = '';
+    // Take messages from newest to oldest until we hit the limit
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      const prefix = m.role === 'user' ? 'USER' : 'ASSISTANT';
+      const entry = `[${prefix}]: ${m.text.slice(0, 800)}\n\n`;
+      if (digest.length + entry.length > MAX_DIGEST) break;
+      digest = entry + digest;
+    }
+
+    // Step 3: Summarize with haiku (new process, no --resume, fast)
     const daemonCfg = loadConfig().daemon || {};
-    const model = daemonCfg.model || 'opus';
-    const compactArgs = ['-p', '--resume', session.id, '--model', model];
+    const compactArgs = ['-p', '--model', 'haiku', '--no-session-persistence'];
     if (daemonCfg.dangerously_skip_permissions) compactArgs.push('--dangerously-skip-permissions');
     const { output, error } = await spawnClaudeAsync(
       compactArgs,
-      'Summarize our entire conversation so far into a compact context document. Include: what we were working on, key decisions made, current state of the work, and any pending tasks. Be concise but preserve all important context. Output ONLY the summary, no preamble.',
+      `Summarize the following conversation into a compact context document. Include: (1) what was being worked on, (2) key decisions made, (3) current state, (4) pending tasks. Be concise but preserve ALL important technical context (file names, function names, variable names, specific values). Output ONLY the summary.\n\n--- CONVERSATION ---\n${digest}`,
       session.cwd,
-      120000
+      60000
     );
     if (error || !output) {
       await bot.sendMessage(chatId, `❌ Compact failed: ${error || 'no output'}`);
       return;
     }
-    // Create new session with the summary as first message
+
+    // Step 4: Create new session with the summary
+    const model = daemonCfg.model || 'opus';
     const oldName = getSessionName(session.id);
     const newSession = createSession(chatId, session.cwd, oldName ? oldName + ' (compacted)' : '');
     const initArgs = ['-p', '--session-id', newSession.id, '--model', model];
