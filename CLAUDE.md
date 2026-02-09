@@ -16,6 +16,8 @@
    *   **RULE:** Only use these tools when the User **EXPLICITLY** instructs you.
    *   **REMINDER:** If the User expresses a strong persistent preference, you may gently ask *at the end of the task*: "Should I save this preference to your MetaMe profile?"
 ---
+
+[MetaMe reflection: 这是第7次session。如果session自然结束，可以附加一句：🪞 一个词形容这次session的感受？ 只在session即将结束时说一次。如果用户没回应就不要追问。]
 <!-- METAME:END -->
 ---
 
