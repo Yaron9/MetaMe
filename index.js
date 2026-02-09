@@ -63,7 +63,11 @@ if (scriptsUpdated) {
       }, 2000);
       const DAEMON_SCRIPT = path.join(METAME_DIR, 'daemon.js');
       setTimeout(() => {
-        const bg = spawn(process.execPath, [DAEMON_SCRIPT], {
+        // Use caffeinate on macOS to prevent sleep while daemon is running
+        const isNotWindows = process.platform !== 'win32';
+        const cmd = isNotWindows ? 'caffeinate' : process.execPath;
+        const args = isNotWindows ? ['-i', process.execPath, DAEMON_SCRIPT] : [DAEMON_SCRIPT];
+        const bg = spawn(cmd, args, {
           detached: true,
           stdio: 'ignore',
           env: { ...process.env, HOME: HOME_DIR, METAME_ROOT: __dirname },
@@ -1086,6 +1090,8 @@ if (isDaemon) {
   <string>com.metame.daemon</string>
   <key>ProgramArguments</key>
   <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
     <string>${nodePath}</string>
     <string>${DAEMON_SCRIPT}</string>
   </array>
@@ -1207,7 +1213,11 @@ WantedBy=default.target
       console.error("❌ daemon.js not found. Reinstall MetaMe.");
       process.exit(1);
     }
-    const bg = spawn(process.execPath, [DAEMON_SCRIPT], {
+    // Use caffeinate on macOS/Linux to prevent sleep while daemon is running
+    const isNotWindows = process.platform !== 'win32';
+    const cmd = isNotWindows ? 'caffeinate' : process.execPath;
+    const args = isNotWindows ? ['-i', process.execPath, DAEMON_SCRIPT] : [DAEMON_SCRIPT];
+    const bg = spawn(cmd, args, {
       detached: true,
       stdio: 'ignore',
       env: { ...process.env, HOME: HOME_DIR, METAME_ROOT: __dirname },
