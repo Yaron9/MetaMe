@@ -16,8 +16,6 @@
    *   **RULE:** Only use these tools when the User **EXPLICITLY** instructs you.
    *   **REMINDER:** If the User expresses a strong persistent preference, you may gently ask *at the end of the task*: "Should I save this preference to your MetaMe profile?"
 ---
-
-[MetaMe reflection: 这是第7次session。如果session自然结束，可以附加一句：🪞 一个词形容这次session的感受？ 只在session即将结束时说一次。如果用户没回应就不要追问。]
 <!-- METAME:END -->
 ---
 
@@ -99,6 +97,16 @@ npm publish --otp=<6位验证码>
 - **手机权限**: `dangerously_skip_permissions: true` — 安全靠 `allowed_chat_ids` 白名单
 - **飞书 chat_id**: 空列表 = deny all (不是 allow all!)，向导会自动 API 获取
 - **Profile 预算**: 800 token 上限，41 个字段，5 个层级
+
+## ⛔ 危险操作警告
+
+> **绝对不要 kill / stop / 干扰 `metame-desktop` 的进程！**
+>
+> 用户同时运行两个独立项目：
+> - **MetaMe**（本项目）— daemon 在 `scripts/daemon.js`
+> - **metame-desktop**（`~/AGI/metame-desktop`）— 完全独立的项目，有自己的 daemon 和 sidecar 进程
+>
+> 它们共存互不干扰。排查问题时**只操作本项目的进程**，看到 `metame-desktop` / `opencode-cli` 相关进程一律跳过。
 
 ## 已知问题 / TODO
 
