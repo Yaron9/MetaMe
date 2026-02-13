@@ -290,11 +290,13 @@ function executeTask(task, config) {
   log('INFO', `Executing task: ${task.name} (model: ${model})`);
 
   try {
+    const cwd = task.cwd ? task.cwd.replace(/^~/, HOME) : undefined;
     const output = execFileSync('claude', claudeArgs, {
       input: fullPrompt,
       encoding: 'utf8',
       timeout: 120000, // 2 min timeout
       maxBuffer: 1024 * 1024,
+      ...(cwd && { cwd }),
       env: { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined },
     }).trim();
 
@@ -363,7 +365,7 @@ function executeWorkflow(task, config) {
 
     log('INFO', `Workflow ${task.name} step ${i + 1}/${steps.length}: ${step.skill || 'prompt'}`);
     try {
-      const output = execSync(`claude ${args.join(' ')}`, {
+      const output = execFileSync('claude', args, {
         input: prompt, encoding: 'utf8', timeout: step.timeout || 300000, maxBuffer: 5 * 1024 * 1024, cwd, env: { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined },
       }).trim();
       const tk = Math.ceil((prompt.length + output.length) / 4);
