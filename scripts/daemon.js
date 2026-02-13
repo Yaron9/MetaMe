@@ -295,7 +295,7 @@ function executeTask(task, config) {
       encoding: 'utf8',
       timeout: 120000, // 2 min timeout
       maxBuffer: 1024 * 1024,
-      env: { ...process.env, ...getDaemonProviderEnv() },
+      env: { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined },
     }).trim();
 
     // Rough token estimate: ~4 chars per token for input + output
@@ -364,7 +364,7 @@ function executeWorkflow(task, config) {
     log('INFO', `Workflow ${task.name} step ${i + 1}/${steps.length}: ${step.skill || 'prompt'}`);
     try {
       const output = execSync(`claude ${args.join(' ')}`, {
-        input: prompt, encoding: 'utf8', timeout: step.timeout || 300000, maxBuffer: 5 * 1024 * 1024, cwd, env: { ...process.env, ...getDaemonProviderEnv() },
+        input: prompt, encoding: 'utf8', timeout: step.timeout || 300000, maxBuffer: 5 * 1024 * 1024, cwd, env: { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined },
       }).trim();
       const tk = Math.ceil((prompt.length + output.length) / 4);
       totalTokens += tk;
@@ -2058,7 +2058,7 @@ function spawnClaudeAsync(args, input, cwd, timeoutMs = 300000) {
     const child = spawn('claude', args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, ...getActiveProviderEnv() },
+      env: { ...process.env, ...getActiveProviderEnv(), CLAUDECODE: undefined },
     });
 
     let stdout = '';
@@ -2233,7 +2233,7 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
     const child = spawn('claude', streamArgs, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, ...getActiveProviderEnv() },
+      env: { ...process.env, ...getActiveProviderEnv(), CLAUDECODE: undefined },
     });
 
     // Track active process for /stop

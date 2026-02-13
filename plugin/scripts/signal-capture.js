@@ -13,7 +13,6 @@ const path = require('path');
 const os = require('os');
 
 const BUFFER_FILE = path.join(os.homedir(), '.metame', 'raw_signals.jsonl');
-const MAX_BUFFER_LINES = 50; // Safety cap to avoid unbounded growth
 
 // === CONFIDENCE PATTERNS ===
 
@@ -109,11 +108,6 @@ process.stdin.on('end', () => {
     }
 
     existingLines.push(JSON.stringify(entry));
-
-    // Keep only the most recent entries (drop oldest)
-    if (existingLines.length > MAX_BUFFER_LINES) {
-      existingLines = existingLines.slice(-MAX_BUFFER_LINES);
-    }
 
     fs.writeFileSync(BUFFER_FILE, existingLines.join('\n') + '\n');
 
