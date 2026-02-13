@@ -285,7 +285,7 @@ function executeTask(task, config) {
   }
   const fullPrompt = preamble + taskPrompt;
 
-  const claudeArgs = ['-p', '--model', model];
+  const claudeArgs = ['-p', '--model', model, '--dangerously-skip-permissions'];
   for (const t of (task.allowedTools || [])) claudeArgs.push('--allowedTools', t);
   log('INFO', `Executing task: ${task.name} (model: ${model})`);
 
@@ -357,7 +357,7 @@ function executeWorkflow(task, config) {
     const step = steps[i];
     let prompt = (step.skill ? `/${step.skill} ` : '') + (step.prompt || '');
     if (i === 0 && precheck.context) prompt += `\n\n相关数据:\n\`\`\`\n${precheck.context}\n\`\`\``;
-    const args = ['-p', '--model', model];
+    const args = ['-p', '--model', model, '--dangerously-skip-permissions'];
     for (const tool of allowed) args.push('--allowedTools', tool);
     args.push(i === 0 ? '--session-id' : '--resume', sessionId);
 
@@ -1124,7 +1124,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     if (precheck.context) taskPrompt += `\n\n以下是相关原始数据:\n\`\`\`\n${precheck.context}\n\`\`\``;
     const fullPrompt = preamble + taskPrompt;
     const model = task.model || 'haiku';
-    const claudeArgs = ['-p', '--model', model];
+    const claudeArgs = ['-p', '--model', model, '--dangerously-skip-permissions'];
     for (const t of (task.allowedTools || [])) claudeArgs.push('--allowedTools', t);
 
     await bot.sendMessage(chatId, `Running: ${taskName} (${model})...`);
