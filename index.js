@@ -28,8 +28,21 @@ if (!fs.existsSync(METAME_DIR)) {
 }
 
 // Auto-deploy bundled scripts to ~/.metame/
+// IMPORTANT: daemon.yaml is USER CONFIG — never overwrite it. Only daemon-default.yaml (template) is synced.
 const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js'];
 const scriptsDir = path.join(__dirname, 'scripts');
+
+// Protect daemon.yaml: create backup before any sync operation
+const DAEMON_YAML_BACKUP = path.join(METAME_DIR, 'daemon.yaml.bak');
+try {
+  if (fs.existsSync(DAEMON_CONFIG_FILE)) {
+    const content = fs.readFileSync(DAEMON_CONFIG_FILE, 'utf8');
+    // Only backup if it has real config (not just the default template)
+    if (content.includes('enabled: true') || content.includes('bot_token:') && !content.includes('bot_token: null')) {
+      fs.copyFileSync(DAEMON_CONFIG_FILE, DAEMON_YAML_BACKUP);
+    }
+  }
+} catch { /* non-fatal */ }
 
 let scriptsUpdated = false;
 for (const script of BUNDLED_SCRIPTS) {
@@ -81,11 +94,17 @@ if (scriptsUpdated) {
   }
 }
 
-// Ensure daemon.yaml exists (copy from template if missing)
+// Ensure daemon.yaml exists (restore backup or copy from template)
 if (!fs.existsSync(DAEMON_CONFIG_FILE)) {
-  const daemonTemplate = path.join(scriptsDir, 'daemon-default.yaml');
-  if (fs.existsSync(daemonTemplate)) {
-    fs.copyFileSync(daemonTemplate, DAEMON_CONFIG_FILE);
+  if (fs.existsSync(DAEMON_YAML_BACKUP)) {
+    // Restore from backup — user had real config that was lost
+    fs.copyFileSync(DAEMON_YAML_BACKUP, DAEMON_CONFIG_FILE);
+    console.log('⚠️  daemon.yaml was missing — restored from backup.');
+  } else {
+    const daemonTemplate = path.join(scriptsDir, 'daemon-default.yaml');
+    if (fs.existsSync(daemonTemplate)) {
+      fs.copyFileSync(daemonTemplate, DAEMON_CONFIG_FILE);
+    }
   }
 }
 
