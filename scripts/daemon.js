@@ -882,6 +882,37 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
+  // /sessions — list all recent sessions across all projects with clickable buttons
+  if (text === '/sessions') {
+    const allSessions = listRecentSessions(15);
+    if (allSessions.length === 0) {
+      await bot.sendMessage(chatId, 'No sessions found. Try /new first.');
+      return;
+    }
+    if (bot.sendButtons) {
+      const buttons = allSessions.map(s => {
+        const proj = s.projectPath ? path.basename(s.projectPath) : '~';
+        const name = s.customTitle || (s.summary || '').slice(0, 20) || (s.firstPrompt || '').slice(0, 20) || '';
+        const shortId = s.sessionId.slice(0, 8);
+        const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
+        const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
+        const ago = formatRelativeTime(new Date(timeMs).toISOString());
+        return [{ text: `${ago} 📁${proj} ${name} #${shortId}`, callback_data: `/resume ${s.sessionId}` }];
+      });
+      await bot.sendButtons(chatId, '📋 Recent sessions:', buttons);
+    } else {
+      let msg = '📋 Recent sessions:\n';
+      allSessions.forEach((s, i) => {
+        const proj = s.projectPath ? path.basename(s.projectPath) : '~';
+        const name = s.customTitle || (s.summary || '').slice(0, 20) || (s.firstPrompt || '').slice(0, 20) || '';
+        const shortId = s.sessionId.slice(0, 8);
+        msg += `${i + 1}. 📁${proj} ${name} #${shortId}\n   /resume ${shortId}\n`;
+      });
+      await bot.sendMessage(chatId, msg);
+    }
+    return;
+  }
+
   if (text === '/resume' || text.startsWith('/resume ')) {
     const arg = text.slice(7).trim();
 
@@ -1699,6 +1730,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       '',
       '📂 Session 管理:',
       '/new [path] [name] — 新建会话',
+      '/sessions — 浏览所有最近会话',
       '/resume [name] — 选择/恢复会话',
       '/name <name> — 命名当前会话',
       '/cd <path> — 切换工作目录',
