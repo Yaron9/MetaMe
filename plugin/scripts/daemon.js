@@ -882,7 +882,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
-  // /sessions — list all recent sessions across all projects with clickable buttons
+  // /sessions — compact list, tap to see details, then tap to switch
   if (text === '/sessions') {
     const allSessions = listRecentSessions(15);
     if (allSessions.length === 0) {
@@ -892,23 +892,66 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     if (bot.sendButtons) {
       const buttons = allSessions.map(s => {
         const proj = s.projectPath ? path.basename(s.projectPath) : '~';
-        const name = s.customTitle || (s.summary || '').slice(0, 20) || (s.firstPrompt || '').slice(0, 20) || '';
-        const shortId = s.sessionId.slice(0, 8);
         const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
         const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
         const ago = formatRelativeTime(new Date(timeMs).toISOString());
-        return [{ text: `${ago} 📁${proj} ${name} #${shortId}`, callback_data: `/resume ${s.sessionId}` }];
+        const shortId = s.sessionId.slice(0, 6);
+        const name = s.customTitle || (s.summary || '').slice(0, 18) || '';
+        let label = `${ago} 📁${proj}`;
+        if (name) label += ` ${name}`;
+        label += ` #${shortId}`;
+        return [{ text: label, callback_data: `/sess ${s.sessionId}` }];
       });
-      await bot.sendButtons(chatId, '📋 Recent sessions:', buttons);
+      await bot.sendButtons(chatId, '📋 Tap a session to view details:', buttons);
     } else {
-      let msg = '📋 Recent sessions:\n';
+      let msg = '📋 Recent sessions:\n\n';
       allSessions.forEach((s, i) => {
         const proj = s.projectPath ? path.basename(s.projectPath) : '~';
-        const name = s.customTitle || (s.summary || '').slice(0, 20) || (s.firstPrompt || '').slice(0, 20) || '';
+        const title = s.customTitle || s.summary || (s.firstPrompt || '').slice(0, 40) || '';
         const shortId = s.sessionId.slice(0, 8);
-        msg += `${i + 1}. 📁${proj} ${name} #${shortId}\n   /resume ${shortId}\n`;
+        msg += `${i + 1}. 📁${proj} | ${title}\n   /resume ${shortId}\n`;
       });
       await bot.sendMessage(chatId, msg);
+    }
+    return;
+  }
+
+  // /sess <id> — show session detail card with switch button
+  if (text.startsWith('/sess ')) {
+    const sid = text.slice(6).trim();
+    const allSessions = listRecentSessions(50);
+    const s = allSessions.find(x => x.sessionId === sid || x.sessionId.startsWith(sid));
+    if (!s) {
+      await bot.sendMessage(chatId, `Session not found: ${sid.slice(0, 8)}`);
+      return;
+    }
+    const proj = s.projectPath || '~';
+    const projName = path.basename(proj);
+    const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
+    const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
+    const ago = formatRelativeTime(new Date(timeMs).toISOString());
+    const title = s.customTitle || '';
+    const summary = s.summary || '';
+    const firstMsg = (s.firstPrompt || '').replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '').slice(0, 100);
+    const msgs = s.messageCount || '?';
+
+    let detail = `📋 Session Detail\n\n`;
+    if (title) detail += `📝 Name: ${title}\n`;
+    if (summary) detail += `💡 Summary: ${summary}\n`;
+    detail += `📁 Project: ${projName}\n`;
+    detail += `📂 Path: ${proj}\n`;
+    detail += `💬 Messages: ${msgs}\n`;
+    detail += `🕐 Last active: ${ago}\n`;
+    detail += `🆔 ID: ${s.sessionId.slice(0, 8)}`;
+    if (firstMsg && firstMsg !== summary) detail += `\n\n🗨️ First message:\n${firstMsg}`;
+
+    if (bot.sendButtons) {
+      await bot.sendButtons(chatId, detail, [
+        [{ text: '▶️ Switch to this session', callback_data: `/resume ${s.sessionId}` }],
+        [{ text: '⬅️ Back to list', callback_data: '/sessions' }],
+      ]);
+    } else {
+      await bot.sendMessage(chatId, detail + `\n\n/resume ${s.sessionId.slice(0, 8)}`);
     }
     return;
   }
