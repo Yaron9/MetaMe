@@ -25,25 +25,20 @@ const STATE_FILE = path.join(METAME_DIR, 'daemon_state.json');
 const PID_FILE = path.join(METAME_DIR, 'daemon.pid');
 const LOG_FILE = path.join(METAME_DIR, 'daemon.log');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
-const SKILLS_DIR = path.join(HOME, '.claude', 'skills');
 
 // ---------------------------------------------------------
-// SKILL HINT (keyword → lightweight pointer, Claude reads file itself)
+// SKILL ROUTING (keyword → /skillname prefix, like metame-desktop)
 // ---------------------------------------------------------
-const SKILL_TRIGGERS = [
+const SKILL_ROUTES = [
   { name: 'macos-mail-calendar', pattern: /邮件|邮箱|收件箱|日历|日程|会议|schedule|email|mail|calendar|unread|inbox/i },
+  { name: 'heartbeat-task-manager', pattern: /提醒|remind|闹钟|定时|每[天周月]/i },
 ];
 
-function getSkillHint(prompt) {
-  const hints = [];
-  for (const t of SKILL_TRIGGERS) {
-    if (t.pattern.test(prompt)) {
-      const p = path.join(SKILLS_DIR, t.name, 'SKILL.md');
-      if (fs.existsSync(p)) hints.push(t.name);
-    }
+function routeSkill(prompt) {
+  for (const r of SKILL_ROUTES) {
+    if (r.pattern.test(prompt)) return r.name;
   }
-  if (!hints.length) return '';
-  return `\n\n[Auto-detected skills: ${hints.join(', ')}. Read ~/.claude/skills/<name>/SKILL.md for instructions before executing.]`;
+  return null;
 }
 
 const yaml = require('./resolve-yaml');
@@ -2653,7 +2648,10 @@ async function askClaude(bot, chatId, prompt) {
    - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
    - Multiple files: use multiple [[FILE:...]] tags]`;
 
-  const fullPrompt = prompt + daemonHint + getSkillHint(prompt);
+  // Route to skill via /skillname prefix (Claude Code loads SKILL.md automatically)
+  const skill = routeSkill(prompt);
+  const routedPrompt = skill ? `/${skill} ${prompt}` : prompt;
+  const fullPrompt = routedPrompt + daemonHint;
 
   // Git checkpoint before Claude modifies files (for /undo)
   gitCheckpoint(session.cwd);
