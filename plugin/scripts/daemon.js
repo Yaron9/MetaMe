@@ -2696,6 +2696,15 @@ async function askClaude(bot, chatId, prompt) {
     bot.deleteMessage(chatId, statusMsgId).catch(() => {});
   }
 
+  // When Claude completes with no text output (pure tool work), send a done notice
+  if (output === '' && !error) {
+    const filesDesc = files && files.length > 0 ? `\n修改了 ${files.length} 个文件` : '';
+    await bot.sendMessage(chatId, `✅ 完成${filesDesc}`);
+    const wasNew = !session.started;
+    if (wasNew) markSessionStarted(chatId);
+    return;
+  }
+
   if (output) {
     // Detect provider/model errors disguised as output (e.g., "model not found", API errors)
     const activeProvCheck = providerMod ? providerMod.getActiveName() : 'anthropic';
