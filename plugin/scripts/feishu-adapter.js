@@ -38,7 +38,7 @@ function createBot(config) {
      * Send a plain text message
      */
     async sendMessage(chatId, text) {
-      await client.im.message.create({
+      const res = await client.im.message.create({
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: chatId,
@@ -46,6 +46,18 @@ function createBot(config) {
           content: JSON.stringify({ text }),
         },
       });
+      // Return Telegram-compatible shape so daemon can edit it later
+      const msgId = res?.data?.message_id;
+      return msgId ? { message_id: msgId } : null;
+    },
+
+    async editMessage(chatId, messageId, text) {
+      try {
+        await client.im.message.patch({
+          path: { message_id: messageId },
+          data: { content: JSON.stringify({ text }) },
+        });
+      } catch { /* non-fatal */ }
     },
 
     /**
