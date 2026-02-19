@@ -1128,7 +1128,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     const currentSession = getSession(chatId);
     const currentCwd = currentSession?.cwd ? path.resolve(expandPath(currentSession.cwd)) : null;
     const buttons = entries.map(([key, p]) => {
-      const projCwd = expandPath(p.cwd);
+      const projCwd = expandPath(p.cwd).replace(/^~/, HOME);
       const active = currentCwd && path.resolve(projCwd) === currentCwd ? ' ◀' : '';
       return [{ text: `${p.icon || '🤖'} ${p.name || key}${active}`, callback_data: `/cd ${projCwd}` }];
     });
@@ -1972,7 +1972,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   const quickAgent = routeAgent(text, config);
   if (quickAgent && !quickAgent.rest) {
     const { key, proj } = quickAgent;
-    const projCwd = expandPath(proj.cwd);
+    const projCwd = expandPath(proj.cwd).replace(/^~/, HOME);
     const st = loadState();
     const recentInDir = listRecentSessions(1, projCwd);
     if (recentInDir.length > 0 && recentInDir[0].sessionId) {
@@ -2697,7 +2697,7 @@ async function askClaude(bot, chatId, prompt, config) {
   const agentMatch = routeAgent(prompt, config);
   if (agentMatch) {
     const { key, proj, rest } = agentMatch;
-    const projCwd = expandPath(proj.cwd);
+    const projCwd = expandPath(proj.cwd).replace(/^~/, HOME);
     const st = loadState();
     const recentInDir = listRecentSessions(1, projCwd);
     if (recentInDir.length > 0 && recentInDir[0].sessionId) {
