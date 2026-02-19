@@ -12,8 +12,27 @@ feishu:
   app_secret: null
   allowed_chat_ids: []
 
+projects:
+  # Per-project heartbeat tasks. Each project's tasks are isolated and
+  # notifications arrive as colored Feishu cards (visually distinct).
+  #
+  # example_project:
+  #   name: "My Project"
+  #   icon: "🎬"
+  #   color: "orange"        # blue|orange|green|red|grey|purple|turquoise
+  #   heartbeat_tasks:
+  #     - name: "daily-task"
+  #       cwd: "~/AGI/MyProject"
+  #       model: "sonnet"
+  #       interval: "24h"
+  #       notify: true
+  #       enabled: true
+  #       prompt: "..."
+  #       allowedTools: [Read, Write, WebSearch]
+
 heartbeat:
   tasks: []
+    # Legacy flat tasks (no project isolation). New tasks should go under projects: above.
     # Examples — uncomment or add your own:
     #
     # Scheduled task (calls claude -p with your profile context):
