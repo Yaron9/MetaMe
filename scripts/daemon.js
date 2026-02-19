@@ -2801,14 +2801,26 @@ async function askClaude(bot, chatId, prompt, config) {
   gitCheckpoint(session.cwd);
 
   // Use streaming mode to show progress
-  // Telegram: edit status msg in-place; Feishu/others: send new messages
+  // Telegram: edit status msg in-place; Feishu: edit or fallback to new messages
+  let editFailed = false;
+  let lastFallbackStatus = 0;
+  const FALLBACK_THROTTLE = 8000; // 8s between new-message status updates
   const onStatus = async (status) => {
     try {
-      if (statusMsgId && bot.editMessage) {
-        await bot.editMessage(chatId, statusMsgId, status);
-      } else {
-        await bot.sendMessage(chatId, status);
+      if (statusMsgId && bot.editMessage && !editFailed) {
+        const editBroken = bot._editBroken !== undefined ? bot._editBroken : false;
+        if (editBroken) {
+          editFailed = true;
+        } else {
+          await bot.editMessage(chatId, statusMsgId, status);
+          return;
+        }
       }
+      // Fallback: send as new message with extra throttle to avoid spam
+      const now = Date.now();
+      if (now - lastFallbackStatus < FALLBACK_THROTTLE) return;
+      lastFallbackStatus = now;
+      await bot.sendMessage(chatId, status);
     } catch { /* ignore status update failures */ }
   };
 
