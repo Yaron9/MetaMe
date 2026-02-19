@@ -28,31 +28,22 @@ const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const SKILLS_DIR = path.join(HOME, '.claude', 'skills');
 
 // ---------------------------------------------------------
-// SKILL AUTO-INJECTION (keyword → skill context, once per session)
+// SKILL HINT (keyword → lightweight pointer, Claude reads file itself)
 // ---------------------------------------------------------
 const SKILL_TRIGGERS = [
   { name: 'macos-mail-calendar', pattern: /邮件|邮箱|收件箱|日历|日程|会议|schedule|email|mail|calendar|unread|inbox/i },
 ];
-const _skillCache = {};
-const _injectedPerSession = {}; // sessionId → Set<skillName>
 
-function getSkillContext(prompt, sessionId) {
-  const injected = _injectedPerSession[sessionId] || (_injectedPerSession[sessionId] = new Set());
-  const parts = [];
+function getSkillHint(prompt) {
+  const hints = [];
   for (const t of SKILL_TRIGGERS) {
-    if (t.pattern.test(prompt) && !injected.has(t.name)) {
-      if (_skillCache[t.name] === undefined) {
-        try { _skillCache[t.name] = fs.readFileSync(path.join(SKILLS_DIR, t.name, 'SKILL.md'), 'utf8'); }
-        catch { _skillCache[t.name] = null; }
-      }
-      if (_skillCache[t.name]) {
-        parts.push(`[Skill: ${t.name}]\n${_skillCache[t.name]}`);
-        injected.add(t.name);
-      }
+    if (t.pattern.test(prompt)) {
+      const p = path.join(SKILLS_DIR, t.name, 'SKILL.md');
+      if (fs.existsSync(p)) hints.push(t.name);
     }
   }
-  if (parts.length) log('INFO', `Skill injected (first in session): ${[...injected].join(', ')}`);
-  return parts.length ? '\n\n' + parts.join('\n\n') : '';
+  if (!hints.length) return '';
+  return `\n\n[Auto-detected skills: ${hints.join(', ')}. Read ~/.claude/skills/<name>/SKILL.md for instructions before executing.]`;
 }
 
 const yaml = require('./resolve-yaml');
@@ -2122,7 +2113,7 @@ function createSession(chatId, cwd, name) {
   };
   saveState(state);
   invalidateSessionCache();
-  delete _injectedPerSession[sessionId]; // reset skill injection tracking
+
 
   // If name provided, write to Claude's session file (same as /rename on desktop)
   if (name) {
@@ -2662,7 +2653,7 @@ async function askClaude(bot, chatId, prompt) {
    - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
    - Multiple files: use multiple [[FILE:...]] tags]`;
 
-  const fullPrompt = prompt + daemonHint + getSkillContext(prompt, session.id);
+  const fullPrompt = prompt + daemonHint + getSkillHint(prompt);
 
   // Git checkpoint before Claude modifies files (for /undo)
   gitCheckpoint(session.cwd);
