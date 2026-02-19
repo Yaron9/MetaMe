@@ -64,7 +64,7 @@ function createBot(config) {
      * Send markdown (Feishu doesn't support raw markdown — sends as text)
      */
     async sendMarkdown(chatId, markdown) {
-      await client.im.message.create({
+      const res = await client.im.message.create({
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: chatId,
@@ -72,6 +72,8 @@ function createBot(config) {
           content: JSON.stringify({ text: markdown }),
         },
       });
+      const msgId = res?.data?.message_id;
+      return msgId ? { message_id: msgId } : null;
     },
 
     /**
