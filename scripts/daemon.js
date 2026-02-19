@@ -28,38 +28,31 @@ const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const SKILLS_DIR = path.join(HOME, '.claude', 'skills');
 
 // ---------------------------------------------------------
-// SKILL AUTO-INJECTION (keyword → skill context)
+// SKILL AUTO-INJECTION (keyword → skill context, once per session)
 // ---------------------------------------------------------
 const SKILL_TRIGGERS = [
-  {
-    name: 'macos-mail-calendar',
-    pattern: /邮件|邮箱|收件箱|日历|日程|会议|schedule|email|mail|calendar|unread|inbox/i,
-    skillDir: 'macos-mail-calendar',
-  },
+  { name: 'macos-mail-calendar', pattern: /邮件|邮箱|收件箱|日历|日程|会议|schedule|email|mail|calendar|unread|inbox/i },
 ];
+const _skillCache = {};
+const _injectedPerSession = {}; // sessionId → Set<skillName>
 
-let _skillCache = {}; // name → content (lazy loaded)
-
-function loadSkillContent(skillDirName) {
-  if (_skillCache[skillDirName] !== undefined) return _skillCache[skillDirName];
-  const skillFile = path.join(SKILLS_DIR, skillDirName, 'SKILL.md');
-  try {
-    _skillCache[skillDirName] = fs.readFileSync(skillFile, 'utf8');
-  } catch {
-    _skillCache[skillDirName] = null;
-  }
-  return _skillCache[skillDirName];
-}
-
-function detectSkills(prompt) {
-  const matched = [];
-  for (const trigger of SKILL_TRIGGERS) {
-    if (trigger.pattern.test(prompt)) {
-      const content = loadSkillContent(trigger.skillDir);
-      if (content) matched.push({ name: trigger.name, content });
+function getSkillContext(prompt, sessionId) {
+  const injected = _injectedPerSession[sessionId] || (_injectedPerSession[sessionId] = new Set());
+  const parts = [];
+  for (const t of SKILL_TRIGGERS) {
+    if (t.pattern.test(prompt) && !injected.has(t.name)) {
+      if (_skillCache[t.name] === undefined) {
+        try { _skillCache[t.name] = fs.readFileSync(path.join(SKILLS_DIR, t.name, 'SKILL.md'), 'utf8'); }
+        catch { _skillCache[t.name] = null; }
+      }
+      if (_skillCache[t.name]) {
+        parts.push(`[Skill: ${t.name}]\n${_skillCache[t.name]}`);
+        injected.add(t.name);
+      }
     }
   }
-  return matched;
+  if (parts.length) log('INFO', `Skill injected (first in session): ${[...injected].join(', ')}`);
+  return parts.length ? '\n\n' + parts.join('\n\n') : '';
 }
 
 const yaml = require('./resolve-yaml');
@@ -2129,6 +2122,7 @@ function createSession(chatId, cwd, name) {
   };
   saveState(state);
   invalidateSessionCache();
+  delete _injectedPerSession[sessionId]; // reset skill injection tracking
 
   // If name provided, write to Claude's session file (same as /rename on desktop)
   if (name) {
@@ -2668,17 +2662,7 @@ async function askClaude(bot, chatId, prompt) {
    - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
    - Multiple files: use multiple [[FILE:...]] tags]`;
 
-  // Auto-inject skill context when keywords match
-  let skillContext = '';
-  const matchedSkills = detectSkills(prompt);
-  if (matchedSkills.length > 0) {
-    skillContext = '\n\n' + matchedSkills.map(s =>
-      `[Skill: ${s.name}]\n${s.content}`
-    ).join('\n\n');
-    log('INFO', `Skill auto-injected: ${matchedSkills.map(s => s.name).join(', ')}`);
-  }
-
-  const fullPrompt = prompt + daemonHint + skillContext;
+  const fullPrompt = prompt + daemonHint + getSkillContext(prompt, session.id);
 
   // Git checkpoint before Claude modifies files (for /undo)
   gitCheckpoint(session.cwd);
