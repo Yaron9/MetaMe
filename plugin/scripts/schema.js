@@ -16,8 +16,7 @@
  */
 
 const SCHEMA = {
-  // === T1: Identity ===
-  'identity.nickname':        { tier: 'T1', type: 'string', locked: true },
+  // === T1: Identity (USER's identity, not agent's) ===
   'identity.role':            { tier: 'T1', type: 'string', locked: false },
   'identity.locale':          { tier: 'T1', type: 'string', locked: true },
 
