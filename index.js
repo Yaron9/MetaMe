@@ -194,6 +194,15 @@ function spawnDistillBackground() {
   const distillPath = path.join(METAME_DIR, 'distill.js');
   if (!fs.existsSync(distillPath)) return;
 
+  // Early exit if distillation already in progress (prevents duplicate spawns across terminals)
+  const lockFile = path.join(METAME_DIR, 'distill.lock');
+  if (fs.existsSync(lockFile)) {
+    try {
+      const lockAge = Date.now() - fs.statSync(lockFile).mtimeMs;
+      if (lockAge < 120000) return;
+    } catch { /* stale lock, proceed */ }
+  }
+
   const hasSignals = shouldDistill();
   const bootstrap = needsBootstrap();
 
