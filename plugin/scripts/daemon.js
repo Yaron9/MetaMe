@@ -463,7 +463,16 @@ function executeWorkflow(task, config) {
 // HEARTBEAT SCHEDULER
 // ---------------------------------------------------------
 function startHeartbeat(config, notifyFn) {
-  const tasks = (config.heartbeat && config.heartbeat.tasks) || [];
+  const legacyTasks = (config.heartbeat && config.heartbeat.tasks) || [];
+  const projectTasks = [];
+  const legacyNames = new Set(legacyTasks.map(t => t.name));
+  for (const [key, proj] of Object.entries(config.projects || {})) {
+    for (const t of (proj.heartbeat_tasks || [])) {
+      if (legacyNames.has(t.name)) log('WARN', `Duplicate task name "${t.name}" in project "${key}" and legacy heartbeat — will run twice`);
+      projectTasks.push({ ...t, _project: { key, name: proj.name || key, color: proj.color || 'blue', icon: proj.icon || '🤖' } });
+    }
+  }
+  const tasks = [...legacyTasks, ...projectTasks];
   if (tasks.length === 0) {
     log('INFO', 'No heartbeat tasks configured');
     return;
@@ -503,10 +512,11 @@ function startHeartbeat(config, notifyFn) {
         nextRun[task.name] = currentTime + intervalSec * 1000;
 
         if (task.notify && notifyFn && !result.skipped) {
+          const proj = task._project || null;
           if (result.success) {
-            notifyFn(`✅ *${task.name}* completed\n\n${result.output}`);
+            notifyFn(`✅ *${task.name}* completed\n\n${result.output}`, proj);
           } else {
-            notifyFn(`❌ *${task.name}* failed: ${result.error}`);
+            notifyFn(`❌ *${task.name}* failed: ${result.error}`, proj);
           }
         }
       }
@@ -1092,6 +1102,24 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
+  if (text === '/agent') {
+    const projects = config.projects || {};
+    const entries = Object.entries(projects).filter(([, p]) => p.cwd);
+    if (entries.length === 0) {
+      await bot.sendMessage(chatId, 'No projects configured. Add projects with cwd to daemon.yaml.');
+      return;
+    }
+    const currentSession = getSession(chatId);
+    const currentCwd = currentSession?.cwd ? path.resolve(expandPath(currentSession.cwd)) : null;
+    const buttons = entries.map(([key, p]) => {
+      const projCwd = expandPath(p.cwd);
+      const active = currentCwd && path.resolve(projCwd) === currentCwd ? ' ◀' : '';
+      return [{ text: `${p.icon || '🤖'} ${p.name || key}${active}`, callback_data: `/cd ${projCwd}` }];
+    });
+    await bot.sendButtons(chatId, '切换对话对象', buttons);
+    return;
+  }
+
   if (text === '/cd' || text.startsWith('/cd ')) {
     let newCwd = expandPath(text.slice(3).trim());
     if (!newCwd) {
@@ -1231,15 +1259,28 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   }
 
   if (text === '/tasks') {
-    const tasks = (config.heartbeat && config.heartbeat.tasks) || [];
-    if (tasks.length === 0) { await bot.sendMessage(chatId, 'No heartbeat tasks configured.'); return; }
-    let msg = 'Heartbeat Tasks:\n';
-    for (const t of tasks) {
-      const ts = state.tasks[t.name] || {};
-      const flag = t.enabled !== false ? '✅' : '⏸';
-      msg += `${flag} ${t.name} (${t.interval}) ${ts.status || 'never_run'}\n`;
+    let msg = '';
+    // Legacy flat tasks
+    const legacyTasks = (config.heartbeat && config.heartbeat.tasks) || [];
+    if (legacyTasks.length > 0) {
+      msg += '📋 General:\n';
+      for (const t of legacyTasks) {
+        const ts = state.tasks[t.name] || {};
+        msg += `${t.enabled !== false ? '✅' : '⏸'} ${t.name} (${t.interval}) ${ts.status || 'never_run'}\n`;
+      }
     }
-    await bot.sendMessage(chatId, msg);
+    // Project tasks grouped
+    for (const [, proj] of Object.entries(config.projects || {})) {
+      const pTasks = proj.heartbeat_tasks || [];
+      if (pTasks.length === 0) continue;
+      msg += `\n${proj.icon || '🤖'} ${proj.name || proj}:\n`;
+      for (const t of pTasks) {
+        const ts = state.tasks[t.name] || {};
+        msg += `${t.enabled !== false ? '✅' : '⏸'} ${t.name} (${t.interval}) ${ts.status || 'never_run'}\n`;
+      }
+    }
+    if (!msg) { await bot.sendMessage(chatId, 'No heartbeat tasks configured.'); return; }
+    await bot.sendMessage(chatId, msg.trim());
     return;
   }
 
@@ -1251,8 +1292,13 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       return;
     }
     const taskName = text.slice(5).trim();
-    const tasks = (config.heartbeat && config.heartbeat.tasks) || [];
-    const task = tasks.find(t => t.name === taskName);
+    const allRunTasks = [...(config.heartbeat && config.heartbeat.tasks || [])];
+    for (const [key, proj] of Object.entries(config.projects || {})) {
+      for (const t of (proj.heartbeat_tasks || [])) {
+        allRunTasks.push({ ...t, _project: { key, name: proj.name || key, color: proj.color || 'blue', icon: proj.icon || '🤖' } });
+      }
+    }
+    const task = allRunTasks.find(t => t.name === taskName);
     if (!task) { await bot.sendMessage(chatId, `❌ Task "${taskName}" not found`); return; }
 
     // Script tasks: quick, run inline
@@ -1844,6 +1890,9 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
       '⚡ 快速同步电脑工作:',
       '/last — 继续电脑上最近的对话',
       '/cd last — 切到电脑最近的项目目录',
+      '',
+      '🤖 Agent 切换:',
+      '/agent — 选择对话的项目/Agent',
       '',
       '📂 Session 管理:',
       '/new [path] [name] — 新建会话',
@@ -2955,7 +3004,7 @@ async function main() {
   }
 
   // Config validation: warn on unknown/suspect fields
-  const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'heartbeat', 'budget'];
+  const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'heartbeat', 'budget', 'projects'];
   const KNOWN_DAEMON = ['model', 'log_max_size', 'heartbeat_check_interval', 'session_allowed_tools', 'dangerously_skip_permissions', 'cooldown_seconds'];
   const VALID_MODELS = ['sonnet', 'opus', 'haiku'];
   for (const key of Object.keys(config)) {
@@ -2988,8 +3037,14 @@ async function main() {
 
   // Task executor lookup (always reads fresh config)
   function executeTaskByName(name) {
-    const tasks = (config.heartbeat && config.heartbeat.tasks) || [];
-    const task = tasks.find(t => t.name === name);
+    const legacy = (config.heartbeat && config.heartbeat.tasks) || [];
+    let task = legacy.find(t => t.name === name);
+    if (!task) {
+      for (const [key, proj] of Object.entries(config.projects || {})) {
+        const found = (proj.heartbeat_tasks || []).find(t => t.name === name);
+        if (found) { task = { ...found, _project: { key, name: proj.name || key, color: proj.color || 'blue', icon: proj.icon || '🤖' } }; break; }
+      }
+    }
     if (!task) return { success: false, error: `Task "${name}" not found` };
     return executeTask(task, config);
   }
@@ -2999,7 +3054,8 @@ async function main() {
   let feishuBridge = null;
 
   // Notification function (sends to all enabled channels)
-  const notifyFn = async (message) => {
+  // project: optional { key, name, color, icon } — triggers colored card on Feishu
+  const notifyFn = async (message, project = null) => {
     if (telegramBridge && telegramBridge.bot) {
       const tgIds = (config.telegram && config.telegram.allowed_chat_ids) || [];
       for (const chatId of tgIds) {
@@ -3011,7 +3067,17 @@ async function main() {
     if (feishuBridge && feishuBridge.bot) {
       const fsIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
       for (const chatId of fsIds) {
-        try { await feishuBridge.bot.sendMessage(chatId, message); } catch (e) {
+        try {
+          if (project && feishuBridge.bot.sendCard) {
+            await feishuBridge.bot.sendCard(chatId, {
+              title: `${project.icon} ${project.name}`,
+              body: message,
+              color: project.color,
+            });
+          } else {
+            await feishuBridge.bot.sendMessage(chatId, message);
+          }
+        } catch (e) {
           log('ERROR', `Feishu notify failed ${chatId}: ${e.message}`);
         }
       }
@@ -3029,8 +3095,11 @@ async function main() {
     refreshLogMaxSize(config);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     heartbeatTimer = startHeartbeat(config, notifyFn);
-    log('INFO', `Config reloaded: ${(config.heartbeat && config.heartbeat.tasks || []).length} tasks`);
-    return { success: true, tasks: (config.heartbeat && config.heartbeat.tasks || []).length };
+    const legacyCount = (config.heartbeat && config.heartbeat.tasks || []).length;
+    const projectCount = Object.values(config.projects || {}).reduce((n, p) => n + (p.heartbeat_tasks || []).length, 0);
+    const totalCount = legacyCount + projectCount;
+    log('INFO', `Config reloaded: ${totalCount} tasks (${projectCount} in projects)`);
+    return { success: true, tasks: totalCount };
   }
   // Expose reloadConfig to handleCommand via closure
   global._metameReload = reloadConfig;

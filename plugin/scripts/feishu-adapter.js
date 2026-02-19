@@ -75,6 +75,28 @@ function createBot(config) {
     },
 
     /**
+     * Send a colored interactive card (for project-tagged notifications)
+     * @param {string} chatId
+     * @param {string} title - card header text
+     * @param {string} body - card body (lark markdown)
+     * @param {string} color - header color: blue|orange|green|red|grey|purple|turquoise
+     */
+    async sendCard(chatId, { title, body, color = 'blue' }) {
+      const elements = body ? [{ tag: 'div', text: { tag: 'lark_md', content: body } }] : [];
+      const card = {
+        config: { wide_screen_mode: true },
+        header: { title: { tag: 'plain_text', content: title }, template: color },
+        elements,
+      };
+      const res = await client.im.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
+      });
+      const msgId = res?.data?.message_id;
+      return msgId ? { message_id: msgId } : null;
+    },
+
+    /**
      * Typing indicator (Feishu has no such API — no-op)
      */
     async sendTyping(_chatId) {},
