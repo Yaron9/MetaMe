@@ -1,2 +1,3 @@
-2026/02/20-00:12:17.152 bb19f5 Creating DB /Users/yaron/AGI/MetaMe/~/.metame/browser-profile/Default/shared_proto_db since it was missing.
-2026/02/20-00:12:17.154 bb19f5 Reusing MANIFEST /Users/yaron/AGI/MetaMe/~/.metame/browser-profile/Default/shared_proto_db/MANIFEST-000001
+2026/02/20-00:13:37.226 bb2612 Reusing MANIFEST /Users/yaron/AGI/MetaMe/~/.metame/browser-profile/Default/shared_proto_db/MANIFEST-000001
+2026/02/20-00:13:37.226 bb2612 Recovering log #3
+2026/02/20-00:13:37.226 bb2612 Reusing old log /Users/yaron/AGI/MetaMe/~/.metame/browser-profile/Default/shared_proto_db/000003.log 

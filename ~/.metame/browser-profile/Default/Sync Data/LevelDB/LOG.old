@@ -1,2 +1,3 @@
-2026/02/20-00:12:16.903 bb19ea Creating DB /Users/yaron/AGI/MetaMe/~/.metame/browser-profile/Default/Sync Data/LevelDB since it was missing.
-2026/02/20-00:12:16.922 bb19ea Reusing MANIFEST /Users/yaron/AGI/MetaMe/~/.metame/browser-profile/Default/Sync Data/LevelDB/MANIFEST-000001
+2026/02/20-00:13:37.016 bb2611 Reusing MANIFEST /Users/yaron/AGI/MetaMe/~/.metame/browser-profile/Default/Sync Data/LevelDB/MANIFEST-000001
+2026/02/20-00:13:37.017 bb2611 Recovering log #3
+2026/02/20-00:13:37.017 bb2611 Reusing old log /Users/yaron/AGI/MetaMe/~/.metame/browser-profile/Default/Sync Data/LevelDB/000003.log 
