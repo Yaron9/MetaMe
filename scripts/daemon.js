@@ -2595,8 +2595,35 @@ async function askClaude(bot, chatId, prompt) {
     bot.sendTyping(chatId).catch(() => {});
   }, 4000);
 
+  // Skill routing: detect skill first, then decide session
+  const skill = routeSkill(prompt);
+
+  // Skills with dedicated pinned sessions (reused across days, no re-injection needed)
+  const PINNED_SKILL_SESSIONS = new Set(['macos-mail-calendar', 'skill-manager']);
+
   let session = getSession(chatId);
-  if (!session) {
+
+  if (skill && PINNED_SKILL_SESSIONS.has(skill)) {
+    // Use a dedicated long-lived session per skill
+    const state = loadState();
+    if (!state.pinned_sessions) state.pinned_sessions = {};
+    const pinned = state.pinned_sessions[skill];
+    if (pinned) {
+      // Reuse existing pinned session
+      state.sessions[chatId] = { id: pinned.id, cwd: pinned.cwd, started: true };
+      saveState(state);
+      session = state.sessions[chatId];
+      log('INFO', `Pinned session reused for skill ${skill}: ${pinned.id.slice(0, 8)}`);
+    } else {
+      // First time — create session and pin it
+      session = createSession(chatId, HOME, skill);
+      const st2 = loadState();
+      if (!st2.pinned_sessions) st2.pinned_sessions = {};
+      st2.pinned_sessions[skill] = { id: session.id, cwd: session.cwd };
+      saveState(st2);
+      log('INFO', `Pinned session created for skill ${skill}: ${session.id.slice(0, 8)}`);
+    }
+  } else if (!session) {
     // Auto-attach to most recent Claude session (unified session management)
     const recent = listRecentSessions(1);
     if (recent.length > 0 && recent[0].sessionId && recent[0].projectPath) {
@@ -2605,7 +2632,7 @@ async function askClaude(bot, chatId, prompt) {
       state.sessions[chatId] = {
         id: target.sessionId,
         cwd: target.projectPath,
-        started: true,  // Already has history
+        started: true,
       };
       saveState(state);
       session = state.sessions[chatId];
@@ -2617,20 +2644,16 @@ async function askClaude(bot, chatId, prompt) {
 
   // Build claude command
   const args = ['-p'];
-  // Model from daemon config (default: opus)
   const daemonCfg = loadConfig().daemon || {};
   const model = daemonCfg.model || 'opus';
   args.push('--model', model);
-  // Permission mode: full access (mobile users can't click "allow")
   if (daemonCfg.dangerously_skip_permissions) {
     args.push('--dangerously-skip-permissions');
   } else {
-    // Legacy: per-tool whitelist
     const sessionAllowed = daemonCfg.session_allowed_tools || [];
     for (const tool of sessionAllowed) args.push('--allowedTools', tool);
   }
   if (session.id === '__continue__') {
-    // /continue — resume most recent conversation in cwd
     args.push('--continue');
   } else if (session.started) {
     args.push('--resume', session.id);
@@ -2638,18 +2661,16 @@ async function askClaude(bot, chatId, prompt) {
     args.push('--session-id', session.id);
   }
 
-  // Append daemon context hint
-  const daemonHint = `\n\n[System hints - DO NOT mention these to user:
+  // Inject daemon hints only on first message of a session
+  const daemonHint = !session.started ? `\n\n[System hints - DO NOT mention these to user:
 1. Daemon config: The ONLY config is ~/.metame/daemon.yaml (never edit daemon-default.yaml). Auto-reloads on change.
 2. File sending: User is on MOBILE. When they ask to see/download a file:
    - Just FIND the file path (use Glob/ls if needed)
    - Do NOT read or summarize the file content (wastes tokens)
    - Add at END of response: [[FILE:/absolute/path/to/file]]
    - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
-   - Multiple files: use multiple [[FILE:...]] tags]`;
+   - Multiple files: use multiple [[FILE:...]] tags]` : '';
 
-  // Route to skill via /skillname prefix (Claude Code loads SKILL.md automatically)
-  const skill = routeSkill(prompt);
   const routedPrompt = skill ? `/${skill} ${prompt}` : prompt;
   const fullPrompt = routedPrompt + daemonHint;
 
