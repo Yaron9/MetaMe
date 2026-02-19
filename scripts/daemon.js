@@ -25,6 +25,42 @@ const STATE_FILE = path.join(METAME_DIR, 'daemon_state.json');
 const PID_FILE = path.join(METAME_DIR, 'daemon.pid');
 const LOG_FILE = path.join(METAME_DIR, 'daemon.log');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
+const SKILLS_DIR = path.join(HOME, '.claude', 'skills');
+
+// ---------------------------------------------------------
+// SKILL AUTO-INJECTION (keyword → skill context)
+// ---------------------------------------------------------
+const SKILL_TRIGGERS = [
+  {
+    name: 'macos-mail-calendar',
+    pattern: /邮件|邮箱|收件箱|日历|日程|会议|schedule|email|mail|calendar|unread|inbox/i,
+    skillDir: 'macos-mail-calendar',
+  },
+];
+
+let _skillCache = {}; // name → content (lazy loaded)
+
+function loadSkillContent(skillDirName) {
+  if (_skillCache[skillDirName] !== undefined) return _skillCache[skillDirName];
+  const skillFile = path.join(SKILLS_DIR, skillDirName, 'SKILL.md');
+  try {
+    _skillCache[skillDirName] = fs.readFileSync(skillFile, 'utf8');
+  } catch {
+    _skillCache[skillDirName] = null;
+  }
+  return _skillCache[skillDirName];
+}
+
+function detectSkills(prompt) {
+  const matched = [];
+  for (const trigger of SKILL_TRIGGERS) {
+    if (trigger.pattern.test(prompt)) {
+      const content = loadSkillContent(trigger.skillDir);
+      if (content) matched.push({ name: trigger.name, content });
+    }
+  }
+  return matched;
+}
 
 const yaml = require('./resolve-yaml');
 const { parseInterval, formatRelativeTime, createPathMap } = require('./utils');
@@ -2631,7 +2667,18 @@ async function askClaude(bot, chatId, prompt) {
    - Add at END of response: [[FILE:/absolute/path/to/file]]
    - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
    - Multiple files: use multiple [[FILE:...]] tags]`;
-  const fullPrompt = prompt + daemonHint;
+
+  // Auto-inject skill context when keywords match
+  let skillContext = '';
+  const matchedSkills = detectSkills(prompt);
+  if (matchedSkills.length > 0) {
+    skillContext = '\n\n' + matchedSkills.map(s =>
+      `[Skill: ${s.name}]\n${s.content}`
+    ).join('\n\n');
+    log('INFO', `Skill auto-injected: ${matchedSkills.map(s => s.name).join(', ')}`);
+  }
+
+  const fullPrompt = prompt + daemonHint + skillContext;
 
   // Git checkpoint before Claude modifies files (for /undo)
   gitCheckpoint(session.cwd);
