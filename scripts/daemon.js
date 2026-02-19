@@ -2808,13 +2808,9 @@ async function askClaude(bot, chatId, prompt, config) {
   const onStatus = async (status) => {
     try {
       if (statusMsgId && bot.editMessage && !editFailed) {
-        const editBroken = bot._editBroken !== undefined ? bot._editBroken : false;
-        if (editBroken) {
-          editFailed = true;
-        } else {
-          await bot.editMessage(chatId, statusMsgId, status);
-          return;
-        }
+        const ok = await bot.editMessage(chatId, statusMsgId, status);
+        if (ok !== false) return; // edit succeeded (true or undefined for Telegram)
+        editFailed = true; // edit failed, switch to fallback permanently
       }
       // Fallback: send as new message with extra throttle to avoid spam
       const now = Date.now();
