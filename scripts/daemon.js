@@ -1940,7 +1940,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     q.messages.push(text);
     // Only notify once (first message), subsequent ones silently queue
     if (isFirst) {
-      await bot.sendMessage(chatId, '📝 收到，中断当前任务后一起处理');
+      await bot.sendMessage(chatId, '📝 收到，稍后一起处理');
     }
     // Interrupt the running Claude process
     const proc = activeProcesses.get(chatId);
