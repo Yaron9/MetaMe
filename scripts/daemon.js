@@ -1968,13 +1968,32 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     }, 5000);
     return;
   }
+  // Nickname-only switch: bypass cooldown + budget (no Claude call)
+  const quickAgent = routeAgent(text, config);
+  if (quickAgent && !quickAgent.rest) {
+    const { key, proj } = quickAgent;
+    const projCwd = expandPath(proj.cwd);
+    const st = loadState();
+    const recentInDir = listRecentSessions(1, projCwd);
+    if (recentInDir.length > 0 && recentInDir[0].sessionId) {
+      st.sessions[chatId] = { id: recentInDir[0].sessionId, cwd: projCwd, started: true };
+    } else {
+      const newSess = createSession(chatId, projCwd, proj.name || key);
+      st.sessions[chatId] = { id: newSess.id, cwd: projCwd, started: false };
+    }
+    saveState(st);
+    log('INFO', `Agent switch via nickname: ${key} (${projCwd})`);
+    await bot.sendMessage(chatId, `${proj.icon || '🤖'} ${proj.name || key} 在线`);
+    return;
+  }
+
   const cd = checkCooldown(chatId);
   if (!cd.ok) { await bot.sendMessage(chatId, `${cd.wait}s`); return; }
   if (!checkBudget(loadConfig(), loadState())) {
     await bot.sendMessage(chatId, 'Daily token budget exceeded.');
     return;
   }
-  await askClaude(bot, chatId, text);
+  await askClaude(bot, chatId, text, config);
 }
 
 // ---------------------------------------------------------
@@ -2643,7 +2662,7 @@ function lazyDistill() {
  * Shared ask logic — full Claude Code session (stateful, with tools)
  * Now uses spawn (async) instead of execSync to allow parallel requests.
  */
-async function askClaude(bot, chatId, prompt) {
+async function askClaude(bot, chatId, prompt, config) {
   log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
   // Trigger background distill on first message / every 4h
   try { lazyDistill(); } catch { /* non-fatal */ }
