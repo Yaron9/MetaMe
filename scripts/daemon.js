@@ -41,6 +41,22 @@ function routeSkill(prompt) {
   return null;
 }
 
+// Agent nickname routing: matches "贾维斯" or "贾维斯，帮我..." at message start
+// Returns { key, proj, rest } or null
+function routeAgent(prompt, config) {
+  for (const [key, proj] of Object.entries((config && config.projects) || {})) {
+    if (!proj.cwd || !proj.nicknames) continue;
+    const nicks = Array.isArray(proj.nicknames) ? proj.nicknames : [proj.nicknames];
+    for (const nick of nicks) {
+      const re = new RegExp(`^${nick}[，,、\\s]*`, 'i');
+      if (re.test(prompt.trim())) {
+        return { key, proj, rest: prompt.trim().replace(re, '').trim() };
+      }
+    }
+  }
+  return null;
+}
+
 const yaml = require('./resolve-yaml');
 const { parseInterval, formatRelativeTime, createPathMap } = require('./utils');
 if (!yaml) {
@@ -2643,6 +2659,31 @@ async function askClaude(bot, chatId, prompt) {
   const typingTimer = setInterval(() => {
     bot.sendTyping(chatId).catch(() => {});
   }, 4000);
+
+  // Agent nickname routing: "贾维斯" / "小美，帮我..." → switch project session
+  const agentMatch = routeAgent(prompt, config);
+  if (agentMatch) {
+    const { key, proj, rest } = agentMatch;
+    const projCwd = expandPath(proj.cwd);
+    const st = loadState();
+    const recentInDir = listRecentSessions(1, projCwd);
+    if (recentInDir.length > 0 && recentInDir[0].sessionId) {
+      st.sessions[chatId] = { id: recentInDir[0].sessionId, cwd: projCwd, started: true };
+    } else {
+      const newSess = createSession(chatId, projCwd, proj.name || key);
+      st.sessions[chatId] = { id: newSess.id, cwd: projCwd, started: false };
+    }
+    saveState(st);
+    log('INFO', `Agent switch via nickname: ${key} (${projCwd})`);
+    if (!rest) {
+      // Pure nickname call — confirm switch and stop
+      clearInterval(typingTimer);
+      await bot.sendMessage(chatId, `${proj.icon || '🤖'} ${proj.name || key} 在线`);
+      return;
+    }
+    // Nickname + content — strip nickname, continue with rest as prompt
+    prompt = rest;
+  }
 
   // Skill routing: detect skill first, then decide session
   const skill = routeSkill(prompt);
