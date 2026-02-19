@@ -305,7 +305,7 @@ runExpiryCleanup();
 if (!fs.existsSync(BRAIN_FILE)) {
   const initialProfile = `identity:
   role: Unknown
-  nickname: null
+  locale: null
 status:
   focus: Initializing
 `;
@@ -367,12 +367,12 @@ You are entering **Calibration Mode**. You are not a chatbot; you are a Psycholo
 
 5. **Shadows (Hidden Fears):** What are you avoiding? What pattern do you keep repeating? What keeps you up at night?
 
-6. **Identity (Nickname + Role):** Based on everything learned, propose a nickname and role summary. Ask if it resonates.
+6. **Identity (Role + Locale):** Based on everything learned, propose a role summary and confirm their preferred language (locale). Ask if it resonates.
 
 **TERMINATION:**
 - After 5-7 exchanges, synthesize everything into \`~/.claude_profile.yaml\`.
 - **LOCK** Core Values with \`# [LOCKED]\`.
-- Announce: "Link Established. I see you now, [Nickname]."
+- Announce: "Link Established. Profile calibrated."
 - Then proceed to **Phase 2** below.
 
 **3. SETUP WIZARD (Phase 2 — Optional):**
@@ -440,7 +440,7 @@ let isKnownUser = false;
 try {
   if (fs.existsSync(BRAIN_FILE)) {
     const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
-    if (doc.identity && doc.identity.nickname && doc.identity.nickname !== 'null') {
+    if (doc.identity && doc.identity.locale && doc.identity.locale !== 'null') {
       isKnownUser = true;
     }
   }
