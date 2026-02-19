@@ -399,6 +399,53 @@ Each step runs in the same Claude Code session. Step outputs automatically becom
 * `~/.metame/` directory set to mode 700
 * Bot tokens stored locally, never transmitted
 
+### Multi-Agent Projects — Context Isolation & Nickname Routing (v1.3.18)
+
+Organize your work into named agents, each tied to a project directory. Switch between them instantly from your phone — no commands needed, just say their name.
+
+**How it works:**
+
+Each `project` entry in `daemon.yaml` defines an agent with a working directory, display name, notification color, and optional nicknames. When you send a message starting with a nickname, the daemon instantly switches to that project's last session — no Claude call, no token cost.
+
+**Setup via conversation:**
+
+The easiest way to add an agent is to tell the bot:
+
+> *"Add a project called 'work' pointing to ~/my-project, nickname is '工作'"*
+
+Or edit `~/.metame/daemon.yaml` directly:
+
+```yaml
+projects:
+  my_agent:
+    name: "My Agent"          # Display name in notifications
+    icon: "🤖"               # Emoji shown in Feishu cards
+    color: "blue"            # Feishu card color: blue|orange|green|purple|red|grey
+    cwd: "~/my-project"      # Working directory for this agent
+    nicknames: [nickname1, nickname2]   # Wake words (matched at message start)
+    heartbeat_tasks: []      # Scheduled tasks for this project (optional)
+```
+
+**Available colors:** `blue` · `orange` · `green` · `purple` · `red` · `grey` · `turquoise`
+
+**Phone commands:**
+
+| Action | How |
+|--------|-----|
+| Switch agent | Send the nickname alone: `贾维斯` → `🤖 Jarvis 在线` |
+| Switch + ask | `贾维斯, what's the status?` → switches then asks Claude |
+| Pick from list | `/agent` → tap button to switch |
+| Continue a reply | Reply to any bot message → session auto-restored |
+| View all tasks | `/tasks` → grouped by project |
+| Run a task | `/run <task-name>` |
+
+**Nickname routing rules:**
+- Matched at **message start only** — mentioning a nickname mid-sentence never triggers a switch
+- Pure nickname (no content after) → instant switch, zero token cost, bypasses cooldown
+- Nickname + content → switch then send content to Claude
+
+**Heartbeat task notifications** arrive as colored Feishu cards — each project's color is distinct, so you can tell at a glance which agent sent the update.
+
 ### Provider Relay — Third-Party Model Support (v1.3.11)
 
 MetaMe supports any Anthropic-compatible API relay as a backend. This means you can route Claude Code through a third-party relay that maps `sonnet`/`opus`/`haiku` to any model (GPT-4, DeepSeek, Gemini, etc.) — MetaMe passes standard model names and the relay handles translation.
@@ -602,6 +649,7 @@ A: No. Your profile stays local at `~/.claude_profile.yaml`. MetaMe simply passe
 
 | Version | Highlights |
 |---------|------------|
+| **v1.3.18** | **Multi-agent project isolation** — `projects` in `daemon.yaml` with per-project heartbeat tasks, Feishu colored cards per project, `/agent` picker button, nickname routing (say agent name to switch instantly), reply-to-message session restoration, fix `~` expansion in project cwd |
 | **v1.3.17** | **Windows support** (WSL one-command installer), `install-systemd` for Linux/WSL daemon auto-start. Fix onboarding (Genesis interview was never injected, CLAUDE.md accumulated across runs). Marker-based cleanup, unified protocols, `--append-system-prompt` guarantees interview activation, Feishu auto-fetch chat ID, full mobile permissions, fix `/publish` false-success, auto-restart daemon on script update |
 | **v1.3.16** | Git-based `/undo` (auto-checkpoint before each turn, `git reset --hard` rollback), `/nosleep` toggle (macOS caffeinate), custom provider model passthrough (`/model` accepts any name for non-anthropic providers), auto-fallback to anthropic/opus on provider failure, message queue works on Telegram (fire-and-forget poll loop), lazy background distill |
 | **v1.3.15** | Native Playwright MCP (browser automation for all users), `/list` interactive file browser with buttons, Feishu image download fix, Skill/MCP/Agent status push, hot restart reliability (single notification, no double instance) |
