@@ -51,13 +51,21 @@ function createBot(config) {
       return msgId ? { message_id: msgId } : null;
     },
 
+    _editBroken: false, // Set to true if patch API consistently fails
     async editMessage(chatId, messageId, text) {
+      if (this._editBroken) return; // Skip if known broken (no permission)
       try {
         await client.im.message.patch({
           path: { message_id: messageId },
           data: { content: JSON.stringify({ text }) },
         });
-      } catch { /* non-fatal */ }
+      } catch (e) {
+        const code = e?.code || e?.response?.data?.code;
+        // 230001 = no permission, 230002 = message not editable
+        if (code === 230001 || code === 230002 || /permission|forbidden/i.test(String(e))) {
+          this._editBroken = true;
+        }
+      }
     },
 
     /**
