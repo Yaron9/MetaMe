@@ -2875,7 +2875,27 @@ async function askClaude(bot, chatId, prompt, config) {
     const markedFiles = fileMarkers.map(m => m.match(/\[\[FILE:([^\]]+)\]\]/)[1].trim());
     const cleanOutput = output.replace(/\s*\[\[FILE:[^\]]+\]\]/g, '').trim();
 
-    const replyMsg = await bot.sendMarkdown(chatId, cleanOutput);
+    // Match current session to a project for colored card display
+    let activeProject = null;
+    if (session && session.cwd && config && config.projects) {
+      const sessionCwd = path.resolve(expandPath(session.cwd).replace(/^~/, HOME));
+      for (const [, proj] of Object.entries(config.projects)) {
+        if (!proj.cwd) continue;
+        const projCwd = path.resolve(expandPath(proj.cwd).replace(/^~/, HOME));
+        if (sessionCwd === projCwd) { activeProject = proj; break; }
+      }
+    }
+
+    let replyMsg;
+    if (activeProject && bot.sendCard) {
+      replyMsg = await bot.sendCard(chatId, {
+        title: `${activeProject.icon || '🤖'} ${activeProject.name || ''}`,
+        body: cleanOutput,
+        color: activeProject.color || 'blue',
+      });
+    } else {
+      replyMsg = await bot.sendMarkdown(chatId, cleanOutput);
+    }
     if (replyMsg && replyMsg.message_id && session) trackMsgSession(replyMsg.message_id, session);
 
     // Combine: marked files + auto-detected content files from Write operations

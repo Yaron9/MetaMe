@@ -127,7 +127,49 @@ function createBot(config) {
      * @param {string} color - header color: blue|orange|green|red|grey|purple|turquoise
      */
     async sendCard(chatId, { title, body, color = 'blue' }) {
-      const elements = body ? [{ tag: 'div', text: { tag: 'lark_md', content: body } }] : [];
+      if (!body) {
+        const card = {
+          config: { wide_screen_mode: true },
+          header: { title: { tag: 'plain_text', content: title }, template: color },
+          elements: [],
+        };
+        const res = await client.im.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
+        });
+        const msgId = res?.data?.message_id;
+        return msgId ? { message_id: msgId } : null;
+      }
+
+      // Convert standard markdown → lark_md
+      let content = body
+        .replace(/^(#{1,3})\s+(.+)$/gm, '**$2**')
+        .replace(/^---+$/gm, '─────────────────────');
+
+      // Split into chunks (lark_md element limit ~4000 chars)
+      const MAX_CHUNK = 3800;
+      const chunks = [];
+      if (content.length <= MAX_CHUNK) {
+        chunks.push(content);
+      } else {
+        const paragraphs = content.split(/\n\n/);
+        let buf = '';
+        for (const p of paragraphs) {
+          if (buf.length + p.length + 2 > MAX_CHUNK && buf) {
+            chunks.push(buf);
+            buf = p;
+          } else {
+            buf = buf ? buf + '\n\n' + p : p;
+          }
+        }
+        if (buf) chunks.push(buf);
+      }
+
+      const elements = chunks.map(c => ({
+        tag: 'div',
+        text: { tag: 'lark_md', content: c },
+      }));
+
       const card = {
         config: { wide_screen_mode: true },
         header: { title: { tag: 'plain_text', content: title }, template: color },
@@ -139,6 +181,15 @@ function createBot(config) {
       });
       const msgId = res?.data?.message_id;
       return msgId ? { message_id: msgId } : null;
+    },
+
+    /**
+     * Delete a message by ID
+     */
+    async deleteMessage(chatId, messageId) {
+      try {
+        await client.im.message.delete({ path: { message_id: messageId } });
+      } catch { /* non-fatal — message may already be deleted or expired */ }
     },
 
     /**
