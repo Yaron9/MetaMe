@@ -78,13 +78,12 @@ function createBot(config) {
         .replace(/^(#{1,3})\s+(.+)$/gm, '**$2**')   // headers → bold
         .replace(/^---+$/gm, '─────────────────────');  // hr → unicode line
 
-      // Split into chunks if too long (lark_md element limit ~4000 chars)
+      // Split into chunks if too long (element limit ~4000 chars)
       const MAX_CHUNK = 3800;
       const chunks = [];
       if (content.length <= MAX_CHUNK) {
         chunks.push(content);
       } else {
-        // Split on double newlines to avoid breaking mid-paragraph
         const paragraphs = content.split(/\n\n/);
         let buf = '';
         for (const p of paragraphs) {
@@ -98,14 +97,16 @@ function createBot(config) {
         if (buf) chunks.push(buf);
       }
 
+      // V2 schema: markdown element with normal text size
       const elements = chunks.map(c => ({
-        tag: 'div',
-        text: { tag: 'lark_md', content: c },
+        tag: 'markdown',
+        content: c,
+        text_size: 'normal',
       }));
 
       const card = {
-        config: { wide_screen_mode: true },
-        elements,
+        schema: '2.0',
+        body: { elements },
       };
 
       const res = await client.im.message.create({
@@ -128,11 +129,12 @@ function createBot(config) {
      * @param {string} color - header color: blue|orange|green|red|grey|purple|turquoise
      */
     async sendCard(chatId, { title, body, color = 'blue' }) {
+      // Use card schema V2 for better text sizing
       if (!body) {
         const card = {
-          config: { wide_screen_mode: true },
+          schema: '2.0',
           header: { title: { tag: 'plain_text', content: title }, template: color },
-          elements: [],
+          body: { elements: [] },
         };
         const res = await client.im.message.create({
           params: { receive_id_type: 'chat_id' },
@@ -166,15 +168,17 @@ function createBot(config) {
         if (buf) chunks.push(buf);
       }
 
+      // V2: use markdown element with text_size for readable font
       const elements = chunks.map(c => ({
-        tag: 'div',
-        text: { tag: 'lark_md', content: c },
+        tag: 'markdown',
+        content: c,
+        text_size: 'normal',
       }));
 
       const card = {
-        config: { wide_screen_mode: true },
+        schema: '2.0',
         header: { title: { tag: 'plain_text', content: title }, template: color },
-        elements,
+        body: { elements },
       };
       const res = await client.im.message.create({
         params: { receive_id_type: 'chat_id' },
