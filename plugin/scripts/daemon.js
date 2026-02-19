@@ -2642,6 +2642,20 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
 
 // Lazy distill: run distill.js in background on first message, then every 4 hours
 let _lastDistillTime = 0;
+// Track outbound message_id → session for reply-based session restoration.
+// Keeps last 200 entries to avoid unbounded growth.
+function trackMsgSession(messageId, session) {
+  if (!messageId || !session || !session.id) return;
+  const st = loadState();
+  if (!st.msg_sessions) st.msg_sessions = {};
+  st.msg_sessions[messageId] = { id: session.id, cwd: session.cwd };
+  const keys = Object.keys(st.msg_sessions);
+  if (keys.length > 200) {
+    for (const k of keys.slice(0, keys.length - 200)) delete st.msg_sessions[k];
+  }
+  saveState(st);
+}
+
 function lazyDistill() {
   const now = Date.now();
   if (now - _lastDistillTime < 4 * 60 * 60 * 1000) return; // 4h cooldown
@@ -2808,7 +2822,8 @@ async function askClaude(bot, chatId, prompt, config) {
   // When Claude completes with no text output (pure tool work), send a done notice
   if (output === '' && !error) {
     const filesDesc = files && files.length > 0 ? `\n修改了 ${files.length} 个文件` : '';
-    await bot.sendMessage(chatId, `✅ 完成${filesDesc}`);
+    const doneMsg = await bot.sendMessage(chatId, `✅ 完成${filesDesc}`);
+    if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session);
     const wasNew = !session.started;
     if (wasNew) markSessionStarted(chatId);
     return;
@@ -2848,7 +2863,8 @@ async function askClaude(bot, chatId, prompt, config) {
     const markedFiles = fileMarkers.map(m => m.match(/\[\[FILE:([^\]]+)\]\]/)[1].trim());
     const cleanOutput = output.replace(/\s*\[\[FILE:[^\]]+\]\]/g, '').trim();
 
-    await bot.sendMarkdown(chatId, cleanOutput);
+    const replyMsg = await bot.sendMarkdown(chatId, cleanOutput);
+    if (replyMsg && replyMsg.message_id && session) trackMsgSession(replyMsg.message_id, session);
 
     // Combine: marked files + auto-detected content files from Write operations
     const allFiles = new Set(markedFiles);
@@ -2999,6 +3015,18 @@ async function startFeishuBridge(config, executeTaskByName) {
       // Handle text message
       if (text) {
         log('INFO', `Feishu message from ${chatId}: ${text.slice(0, 50)}`);
+        // Reply-based session restoration: if user replied to a bot message,
+        // restore the session that sent that message before processing.
+        const parentId = event?.message?.parent_id;
+        if (parentId) {
+          const st = loadState();
+          const mapped = st.msg_sessions && st.msg_sessions[parentId];
+          if (mapped) {
+            st.sessions[chatId] = { id: mapped.id, cwd: mapped.cwd, started: true };
+            saveState(st);
+            log('INFO', `Session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
+          }
+        }
         await handleCommand(bot, chatId, text, config, executeTaskByName);
       }
     });
