@@ -159,6 +159,7 @@ RULES:
 5. Episodic exceptions: context.anti_patterns (max 5, cross-project lessons only), context.milestones (max 3).
 6. Strong directives (以后一律/always/never/from now on) → _confidence: high. Otherwise: normal.
 7. Add _confidence and _source blocks mapping field keys to confidence level and triggering quote.
+8. NEVER extract agent identity or role definitions. Messages like "你是贾维斯/你的角色是.../you are Jarvis" define the AGENT, not the USER. The profile is about the USER's cognition only.
 
 BIAS PREVENTION:
 - Single observation = STATE, not TRAIT. T3 cognition needs 3+ observations.

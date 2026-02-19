@@ -65,6 +65,11 @@ process.stdin.on('end', () => {
       process.exit(0);
     }
 
+    // Skip agent identity definitions (these belong in project CLAUDE.md, not user profile)
+    if (/^(你是|你叫|你的(角色|身份|职责|任务)|你负责|你现在是|from now on you are|you are now|your role is)/i.test(prompt)) {
+      process.exit(0);
+    }
+
     // Skip pasted error logs / stack traces
     if (/^(Error|TypeError|SyntaxError|ReferenceError|at\s+\w+|Traceback|FATAL|WARN|ERR!)/i.test(prompt)) {
       process.exit(0);
