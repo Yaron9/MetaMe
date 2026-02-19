@@ -221,6 +221,11 @@ function checkPrecondition(task) {
 }
 
 function executeTask(task, config) {
+  if (task.enabled === false) {
+    log('INFO', `Skipping disabled task: ${task.name}`);
+    return { success: true, output: '(disabled)', skipped: true };
+  }
+
   const state = loadState();
 
   if (!checkBudget(config, state)) {
@@ -287,15 +292,39 @@ function executeTask(task, config) {
 
   const claudeArgs = ['-p', '--model', model, '--dangerously-skip-permissions'];
   for (const t of (task.allowedTools || [])) claudeArgs.push('--allowedTools', t);
-  log('INFO', `Executing task: ${task.name} (model: ${model})`);
+  // Auto-detect MCP config in task cwd or project directory
+  const cwd = task.cwd ? task.cwd.replace(/^~/, HOME) : undefined;
+  const mcpConfig = task.mcp_config
+    ? path.resolve(task.mcp_config.replace(/^~/, HOME))
+    : cwd && fs.existsSync(path.join(cwd, '.mcp.json'))
+      ? path.join(cwd, '.mcp.json')
+      : null;
+  if (mcpConfig) claudeArgs.push('--mcp-config', mcpConfig);
+
+  // Persistent session: reuse same session across runs (for tasks like weekly-review)
+  if (task.persistent_session) {
+    const savedSessionId = state.tasks[task.name]?.session_id;
+    if (savedSessionId) {
+      claudeArgs.push('--resume', savedSessionId);
+      log('INFO', `Executing task: ${task.name} (model: ${model}, resuming session ${savedSessionId.slice(0, 8)}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''})`);
+    } else {
+      const newSessionId = crypto.randomUUID();
+      claudeArgs.push('--session-id', newSessionId);
+      if (!state.tasks[task.name]) state.tasks[task.name] = {};
+      state.tasks[task.name].session_id = newSessionId;
+      saveState(state);
+      log('INFO', `Executing task: ${task.name} (model: ${model}, new session ${newSessionId.slice(0, 8)}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''})`);
+    }
+  } else {
+    log('INFO', `Executing task: ${task.name} (model: ${model}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''})`);
+  }
 
   try {
-    const cwd = task.cwd ? task.cwd.replace(/^~/, HOME) : undefined;
     const output = execFileSync('claude', claudeArgs, {
       input: fullPrompt,
       encoding: 'utf8',
-      timeout: 120000, // 2 min timeout
-      maxBuffer: 1024 * 1024,
+      timeout: task.timeout || 120000,
+      maxBuffer: 5 * 1024 * 1024,
       ...(cwd && { cwd }),
       env: { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined },
     }).trim();
@@ -304,22 +333,38 @@ function executeTask(task, config) {
     const estimatedTokens = Math.ceil((fullPrompt.length + output.length) / 4);
     recordTokens(state, estimatedTokens);
 
-    // Record task result
+    // Record task result (preserve session_id for persistent sessions)
+    const prevSessionId = state.tasks[task.name]?.session_id;
     state.tasks[task.name] = {
       last_run: new Date().toISOString(),
       status: 'success',
       output_preview: output.slice(0, 200),
+      ...(prevSessionId && { session_id: prevSessionId }),
     };
     saveState(state);
 
     log('INFO', `Task ${task.name} completed (est. ${estimatedTokens} tokens)`);
     return { success: true, output, tokens: estimatedTokens };
   } catch (e) {
-    log('ERROR', `Task ${task.name} failed: ${e.message}`);
+    const errMsg = e.message || '';
+    // If persistent session expired/not found, reset and let next run create fresh
+    if (task.persistent_session && (errMsg.includes('not found') || errMsg.includes('No session'))) {
+      log('WARN', `Persistent session for ${task.name} expired, will create new on next run`);
+      state.tasks[task.name] = {
+        last_run: new Date().toISOString(),
+        status: 'session_reset',
+        error: 'Session expired, will retry with new session',
+      };
+      saveState(state);
+      return { success: false, error: 'session_expired', output: '' };
+    }
+    log('ERROR', `Task ${task.name} failed: ${errMsg}`);
+    const prevSid = state.tasks[task.name]?.session_id;
     state.tasks[task.name] = {
       last_run: new Date().toISOString(),
       status: 'error',
-      error: e.message.slice(0, 200),
+      error: errMsg.slice(0, 200),
+      ...(prevSid && { session_id: prevSid }),
     };
     saveState(state);
     return { success: false, error: e.message, output: '' };
@@ -352,8 +397,14 @@ function executeWorkflow(task, config) {
   const outputs = [];
   let totalTokens = 0;
   const allowed = task.allowedTools || [];
+  // Auto-detect MCP config in task cwd
+  const mcpConfig = task.mcp_config
+    ? path.resolve(task.mcp_config.replace(/^~/, HOME))
+    : fs.existsSync(path.join(cwd, '.mcp.json'))
+      ? path.join(cwd, '.mcp.json')
+      : null;
 
-  log('INFO', `Workflow ${task.name}: ${steps.length} steps, session ${sessionId.slice(0, 8)}`);
+  log('INFO', `Workflow ${task.name}: ${steps.length} steps, session ${sessionId.slice(0, 8)}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''}`);
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
@@ -361,6 +412,7 @@ function executeWorkflow(task, config) {
     if (i === 0 && precheck.context) prompt += `\n\n相关数据:\n\`\`\`\n${precheck.context}\n\`\`\``;
     const args = ['-p', '--model', model, '--dangerously-skip-permissions'];
     for (const tool of allowed) args.push('--allowedTools', tool);
+    if (mcpConfig) args.push('--mcp-config', mcpConfig);
     args.push(i === 0 ? '--session-id' : '--resume', sessionId);
 
     log('INFO', `Workflow ${task.name} step ${i + 1}/${steps.length}: ${step.skill || 'prompt'}`);
@@ -402,15 +454,20 @@ function startHeartbeat(config, notifyFn) {
     return;
   }
 
+  const enabledTasks = tasks.filter(t => t.enabled !== false);
   const checkIntervalSec = (config.daemon && config.daemon.heartbeat_check_interval) || 60;
-  log('INFO', `Heartbeat scheduler started (check every ${checkIntervalSec}s, ${tasks.length} tasks)`);
+  log('INFO', `Heartbeat scheduler started (check every ${checkIntervalSec}s, ${enabledTasks.length}/${tasks.length} tasks enabled)`);
+
+  if (enabledTasks.length === 0) {
+    return;
+  }
 
   // Track next run times
   const nextRun = {};
   const now = Date.now();
   const state = loadState();
 
-  for (const task of tasks) {
+  for (const task of enabledTasks) {
     const intervalSec = parseInterval(task.interval);
     const lastRun = state.tasks[task.name] && state.tasks[task.name].last_run;
     if (lastRun) {
@@ -424,7 +481,7 @@ function startHeartbeat(config, notifyFn) {
 
   const timer = setInterval(() => {
     const currentTime = Date.now();
-    for (const task of tasks) {
+    for (const task of enabledTasks) {
       if (currentTime >= (nextRun[task.name] || 0)) {
         const result = executeTask(task, config);
         const intervalSec = parseInterval(task.interval);
@@ -932,11 +989,12 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     const ago = formatRelativeTime(new Date(timeMs).toISOString());
     const title = s.customTitle || '';
     const summary = s.summary || '';
-    const firstMsg = (s.firstPrompt || '').replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '').slice(0, 100);
+    const firstMsg = (s.firstPrompt || '').replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '');
     const msgs = s.messageCount || '?';
 
-    let detail = `📋 Session Detail\n\n`;
-    if (title) detail += `📝 Name: ${title}\n`;
+    let detail = `📋 Session Detail\n`;
+    detail += `━━━━━━━━━━━━━━━━━━━━\n`;
+    if (title) detail += `📝 Title: ${title}\n`;
     if (summary) detail += `💡 Summary: ${summary}\n`;
     detail += `📁 Project: ${projName}\n`;
     detail += `📂 Path: ${proj}\n`;
@@ -1163,7 +1221,8 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     let msg = 'Heartbeat Tasks:\n';
     for (const t of tasks) {
       const ts = state.tasks[t.name] || {};
-      msg += `- ${t.name} (${t.interval}) ${ts.status || 'never_run'}\n`;
+      const flag = t.enabled !== false ? '✅' : '⏸';
+      msg += `${flag} ${t.name} (${t.interval}) ${ts.status || 'never_run'}\n`;
     }
     await bot.sendMessage(chatId, msg);
     return;

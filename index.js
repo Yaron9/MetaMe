@@ -94,6 +94,16 @@ if (scriptsUpdated) {
   }
 }
 
+// Load daemon config for local launch flags
+let daemonCfg = {};
+try {
+  if (fs.existsSync(DAEMON_CONFIG_FILE)) {
+    const _yaml = require(path.join(__dirname, 'node_modules', 'js-yaml'));
+    const raw = _yaml.load(fs.readFileSync(DAEMON_CONFIG_FILE, 'utf8')) || {};
+    daemonCfg = raw.daemon || {};
+  }
+} catch { /* non-fatal */ }
+
 // Ensure daemon.yaml exists (restore backup or copy from template)
 if (!fs.existsSync(DAEMON_CONFIG_FILE)) {
   if (fs.existsSync(DAEMON_YAML_BACKUP)) {
@@ -1392,7 +1402,9 @@ if (isSync) {
 
   console.log(`\n🔄 Resuming session ${bestSession.id.slice(0, 8)}...\n`);
   const providerEnv = (() => { try { return require(path.join(__dirname, 'scripts', 'providers.js')).buildActiveEnv(); } catch { return {}; } })();
-  const syncChild = spawn('claude', ['--resume', bestSession.id], {
+  const resumeArgs = ['--resume', bestSession.id];
+  if (daemonCfg.dangerously_skip_permissions) resumeArgs.push('--dangerously-skip-permissions');
+  const syncChild = spawn('claude', resumeArgs, {
     stdio: 'inherit',
     env: { ...process.env, ...providerEnv, METAME_ACTIVE_SESSION: 'true' }
   });
@@ -1427,6 +1439,9 @@ if (activeProviderName !== 'anthropic') {
 
 // Build launch args — inject system prompt for new users
 const launchArgs = process.argv.slice(2);
+if (daemonCfg.dangerously_skip_permissions && !launchArgs.includes('--dangerously-skip-permissions')) {
+  launchArgs.push('--dangerously-skip-permissions');
+}
 if (!isKnownUser) {
   launchArgs.push(
     '--append-system-prompt',
