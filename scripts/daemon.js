@@ -26,6 +26,10 @@ const PID_FILE = path.join(METAME_DIR, 'daemon.pid');
 const LOG_FILE = path.join(METAME_DIR, 'daemon.log');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 
+// Skill evolution module (hot path + cold path)
+let skillEvolution = null;
+try { skillEvolution = require('./skill-evolution'); } catch { /* graceful fallback */ }
+
 // ---------------------------------------------------------
 // SKILL ROUTING (keyword → /skillname prefix, like metame-desktop)
 // ---------------------------------------------------------
@@ -558,6 +562,25 @@ function startHeartbeat(config, notifyFn) {
           }
         }
       }
+    }
+
+    // Skill evolution: check queue and notify user of actionable items
+    if (skillEvolution) {
+      try {
+        const notifications = skillEvolution.checkEvolutionQueue();
+        for (const item of notifications) {
+          let msg = '';
+          if (item.type === 'skill_gap') {
+            msg = `🧬 *技能缺口检测*\n${item.reason}`;
+            if (item.search_hint) msg += `\n搜索建议: \`${item.search_hint}\``;
+          } else if (item.type === 'skill_fix') {
+            msg = `🔧 *技能需要修复*\n技能 \`${item.skill_name}\` ${item.reason}`;
+          } else if (item.type === 'user_complaint') {
+            msg = `⚠️ *技能反馈*\n技能 \`${item.skill_name}\` 收到用户反馈\n${item.reason}`;
+          }
+          if (msg && notifyFn) notifyFn(msg);
+        }
+      } catch (e) { log('WARN', `Skill evolution queue check failed: ${e.message}`); }
     }
   }, checkIntervalSec * 1000);
 
@@ -2742,6 +2765,7 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
     let lastStatusTime = 0;
     const STATUS_THROTTLE = STATUS_THROTTLE_MS;
     const writtenFiles = []; // Track files created/modified by Write tool
+    const toolUsageLog = []; // Track all tool invocations for skill evolution
 
     const timer = setTimeout(() => {
       killed = true;
@@ -2775,6 +2799,13 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
             for (const block of event.message.content) {
               if (block.type === 'tool_use') {
                 const toolName = block.name || 'Tool';
+
+                // Track tool usage for skill evolution
+                const toolEntry = { tool: toolName };
+                if (toolName === 'Skill' && block.input?.skill) toolEntry.skill = block.input.skill;
+                else if (block.input?.command) toolEntry.context = block.input.command.slice(0, 50);
+                else if (block.input?.file_path) toolEntry.context = path.basename(block.input.file_path);
+                if (toolUsageLog.length < 50) toolUsageLog.push(toolEntry);
 
                 // Track files written by Write tool
                 if (toolName === 'Write' && block.input?.file_path) {
@@ -2878,20 +2909,20 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
       if (chatId) { activeProcesses.delete(chatId); saveActivePids(); } // Fix3
 
       if (wasAborted) {
-        resolve({ output: finalResult || null, error: 'Stopped by user', files: writtenFiles });
+        resolve({ output: finalResult || null, error: 'Stopped by user', files: writtenFiles, toolUsageLog });
       } else if (killed) {
-        resolve({ output: finalResult || null, error: 'Timeout: Claude took too long', files: writtenFiles });
+        resolve({ output: finalResult || null, error: 'Timeout: Claude took too long', files: writtenFiles, toolUsageLog });
       } else if (code !== 0) {
-        resolve({ output: finalResult || null, error: stderr || `Exit code ${code}`, files: writtenFiles });
+        resolve({ output: finalResult || null, error: stderr || `Exit code ${code}`, files: writtenFiles, toolUsageLog });
       } else {
-        resolve({ output: finalResult || '', error: null, files: writtenFiles });
+        resolve({ output: finalResult || '', error: null, files: writtenFiles, toolUsageLog });
       }
     });
 
     child.on('error', (err) => {
       clearTimeout(timer);
       if (chatId) { activeProcesses.delete(chatId); saveActivePids(); } // Fix3
-      resolve({ output: null, error: err.message, files: [] });
+      resolve({ output: null, error: err.message, files: [], toolUsageLog: [] });
     });
 
     // Write input and close stdin
@@ -3078,8 +3109,20 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
     } catch { /* ignore status update failures */ }
   };
 
-  const { output, error, files } = await spawnClaudeStreaming(args, fullPrompt, session.cwd, onStatus, 600000, chatId);
+  const { output, error, files, toolUsageLog } = await spawnClaudeStreaming(args, fullPrompt, session.cwd, onStatus, 600000, chatId);
   clearInterval(typingTimer);
+
+  // Skill evolution: capture signal + hot path heuristic check
+  if (skillEvolution) {
+    try {
+      const signal = skillEvolution.extractSkillSignal(fullPrompt, output, error, files, session.cwd, toolUsageLog);
+      if (signal) {
+        skillEvolution.appendSkillSignal(signal);
+        skillEvolution.checkHotEvolution(signal);
+      }
+    } catch (e) { log('WARN', `Skill evolution signal capture failed: ${e.message}`); }
+  }
+
   // Clean up status message
   if (statusMsgId && bot.deleteMessage) {
     bot.deleteMessage(chatId, statusMsgId).catch(() => {});
