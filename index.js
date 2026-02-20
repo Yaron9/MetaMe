@@ -203,6 +203,21 @@ function spawnDistillBackground() {
     } catch { /* stale lock, proceed */ }
   }
 
+  // 4-hour cooldown: check last distill timestamp from profile
+  const cooldownMs = 4 * 60 * 60 * 1000;
+  try {
+    const profilePath = path.join(process.env.HOME || '', '.claude_profile.yaml');
+    if (fs.existsSync(profilePath)) {
+      const yaml = require('js-yaml');
+      const profile = yaml.load(fs.readFileSync(profilePath, 'utf8'));
+      const distillLog = profile && profile.evolution && profile.evolution.auto_distill;
+      if (Array.isArray(distillLog) && distillLog.length > 0) {
+        const lastTs = new Date(distillLog[distillLog.length - 1].ts).getTime();
+        if (Date.now() - lastTs < cooldownMs) return;
+      }
+    }
+  } catch { /* non-fatal, proceed */ }
+
   const hasSignals = shouldDistill();
   const bootstrap = needsBootstrap();
 
