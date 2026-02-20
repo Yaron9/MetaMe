@@ -1409,7 +1409,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
         desc += `📁${proj} · ${ago}`;
         if (summary && summary !== name) desc += `\n${summary.slice(0, 60)}`;
         else if (!name && s.firstPrompt) {
-          const preview = s.firstPrompt.replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '').slice(0, 60);
+          const preview = s.firstPrompt.replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '').replace(/\n?\[System hints[\s\S]*/i, '').trim().slice(0, 60);
           if (preview) desc += `\n${preview}`;
         }
         elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
@@ -1515,7 +1515,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
           desc += `📁${proj} · ${ago}`;
           if (summary && summary !== name) desc += `\n${summary.slice(0, 60)}`;
           else if (!name && s.firstPrompt) {
-            const preview = s.firstPrompt.replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '').slice(0, 60);
+            const preview = s.firstPrompt.replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '').replace(/\n?\[System hints[\s\S]*/i, '').trim().slice(0, 60);
             if (preview) desc += `\n${preview}`;
           }
           elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
@@ -2855,19 +2855,23 @@ function _scanAllSessions() {
         const headBuf = Buffer.alloc(8192);
         const headBytes = fs.readSync(fd, headBuf, 0, 8192, 0);
         const headStr = headBuf.toString('utf8', 0, headBytes);
-        // Extract firstPrompt from first user message
+        // Extract firstPrompt from first real user message (skip system-generated)
         if (!s.firstPrompt) {
           for (const line of headStr.split('\n')) {
             if (!line) continue;
             try {
               const d = JSON.parse(line);
-              if (d.type === 'user' && d.message) {
+              if (d.type === 'user' && d.message && d.userType === 'external') {
                 const content = d.message.content;
-                if (typeof content === 'string') { s.firstPrompt = content.slice(0, 120); break; }
-                if (Array.isArray(content)) {
+                let raw = '';
+                if (typeof content === 'string') raw = content;
+                else if (Array.isArray(content)) {
                   const txt = content.find(c => c.type === 'text');
-                  if (txt) { s.firstPrompt = txt.text.slice(0, 120); break; }
+                  if (txt) raw = txt.text;
                 }
+                // Strip [System hints ...] suffix and <system-reminder> blocks
+                raw = raw.replace(/\n?\[System hints[\s\S]*/i, '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+                if (raw && raw.length > 2) { s.firstPrompt = raw.slice(0, 120); break; }
               }
             } catch { /* skip line */ }
           }
@@ -2972,8 +2976,8 @@ function sessionRichLabel(s, index) {
   line += `📁${proj} · ${ago}`;
   if (summary && summary !== name) line += `\n   💡 ${summary.slice(0, 50)}${summary.length > 50 ? '..' : ''}`;
   else if (!name && s.firstPrompt) {
-    const preview = s.firstPrompt.replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '').slice(0, 50);
-    if (preview) line += `\n   🗨️ ${preview}${s.firstPrompt.length > 50 ? '..' : ''}`;
+    const preview = s.firstPrompt.replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '').replace(/\n?\[System hints[\s\S]*/i, '').trim().slice(0, 50);
+    if (preview && preview.length > 2) line += `\n   🗨️ ${preview}${preview.length >= 50 ? '..' : ''}`;
   }
   line += `\n   /resume ${shortId}`;
   return line;
