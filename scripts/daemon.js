@@ -2593,12 +2593,23 @@ function saveActivePids() {
     fs.writeFileSync(ACTIVE_PIDS_FILE, JSON.stringify(pids), 'utf8');
   } catch {}
 }
+function getProcessName(pid) {
+  try {
+    return execSync(`ps -p ${pid} -o comm=`, { encoding: 'utf8', timeout: 2000 }).trim();
+  } catch { return null; }
+}
 function killOrphanPids() {
   try {
     if (!fs.existsSync(ACTIVE_PIDS_FILE)) return;
     const pids = JSON.parse(fs.readFileSync(ACTIVE_PIDS_FILE, 'utf8'));
     for (const [chatId, pid] of Object.entries(pids)) {
       try {
+        // Safety: only kill if PID still belongs to a claude process (prevent PID reuse accidents)
+        const comm = getProcessName(pid);
+        if (!comm || !comm.includes('claude')) {
+          log('WARN', `Skipping PID ${pid} (chatId: ${chatId}): process is "${comm}", not claude`);
+          continue;
+        }
         process.kill(pid, 'SIGKILL');
         log('INFO', `Killed orphan claude PID ${pid} (chatId: ${chatId})`);
       } catch {}
