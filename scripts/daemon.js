@@ -884,6 +884,59 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
+  // --- /bind <name> <cwd>: register this chat as a dedicated agent channel ---
+  // Example: /bind 小美 ~/   or   /bind DevBot ~/AGI/MyProject
+  if (text.startsWith('/bind ')) {
+    const parts = text.slice(6).trim().split(/\s+/);
+    const agentName = parts[0];
+    const agentCwd = parts.slice(1).join(' ') || '~';
+    if (!agentName) {
+      await bot.sendMessage(chatId, '用法: /bind <名称> <工作目录>\n例: /bind 小美 ~/');
+      return;
+    }
+    try {
+      const cfg = loadConfig();
+      const adapterKey = cfg.feishu && cfg.feishu.allowed_chat_ids !== undefined ? 'feishu' : 'telegram';
+      // Detect which adapter this chatId belongs to
+      const isTg = typeof chatId === 'number';
+      const ak = isTg ? 'telegram' : 'feishu';
+
+      if (!cfg[ak]) cfg[ak] = {};
+      if (!cfg[ak].allowed_chat_ids) cfg[ak].allowed_chat_ids = [];
+      if (!cfg[ak].chat_agent_map) cfg[ak].chat_agent_map = {};
+
+      // Add to whitelist
+      const idStr = String(chatId);
+      if (!cfg[ak].allowed_chat_ids.includes(isTg ? chatId : idStr)) {
+        cfg[ak].allowed_chat_ids.push(isTg ? chatId : idStr);
+      }
+
+      // Generate a safe project key from name
+      const projectKey = agentName.replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_').toLowerCase() || idStr;
+
+      // Add to chat_agent_map
+      cfg[ak].chat_agent_map[idStr] = projectKey;
+
+      // Create project entry if not exists
+      if (!cfg.projects) cfg.projects = {};
+      if (!cfg.projects[projectKey]) {
+        cfg.projects[projectKey] = { name: agentName, cwd: agentCwd, nicknames: [agentName] };
+      } else {
+        cfg.projects[projectKey].cwd = agentCwd;
+        cfg.projects[projectKey].name = agentName;
+      }
+
+      fs.writeFileSync(CONFIG_FILE, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+      backupConfig();
+      config = loadConfig();
+
+      await bot.sendMessage(chatId, `✅ 已绑定\n名称: ${agentName}\n目录: ${agentCwd}\nChat ID: ${chatId}`);
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ 绑定失败: ${e.message}`);
+    }
+    return;
+  }
+
   // --- chat_agent_map: auto-switch agent based on dedicated chatId ---
   // Configure in daemon.yaml: feishu.chat_agent_map or telegram.chat_agent_map
   //   e.g.  chat_agent_map: { "oc_xxx": "personal", "oc_yyy": "metame" }
