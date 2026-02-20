@@ -112,6 +112,11 @@ function log(level, msg) {
     // Last resort
     process.stderr.write(line);
   }
+  // When running as LaunchAgent (stdout redirected to file), mirror structured logs there too.
+  // This unifies daemon.log and daemon-npm-stdout.log into one source of truth.
+  if (!process.stdout.isTTY) {
+    process.stdout.write(line);
+  }
 }
 
 // ---------------------------------------------------------
@@ -378,56 +383,78 @@ function executeTask(task, config) {
     log('INFO', `Executing task: ${task.name} (model: ${model}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''})`);
   }
 
-  try {
-    const output = execFileSync('claude', claudeArgs, {
-      input: fullPrompt,
-      encoding: 'utf8',
-      timeout: task.timeout || 120000,
-      maxBuffer: 5 * 1024 * 1024,
-      ...(cwd && { cwd }),
-      env: { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined },
-    }).trim();
+  // Use spawnClaudeAsync (non-blocking spawn with process-group kill) instead of
+  // execFileSync (sync, blocks event loop, can't kill sub-agents).
+  // executeTask now returns a Promise — callers must handle it with .then() or await.
+  const timeoutMs = task.timeout || 120000;
+  const asyncArgs = [...claudeArgs];
+  const asyncEnv = { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined };
 
-    // Rough token estimate: ~4 chars per token for input + output
-    const estimatedTokens = Math.ceil((fullPrompt.length + output.length) / 4);
-    recordTokens(state, estimatedTokens);
+  return new Promise((resolve) => {
+    const child = spawn('claude', asyncArgs, {
+      cwd: cwd || undefined,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true, // own process group — kills sub-agents on timeout too
+      env: asyncEnv,
+    });
 
-    // Record task result (preserve session_id for persistent sessions)
-    const prevSessionId = state.tasks[task.name]?.session_id;
-    state.tasks[task.name] = {
-      last_run: new Date().toISOString(),
-      status: 'success',
-      output_preview: output.slice(0, 200),
-      ...(prevSessionId && { session_id: prevSessionId }),
-    };
-    saveState(state);
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
 
-    log('INFO', `Task ${task.name} completed (est. ${estimatedTokens} tokens)`);
-    return { success: true, output, tokens: estimatedTokens };
-  } catch (e) {
-    const errMsg = e.message || '';
-    // If persistent session expired/not found, reset and let next run create fresh
-    if (task.persistent_session && (errMsg.includes('not found') || errMsg.includes('No session'))) {
-      log('WARN', `Persistent session for ${task.name} expired, will create new on next run`);
-      state.tasks[task.name] = {
-        last_run: new Date().toISOString(),
-        status: 'session_reset',
-        error: 'Session expired, will retry with new session',
-      };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      log('WARN', `Task ${task.name} timeout (${timeoutMs / 1000}s) — killing process group`);
+      try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
+      setTimeout(() => {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { } }
+      }, 5000);
+    }, timeoutMs);
+
+    child.stdin.write(fullPrompt);
+    child.stdin.end();
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      const output = stdout.trim();
+      if (timedOut) {
+        const prevSid = state.tasks[task.name]?.session_id;
+        state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'timeout', error: 'Task exceeded timeout', ...(prevSid && { session_id: prevSid }) };
+        saveState(state);
+        return resolve({ success: false, error: 'timeout', output: '' });
+      }
+      if (code !== 0) {
+        const errMsg = (stderr || `Exit code ${code}`).slice(0, 200);
+        // Persistent session expired: reset so next run creates a new one
+        if (task.persistent_session && (errMsg.includes('not found') || errMsg.includes('No session'))) {
+          log('WARN', `Persistent session for ${task.name} expired, will create new on next run`);
+          state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'session_reset', error: 'Session expired' };
+          saveState(state);
+          return resolve({ success: false, error: 'session_expired', output: '' });
+        }
+        log('ERROR', `Task ${task.name} failed (exit ${code}): ${errMsg}`);
+        const prevSid = state.tasks[task.name]?.session_id;
+        state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: errMsg, ...(prevSid && { session_id: prevSid }) };
+        saveState(state);
+        return resolve({ success: false, error: errMsg, output: '' });
+      }
+      const estimatedTokens = Math.ceil((fullPrompt.length + output.length) / 4);
+      recordTokens(state, estimatedTokens);
+      const prevSessionId = state.tasks[task.name]?.session_id;
+      state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'success', output_preview: output.slice(0, 200), ...(prevSessionId && { session_id: prevSessionId }) };
       saveState(state);
-      return { success: false, error: 'session_expired', output: '' };
-    }
-    log('ERROR', `Task ${task.name} failed: ${errMsg}`);
-    const prevSid = state.tasks[task.name]?.session_id;
-    state.tasks[task.name] = {
-      last_run: new Date().toISOString(),
-      status: 'error',
-      error: errMsg.slice(0, 200),
-      ...(prevSid && { session_id: prevSid }),
-    };
-    saveState(state);
-    return { success: false, error: e.message, output: '' };
-  }
+      log('INFO', `Task ${task.name} completed (est. ${estimatedTokens} tokens)`);
+      resolve({ success: true, output, tokens: estimatedTokens });
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      log('ERROR', `Task ${task.name} spawn error: ${err.message}`);
+      resolve({ success: false, error: err.message, output: '' });
+    });
+  });
 }
 
 // parseInterval — imported from ./utils
@@ -688,6 +715,9 @@ function startHeartbeat(config, notifyFn, processInboxMessage) {
     }
   }
 
+  // Tracks tasks currently running (prevents concurrent runs of the same task)
+  const runningTasks = new Set();
+
   const timer = setInterval(() => {
     // ① Physiological heartbeat (zero token, pure awareness)
     if (processInboxMessage) {
@@ -698,18 +728,32 @@ function startHeartbeat(config, notifyFn, processInboxMessage) {
     const currentTime = Date.now();
     for (const task of enabledTasks) {
       if (currentTime >= (nextRun[task.name] || 0)) {
-        const result = executeTask(task, config);
         const intervalSec = parseInterval(task.interval);
         nextRun[task.name] = currentTime + intervalSec * 1000;
 
-        if (task.notify && notifyFn && !result.skipped) {
-          const proj = task._project || null;
-          if (result.success) {
-            notifyFn(`✅ *${task.name}* completed\n\n${result.output}`, proj);
-          } else {
-            notifyFn(`❌ *${task.name}* failed: ${result.error}`, proj);
-          }
+        if (runningTasks.has(task.name)) {
+          log('WARN', `Task ${task.name} still running — skipping this interval`);
+          continue;
         }
+
+        runningTasks.add(task.name);
+        // executeTask now returns a Promise (async, non-blocking, process-group kill)
+        Promise.resolve(executeTask(task, config))
+          .then((result) => {
+            runningTasks.delete(task.name);
+            if (task.notify && notifyFn && !result.skipped) {
+              const proj = task._project || null;
+              if (result.success) {
+                notifyFn(`✅ *${task.name}* completed\n\n${result.output}`, proj);
+              } else {
+                notifyFn(`❌ *${task.name}* failed: ${result.error}`, proj);
+              }
+            }
+          })
+          .catch((err) => {
+            runningTasks.delete(task.name);
+            log('ERROR', `Task ${task.name} threw: ${err.message}`);
+          });
       }
     }
 
@@ -761,11 +805,12 @@ async function startTelegramBridge(config, executeTaskByName) {
 
   let offset = 0;
   let running = true;
+  const abortController = new AbortController();
 
   const pollLoop = async () => {
     while (running) {
       try {
-        const updates = await bot.getUpdates(offset, 30);
+        const updates = await bot.getUpdates(offset, 30, abortController.signal);
         for (const update of updates) {
           offset = update.update_id + 1;
 
@@ -848,6 +893,7 @@ async function startTelegramBridge(config, executeTaskByName) {
           }
         }
       } catch (e) {
+        if (e.message === 'aborted') break; // clean stop requested, exit loop
         log('ERROR', `Telegram poll error: ${e.message}`);
         // Wait before retry
         await sleep(5000);
@@ -857,6 +903,7 @@ async function startTelegramBridge(config, executeTaskByName) {
 
   const startPoll = () => {
     pollLoop().catch(e => {
+      if (e.message === 'aborted') return; // clean stop, no need to restart
       log('ERROR', `pollLoop crashed: ${e.message} — restarting in 5s`);
       if (running) setTimeout(startPoll, 5000);
     });
@@ -864,7 +911,7 @@ async function startTelegramBridge(config, executeTaskByName) {
   startPoll();
 
   return {
-    stop() { running = false; },
+    stop() { running = false; abortController.abort(); }, // cancel in-flight request immediately
     bot,
   };
 }
@@ -2084,7 +2131,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     const proc = activeProcesses.get(chatId);
     if (proc && proc.child) {
       proc.aborted = true;
-      proc.child.kill('SIGINT');
+      try { process.kill(-proc.child.pid, 'SIGINT'); } catch { proc.child.kill('SIGINT'); }
       await bot.sendMessage(chatId, '⏹ Stopping Claude...');
     } else {
       await bot.sendMessage(chatId, 'No active task to stop.');
@@ -2103,7 +2150,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     const proc = activeProcesses.get(chatId);
     if (proc && proc.child) {
       proc.aborted = true;
-      proc.child.kill('SIGINT');
+      try { process.kill(-proc.child.pid, 'SIGINT'); } catch { proc.child.kill('SIGINT'); }
     }
     const session = getSession(chatId);
     const name = session ? getSessionName(session.id) : null;
@@ -2288,7 +2335,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     const proc = activeProcesses.get(chatId);
     if (proc && proc.child) {
       proc.aborted = true;
-      proc.child.kill('SIGINT');
+      try { process.kill(-proc.child.pid, 'SIGINT'); } catch { proc.child.kill('SIGINT'); }
     }
 
     const session = getSession(chatId);
@@ -2662,7 +2709,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     const proc = activeProcesses.get(chatId);
     if (proc && proc.child && !proc.aborted) {
       proc.aborted = true;
-      proc.child.kill('SIGINT');
+      try { process.kill(-proc.child.pid, 'SIGINT'); } catch { proc.child.kill('SIGINT'); }
     }
     // Debounce: wait 5s for more messages before processing
     if (q.timer) clearTimeout(q.timer);
@@ -2920,15 +2967,23 @@ function sessionLabel(s) {
  */
 function sessionDisplayTitle(s, maxLen) {
   maxLen = maxLen || 50;
-  if (s.customTitle) return s.customTitle;
-  if (s.summary) return s.summary.slice(0, maxLen);
+  // Newlines → space; strip null bytes, surrogates, replacement char, other non-printable control chars
+  const sanitize = (t) => t
+    .replace(/\r?\n/g, ' ')
+    .replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F\uFFFD\uD800-\uDFFF]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (s.customTitle) return sanitize(s.customTitle).slice(0, maxLen);
+  if (s.summary) return sanitize(s.summary).slice(0, maxLen);
   if (s.firstPrompt) {
     const clean = s.firstPrompt
       .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
       .replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '')
-      .replace(/\n?\[System hints[\s\S]*/i, '')
-      .trim();
-    if (clean && clean.length > 2) return clean.slice(0, maxLen);
+      .replace(/\[System hints[\s\S]*/i, '');
+    // Take first non-empty line after stripping noise
+    const firstLine = clean.split('\n').map(l => l.trim()).find(l => l.length > 2) || '';
+    const sanitized = sanitize(firstLine);
+    if (sanitized && sanitized.length > 2) return sanitized.slice(0, maxLen);
   }
   return '';
 }
@@ -3124,9 +3179,10 @@ function spawnClaudeAsync(args, input, cwd, timeoutMs = 300000) {
 
     const timer = setTimeout(() => {
       killed = true;
-      child.kill('SIGTERM');
-      // Fix: escalate to SIGKILL if SIGTERM is ignored
-      setTimeout(() => { try { child.kill('SIGKILL'); } catch { } }, 5000);
+      try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
+      setTimeout(() => {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { } }
+      }, 5000);
     }, timeoutMs);
 
     child.stdout.on('data', (data) => { stdout += data.toString(); });
@@ -3222,6 +3278,7 @@ function killOrphanPids() {
     fs.unlinkSync(ACTIVE_PIDS_FILE);
   } catch { }
 }
+
 
 // Pending /bind flows: waiting for user to pick a directory
 const pendingBinds = new Map(); // chatId -> agentName
@@ -3335,6 +3392,7 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
     const child = spawn('claude', streamArgs, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true, // Create new process group so killing -pid kills all sub-agents too
       env: { ...process.env, ...getActiveProviderEnv(), CLAUDECODE: undefined },
     });
 
@@ -3355,9 +3413,11 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
 
     const timer = setTimeout(() => {
       killed = true;
-      child.kill('SIGTERM');
-      // Fix: escalate to SIGKILL if SIGTERM is ignored
-      setTimeout(() => { try { child.kill('SIGKILL'); } catch { } }, 5000);
+      log('WARN', `Claude timeout (${timeoutMs / 60000}min) for chatId ${chatId} — killing process group`);
+      try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
+      setTimeout(() => {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { } }
+      }, 5000);
     }, timeoutMs);
 
     child.stdout.on('data', (data) => {
@@ -4019,6 +4079,10 @@ async function main() {
 
   log('INFO', `MetaMe daemon started (PID: ${process.pid})`);
   killOrphanPids(); // Fix3: kill any claude processes left by previous daemon
+  // Hourly heartbeat so daemon.log stays fresh even when idle (visible aliveness check)
+  setInterval(() => {
+    log('INFO', `Daemon heartbeat — uptime: ${Math.round(process.uptime() / 60)}m, active sessions: ${activeProcesses.size}`);
+  }, 60 * 60 * 1000);
 
   // Task executor lookup (always reads fresh config)
   function executeTaskByName(name) {
@@ -4232,10 +4296,10 @@ async function main() {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (telegramBridge) telegramBridge.stop();
     if (feishuBridge) feishuBridge.stop();
-    // Fix1: kill all tracked claude child processes before exiting
+    // Kill all tracked claude process groups before exiting (covers sub-agents too)
     for (const [cid, proc] of activeProcesses) {
-      try { proc.child.kill('SIGKILL'); } catch { }
-      log('INFO', `Shutdown: killed claude child for chatId ${cid}`);
+      try { process.kill(-proc.child.pid, 'SIGKILL'); } catch { try { proc.child.kill('SIGKILL'); } catch { } }
+      log('INFO', `Shutdown: killed claude process group for chatId ${cid}`);
     }
     activeProcesses.clear();
     try { if (fs.existsSync(ACTIVE_PIDS_FILE)) fs.unlinkSync(ACTIVE_PIDS_FILE); } catch { }

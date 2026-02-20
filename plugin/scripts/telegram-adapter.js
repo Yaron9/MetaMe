@@ -15,7 +15,7 @@ const API_BASE = 'https://api.telegram.org';
 /**
  * Make an HTTPS request to Telegram Bot API
  */
-function apiRequest(token, method, params = {}, timeout = 10000) {
+function apiRequest(token, method, params = {}, timeout = 10000, signal = null) {
   return new Promise((resolve, reject) => {
     const url = `${API_BASE}/bot${token}/${method}`;
     const body = JSON.stringify(params);
@@ -49,7 +49,14 @@ function apiRequest(token, method, params = {}, timeout = 10000) {
       });
     });
 
-    req.on('error', reject);
+    // AbortController support: destroy the in-flight request immediately on abort
+    if (signal) {
+      const onAbort = () => { req.destroy(); reject(new Error('aborted')); };
+      signal.addEventListener('abort', onAbort, { once: true });
+      req.on('close', () => signal.removeEventListener('abort', onAbort));
+    }
+
+    req.on('error', (e) => { if (e.message !== 'aborted') reject(e); });
     req.on('timeout', () => {
       req.destroy();
       reject(new Error('Telegram API request timed out'));
@@ -75,15 +82,16 @@ function createBot(token) {
      * @param {number} timeout - Long-poll timeout in seconds (default 30)
      * @returns {Promise<Array>} Array of update objects
      */
-    async getUpdates(offset = 0, timeout = 30) {
+    async getUpdates(offset = 0, timeout = 30, signal = null) {
       try {
         const result = await apiRequest(token, 'getUpdates', {
           offset,
           timeout,
           allowed_updates: ['message', 'callback_query'],
-        }, (timeout + 5) * 1000); // HTTP timeout > long-poll timeout
+        }, (timeout + 5) * 1000, signal); // HTTP timeout > long-poll timeout
         return result || [];
       } catch (e) {
+        if (e.message === 'aborted') throw e; // propagate abort, don't swallow
         // On timeout or network error, return empty — caller retries
         if (e.message.includes('timed out')) return [];
         throw e;
