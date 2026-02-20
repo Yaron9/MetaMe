@@ -2841,6 +2841,57 @@ function _scanAllSessions() {
       const bTime = b.fileMtime || new Date(b.modified).getTime();
       return bTime - aTime;
     });
+
+    // Enrich top N sessions that lack firstPrompt/customTitle by reading jsonl heads
+    const ENRICH_LIMIT = 20;
+    for (let i = 0; i < Math.min(all.length, ENRICH_LIMIT); i++) {
+      const s = all[i];
+      if (s.firstPrompt && s.customTitle) continue;
+      try {
+        const sessionFile = findSessionFile(s.sessionId);
+        if (!sessionFile) continue;
+        // Read first 8KB for firstPrompt, and last 4KB for customTitle
+        const fd = fs.openSync(sessionFile, 'r');
+        const headBuf = Buffer.alloc(8192);
+        const headBytes = fs.readSync(fd, headBuf, 0, 8192, 0);
+        const headStr = headBuf.toString('utf8', 0, headBytes);
+        // Extract firstPrompt from first user message
+        if (!s.firstPrompt) {
+          for (const line of headStr.split('\n')) {
+            if (!line) continue;
+            try {
+              const d = JSON.parse(line);
+              if (d.type === 'user' && d.message) {
+                const content = d.message.content;
+                if (typeof content === 'string') { s.firstPrompt = content.slice(0, 120); break; }
+                if (Array.isArray(content)) {
+                  const txt = content.find(c => c.type === 'text');
+                  if (txt) { s.firstPrompt = txt.text.slice(0, 120); break; }
+                }
+              }
+            } catch { /* skip line */ }
+          }
+        }
+        // Read tail for customTitle (written by /name command)
+        if (!s.customTitle) {
+          const stat = fs.fstatSync(fd);
+          const tailSize = Math.min(4096, stat.size);
+          const tailBuf = Buffer.alloc(tailSize);
+          fs.readSync(fd, tailBuf, 0, tailSize, stat.size - tailSize);
+          const tailStr = tailBuf.toString('utf8');
+          const tailLines = tailStr.split('\n').reverse();
+          for (const line of tailLines) {
+            if (!line) continue;
+            try {
+              const d = JSON.parse(line);
+              if (d.type === 'custom-title' && d.customTitle) { s.customTitle = d.customTitle; break; }
+            } catch { /* skip */ }
+          }
+        }
+        fs.closeSync(fd);
+      } catch { /* non-fatal */ }
+    }
+
     _sessionCache = all;
     _sessionCacheTime = Date.now();
     return all;
