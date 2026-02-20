@@ -715,6 +715,53 @@ function checkCooldown(chatId) {
 const { shortenPath, expandPath } = createPathMap();
 
 /**
+ * Normalize a directory path: expand shortcuts and resolve ~
+ */
+function normalizeCwd(p) {
+  return expandPath(p).replace(/^~/, HOME);
+}
+
+/**
+ * Parse [[FILE:...]] markers from Claude output.
+ * Returns { markedFiles, cleanOutput }
+ */
+function parseFileMarkers(output) {
+  const markers = output.match(/\[\[FILE:([^\]]+)\]\]/g) || [];
+  const markedFiles = markers.map(m => m.match(/\[\[FILE:([^\]]+)\]\]/)[1].trim());
+  const cleanOutput = output.replace(/\s*\[\[FILE:[^\]]+\]\]/g, '').trim();
+  return { markedFiles, cleanOutput };
+}
+
+/**
+ * Send file download buttons for a set of file paths.
+ */
+async function sendFileButtons(bot, chatId, files) {
+  if (!bot.sendButtons || files.size === 0) return;
+  const validFiles = [...files].filter(f => fs.existsSync(f));
+  if (validFiles.length === 0) return;
+  const buttons = validFiles.map(filePath => {
+    const shortId = cacheFile(filePath);
+    return [{ text: `📎 ${path.basename(filePath)}`, callback_data: `/file ${shortId}` }];
+  });
+  await bot.sendButtons(chatId, '📂 文件:', buttons);
+}
+
+/**
+ * Attach chatId to the most recent session in projCwd, or create a new one.
+ */
+function attachOrCreateSession(chatId, projCwd, name) {
+  const state = loadState();
+  const recent = listRecentSessions(1, projCwd);
+  if (recent.length > 0 && recent[0].sessionId) {
+    state.sessions[chatId] = { id: recent[0].sessionId, cwd: projCwd, started: true };
+  } else {
+    const newSess = createSession(chatId, projCwd, name || '');
+    state.sessions[chatId] = { id: newSess.id, cwd: projCwd, started: false };
+  }
+  saveState(state);
+}
+
+/**
  * Send directory picker: recent projects + Browse button
  * @param {string} mode - 'new' or 'cd' (determines callback command)
  */
@@ -989,18 +1036,10 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
   const mappedKey = chatAgentMap[String(chatId)];
   if (mappedKey && config.projects && config.projects[mappedKey]) {
     const proj = config.projects[mappedKey];
-    const projCwd = expandPath(proj.cwd).replace(/^~/, HOME);
-    const st = loadState();
-    const cur = st.sessions && st.sessions[chatId];
+    const projCwd = normalizeCwd(proj.cwd);
+    const cur = loadState().sessions?.[chatId];
     if (!cur || cur.cwd !== projCwd) {
-      const recent = listRecentSessions(1, projCwd);
-      if (recent.length > 0 && recent[0].sessionId) {
-        st.sessions[chatId] = { id: recent[0].sessionId, cwd: projCwd, started: true };
-      } else {
-        const newSess = createSession(chatId, projCwd, proj.name || mappedKey);
-        st.sessions[chatId] = { id: newSess.id, cwd: projCwd, started: false };
-      }
-      saveState(st);
+      attachOrCreateSession(chatId, projCwd, proj.name || mappedKey);
     }
   }
 
@@ -1030,13 +1069,13 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     const arg = text.slice(4).trim();
     if (!arg) {
       // In a dedicated agent group, use the agent's bound cwd directly
-      const liveCfg2 = loadConfig();
-      const agentMap2 = (liveCfg2.feishu && liveCfg2.feishu.chat_agent_map) ||
-                        (liveCfg2.telegram && liveCfg2.telegram.chat_agent_map) || {};
-      const boundKey = agentMap2[String(chatId)];
-      const boundProj = boundKey && liveCfg2.projects && liveCfg2.projects[boundKey];
+      const newCfg = loadConfig();
+      const agentMap = (newCfg.feishu && newCfg.feishu.chat_agent_map) ||
+                       (newCfg.telegram && newCfg.telegram.chat_agent_map) || {};
+      const boundKey = agentMap[String(chatId)];
+      const boundProj = boundKey && newCfg.projects && newCfg.projects[boundKey];
       if (boundProj && boundProj.cwd) {
-        const boundCwd = expandPath(boundProj.cwd).replace(/^~/, HOME);
+        const boundCwd = normalizeCwd(boundProj.cwd);
         const session = createSession(chatId, boundCwd, '');
         await bot.sendMessage(chatId, `✅ 新会话已创建\nWorkdir: ${session.cwd}`);
         return;
@@ -1295,7 +1334,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     const currentSession = getSession(chatId);
     const currentCwd = currentSession?.cwd ? path.resolve(expandPath(currentSession.cwd)) : null;
     const buttons = entries.map(([key, p]) => {
-      const projCwd = expandPath(p.cwd).replace(/^~/, HOME);
+      const projCwd = normalizeCwd(p.cwd);
       const active = currentCwd && path.resolve(projCwd) === currentCwd ? ' ◀' : '';
       return [{ text: `${p.icon || '🤖'} ${p.name || key}${active}`, callback_data: `/cd ${projCwd}` }];
     });
@@ -2139,16 +2178,8 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
   const quickAgent = routeAgent(text, config);
   if (quickAgent && !quickAgent.rest) {
     const { key, proj } = quickAgent;
-    const projCwd = expandPath(proj.cwd).replace(/^~/, HOME);
-    const st = loadState();
-    const recentInDir = listRecentSessions(1, projCwd);
-    if (recentInDir.length > 0 && recentInDir[0].sessionId) {
-      st.sessions[chatId] = { id: recentInDir[0].sessionId, cwd: projCwd, started: true };
-    } else {
-      const newSess = createSession(chatId, projCwd, proj.name || key);
-      st.sessions[chatId] = { id: newSess.id, cwd: projCwd, started: false };
-    }
-    saveState(st);
+    const projCwd = normalizeCwd(proj.cwd);
+    attachOrCreateSession(chatId, projCwd, proj.name || key);
     log('INFO', `Agent switch via nickname: ${key} (${projCwd})`);
     await bot.sendMessage(chatId, `${proj.icon || '🤖'} ${proj.name || key} 在线`);
     return;
@@ -2867,16 +2898,8 @@ async function askClaude(bot, chatId, prompt, config) {
   const agentMatch = routeAgent(prompt, config);
   if (agentMatch) {
     const { key, proj, rest } = agentMatch;
-    const projCwd = expandPath(proj.cwd).replace(/^~/, HOME);
-    const st = loadState();
-    const recentInDir = listRecentSessions(1, projCwd);
-    if (recentInDir.length > 0 && recentInDir[0].sessionId) {
-      st.sessions[chatId] = { id: recentInDir[0].sessionId, cwd: projCwd, started: true };
-    } else {
-      const newSess = createSession(chatId, projCwd, proj.name || key);
-      st.sessions[chatId] = { id: newSess.id, cwd: projCwd, started: false };
-    }
-    saveState(st);
+    const projCwd = normalizeCwd(proj.cwd);
+    attachOrCreateSession(chatId, projCwd, proj.name || key);
     log('INFO', `Agent switch via nickname: ${key} (${projCwd})`);
     if (!rest) {
       // Pure nickname call — confirm switch and stop
@@ -3041,17 +3064,15 @@ async function askClaude(bot, chatId, prompt, config) {
     recordTokens(loadState(), estimated);
 
     // Parse [[FILE:...]] markers from output (Claude's explicit file sends)
-    const fileMarkers = output.match(/\[\[FILE:([^\]]+)\]\]/g) || [];
-    const markedFiles = fileMarkers.map(m => m.match(/\[\[FILE:([^\]]+)\]\]/)[1].trim());
-    const cleanOutput = output.replace(/\s*\[\[FILE:[^\]]+\]\]/g, '').trim();
+    const { markedFiles, cleanOutput } = parseFileMarkers(output);
 
     // Match current session to a project for colored card display
     let activeProject = null;
     if (session && session.cwd && config && config.projects) {
-      const sessionCwd = path.resolve(expandPath(session.cwd).replace(/^~/, HOME));
+      const sessionCwd = path.resolve(normalizeCwd(session.cwd));
       for (const [, proj] of Object.entries(config.projects)) {
         if (!proj.cwd) continue;
-        const projCwd = path.resolve(expandPath(proj.cwd).replace(/^~/, HOME));
+        const projCwd = path.resolve(normalizeCwd(proj.cwd));
         if (sessionCwd === projCwd) { activeProject = proj; break; }
       }
     }
@@ -3071,22 +3092,9 @@ async function askClaude(bot, chatId, prompt, config) {
     // Combine: marked files + auto-detected content files from Write operations
     const allFiles = new Set(markedFiles);
     if (files && files.length > 0) {
-      for (const f of files) {
-        if (isContentFile(f)) allFiles.add(f);
-      }
+      for (const f of files) { if (isContentFile(f)) allFiles.add(f); }
     }
-
-    // Send file buttons
-    if (allFiles.size > 0 && bot.sendButtons) {
-      const validFiles = [...allFiles].filter(f => fs.existsSync(f));
-      if (validFiles.length > 0) {
-        const buttons = validFiles.map(filePath => {
-          const shortId = cacheFile(filePath);
-          return [{ text: `📎 ${path.basename(filePath)}`, callback_data: `/file ${shortId}` }];
-        });
-        await bot.sendButtons(chatId, '📂 文件:', buttons);
-      }
-    }
+    await sendFileButtons(bot, chatId, allFiles);
 
     // Auto-name: if this was the first message and session has no name, generate one
     if (wasNew && !getSessionName(session.id)) {
@@ -3111,28 +3119,13 @@ async function askClaude(bot, chatId, prompt, config) {
       const retry = await spawnClaudeStreaming(retryArgs, prompt, session.cwd, onStatus);
       if (retry.output) {
         markSessionStarted(chatId);
-        // Parse [[FILE:...]] markers
-        const retryFileMarkers = retry.output.match(/\[\[FILE:([^\]]+)\]\]/g) || [];
-        const retryMarkedFiles = retryFileMarkers.map(m => m.match(/\[\[FILE:([^\]]+)\]\]/)[1].trim());
-        const retryCleanOutput = retry.output.replace(/\s*\[\[FILE:[^\]]+\]\]/g, '').trim();
-        await bot.sendMarkdown(chatId, retryCleanOutput);
-        // Combine marked + auto-detected content files
-        const retryAllFiles = new Set(retryMarkedFiles);
+        const { markedFiles: retryMarked, cleanOutput: retryClean } = parseFileMarkers(retry.output);
+        await bot.sendMarkdown(chatId, retryClean);
+        const retryAllFiles = new Set(retryMarked);
         if (retry.files && retry.files.length > 0) {
-          for (const f of retry.files) {
-            if (isContentFile(f)) retryAllFiles.add(f);
-          }
+          for (const f of retry.files) { if (isContentFile(f)) retryAllFiles.add(f); }
         }
-        if (retryAllFiles.size > 0 && bot.sendButtons) {
-          const validFiles = [...retryAllFiles].filter(f => fs.existsSync(f));
-          if (validFiles.length > 0) {
-            const buttons = validFiles.map(filePath => {
-              const shortId = cacheFile(filePath);
-              return [{ text: `📎 ${path.basename(filePath)}`, callback_data: `/file ${shortId}` }];
-            });
-            await bot.sendButtons(chatId, '📂 文件:', buttons);
-          }
-        }
+        await sendFileButtons(bot, chatId, retryAllFiles);
       } else {
         log('ERROR', `askClaude retry failed: ${(retry.error || '').slice(0, 200)}`);
         try { await bot.sendMessage(chatId, `Error: ${(retry.error || '').slice(0, 200)}`); } catch { /* */ }
