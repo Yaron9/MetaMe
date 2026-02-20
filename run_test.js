@@ -3,8 +3,8 @@ const path = require('path');
 
 let code = fs.readFileSync(path.join(__dirname, 'scripts', 'daemon.js'), 'utf8');
 
-// Disable main execution
-code = code.replace(/main\(\)\.catch\([\s\S]+?\);/, '// main() disabled for test');
+// Disable main execution safely
+code = code.replace(/main\(\)\.catch\([\s\S]*?\}\);/, '// main() disabled for test');
 
 // Mock spawnClaudeAsync
 const mockCode = `
@@ -24,9 +24,9 @@ code += `\nmodule.exports.handleCommand = handleCommand;
 module.exports.pendingAgentFlows = pendingAgentFlows;
 module.exports.loadConfig = loadConfig;`;
 
-fs.writeFileSync(path.join(__dirname, 'test_daemon.js'), code, 'utf8');
+fs.writeFileSync(path.join(__dirname, 'scripts', 'test_daemon.js'), code, 'utf8');
 
-const { handleCommand, pendingAgentFlows, loadConfig } = require('./test_daemon');
+const { handleCommand, pendingAgentFlows, loadConfig } = require('./scripts/test_daemon');
 
 const bot = {
     sendMessage: async (chatId, text) => {
@@ -37,6 +37,9 @@ const bot = {
     },
     sendCard: async (chatId, card) => {
         console.log('\\x1b[32m[BOT -> USER ' + chatId + '] (Card)\\x1b[0m\\n' + JSON.stringify(card, null, 2) + '\\n');
+    },
+    sendTyping: async (chatId) => {
+        console.log('\\x1b[32m[BOT -> USER ' + chatId + '] (Typing...)\\x1b[0m\\n');
     }
 };
 
@@ -48,6 +51,8 @@ async function runTest() {
 
     const testDir = path.join(require('os').homedir(), '.metame', 'test_agent');
     if (!fs.existsSync(testDir)) fs.mkdirSync(testDir, { recursive: true });
+    const claudeMdPath = path.join(testDir, 'CLAUDE.md');
+    if (fs.existsSync(claudeMdPath)) fs.unlinkSync(claudeMdPath); // reset to clean state for test
 
     console.log('\\n\\n=== TEST 1: /agent new (Start flow) ===');
     await handleCommand(bot, chatId, '/agent new', config, executeTask);
@@ -65,7 +70,6 @@ async function runTest() {
     await handleCommand(bot, chatId, 'I want this agent to test the bot framework.', config, executeTask);
     console.log('pendingAgentFlows:', pendingAgentFlows.get(String(chatId)));
 
-    const claudeMdPath = path.join(testDir, 'CLAUDE.md');
     console.log('\\n[VERIFY] Check test agent CLAUDE.md:');
     if (fs.existsSync(claudeMdPath)) {
         console.log(fs.readFileSync(claudeMdPath, 'utf8'));

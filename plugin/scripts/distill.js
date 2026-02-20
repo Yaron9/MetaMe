@@ -932,6 +932,21 @@ if (require.main === module) {
   }
   // Run pattern detection (only triggers every 5th distill)
   if (!bootstrapped) detectPatterns();
+
+  // Skill evolution: cold path — Haiku-powered batch analysis
+  try {
+    const skillEvo = require('./skill-evolution');
+    const evoResult = skillEvo.distillSkills();
+    if (evoResult && (evoResult.updates.length > 0 || evoResult.missing_skills.length > 0)) {
+      console.log(`🧬 Skill evolution: ${evoResult.updates.length} update(s), ${evoResult.missing_skills.length} gap(s) detected.`);
+    }
+  } catch (e) {
+    // Non-fatal: skill evolution is optional
+    if (e.code !== 'MODULE_NOT_FOUND') {
+      console.log(`⚠️ Skill evolution skipped: ${e.message}`);
+    }
+  }
+
   if (result.updated) {
     console.log(`🧠 ${result.summary}`);
   } else {

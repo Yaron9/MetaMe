@@ -645,7 +645,7 @@ async function startTelegramBridge(config, executeTaskByName) {
           // Exception: /bind and /agent bind/new are allowed from any chat so users can self-register new groups
           const allowedIds = (loadConfig().telegram && loadConfig().telegram.allowed_chat_ids) || [];
           const trimmedText = msg.text && msg.text.trim();
-          const isBindCmd = trimmedText && (trimmedText.startsWith('/bind') || trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
+          const isBindCmd = trimmedText && (trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
           if (!allowedIds.includes(chatId) && !isBindCmd) {
             log('WARN', `Rejected message from unauthorized chat: ${chatId}`);
             continue;
@@ -1079,48 +1079,11 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
   }
 
   // --- /bind <name> [cwd]: register this chat as a dedicated agent channel ---
-  // With cwd:    /bind 小美 ~/          → bind immediately
-  // Without cwd: /bind 教授             → show directory picker
-  if (text.startsWith('/bind ') || text === '/bind') {
-    const args = text.slice(5).trim();
-    const parts = args.split(/\s+/);
-    const agentName = parts[0];
-    const agentCwd = parts.slice(1).join(' ');
-
-    if (!agentName) {
-      await bot.sendMessage(chatId, '用法: /bind <名称> [工作目录]\n例: /bind 小美 ~/\n或:  /bind 教授  (弹出目录选择)');
-      return;
-    }
-
-    if (!agentCwd) {
-      // No cwd given — show directory picker
-      pendingBinds.set(String(chatId), agentName);
-      await sendDirPicker(bot, chatId, 'bind', `为「${agentName}」选择工作目录:`);
-      return;
-    }
-
-    await doBindAgent(bot, chatId, agentName, agentCwd);
-    return;
-  }
-
-  // --- /bind-dir <path>: called by directory picker to complete a pending bind ---
-  if (text.startsWith('/bind-dir ')) {
-    const dirPath = expandPath(text.slice(10).trim());
-    const agentName = pendingBinds.get(String(chatId));
-    if (!agentName) {
-      await bot.sendMessage(chatId, '❌ 没有待完成的 /bind，请重新发送 /bind <名称>');
-      return;
-    }
-    pendingBinds.delete(String(chatId));
-    await doBindAgent(bot, chatId, agentName, dirPath);
-    return;
-  }
 
   // --- chat_agent_map: auto-switch agent based on dedicated chatId ---
   // Configure in daemon.yaml: feishu.chat_agent_map or telegram.chat_agent_map
   //   e.g.  chat_agent_map: { "oc_xxx": "personal", "oc_yyy": "metame" }
-  const chatAgentMap = (config.feishu && config.feishu.chat_agent_map) ||
-    (config.telegram && config.telegram.chat_agent_map) || {};
+  const chatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
   const mappedKey = chatAgentMap[String(chatId)];
   if (mappedKey && config.projects && config.projects[mappedKey]) {
     const proj = config.projects[mappedKey];
@@ -1158,8 +1121,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     if (!arg) {
       // In a dedicated agent group, use the agent's bound cwd directly
       const newCfg = loadConfig();
-      const agentMap = (newCfg.feishu && newCfg.feishu.chat_agent_map) ||
-        (newCfg.telegram && newCfg.telegram.chat_agent_map) || {};
+      const agentMap = { ...(newCfg.telegram ? newCfg.telegram.chat_agent_map : {}), ...(newCfg.feishu ? newCfg.feishu.chat_agent_map : {}) };
       const boundKey = agentMap[String(chatId)];
       const boundProj = boundKey && newCfg.projects && newCfg.projects[boundKey];
       if (boundProj && boundProj.cwd) {
@@ -1506,8 +1468,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
         return;
       }
       // 找出当前群绑定的 agent
-      const agentMap = (cfg.feishu && cfg.feishu.chat_agent_map) ||
-        (cfg.telegram && cfg.telegram.chat_agent_map) || {};
+      const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
       const boundKey = agentMap[String(chatId)];
       const lines = ['📋 已配置的 Agent：', ''];
       for (const [key, p] of entries) {
@@ -1534,8 +1495,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     // /agent edit — 编辑当前 agent 的 CLAUDE.md 角色定义
     if (agentSub === 'edit') {
       const cfg = loadConfig();
-      const agentMap = (cfg.feishu && cfg.feishu.chat_agent_map) ||
-        (cfg.telegram && cfg.telegram.chat_agent_map) || {};
+      const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
       const boundKey = agentMap[String(chatId)];
       const boundProj = boundKey && cfg.projects && cfg.projects[boundKey];
       if (!boundProj || !boundProj.cwd) {
@@ -1560,8 +1520,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     // /agent reset — 删除 CLAUDE.md 里的角色 section
     if (agentSub === 'reset') {
       const cfg = loadConfig();
-      const agentMap = (cfg.feishu && cfg.feishu.chat_agent_map) ||
-        (cfg.telegram && cfg.telegram.chat_agent_map) || {};
+      const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
       const boundKey = agentMap[String(chatId)];
       const boundProj = boundKey && cfg.projects && cfg.projects[boundKey];
       if (!boundProj || !boundProj.cwd) {
@@ -3521,7 +3480,7 @@ async function startFeishuBridge(config, executeTaskByName) {
       const liveCfg = loadConfig();
       const allowedIds = (liveCfg.feishu && liveCfg.feishu.allowed_chat_ids) || [];
       const trimmedText = text && text.trim();
-      const isBindCmd = trimmedText && (trimmedText.startsWith('/bind') || trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
+      const isBindCmd = trimmedText && (trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
       if (!allowedIds.includes(chatId) && !isBindCmd) {
         log('WARN', `Feishu: rejected message from ${chatId}`);
         return;
