@@ -719,58 +719,62 @@ const { shortenPath, expandPath } = createPathMap();
  * @param {string} mode - 'new' or 'cd' (determines callback command)
  */
 async function sendDirPicker(bot, chatId, mode, title) {
-  const dirs = listProjectDirs();
-  const cmd = mode === 'new' ? '/new' : mode === 'bind' ? '/bind-dir' : '/cd';
-  if (bot.sendButtons) {
-    const buttons = dirs.map(d => [{ text: d.label, callback_data: `${cmd} ${shortenPath(d.path)}` }]);
-    buttons.push([{ text: 'Browse...', callback_data: `/browse ${mode} ${shortenPath(HOME)}` }]);
-    await bot.sendButtons(chatId, title, buttons);
-  } else {
-    let msg = `${title}\n`;
-    dirs.forEach((d, i) => { msg += `${i + 1}. ${d.label}\n   ${cmd} ${d.path}\n`; });
-    msg += `\nOr type: ${cmd} /full/path`;
-    await bot.sendMessage(chatId, msg);
-  }
+  // Always open the file browser starting from HOME — Finder-style navigation
+  await sendBrowse(bot, chatId, mode, HOME, title);
 }
 
 /**
- * Send directory browser: list subdirs of a path with .. parent nav
+ * Send directory browser: Finder-style navigation
+ * - Clicking a subdir ALWAYS navigates into it (never immediate select)
+ * - "✓ 选择此目录" button at top confirms the current dir
+ * - Shows up to 12 subdirs per page with pagination
  */
-async function sendBrowse(bot, chatId, mode, dirPath) {
+async function sendBrowse(bot, chatId, mode, dirPath, title, page = 0) {
   const cmd = mode === 'new' ? '/new' : mode === 'bind' ? '/bind-dir' : '/cd';
+  const PAGE_SIZE = 10;
   try {
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
     const subdirs = entries
       .filter(e => e.isDirectory() && !e.name.startsWith('.'))
       .map(e => e.name)
-      .sort()
-      .slice(0, 8); // max 8 subdirs per screen
+      .sort();
+
+    const totalPages = Math.ceil(subdirs.length / PAGE_SIZE);
+    const pageSubdirs = subdirs.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+    const parent = path.dirname(dirPath);
+    const displayPath = dirPath.replace(HOME, '~');
 
     if (bot.sendButtons) {
       const buttons = [];
-      // Select this directory
-      buttons.push([{ text: `>> Use this dir`, callback_data: `${cmd} ${shortenPath(dirPath)}` }]);
-      // Subdirectories
-      for (const name of subdirs) {
+      // ✓ Confirm current dir
+      buttons.push([{ text: `✓ 选择「${displayPath}」`, callback_data: `${cmd} ${shortenPath(dirPath)}` }]);
+      // Subdirectories — click = navigate in
+      for (const name of pageSubdirs) {
         const full = path.join(dirPath, name);
-        buttons.push([{ text: `${name}/`, callback_data: `/browse ${mode} ${shortenPath(full)}` }]);
+        buttons.push([{ text: `📁 ${name}`, callback_data: `/browse ${mode} ${shortenPath(full)}` }]);
       }
-      // Parent
-      const parent = path.dirname(dirPath);
+      // Pagination
+      const nav = [];
+      if (page > 0) nav.push({ text: '← 上页', callback_data: `/browse ${mode} ${shortenPath(dirPath)} ${page - 1}` });
+      if (page < totalPages - 1) nav.push({ text: '下页 →', callback_data: `/browse ${mode} ${shortenPath(dirPath)} ${page + 1}` });
+      if (nav.length) buttons.push(nav);
+      // Parent dir
       if (parent !== dirPath) {
-        buttons.push([{ text: '.. back', callback_data: `/browse ${mode} ${shortenPath(parent)}` }]);
+        buttons.push([{ text: '⬆ 上级目录', callback_data: `/browse ${mode} ${shortenPath(parent)}` }]);
       }
-      await bot.sendButtons(chatId, dirPath, buttons);
+      const header = title ? `${title}\n📂 ${displayPath}` : `📂 ${displayPath}`;
+      await bot.sendButtons(chatId, header, buttons);
     } else {
-      let msg = `${dirPath}\n\n`;
-      subdirs.forEach((name, i) => {
-        msg += `${i + 1}. ${name}/\n   /browse ${mode} ${path.join(dirPath, name)}\n`;
+      let msg = `📂 ${displayPath}\n\n`;
+      pageSubdirs.forEach((name, i) => {
+        msg += `${page * PAGE_SIZE + i + 1}. ${name}/\n   /browse ${mode} ${path.join(dirPath, name)}\n`;
       });
-      msg += `\nSelect: ${cmd} ${dirPath}\nBack: /browse ${mode} ${path.dirname(dirPath)}`;
+      msg += `\n✓ 选择此目录: ${cmd} ${dirPath}`;
+      if (parent !== dirPath) msg += `\n⬆ 上级: /browse ${mode} ${parent}`;
       await bot.sendMessage(chatId, msg);
     }
   } catch (e) {
-    await bot.sendMessage(chatId, `Cannot read: ${dirPath}`);
+    await bot.sendMessage(chatId, `无法读取目录: ${dirPath}`);
   }
 }
 
@@ -979,10 +983,14 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   // --- Browse handler (directory navigation) ---
   if (text.startsWith('/browse ')) {
     const parts = text.slice(8).trim().split(' ');
-    const mode = parts[0]; // 'new' or 'cd'
-    const dirPath = expandPath(parts.slice(1).join(' '));
+    const mode = parts[0]; // 'new', 'cd', or 'bind'
+    // Last token may be a page number
+    const lastPart = parts[parts.length - 1];
+    const page = /^\d+$/.test(lastPart) ? parseInt(lastPart, 10) : 0;
+    const pathParts = /^\d+$/.test(lastPart) ? parts.slice(1, -1) : parts.slice(1);
+    const dirPath = expandPath(pathParts.join(' '));
     if (mode && dirPath && fs.existsSync(dirPath)) {
-      await sendBrowse(bot, chatId, mode, dirPath);
+      await sendBrowse(bot, chatId, mode, dirPath, null, page);
     } else if (/^p\d+$/.test(dirPath)) {
       await bot.sendMessage(chatId, '⚠️ Button expired. Pick again:');
       await sendDirPicker(bot, chatId, mode || 'cd', 'Switch workdir:');
