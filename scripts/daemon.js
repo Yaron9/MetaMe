@@ -696,9 +696,15 @@ async function startTelegramBridge(config, executeTaskByName) {
   };
 }
 
+// ── Timing constants ─────────────────────────────────────────────────────────
+const CLAUDE_COOLDOWN_MS  = 10000; // 10s between Claude calls per chat
+const STATUS_THROTTLE_MS  = 3000;  // Min 3s between streaming status updates
+const FALLBACK_THROTTLE_MS = 8000; // 8s between fallback status updates
+const DEDUP_TTL_MS        = 60000; // Feishu message dedup window (60s)
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Rate limiter for /ask and /run — prevents rapid-fire Claude calls
 const _lastClaudeCall = {};
-const CLAUDE_COOLDOWN_MS = 10000; // 10s between Claude calls per chat
 
 function checkCooldown(chatId) {
   const now = Date.now();
@@ -730,6 +736,18 @@ function parseFileMarkers(output) {
   const markedFiles = markers.map(m => m.match(/\[\[FILE:([^\]]+)\]\]/)[1].trim());
   const cleanOutput = output.replace(/\s*\[\[FILE:[^\]]+\]\]/g, '').trim();
   return { markedFiles, cleanOutput };
+}
+
+/**
+ * Merge explicit [[FILE:...]] paths with auto-detected content files.
+ * Returns a Set of unique file paths.
+ */
+function mergeFileCollections(markedFiles, sourceFiles) {
+  const result = new Set(markedFiles);
+  if (sourceFiles && sourceFiles.length > 0) {
+    for (const f of sourceFiles) { if (isContentFile(f)) result.add(f); }
+  }
+  return result;
 }
 
 /**
@@ -2683,7 +2701,7 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
     let killed = false;
     let finalResult = '';
     let lastStatusTime = 0;
-    const STATUS_THROTTLE = 3000; // Min 3s between status updates
+    const STATUS_THROTTLE = STATUS_THROTTLE_MS;
     const writtenFiles = []; // Track files created/modified by Write tool
 
     const timer = setTimeout(() => {
@@ -2842,7 +2860,6 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
 }
 
 // Lazy distill: run distill.js in background on first message, then every 4 hours
-let _lastDistillTime = 0;
 // Track outbound message_id → session for reply-based session restoration.
 // Keeps last 200 entries to avoid unbounded growth.
 function trackMsgSession(messageId, session) {
@@ -2859,14 +2876,17 @@ function trackMsgSession(messageId, session) {
 
 function lazyDistill() {
   const now = Date.now();
-  if (now - _lastDistillTime < 4 * 60 * 60 * 1000) return; // 4h cooldown
+  const st = loadState();
+  const lastDistillTime = st.last_distill_time || 0;
+  if (now - lastDistillTime < 4 * 60 * 60 * 1000) return; // 4h cooldown
   const distillPath = path.join(HOME, '.metame', 'distill.js');
   const signalsPath = path.join(HOME, '.metame', 'raw_signals.jsonl');
   if (!fs.existsSync(distillPath)) return;
   if (!fs.existsSync(signalsPath)) return;
   const content = fs.readFileSync(signalsPath, 'utf8').trim();
   if (!content) return;
-  _lastDistillTime = now;
+  st.last_distill_time = now;
+  saveState(st);
   const lines = content.split('\n').filter(l => l.trim()).length;
   log('INFO', `Distilling ${lines} signal(s) in background...`);
   const bg = spawn('node', [distillPath], { detached: true, stdio: 'ignore' });
@@ -3001,7 +3021,7 @@ async function askClaude(bot, chatId, prompt, config) {
   // Telegram: edit status msg in-place; Feishu: edit or fallback to new messages
   let editFailed = false;
   let lastFallbackStatus = 0;
-  const FALLBACK_THROTTLE = 8000; // 8s between new-message status updates
+  const FALLBACK_THROTTLE = FALLBACK_THROTTLE_MS;
   const onStatus = async (status) => {
     try {
       if (statusMsgId && bot.editMessage && !editFailed) {
@@ -3089,12 +3109,7 @@ async function askClaude(bot, chatId, prompt, config) {
     }
     if (replyMsg && replyMsg.message_id && session) trackMsgSession(replyMsg.message_id, session);
 
-    // Combine: marked files + auto-detected content files from Write operations
-    const allFiles = new Set(markedFiles);
-    if (files && files.length > 0) {
-      for (const f of files) { if (isContentFile(f)) allFiles.add(f); }
-    }
-    await sendFileButtons(bot, chatId, allFiles);
+    await sendFileButtons(bot, chatId, mergeFileCollections(markedFiles, files));
 
     // Auto-name: if this was the first message and session has no name, generate one
     if (wasNew && !getSessionName(session.id)) {
@@ -3121,11 +3136,7 @@ async function askClaude(bot, chatId, prompt, config) {
         markSessionStarted(chatId);
         const { markedFiles: retryMarked, cleanOutput: retryClean } = parseFileMarkers(retry.output);
         await bot.sendMarkdown(chatId, retryClean);
-        const retryAllFiles = new Set(retryMarked);
-        if (retry.files && retry.files.length > 0) {
-          for (const f of retry.files) { if (isContentFile(f)) retryAllFiles.add(f); }
-        }
-        await sendFileButtons(bot, chatId, retryAllFiles);
+        await sendFileButtons(bot, chatId, mergeFileCollections(retryMarked, retry.files));
       } else {
         log('ERROR', `askClaude retry failed: ${(retry.error || '').slice(0, 200)}`);
         try { await bot.sendMessage(chatId, `Error: ${(retry.error || '').slice(0, 200)}`); } catch { /* */ }
