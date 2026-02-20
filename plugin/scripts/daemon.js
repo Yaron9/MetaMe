@@ -126,12 +126,34 @@ function backupConfig() {
 
 function restoreConfig() {
   const bak = CONFIG_FILE + '.bak';
-  if (fs.existsSync(bak)) {
+  if (!fs.existsSync(bak)) return false;
+  try {
+    const bakCfg = yaml.load(fs.readFileSync(bak, 'utf8')) || {};
+    // Preserve security-critical fields from current config (chat IDs, agent map)
+    // so a /fix never loses manually-added channels
+    let curCfg = {};
+    try { curCfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {}; } catch {}
+    for (const adapter of ['feishu', 'telegram']) {
+      if (curCfg[adapter] && bakCfg[adapter]) {
+        const curIds = curCfg[adapter].allowed_chat_ids || [];
+        const bakIds = bakCfg[adapter].allowed_chat_ids || [];
+        // Union of both lists
+        const merged = [...new Set([...bakIds, ...curIds])];
+        bakCfg[adapter].allowed_chat_ids = merged;
+        // Merge chat_agent_map (current takes precedence)
+        bakCfg[adapter].chat_agent_map = Object.assign(
+          {}, bakCfg[adapter].chat_agent_map || {}, curCfg[adapter].chat_agent_map || {}
+        );
+      }
+    }
+    fs.writeFileSync(CONFIG_FILE, yaml.dump(bakCfg, { lineWidth: -1 }), 'utf8');
+    config = loadConfig();
+    return true;
+  } catch {
     fs.copyFileSync(bak, CONFIG_FILE);
     config = loadConfig();
     return true;
   }
-  return false;
 }
 
 let _cachedState = null;
@@ -554,7 +576,7 @@ async function startTelegramBridge(config, executeTaskByName) {
 
   const { createBot } = require(path.join(__dirname, 'telegram-adapter.js'));
   const bot = createBot(config.telegram.bot_token);
-  const allowedIds = config.telegram.allowed_chat_ids || [];
+  // allowedIds read dynamically per-message to support hot-reload of daemon.yaml
 
   // Verify bot
   try {
@@ -581,6 +603,7 @@ async function startTelegramBridge(config, executeTaskByName) {
             const chatId = cb.message && cb.message.chat.id;
             bot.answerCallback(cb.id).catch(() => {});
             if (chatId && cb.data) {
+              const allowedIds = (loadConfig().telegram && loadConfig().telegram.allowed_chat_ids) || [];
               if (!allowedIds.includes(chatId)) continue;
               // Fire-and-forget: don't block poll loop (enables message queue)
               handleCommand(bot, chatId, cb.data, config, executeTaskByName).catch(e => {
@@ -595,7 +618,8 @@ async function startTelegramBridge(config, executeTaskByName) {
           const msg = update.message;
           const chatId = msg.chat.id;
 
-          // Security: check whitelist (empty = deny all)
+          // Security: check whitelist (empty = deny all) — read live config to support hot-reload
+          const allowedIds = (loadConfig().telegram && loadConfig().telegram.allowed_chat_ids) || [];
           if (!allowedIds.includes(chatId)) {
             log('WARN', `Rejected message from unauthorized chat: ${chatId}`);
             continue;
@@ -853,6 +877,35 @@ async function sendDirListing(bot, chatId, baseDir, arg) {
  */
 async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   const state = loadState();
+
+  // --- /chatid: reply with current chatId (useful for setting up chat_agent_map) ---
+  if (text === '/chatid') {
+    await bot.sendMessage(chatId, `Chat ID: \`${chatId}\``);
+    return;
+  }
+
+  // --- chat_agent_map: auto-switch agent based on dedicated chatId ---
+  // Configure in daemon.yaml: feishu.chat_agent_map or telegram.chat_agent_map
+  //   e.g.  chat_agent_map: { "oc_xxx": "personal", "oc_yyy": "metame" }
+  const chatAgentMap = (config.feishu && config.feishu.chat_agent_map) ||
+                       (config.telegram && config.telegram.chat_agent_map) || {};
+  const mappedKey = chatAgentMap[String(chatId)];
+  if (mappedKey && config.projects && config.projects[mappedKey]) {
+    const proj = config.projects[mappedKey];
+    const projCwd = expandPath(proj.cwd).replace(/^~/, HOME);
+    const st = loadState();
+    const cur = st.sessions && st.sessions[chatId];
+    if (!cur || cur.cwd !== projCwd) {
+      const recent = listRecentSessions(1, projCwd);
+      if (recent.length > 0 && recent[0].sessionId) {
+        st.sessions[chatId] = { id: recent[0].sessionId, cwd: projCwd, started: true };
+      } else {
+        const newSess = createSession(chatId, projCwd, proj.name || mappedKey);
+        st.sessions[chatId] = { id: newSess.id, cwd: projCwd, started: false };
+      }
+      saveState(st);
+    }
+  }
 
   // --- Browse handler (directory navigation) ---
   if (text.startsWith('/browse ')) {
@@ -1940,7 +1993,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     q.messages.push(text);
     // Only notify once (first message), subsequent ones silently queue
     if (isFirst) {
-      await bot.sendMessage(chatId, '📝 收到，中断当前任务后一起处理');
+      await bot.sendMessage(chatId, '📝 收到，稍后一起处理');
     }
     // Interrupt the running Claude process
     const proc = activeProcesses.get(chatId);
@@ -2801,14 +2854,22 @@ async function askClaude(bot, chatId, prompt, config) {
   gitCheckpoint(session.cwd);
 
   // Use streaming mode to show progress
-  // Telegram: edit status msg in-place; Feishu/others: send new messages
+  // Telegram: edit status msg in-place; Feishu: edit or fallback to new messages
+  let editFailed = false;
+  let lastFallbackStatus = 0;
+  const FALLBACK_THROTTLE = 8000; // 8s between new-message status updates
   const onStatus = async (status) => {
     try {
-      if (statusMsgId && bot.editMessage) {
-        await bot.editMessage(chatId, statusMsgId, status);
-      } else {
-        await bot.sendMessage(chatId, status);
+      if (statusMsgId && bot.editMessage && !editFailed) {
+        const ok = await bot.editMessage(chatId, statusMsgId, status);
+        if (ok !== false) return; // edit succeeded (true or undefined for Telegram)
+        editFailed = true; // edit failed, switch to fallback permanently
       }
+      // Fallback: send as new message with extra throttle to avoid spam
+      const now = Date.now();
+      if (now - lastFallbackStatus < FALLBACK_THROTTLE) return;
+      lastFallbackStatus = now;
+      await bot.sendMessage(chatId, status);
     } catch { /* ignore status update failures */ }
   };
 
@@ -2863,7 +2924,27 @@ async function askClaude(bot, chatId, prompt, config) {
     const markedFiles = fileMarkers.map(m => m.match(/\[\[FILE:([^\]]+)\]\]/)[1].trim());
     const cleanOutput = output.replace(/\s*\[\[FILE:[^\]]+\]\]/g, '').trim();
 
-    const replyMsg = await bot.sendMarkdown(chatId, cleanOutput);
+    // Match current session to a project for colored card display
+    let activeProject = null;
+    if (session && session.cwd && config && config.projects) {
+      const sessionCwd = path.resolve(expandPath(session.cwd).replace(/^~/, HOME));
+      for (const [, proj] of Object.entries(config.projects)) {
+        if (!proj.cwd) continue;
+        const projCwd = path.resolve(expandPath(proj.cwd).replace(/^~/, HOME));
+        if (sessionCwd === projCwd) { activeProject = proj; break; }
+      }
+    }
+
+    let replyMsg;
+    if (activeProject && bot.sendCard) {
+      replyMsg = await bot.sendCard(chatId, {
+        title: `${activeProject.icon || '🤖'} ${activeProject.name || ''}`,
+        body: cleanOutput,
+        color: activeProject.color || 'blue',
+      });
+    } else {
+      replyMsg = await bot.sendMarkdown(chatId, cleanOutput);
+    }
     if (replyMsg && replyMsg.message_id && session) trackMsgSession(replyMsg.message_id, session);
 
     // Combine: marked files + auto-detected content files from Write operations
@@ -2975,11 +3056,10 @@ async function startFeishuBridge(config, executeTaskByName) {
 
   const { createBot } = require(path.join(__dirname, 'feishu-adapter.js'));
   const bot = createBot(config.feishu);
-  const allowedIds = config.feishu.allowed_chat_ids || [];
-
   try {
     const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo) => {
-      // Security: check whitelist (empty = deny all)
+      // Security: check whitelist (empty = deny all) — read live config to support hot-reload
+      const allowedIds = (loadConfig().feishu && loadConfig().feishu.allowed_chat_ids) || [];
       if (!allowedIds.includes(chatId)) {
         log('WARN', `Feishu: rejected message from ${chatId}`);
         return;
