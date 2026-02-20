@@ -264,6 +264,31 @@ function createBot(config) {
     },
 
     /**
+     * Send a rich interactive card with pre-built elements (no title splitting).
+     * @param {string} chatId
+     * @param {string} headerText - single-line card header
+     * @param {Array} elements - Feishu card elements array
+     */
+    async sendCard(chatId, headerText, elements) {
+      const card = {
+        config: { wide_screen_mode: true },
+        header: {
+          title: { tag: 'plain_text', content: headerText },
+          template: 'blue',
+        },
+        elements,
+      };
+      await withTimeout(client.im.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: {
+          receive_id: chatId,
+          msg_type: 'interactive',
+          content: JSON.stringify(card),
+        },
+      }));
+    },
+
+    /**
      * Get bot info
      */
     async getMe() {

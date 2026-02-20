@@ -1393,19 +1393,29 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       return;
     }
     if (bot.sendButtons) {
-      const buttons = allSessions.map(s => {
+      // Rich card: each session = description + switch button, separated by hr
+      const elements = [];
+      allSessions.forEach((s, i) => {
+        if (i > 0) elements.push({ tag: 'hr' });
         const proj = s.projectPath ? path.basename(s.projectPath) : '~';
         const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
         const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
         const ago = formatRelativeTime(new Date(timeMs).toISOString());
+        const name = s.customTitle || '';
+        const summary = s.summary || '';
         const shortId = s.sessionId.slice(0, 6);
-        const name = s.customTitle || (s.summary || '').slice(0, 18) || '';
-        let label = `${ago} 📁${proj}`;
-        if (name) label += ` ${name}`;
-        label += ` #${shortId}`;
-        return [{ text: label, callback_data: `/sess ${s.sessionId}` }];
+        let desc = `**${i + 1}.** `;
+        if (name) desc += `**${name}**  `;
+        desc += `📁${proj} · ${ago}`;
+        if (summary && summary !== name) desc += `\n${summary.slice(0, 60)}`;
+        else if (!name && s.firstPrompt) {
+          const preview = s.firstPrompt.replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '').slice(0, 60);
+          if (preview) desc += `\n${preview}`;
+        }
+        elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
+        elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Switch #${shortId}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
       });
-      await bot.sendButtons(chatId, '📋 Tap a session to view details:', buttons);
+      await bot.sendCard(chatId, '📋 Recent Sessions', elements);
     } else {
       let msg = '📋 Recent sessions:\n\n';
       allSessions.forEach((s, i) => {
@@ -1446,7 +1456,25 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     detail += `🆔 ID: ${s.sessionId.slice(0, 8)}`;
     if (firstMsg && firstMsg !== summary) detail += `\n\n🗨️ First message:\n${firstMsg}`;
 
-    if (bot.sendButtons) {
+    if (bot.sendCard) {
+      // Build rich detail as markdown body + buttons
+      let body = '';
+      if (title) body += `**📝 ${title}**\n`;
+      if (summary) body += `💡 ${summary}\n`;
+      body += `📁 ${projName} · 📂 ${proj}\n`;
+      body += `💬 ${msgs} messages · 🕐 ${ago}\n`;
+      body += `🆔 ${s.sessionId.slice(0, 8)}`;
+      if (firstMsg && firstMsg !== summary) body += `\n\n🗨️ ${firstMsg.slice(0, 100)}`;
+      const elements = [
+        { tag: 'div', text: { tag: 'lark_md', content: body } },
+        { tag: 'hr' },
+        { tag: 'action', actions: [
+          { tag: 'button', text: { tag: 'plain_text', content: '▶️ Switch to this session' }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } },
+          { tag: 'button', text: { tag: 'plain_text', content: '⬅️ Back to list' }, type: 'default', value: { cmd: '/sessions' } },
+        ] },
+      ];
+      await bot.sendCard(chatId, '📋 Session Detail', elements);
+    } else if (bot.sendButtons) {
       await bot.sendButtons(chatId, detail, [
         [{ text: '▶️ Switch to this session', callback_data: `/resume ${s.sessionId}` }],
         [{ text: '⬅️ Back to list', callback_data: '/sessions' }],
@@ -1470,12 +1498,35 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
         await bot.sendMessage(chatId, `No sessions found${curCwd ? ' in ' + path.basename(curCwd) : ''}. Try /new first.`);
         return;
       }
-      const title = curCwd ? `Sessions in ${path.basename(curCwd)}:` : 'Recent sessions:';
-      if (bot.sendButtons) {
+      const headerTitle = curCwd ? `📋 Sessions in ${path.basename(curCwd)}` : '📋 Recent Sessions';
+      if (bot.sendCard) {
+        const elements = [];
+        recentSessions.forEach((s, i) => {
+          if (i > 0) elements.push({ tag: 'hr' });
+          const proj = s.projectPath ? path.basename(s.projectPath) : '~';
+          const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
+          const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
+          const ago = formatRelativeTime(new Date(timeMs).toISOString());
+          const name = s.customTitle || '';
+          const summary = s.summary || '';
+          const shortId = s.sessionId.slice(0, 6);
+          let desc = `**${i + 1}.** `;
+          if (name) desc += `**${name}**  `;
+          desc += `📁${proj} · ${ago}`;
+          if (summary && summary !== name) desc += `\n${summary.slice(0, 60)}`;
+          else if (!name && s.firstPrompt) {
+            const preview = s.firstPrompt.replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '').slice(0, 60);
+            if (preview) desc += `\n${preview}`;
+          }
+          elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
+          elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Switch #${shortId}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
+        });
+        await bot.sendCard(chatId, headerTitle, elements);
+      } else if (bot.sendButtons) {
         const buttons = recentSessions.map(s => {
           return [{ text: sessionLabel(s), callback_data: `/resume ${s.sessionId}` }];
         });
-        await bot.sendButtons(chatId, title, buttons);
+        await bot.sendButtons(chatId, headerTitle, buttons);
       } else {
         let msg = `${title}\n\n`;
         recentSessions.forEach((s, i) => {
