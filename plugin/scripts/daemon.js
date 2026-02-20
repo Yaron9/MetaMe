@@ -25,6 +25,8 @@ const STATE_FILE = path.join(METAME_DIR, 'daemon_state.json');
 const PID_FILE = path.join(METAME_DIR, 'daemon.pid');
 const LOG_FILE = path.join(METAME_DIR, 'daemon.log');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
+const DISPATCH_DIR = path.join(METAME_DIR, 'dispatch');
+const DISPATCH_LOG = path.join(DISPATCH_DIR, 'dispatch-log.jsonl');
 
 // Skill evolution module (hot path + cold path)
 let skillEvolution = null;
@@ -109,6 +111,11 @@ function log(level, msg) {
   } catch {
     // Last resort
     process.stderr.write(line);
+  }
+  // When running as LaunchAgent (stdout redirected to file), mirror structured logs there too.
+  // This unifies daemon.log and daemon-npm-stdout.log into one source of truth.
+  if (!process.stdout.isTTY) {
+    process.stdout.write(line);
   }
 }
 
@@ -376,56 +383,78 @@ function executeTask(task, config) {
     log('INFO', `Executing task: ${task.name} (model: ${model}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''})`);
   }
 
-  try {
-    const output = execFileSync('claude', claudeArgs, {
-      input: fullPrompt,
-      encoding: 'utf8',
-      timeout: task.timeout || 120000,
-      maxBuffer: 5 * 1024 * 1024,
-      ...(cwd && { cwd }),
-      env: { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined },
-    }).trim();
+  // Use spawnClaudeAsync (non-blocking spawn with process-group kill) instead of
+  // execFileSync (sync, blocks event loop, can't kill sub-agents).
+  // executeTask now returns a Promise — callers must handle it with .then() or await.
+  const timeoutMs = task.timeout || 120000;
+  const asyncArgs = [...claudeArgs];
+  const asyncEnv = { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined };
 
-    // Rough token estimate: ~4 chars per token for input + output
-    const estimatedTokens = Math.ceil((fullPrompt.length + output.length) / 4);
-    recordTokens(state, estimatedTokens);
+  return new Promise((resolve) => {
+    const child = spawn('claude', asyncArgs, {
+      cwd: cwd || undefined,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true, // own process group — kills sub-agents on timeout too
+      env: asyncEnv,
+    });
 
-    // Record task result (preserve session_id for persistent sessions)
-    const prevSessionId = state.tasks[task.name]?.session_id;
-    state.tasks[task.name] = {
-      last_run: new Date().toISOString(),
-      status: 'success',
-      output_preview: output.slice(0, 200),
-      ...(prevSessionId && { session_id: prevSessionId }),
-    };
-    saveState(state);
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
 
-    log('INFO', `Task ${task.name} completed (est. ${estimatedTokens} tokens)`);
-    return { success: true, output, tokens: estimatedTokens };
-  } catch (e) {
-    const errMsg = e.message || '';
-    // If persistent session expired/not found, reset and let next run create fresh
-    if (task.persistent_session && (errMsg.includes('not found') || errMsg.includes('No session'))) {
-      log('WARN', `Persistent session for ${task.name} expired, will create new on next run`);
-      state.tasks[task.name] = {
-        last_run: new Date().toISOString(),
-        status: 'session_reset',
-        error: 'Session expired, will retry with new session',
-      };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      log('WARN', `Task ${task.name} timeout (${timeoutMs / 1000}s) — killing process group`);
+      try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
+      setTimeout(() => {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { } }
+      }, 5000);
+    }, timeoutMs);
+
+    child.stdin.write(fullPrompt);
+    child.stdin.end();
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      const output = stdout.trim();
+      if (timedOut) {
+        const prevSid = state.tasks[task.name]?.session_id;
+        state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'timeout', error: 'Task exceeded timeout', ...(prevSid && { session_id: prevSid }) };
+        saveState(state);
+        return resolve({ success: false, error: 'timeout', output: '' });
+      }
+      if (code !== 0) {
+        const errMsg = (stderr || `Exit code ${code}`).slice(0, 200);
+        // Persistent session expired: reset so next run creates a new one
+        if (task.persistent_session && (errMsg.includes('not found') || errMsg.includes('No session'))) {
+          log('WARN', `Persistent session for ${task.name} expired, will create new on next run`);
+          state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'session_reset', error: 'Session expired' };
+          saveState(state);
+          return resolve({ success: false, error: 'session_expired', output: '' });
+        }
+        log('ERROR', `Task ${task.name} failed (exit ${code}): ${errMsg}`);
+        const prevSid = state.tasks[task.name]?.session_id;
+        state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: errMsg, ...(prevSid && { session_id: prevSid }) };
+        saveState(state);
+        return resolve({ success: false, error: errMsg, output: '' });
+      }
+      const estimatedTokens = Math.ceil((fullPrompt.length + output.length) / 4);
+      recordTokens(state, estimatedTokens);
+      const prevSessionId = state.tasks[task.name]?.session_id;
+      state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'success', output_preview: output.slice(0, 200), ...(prevSessionId && { session_id: prevSessionId }) };
       saveState(state);
-      return { success: false, error: 'session_expired', output: '' };
-    }
-    log('ERROR', `Task ${task.name} failed: ${errMsg}`);
-    const prevSid = state.tasks[task.name]?.session_id;
-    state.tasks[task.name] = {
-      last_run: new Date().toISOString(),
-      status: 'error',
-      error: errMsg.slice(0, 200),
-      ...(prevSid && { session_id: prevSid }),
-    };
-    saveState(state);
-    return { success: false, error: e.message, output: '' };
-  }
+      log('INFO', `Task ${task.name} completed (est. ${estimatedTokens} tokens)`);
+      resolve({ success: true, output, tokens: estimatedTokens });
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      log('ERROR', `Task ${task.name} spawn error: ${err.message}`);
+      resolve({ success: false, error: err.message, output: '' });
+    });
+  });
 }
 
 // parseInterval — imported from ./utils
@@ -502,9 +531,150 @@ function executeWorkflow(task, config) {
 }
 
 // ---------------------------------------------------------
+// AGENT DISPATCH — file-based inter-agent communication
+// ---------------------------------------------------------
+
+// Ensure dispatch directory exists
+if (!fs.existsSync(DISPATCH_DIR)) {
+  fs.mkdirSync(DISPATCH_DIR, { recursive: true });
+}
+
+/**
+ * Dispatch a task/message to another agent's inbox.
+ * @param {string} targetProject - project key (e.g. 'digital_me', 'desktop')
+ * @param {object} message - { from, type, priority, payload, callback, chain }
+ * @returns {{ success: boolean, error?: string }}
+ */
+function dispatchTask(targetProject, message) {
+  const LIMITS = { max_per_hour_per_target: 5, max_total_per_hour: 20, max_depth: 2 };
+
+  // Anti-storm: check chain depth
+  const chain = message.chain || [];
+  if (chain.length >= LIMITS.max_depth) {
+    log('WARN', `Dispatch blocked: max depth ${LIMITS.max_depth} reached (chain: ${chain.join('→')})`);
+    return { success: false, error: 'max_depth_exceeded' };
+  }
+
+  // Anti-storm: check for cycles
+  if (chain.includes(targetProject)) {
+    log('WARN', `Dispatch blocked: cycle detected (${chain.join('→')}→${targetProject})`);
+    return { success: false, error: 'cycle_detected' };
+  }
+
+  // Anti-storm: rate limiting (read dispatch log, count recent dispatches)
+  try {
+    if (fs.existsSync(DISPATCH_LOG)) {
+      const lines = fs.readFileSync(DISPATCH_LOG, 'utf8').trim().split('\n').filter(Boolean);
+      const oneHourAgo = Date.now() - 3600_000;
+      const recent = lines
+        .map(l => { try { return JSON.parse(l); } catch { return null; } })
+        .filter(e => e && new Date(e.dispatched_at).getTime() > oneHourAgo);
+
+      const toTarget = recent.filter(e => e.to === targetProject).length;
+      if (toTarget >= LIMITS.max_per_hour_per_target) {
+        log('WARN', `Dispatch blocked: rate limit to ${targetProject} (${toTarget}/${LIMITS.max_per_hour_per_target} per hour)`);
+        return { success: false, error: 'rate_limit_target' };
+      }
+      if (recent.length >= LIMITS.max_total_per_hour) {
+        log('WARN', `Dispatch blocked: total rate limit (${recent.length}/${LIMITS.max_total_per_hour} per hour)`);
+        return { success: false, error: 'rate_limit_total' };
+      }
+    }
+  } catch (e) {
+    log('WARN', `Dispatch rate check failed: ${e.message}`);
+  }
+
+  // Build the full message
+  const fullMsg = {
+    id: `d_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    from: message.from || 'unknown',
+    to: targetProject,
+    type: message.type || 'task',
+    priority: message.priority || 'normal',
+    payload: message.payload || {},
+    callback: message.callback || false,
+    chain: [...chain, message.from || 'unknown'],
+    created_at: new Date().toISOString(),
+    expires_at: message.expires_at || new Date(Date.now() + 86400_000).toISOString(),
+  };
+
+  // Write to target inbox (atomic append)
+  const inboxFile = path.join(DISPATCH_DIR, `inbox-${targetProject}.jsonl`);
+  fs.appendFileSync(inboxFile, JSON.stringify(fullMsg) + '\n', 'utf8');
+
+  // Write to dispatch log
+  fs.appendFileSync(DISPATCH_LOG, JSON.stringify({ ...fullMsg, dispatched_at: new Date().toISOString() }) + '\n', 'utf8');
+
+  log('INFO', `Dispatched ${fullMsg.type} to ${targetProject}: ${(fullMsg.payload.title || fullMsg.payload.prompt || '').slice(0, 80)}`);
+  return { success: true, id: fullMsg.id };
+}
+
+/**
+ * Scan inbox for a given project, return messages and clear the file.
+ * @param {string} projectKey
+ * @returns {Array} messages
+ */
+function scanInbox(projectKey) {
+  const inboxFile = path.join(DISPATCH_DIR, `inbox-${projectKey}.jsonl`);
+  if (!fs.existsSync(inboxFile)) return [];
+
+  const content = fs.readFileSync(inboxFile, 'utf8').trim();
+  if (!content) return [];
+
+  // Atomic clear: write empty → rename
+  const tmpFile = inboxFile + '.tmp';
+  fs.writeFileSync(tmpFile, '', 'utf8');
+  fs.renameSync(tmpFile, inboxFile);
+
+  const now = Date.now();
+  return content.split('\n')
+    .filter(Boolean)
+    .map(line => { try { return JSON.parse(line); } catch { return null; } })
+    .filter(msg => msg && (!msg.expires_at || new Date(msg.expires_at).getTime() > now));
+}
+
+/**
+ * Physiological heartbeat: zero-token awareness check.
+ * Runs every tick unconditionally.
+ */
+function physiologicalHeartbeat(config, processInboxMessage) {
+  // 1. Update last_alive timestamp
+  const state = loadState();
+  state.last_alive = new Date().toISOString();
+  state.memory_mb = Math.round(process.memoryUsage().rss / 1024 / 1024);
+  saveState(state);
+
+  // 2. Scan inbox for all projects
+  for (const [key, proj] of Object.entries(config.projects || {})) {
+    const messages = scanInbox(key);
+    for (const msg of messages) {
+      log('INFO', `Inbox ${key}: received ${msg.type} from ${msg.from} — ${(msg.payload.title || msg.payload.prompt || '').slice(0, 60)}`);
+      processInboxMessage(key, proj, msg);
+    }
+  }
+
+  // 3. Rotate dispatch-log weekly (keep 7 days)
+  try {
+    if (fs.existsSync(DISPATCH_LOG)) {
+      const stat = fs.statSync(DISPATCH_LOG);
+      if (stat.size > 512 * 1024) { // > 512KB, truncate to recent entries
+        const lines = fs.readFileSync(DISPATCH_LOG, 'utf8').trim().split('\n');
+        const sevenDaysAgo = Date.now() - 7 * 86400_000;
+        const recent = lines.filter(l => {
+          try { return new Date(JSON.parse(l).dispatched_at).getTime() > sevenDaysAgo; } catch { return false; }
+        });
+        fs.writeFileSync(DISPATCH_LOG, recent.join('\n') + '\n', 'utf8');
+      }
+    }
+  } catch (e) {
+    log('WARN', `Dispatch log rotation failed: ${e.message}`);
+  }
+}
+
+// ---------------------------------------------------------
 // HEARTBEAT SCHEDULER
 // ---------------------------------------------------------
-function startHeartbeat(config, notifyFn) {
+function startHeartbeat(config, notifyFn, processInboxMessage) {
   const legacyTasks = (config.heartbeat && config.heartbeat.tasks) || [];
   const projectTasks = [];
   const legacyNames = new Set(legacyTasks.map(t => t.name));
@@ -515,16 +685,13 @@ function startHeartbeat(config, notifyFn) {
     }
   }
   const tasks = [...legacyTasks, ...projectTasks];
-  if (tasks.length === 0) {
-    log('INFO', 'No heartbeat tasks configured');
-    return;
-  }
 
   const enabledTasks = tasks.filter(t => t.enabled !== false);
   const checkIntervalSec = (config.daemon && config.daemon.heartbeat_check_interval) || 60;
   log('INFO', `Heartbeat scheduler started (check every ${checkIntervalSec}s, ${enabledTasks.length}/${tasks.length} tasks enabled)`);
 
-  if (enabledTasks.length === 0) {
+  // Even with zero tasks, the physiological heartbeat still runs
+  if (enabledTasks.length === 0 && !processInboxMessage) {
     return;
   }
 
@@ -533,6 +700,7 @@ function startHeartbeat(config, notifyFn) {
   const now = Date.now();
   const state = loadState();
 
+  let newTaskIndex = 0;
   for (const task of enabledTasks) {
     const intervalSec = parseInterval(task.interval);
     const lastRun = state.tasks[task.name] && state.tasks[task.name].last_run;
@@ -540,27 +708,52 @@ function startHeartbeat(config, notifyFn) {
       const elapsed = (now - new Date(lastRun).getTime()) / 1000;
       nextRun[task.name] = now + Math.max(0, (intervalSec - elapsed)) * 1000;
     } else {
-      // First run: execute after one check interval
-      nextRun[task.name] = now + checkIntervalSec * 1000;
+      // First run: stagger new tasks to avoid thundering herd
+      // Each new task waits an additional check interval beyond the first
+      newTaskIndex++;
+      nextRun[task.name] = now + checkIntervalSec * 1000 * newTaskIndex;
     }
   }
 
+  // Tracks tasks currently running (prevents concurrent runs of the same task)
+  const runningTasks = new Set();
+
   const timer = setInterval(() => {
+    // ① Physiological heartbeat (zero token, pure awareness)
+    if (processInboxMessage) {
+      physiologicalHeartbeat(config, processInboxMessage);
+    }
+
+    // ② Task heartbeat (burns tokens on schedule)
     const currentTime = Date.now();
     for (const task of enabledTasks) {
       if (currentTime >= (nextRun[task.name] || 0)) {
-        const result = executeTask(task, config);
         const intervalSec = parseInterval(task.interval);
         nextRun[task.name] = currentTime + intervalSec * 1000;
 
-        if (task.notify && notifyFn && !result.skipped) {
-          const proj = task._project || null;
-          if (result.success) {
-            notifyFn(`✅ *${task.name}* completed\n\n${result.output}`, proj);
-          } else {
-            notifyFn(`❌ *${task.name}* failed: ${result.error}`, proj);
-          }
+        if (runningTasks.has(task.name)) {
+          log('WARN', `Task ${task.name} still running — skipping this interval`);
+          continue;
         }
+
+        runningTasks.add(task.name);
+        // executeTask now returns a Promise (async, non-blocking, process-group kill)
+        Promise.resolve(executeTask(task, config))
+          .then((result) => {
+            runningTasks.delete(task.name);
+            if (task.notify && notifyFn && !result.skipped) {
+              const proj = task._project || null;
+              if (result.success) {
+                notifyFn(`✅ *${task.name}* completed\n\n${result.output}`, proj);
+              } else {
+                notifyFn(`❌ *${task.name}* failed: ${result.error}`, proj);
+              }
+            }
+          })
+          .catch((err) => {
+            runningTasks.delete(task.name);
+            log('ERROR', `Task ${task.name} threw: ${err.message}`);
+          });
       }
     }
 
@@ -612,11 +805,12 @@ async function startTelegramBridge(config, executeTaskByName) {
 
   let offset = 0;
   let running = true;
+  const abortController = new AbortController();
 
   const pollLoop = async () => {
     while (running) {
       try {
-        const updates = await bot.getUpdates(offset, 30);
+        const updates = await bot.getUpdates(offset, 30, abortController.signal);
         for (const update of updates) {
           offset = update.update_id + 1;
 
@@ -699,6 +893,7 @@ async function startTelegramBridge(config, executeTaskByName) {
           }
         }
       } catch (e) {
+        if (e.message === 'aborted') break; // clean stop requested, exit loop
         log('ERROR', `Telegram poll error: ${e.message}`);
         // Wait before retry
         await sleep(5000);
@@ -708,6 +903,7 @@ async function startTelegramBridge(config, executeTaskByName) {
 
   const startPoll = () => {
     pollLoop().catch(e => {
+      if (e.message === 'aborted') return; // clean stop, no need to restart
       log('ERROR', `pollLoop crashed: ${e.message} — restarting in 5s`);
       if (running) setTimeout(startPoll, 5000);
     });
@@ -715,7 +911,7 @@ async function startTelegramBridge(config, executeTaskByName) {
   startPoll();
 
   return {
-    stop() { running = false; },
+    stop() { running = false; abortController.abort(); }, // cancel in-flight request immediately
     bot,
   };
 }
@@ -1244,26 +1440,11 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       return;
     }
     if (bot.sendButtons) {
-      const buttons = allSessions.map(s => {
-        const proj = s.projectPath ? path.basename(s.projectPath) : '~';
-        const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
-        const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
-        const ago = formatRelativeTime(new Date(timeMs).toISOString());
-        const shortId = s.sessionId.slice(0, 6);
-        const name = s.customTitle || (s.summary || '').slice(0, 18) || '';
-        let label = `${ago} 📁${proj}`;
-        if (name) label += ` ${name}`;
-        label += ` #${shortId}`;
-        return [{ text: label, callback_data: `/sess ${s.sessionId}` }];
-      });
-      await bot.sendButtons(chatId, '📋 Tap a session to view details:', buttons);
+      await bot.sendCard(chatId, '📋 Recent Sessions', buildSessionCardElements(allSessions));
     } else {
       let msg = '📋 Recent sessions:\n\n';
       allSessions.forEach((s, i) => {
-        const proj = s.projectPath ? path.basename(s.projectPath) : '~';
-        const title = s.customTitle || s.summary || (s.firstPrompt || '').slice(0, 40) || '';
-        const shortId = s.sessionId.slice(0, 8);
-        msg += `${i + 1}. 📁${proj} | ${title}\n   /resume ${shortId}\n`;
+        msg += sessionRichLabel(s, i + 1) + '\n';
       });
       await bot.sendMessage(chatId, msg);
     }
@@ -1300,7 +1481,25 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     detail += `🆔 ID: ${s.sessionId.slice(0, 8)}`;
     if (firstMsg && firstMsg !== summary) detail += `\n\n🗨️ First message:\n${firstMsg}`;
 
-    if (bot.sendButtons) {
+    if (bot.sendCard) {
+      // Build rich detail as markdown body + buttons
+      let body = '';
+      if (title) body += `**📝 ${title}**\n`;
+      if (summary) body += `💡 ${summary}\n`;
+      body += `📁 ${projName} · 📂 ${proj}\n`;
+      body += `💬 ${msgs} messages · 🕐 ${ago}\n`;
+      body += `🆔 ${s.sessionId.slice(0, 8)}`;
+      if (firstMsg && firstMsg !== summary) body += `\n\n🗨️ ${firstMsg.slice(0, 100)}`;
+      const elements = [
+        { tag: 'div', text: { tag: 'lark_md', content: body } },
+        { tag: 'hr' },
+        { tag: 'action', actions: [
+          { tag: 'button', text: { tag: 'plain_text', content: '▶️ Switch to this session' }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } },
+          { tag: 'button', text: { tag: 'plain_text', content: '⬅️ Back to list' }, type: 'default', value: { cmd: '/sessions' } },
+        ] },
+      ];
+      await bot.sendCard(chatId, '📋 Session Detail', elements);
+    } else if (bot.sendButtons) {
       await bot.sendButtons(chatId, detail, [
         [{ text: '▶️ Switch to this session', callback_data: `/resume ${s.sessionId}` }],
         [{ text: '⬅️ Back to list', callback_data: '/sessions' }],
@@ -1324,16 +1523,18 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
         await bot.sendMessage(chatId, `No sessions found${curCwd ? ' in ' + path.basename(curCwd) : ''}. Try /new first.`);
         return;
       }
-      const title = curCwd ? `Sessions in ${path.basename(curCwd)}:` : 'Recent sessions:';
-      if (bot.sendButtons) {
+      const headerTitle = curCwd ? `📋 Sessions in ${path.basename(curCwd)}` : '📋 Recent Sessions';
+      if (bot.sendCard) {
+        await bot.sendCard(chatId, headerTitle, buildSessionCardElements(recentSessions));
+      } else if (bot.sendButtons) {
         const buttons = recentSessions.map(s => {
           return [{ text: sessionLabel(s), callback_data: `/resume ${s.sessionId}` }];
         });
-        await bot.sendButtons(chatId, title, buttons);
+        await bot.sendButtons(chatId, headerTitle, buttons);
       } else {
-        let msg = `${title}\n`;
+        let msg = `${title}\n\n`;
         recentSessions.forEach((s, i) => {
-          msg += `${i + 1}. ${sessionLabel(s)}\n   /resume ${s.sessionId.slice(0, 8)}\n`;
+          msg += sessionRichLabel(s, i + 1) + '\n';
         });
         await bot.sendMessage(chatId, msg);
       }
@@ -1358,8 +1559,13 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       fullMatch = recentSessions.find(s => s.sessionId.startsWith(arg))
         || allSessions.find(s => s.sessionId.startsWith(arg));
     }
-    const sessionId = fullMatch ? fullMatch.sessionId : arg;
-    const cwd = (fullMatch && fullMatch.projectPath) || (getSession(chatId) && getSession(chatId).cwd) || HOME;
+    if (!fullMatch) {
+      // No match found — treat as normal message, not a /resume command
+      // (e.g. "/resume 看到的session信息太少了" is feedback, not a session ID)
+      return null; // fall through to askClaude
+    }
+    const sessionId = fullMatch.sessionId;
+    const cwd = fullMatch.projectPath || (getSession(chatId) && getSession(chatId).cwd) || HOME;
 
     const state2 = loadState();
     state2.sessions[chatId] = {
@@ -1368,8 +1574,8 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       started: true,
     };
     saveState(state2);
-    const name = fullMatch ? fullMatch.customTitle : null;
-    const label = name || (fullMatch ? (fullMatch.summary || fullMatch.firstPrompt || '').slice(0, 40) : sessionId.slice(0, 8));
+    const name = fullMatch.customTitle;
+    const label = name || (fullMatch.summary || fullMatch.firstPrompt || '').slice(0, 40) || sessionId.slice(0, 8);
     await bot.sendMessage(chatId, `Resumed: ${label}\nWorkdir: ${cwd}`);
     return;
   }
@@ -1759,6 +1965,99 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     return;
   }
 
+  // /dispatch — inter-agent task dispatch
+  if (text.startsWith('/dispatch')) {
+    const args = text.slice('/dispatch'.length).trim();
+
+    if (!args || args === 'status') {
+      // Show dispatch status
+      let msg = '📬 Agent Dispatch 状态\n─────────────\n';
+      for (const [key, proj] of Object.entries(config.projects || {})) {
+        const inboxFile = path.join(DISPATCH_DIR, `inbox-${key}.jsonl`);
+        let pending = 0;
+        if (fs.existsSync(inboxFile)) {
+          const content = fs.readFileSync(inboxFile, 'utf8').trim();
+          if (content) pending = content.split('\n').filter(Boolean).length;
+        }
+        msg += `${proj.icon || '🤖'} ${proj.name || key} — ${pending > 0 ? `📨 ${pending} 待处理` : '空闲'}\n`;
+      }
+      // Recent dispatch log
+      if (fs.existsSync(DISPATCH_LOG)) {
+        const lines = fs.readFileSync(DISPATCH_LOG, 'utf8').trim().split('\n').filter(Boolean);
+        const recent = lines.slice(-5).reverse();
+        if (recent.length > 0) {
+          msg += `\n📤 最近派发:\n`;
+          for (const l of recent) {
+            try {
+              const e = JSON.parse(l);
+              msg += `${e.from}→${e.to}: ${(e.payload.title || e.payload.prompt || '').slice(0, 40)} (${e.type})\n`;
+            } catch { /* skip */ }
+          }
+        }
+      }
+      await bot.sendMessage(chatId, msg.trim());
+      return;
+    }
+
+    if (args === 'log') {
+      if (!fs.existsSync(DISPATCH_LOG)) { await bot.sendMessage(chatId, '无派发记录。'); return; }
+      const lines = fs.readFileSync(DISPATCH_LOG, 'utf8').trim().split('\n').filter(Boolean);
+      const recent = lines.slice(-10).reverse();
+      let msg = '📤 最近 10 条派发记录:\n';
+      for (const l of recent) {
+        try {
+          const e = JSON.parse(l);
+          const time = new Date(e.dispatched_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+          msg += `[${time}] ${e.from}→${e.to} ${e.type}: ${(e.payload.title || e.payload.prompt || '').slice(0, 40)}\n`;
+        } catch { /* skip */ }
+      }
+      await bot.sendMessage(chatId, msg.trim());
+      return;
+    }
+
+    // /dispatch to <agent> <prompt>
+    const toMatch = args.match(/^to\s+(\S+)\s+(.+)$/s);
+    if (toMatch) {
+      const targetName = toMatch[1];
+      const prompt = toMatch[2].trim();
+
+      // Resolve target by project key or nickname
+      let targetKey = null;
+      for (const [key, proj] of Object.entries(config.projects || {})) {
+        if (key === targetName || (proj.nicknames || []).some(n => n === targetName)) {
+          targetKey = key;
+          break;
+        }
+      }
+      if (!targetKey) {
+        await bot.sendMessage(chatId, `未找到 agent: ${targetName}\n可用: ${Object.keys(config.projects || {}).join(', ')}`);
+        return;
+      }
+
+      // Determine sender from current chat's project mapping
+      const chatAgentMap = (config.feishu && config.feishu.chat_agent_map) || {};
+      const senderKey = chatAgentMap[chatId] || 'user';
+
+      const result = dispatchTask(targetKey, {
+        from: senderKey,
+        type: 'task',
+        priority: 'normal',
+        payload: { title: prompt.slice(0, 60), prompt },
+        callback: true,
+      });
+
+      if (result.success) {
+        await bot.sendMessage(chatId, `✅ 已派发给 ${targetName} (id: ${result.id.slice(0, 12)})\n下个心跳周期（≤60s）自动执行。`);
+      } else {
+        await bot.sendMessage(chatId, `❌ 派发失败: ${result.error}`);
+      }
+      return;
+    }
+
+    await bot.sendMessage(chatId, '用法:\n/dispatch status — 查看状态\n/dispatch log — 查看记录\n/dispatch to <agent> <任务内容>');
+    return;
+  }
+
   if (text.startsWith('/run ')) {
     const cd = checkCooldown(chatId);
     if (!cd.ok) { await bot.sendMessage(chatId, `Cooldown: ${cd.wait}s`); return; }
@@ -1832,7 +2131,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     const proc = activeProcesses.get(chatId);
     if (proc && proc.child) {
       proc.aborted = true;
-      proc.child.kill('SIGINT');
+      try { process.kill(-proc.child.pid, 'SIGINT'); } catch { proc.child.kill('SIGINT'); }
       await bot.sendMessage(chatId, '⏹ Stopping Claude...');
     } else {
       await bot.sendMessage(chatId, 'No active task to stop.');
@@ -1851,7 +2150,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     const proc = activeProcesses.get(chatId);
     if (proc && proc.child) {
       proc.aborted = true;
-      proc.child.kill('SIGINT');
+      try { process.kill(-proc.child.pid, 'SIGINT'); } catch { proc.child.kill('SIGINT'); }
     }
     const session = getSession(chatId);
     const name = session ? getSessionName(session.id) : null;
@@ -2036,7 +2335,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     const proc = activeProcesses.get(chatId);
     if (proc && proc.child) {
       proc.aborted = true;
-      proc.child.kill('SIGINT');
+      try { process.kill(-proc.child.pid, 'SIGINT'); } catch { proc.child.kill('SIGINT'); }
     }
 
     const session = getSession(chatId);
@@ -2410,7 +2709,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     const proc = activeProcesses.get(chatId);
     if (proc && proc.child && !proc.aborted) {
       proc.aborted = true;
-      proc.child.kill('SIGINT');
+      try { process.kill(-proc.child.pid, 'SIGINT'); } catch { proc.child.kill('SIGINT'); }
     }
     // Debounce: wait 5s for more messages before processing
     if (q.timer) clearTimeout(q.timer);
@@ -2546,6 +2845,61 @@ function _scanAllSessions() {
       const bTime = b.fileMtime || new Date(b.modified).getTime();
       return bTime - aTime;
     });
+
+    // Enrich top N sessions that lack firstPrompt/customTitle by reading jsonl heads
+    const ENRICH_LIMIT = 20;
+    for (let i = 0; i < Math.min(all.length, ENRICH_LIMIT); i++) {
+      const s = all[i];
+      if (s.firstPrompt && s.customTitle) continue;
+      try {
+        const sessionFile = findSessionFile(s.sessionId);
+        if (!sessionFile) continue;
+        // Read first 8KB for firstPrompt, and last 4KB for customTitle
+        const fd = fs.openSync(sessionFile, 'r');
+        const headBuf = Buffer.alloc(8192);
+        const headBytes = fs.readSync(fd, headBuf, 0, 8192, 0);
+        const headStr = headBuf.toString('utf8', 0, headBytes);
+        // Extract firstPrompt from first real user message (skip system-generated)
+        if (!s.firstPrompt) {
+          for (const line of headStr.split('\n')) {
+            if (!line) continue;
+            try {
+              const d = JSON.parse(line);
+              if (d.type === 'user' && d.message && d.userType === 'external') {
+                const content = d.message.content;
+                let raw = '';
+                if (typeof content === 'string') raw = content;
+                else if (Array.isArray(content)) {
+                  const txt = content.find(c => c.type === 'text');
+                  if (txt) raw = txt.text;
+                }
+                // Strip [System hints ...] suffix and <system-reminder> blocks
+                raw = raw.replace(/\n?\[System hints[\s\S]*/i, '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+                if (raw && raw.length > 2) { s.firstPrompt = raw.slice(0, 120); break; }
+              }
+            } catch { /* skip line */ }
+          }
+        }
+        // Read tail for customTitle (written by /name command)
+        if (!s.customTitle) {
+          const stat = fs.fstatSync(fd);
+          const tailSize = Math.min(4096, stat.size);
+          const tailBuf = Buffer.alloc(tailSize);
+          fs.readSync(fd, tailBuf, 0, tailSize, stat.size - tailSize);
+          const tailStr = tailBuf.toString('utf8');
+          const tailLines = tailStr.split('\n').reverse();
+          for (const line of tailLines) {
+            if (!line) continue;
+            try {
+              const d = JSON.parse(line);
+              if (d.type === 'custom-title' && d.customTitle) { s.customTitle = d.customTitle; break; }
+            } catch { /* skip */ }
+          }
+        }
+        fs.closeSync(fd);
+      } catch { /* non-fatal */ }
+    }
+
     _sessionCache = all;
     _sessionCacheTime = Date.now();
     return all;
@@ -2606,6 +2960,72 @@ function sessionLabel(s) {
   }
 
   return `${ago} ${proj ? proj + ': ' : ''}${title || ''} #${shortId}`;
+}
+
+/**
+ * Get the display title for a session using fallback chain: name → summary → firstPrompt
+ */
+function sessionDisplayTitle(s, maxLen) {
+  maxLen = maxLen || 50;
+  // Newlines → space; strip null bytes, surrogates, replacement char, other non-printable control chars
+  const sanitize = (t) => t
+    .replace(/\r?\n/g, ' ')
+    .replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F\uFFFD\uD800-\uDFFF]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (s.customTitle) return sanitize(s.customTitle).slice(0, maxLen);
+  if (s.summary) return sanitize(s.summary).slice(0, maxLen);
+  if (s.firstPrompt) {
+    const clean = s.firstPrompt
+      .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+      .replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '')
+      .replace(/\[System hints[\s\S]*/i, '');
+    // Take first non-empty line after stripping noise
+    const firstLine = clean.split('\n').map(l => l.trim()).find(l => l.length > 2) || '';
+    const sanitized = sanitize(firstLine);
+    if (sanitized && sanitized.length > 2) return sanitized.slice(0, maxLen);
+  }
+  return '';
+}
+
+/**
+ * Format a session entry into a rich text block for non-button contexts (Feishu text).
+ * Shows: name, title/summary, project, time, and /resume shortcut.
+ */
+function sessionRichLabel(s, index) {
+  const title = sessionDisplayTitle(s, 50);
+  const proj = s.projectPath ? path.basename(s.projectPath) : '~';
+  const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
+  const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
+  const ago = formatRelativeTime(new Date(timeMs).toISOString());
+  const shortId = s.sessionId.slice(0, 8);
+
+  let line = `${index}. `;
+  if (title) line += `${title}${title.length >= 50 ? '..' : ''}`;
+  else line += `(unnamed)`;
+  line += `\n   📁${proj} · ${ago}`;
+  line += `\n   /resume ${shortId}`;
+  return line;
+}
+
+/**
+ * Build Feishu card elements for a list of sessions (used by /sessions and /resume)
+ */
+function buildSessionCardElements(sessions) {
+  const elements = [];
+  sessions.forEach((s, i) => {
+    if (i > 0) elements.push({ tag: 'hr' });
+    const title = sessionDisplayTitle(s, 60);
+    const proj = s.projectPath ? path.basename(s.projectPath) : '~';
+    const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
+    const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
+    const ago = formatRelativeTime(new Date(timeMs).toISOString());
+    const shortId = s.sessionId.slice(0, 6);
+    let desc = `**${i + 1}. ${title || '(unnamed)'}**\n📁${proj} · ${ago}`;
+    elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
+    elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Switch #${shortId}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
+  });
+  return elements;
 }
 
 /**
@@ -2759,9 +3179,10 @@ function spawnClaudeAsync(args, input, cwd, timeoutMs = 300000) {
 
     const timer = setTimeout(() => {
       killed = true;
-      child.kill('SIGTERM');
-      // Fix: escalate to SIGKILL if SIGTERM is ignored
-      setTimeout(() => { try { child.kill('SIGKILL'); } catch { } }, 5000);
+      try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
+      setTimeout(() => {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { } }
+      }, 5000);
     }, timeoutMs);
 
     child.stdout.on('data', (data) => { stdout += data.toString(); });
@@ -2857,6 +3278,7 @@ function killOrphanPids() {
     fs.unlinkSync(ACTIVE_PIDS_FILE);
   } catch { }
 }
+
 
 // Pending /bind flows: waiting for user to pick a directory
 const pendingBinds = new Map(); // chatId -> agentName
@@ -2970,6 +3392,7 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
     const child = spawn('claude', streamArgs, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true, // Create new process group so killing -pid kills all sub-agents too
       env: { ...process.env, ...getActiveProviderEnv(), CLAUDECODE: undefined },
     });
 
@@ -2990,9 +3413,11 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
 
     const timer = setTimeout(() => {
       killed = true;
-      child.kill('SIGTERM');
-      // Fix: escalate to SIGKILL if SIGTERM is ignored
-      setTimeout(() => { try { child.kill('SIGKILL'); } catch { } }, 5000);
+      log('WARN', `Claude timeout (${timeoutMs / 60000}min) for chatId ${chatId} — killing process group`);
+      try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
+      setTimeout(() => {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { } }
+      }, 5000);
     }, timeoutMs);
 
     child.stdout.on('data', (data) => {
@@ -3225,7 +3650,8 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
   }
 
   // Skill routing: detect skill first, then decide session
-  const skill = routeSkill(prompt);
+  // BUT: if agent was explicitly addressed by nickname, don't let skill routing hijack the session
+  const skill = agentMatch ? null : routeSkill(prompt);
 
   // Skills with dedicated pinned sessions (reused across days, no re-injection needed)
   const PINNED_SKILL_SESSIONS = new Set(['macos-mail-calendar', 'skill-manager']);
@@ -3653,6 +4079,10 @@ async function main() {
 
   log('INFO', `MetaMe daemon started (PID: ${process.pid})`);
   killOrphanPids(); // Fix3: kill any claude processes left by previous daemon
+  // Hourly heartbeat so daemon.log stays fresh even when idle (visible aliveness check)
+  setInterval(() => {
+    log('INFO', `Daemon heartbeat — uptime: ${Math.round(process.uptime() / 60)}m, active sessions: ${activeProcesses.size}`);
+  }, 60 * 60 * 1000);
 
   // Task executor lookup (always reads fresh config)
   function executeTaskByName(name) {
@@ -3672,20 +4102,24 @@ async function main() {
   let telegramBridge = null;
   let feishuBridge = null;
 
-  // Notification function (sends to all enabled channels)
-  // project: optional { key, name, color, icon } — triggers colored card on Feishu
+  // Notification function
+  // project: optional { key, name, color, icon } — sends to that project's specific chat only
+  // If no project, sends to ALL allowed_chat_ids (use adminNotifyFn for system-only messages)
   const notifyFn = async (message, project = null) => {
-    if (telegramBridge && telegramBridge.bot) {
-      const tgIds = (config.telegram && config.telegram.allowed_chat_ids) || [];
-      for (const chatId of tgIds) {
-        try { await telegramBridge.bot.sendMarkdown(chatId, message); } catch (e) {
-          log('ERROR', `Telegram notify failed ${chatId}: ${e.message}`);
-        }
-      }
-    }
     if (feishuBridge && feishuBridge.bot) {
+      // If a project is specified, only notify chats mapped to that project
+      const chatAgentMap = (config.feishu && config.feishu.chat_agent_map) || {};
       const fsIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
-      for (const chatId of fsIds) {
+      let targetIds;
+      if (project) {
+        // Send only to chats belonging to this project
+        targetIds = fsIds.filter(id => chatAgentMap[id] === project.key);
+        // Fallback: if no mapped chat found, send to first chat (admin)
+        if (targetIds.length === 0) targetIds = fsIds.slice(0, 1);
+      } else {
+        targetIds = fsIds;
+      }
+      for (const chatId of targetIds) {
         try {
           if (project && feishuBridge.bot.sendCard) {
             await feishuBridge.bot.sendCard(chatId, {
@@ -3701,10 +4135,82 @@ async function main() {
         }
       }
     }
+    if (telegramBridge && telegramBridge.bot) {
+      const tgIds = (config.telegram && config.telegram.allowed_chat_ids) || [];
+      for (const chatId of tgIds) {
+        try { await telegramBridge.bot.sendMarkdown(chatId, message); } catch (e) {
+          log('ERROR', `Telegram notify failed ${chatId}: ${e.message}`);
+        }
+      }
+    }
   };
 
-  // Start heartbeat scheduler
-  let heartbeatTimer = startHeartbeat(config, notifyFn);
+  // Admin-only notify: system messages sent only to the primary (first) chat
+  const adminNotifyFn = async (message) => {
+    if (feishuBridge && feishuBridge.bot) {
+      const fsIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
+      const adminId = fsIds[0];
+      if (adminId) {
+        try { await feishuBridge.bot.sendMessage(adminId, message); } catch (e) {
+          log('ERROR', `Feishu admin notify failed ${adminId}: ${e.message}`);
+        }
+      }
+    }
+  };
+
+  // Inbox message handler: called by physiological heartbeat when messages arrive
+  const processInboxMessage = (projectKey, proj, msg) => {
+    if (msg.type === 'task') {
+      // Build a temporary task and execute via existing executeTask()
+      const task = {
+        name: `dispatch-${msg.id}`,
+        prompt: msg.payload.prompt || msg.payload.title || 'No prompt provided',
+        model: msg.payload.model || 'sonnet',
+        timeout: msg.payload.timeout || 300000,
+        cwd: proj.cwd ? proj.cwd.replace(/^~/, HOME) : undefined,
+        allowedTools: msg.payload.allowedTools || (config.daemon && config.daemon.session_allowed_tools) || [],
+        enabled: true,
+        _project: { key: projectKey, name: proj.name || projectKey, color: proj.color || 'blue', icon: proj.icon || '🤖' },
+      };
+      const result = executeTask(task, config);
+      log('INFO', `Dispatch task ${msg.id} result: ${result.success ? 'OK' : 'FAIL'}`);
+
+      // Notify the target project's chat
+      const projObj = task._project;
+      if (result.success && !result.skipped) {
+        notifyFn(`📬 *来自 ${msg.from}* 的任务已完成\n\n${result.output.slice(0, 500)}`, projObj);
+      } else if (!result.success) {
+        notifyFn(`📬 *来自 ${msg.from}* 的任务失败: ${result.error}`, projObj);
+      }
+
+      // Callback to sender
+      if (msg.callback && msg.from) {
+        dispatchTask(msg.from, {
+          from: projectKey,
+          type: 'callback',
+          priority: 'normal',
+          payload: {
+            title: `任务完成: ${msg.payload.title || msg.id}`,
+            original_id: msg.id,
+            success: result.success,
+            output: (result.output || '').slice(0, 500),
+          },
+          chain: msg.chain || [],
+        });
+      }
+    } else if (msg.type === 'callback') {
+      // Notify the project's chat about callback
+      const projObj = { key: projectKey, name: proj.name || projectKey, color: proj.color || 'blue', icon: proj.icon || '🤖' };
+      notifyFn(`✅ *${msg.from}* 回报: ${msg.payload.title || '任务完成'}`, projObj);
+    } else if (msg.type === 'message') {
+      // Just log and notify, no execution
+      const projObj = { key: projectKey, name: proj.name || projectKey, color: proj.color || 'blue', icon: proj.icon || '🤖' };
+      notifyFn(`💬 *${msg.from}*: ${msg.payload.text || msg.payload.title || '(empty)'}`, projObj);
+    }
+  };
+
+  // Start heartbeat scheduler (with physiological heartbeat)
+  let heartbeatTimer = startHeartbeat(config, notifyFn, processInboxMessage);
 
   // Hot reload: re-read config and restart heartbeat scheduler
   function reloadConfig() {
@@ -3713,7 +4219,7 @@ async function main() {
     config = newConfig;
     refreshLogMaxSize(config);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
-    heartbeatTimer = startHeartbeat(config, notifyFn);
+    heartbeatTimer = startHeartbeat(config, notifyFn, processInboxMessage);
     const legacyCount = (config.heartbeat && config.heartbeat.tasks || []).length;
     const projectCount = Object.values(config.projects || {}).reduce((n, p) => n + (p.heartbeat_tasks || []).length, 0);
     const totalCount = legacyCount + projectCount;
@@ -3734,7 +4240,7 @@ async function main() {
       const r = reloadConfig();
       if (r.success) {
         log('INFO', `Auto-reload OK: ${r.tasks} tasks`);
-        notifyFn(`🔄 Config auto-reloaded. ${r.tasks} heartbeat tasks active.`).catch(() => { });
+        adminNotifyFn(`🔄 Config auto-reloaded. ${r.tasks} heartbeat tasks active.`).catch(() => { });
       } else {
         log('ERROR', `Auto-reload failed: ${r.error}`);
       }
@@ -3742,20 +4248,37 @@ async function main() {
   });
 
   // Auto-restart: watch daemon.js for code changes (hot restart)
+  // If Claude tasks are running, defer restart until they complete.
   const DAEMON_SCRIPT = path.join(METAME_DIR, 'daemon.js');
   const _startTime = Date.now();
   let _restartDebounce = null;
+  let _pendingRestart = false;
   fs.watchFile(DAEMON_SCRIPT, { interval: 3000 }, (curr, prev) => {
     if (curr.mtimeMs === prev.mtimeMs) return;
     // Ignore file changes within 10s of startup (avoids restart loop)
     if (Date.now() - _startTime < 10000) return;
     if (_restartDebounce) clearTimeout(_restartDebounce);
     _restartDebounce = setTimeout(() => {
-      log('INFO', 'daemon.js changed on disk — exiting for restart...');
-      // Don't notify here — the NEW process will notify after startup
-      process.exit(0);
+      if (activeProcesses.size > 0) {
+        // Active Claude tasks running — defer restart
+        log('INFO', `daemon.js changed on disk — deferring restart (${activeProcesses.size} active task(s))`);
+        _pendingRestart = true;
+      } else {
+        log('INFO', 'daemon.js changed on disk — exiting for restart...');
+        process.exit(0);
+      }
     }, 2000);
   });
+  // Hook: after every Claude task completes, check if restart is pending
+  const _origDelete = activeProcesses.delete.bind(activeProcesses);
+  activeProcesses.delete = function(key) {
+    const result = _origDelete(key);
+    if (_pendingRestart && activeProcesses.size === 0) {
+      log('INFO', 'All tasks completed — executing deferred restart...');
+      setTimeout(() => process.exit(0), 500);
+    }
+    return result;
+  };
 
   // Start bridges (both can run simultaneously)
   telegramBridge = await startTelegramBridge(config, executeTaskByName);
@@ -3763,7 +4286,7 @@ async function main() {
 
   // Notify once on startup (single message, no duplicates)
   await sleep(1500); // Let polling settle
-  await notifyFn('✅ Daemon ready.').catch(() => { });
+  await adminNotifyFn('✅ Daemon ready.').catch(() => { });
 
   // Graceful shutdown
   const shutdown = () => {
@@ -3773,10 +4296,10 @@ async function main() {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (telegramBridge) telegramBridge.stop();
     if (feishuBridge) feishuBridge.stop();
-    // Fix1: kill all tracked claude child processes before exiting
+    // Kill all tracked claude process groups before exiting (covers sub-agents too)
     for (const [cid, proc] of activeProcesses) {
-      try { proc.child.kill('SIGKILL'); } catch { }
-      log('INFO', `Shutdown: killed claude child for chatId ${cid}`);
+      try { process.kill(-proc.child.pid, 'SIGKILL'); } catch { try { proc.child.kill('SIGKILL'); } catch { } }
+      log('INFO', `Shutdown: killed claude process group for chatId ${cid}`);
     }
     activeProcesses.clear();
     try { if (fs.existsSync(ACTIVE_PIDS_FILE)) fs.unlinkSync(ACTIVE_PIDS_FILE); } catch { }
