@@ -908,7 +908,6 @@ async function doBindAgent(bot, chatId, agentName, agentCwd) {
     }
     fs.writeFileSync(CONFIG_FILE, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
     backupConfig();
-    config = loadConfig();
 
     const proj = cfg.projects[projectKey];
     const icon = proj.icon || '🤖';
