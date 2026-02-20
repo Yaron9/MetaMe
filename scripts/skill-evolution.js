@@ -19,6 +19,11 @@
  *   Claude completes → extractSkillSignal() → skill_signals.jsonl
  *                    → checkHotEvolution() → evolution_queue.yaml
  *                    → [distill.js] distillSkills() → evolution.json → SKILL.md
+ *
+ * SELF-EVOLUTION:
+ *   All thresholds, rules, and even the Haiku prompt live in evolution_policy.yaml.
+ *   The cold path periodically evaluates its own effectiveness and rewrites the policy.
+ *   Nothing is hardcoded that can't be changed by the system itself.
  */
 
 'use strict';
@@ -31,6 +36,7 @@ const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
 const SKILL_SIGNAL_FILE = path.join(METAME_DIR, 'skill_signals.jsonl');
 const EVOLUTION_QUEUE_FILE = path.join(METAME_DIR, 'evolution_queue.yaml');
+const EVOLUTION_POLICY_FILE = path.join(METAME_DIR, 'evolution_policy.yaml');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 
 // Skill directories (check both locations)
@@ -39,10 +45,99 @@ const SKILL_DIRS = [
   path.join(HOME, '.opencode', 'skills'),
 ];
 
-const MAX_SIGNALS = 200;
-const MIN_SIGNALS_FOR_DISTILL = 3;
-const HOT_FAILURE_THRESHOLD = 3;     // 3 failures within window → queue discovery
-const HOT_FAILURE_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
+// ─────────────────────────────────────────────
+// Policy: all tunable params, self-modifiable
+// ─────────────────────────────────────────────
+
+const DEFAULT_POLICY = {
+  version: 1,
+
+  // Hot path params
+  hot_failure_threshold: 3,
+  hot_failure_window_minutes: 30,
+  complaint_patterns: ['不好用', '不对', 'wrong', 'broken', "doesn't work", '有问题', '不行', 'bug', '失败'],
+  missing_skill_patterns: ['没有找到.{0,10}技能', 'skill not found', 'no skill.{0,10}(available|installed)', '能力不足', '找不到'],
+
+  // Cold path params
+  min_signals_for_distill: 3,
+  max_signals_buffer: 200,
+  min_evidence_for_update: 2,
+  min_evidence_for_gap: 3,
+  max_updates_per_analysis: 3,
+  max_gaps_per_analysis: 2,
+
+  // Self-evaluation
+  self_eval_interval: 5,           // every N cold-path runs, evaluate policy effectiveness
+  cold_path_run_count: 0,
+
+  // Haiku prompt (the system can rewrite this)
+  prompt_template: `You are a skill evolution analyzer for an AI coding assistant called MetaMe.
+Analyze recent skill usage signals and provide actionable evolution insights.
+
+INSTALLED SKILLS:
+\${installedSkills}
+
+RECENT SKILL SIGNALS (\${signalCount} interactions):
+\${signalSummary}
+\${patternContext}
+
+RULES:
+1. Only reference skills in INSTALLED SKILLS or explicitly invoked in signals.
+2. For "updates": provide specific, concrete improvements (not vague suggestions).
+3. For "missing_skills": only when user repeatedly attempted a task with no matching skill (\${minEvidenceForGap}+ signals).
+4. Minimum evidence: updates need \${minEvidenceForUpdate}+ related signals, missing_skills need \${minEvidenceForGap}+ failed attempts.
+5. Do NOT suggest for one-off tasks.
+6. Maximum \${maxUpdates} updates and \${maxGaps} missing_skills per analysis.
+
+Respond with ONLY a JSON code block:
+\\\`\\\`\\\`json
+{
+  "updates": [
+    {
+      "skill_name": "exact-installed-skill-name",
+      "category": "fix|preference|context",
+      "insight": "specific actionable text",
+      "evidence_count": 3
+    }
+  ],
+  "missing_skills": [
+    {
+      "task_pattern": "what the user keeps trying to do",
+      "search_query": "suggested search term",
+      "evidence_count": 4
+    }
+  ]
+}
+\\\`\\\`\\\`
+
+If no actionable insights, respond with exactly: NO_EVOLUTION`,
+};
+
+function loadPolicy() {
+  let yaml;
+  try { yaml = require('js-yaml'); } catch { return { ...DEFAULT_POLICY }; }
+
+  try {
+    if (!fs.existsSync(EVOLUTION_POLICY_FILE)) {
+      // First run: write default policy
+      savePolicy(yaml, DEFAULT_POLICY);
+      return { ...DEFAULT_POLICY };
+    }
+    const content = fs.readFileSync(EVOLUTION_POLICY_FILE, 'utf8');
+    const loaded = yaml.load(content) || {};
+    // Merge with defaults (new fields auto-added on upgrade)
+    return { ...DEFAULT_POLICY, ...loaded };
+  } catch {
+    return { ...DEFAULT_POLICY };
+  }
+}
+
+function savePolicy(yaml, policy) {
+  try {
+    if (!fs.existsSync(METAME_DIR)) fs.mkdirSync(METAME_DIR, { mode: 0o700, recursive: true });
+    fs.writeFileSync(EVOLUTION_POLICY_FILE, yaml.dump(policy, { lineWidth: 120 }), 'utf8');
+  } catch {}
+}
 
 // ─────────────────────────────────────────────
 // Signal Extraction (called from daemon.js)
@@ -111,8 +206,9 @@ function appendSkillSignal(signal) {
     // Truncate if over limit (keep newest)
     const content = fs.readFileSync(SKILL_SIGNAL_FILE, 'utf8').trim();
     const lines = content.split('\n');
-    if (lines.length > MAX_SIGNALS) {
-      fs.writeFileSync(SKILL_SIGNAL_FILE, lines.slice(-MAX_SIGNALS).join('\n') + '\n', 'utf8');
+    const policy = loadPolicy();
+    if (lines.length > policy.max_signals_buffer) {
+      fs.writeFileSync(SKILL_SIGNAL_FILE, lines.slice(-policy.max_signals_buffer).join('\n') + '\n', 'utf8');
     }
   } catch {
     // Non-fatal
@@ -133,18 +229,18 @@ function checkHotEvolution(signal) {
   let yaml;
   try { yaml = require('js-yaml'); } catch { return; }
 
+  const policy = loadPolicy();
   const queue = loadEvolutionQueue(yaml);
+  const windowMs = policy.hot_failure_window_minutes * 60 * 1000;
 
   // Rule 1: Repeated skill failures → queue discovery
   if (signal.error || signal.has_tool_failure) {
     const recentFailures = readRecentSignals()
       .filter(s => {
         if (!s.error && !s.has_tool_failure) return false;
-        const age = Date.now() - new Date(s.ts).getTime();
-        return age < HOT_FAILURE_WINDOW_MS;
+        return (Date.now() - new Date(s.ts).getTime()) < windowMs;
       });
 
-    // Group by skill name
     const failCounts = {};
     for (const s of recentFailures) {
       for (const sk of (s.skills_invoked || [])) {
@@ -153,20 +249,20 @@ function checkHotEvolution(signal) {
     }
 
     for (const [skillName, count] of Object.entries(failCounts)) {
-      if (count >= HOT_FAILURE_THRESHOLD) {
+      if (count >= policy.hot_failure_threshold) {
         addToQueue(queue, {
           type: 'skill_fix',
           skill_name: skillName,
-          reason: `Failed ${count} times in ${HOT_FAILURE_WINDOW_MS / 60000} minutes`,
+          reason: `Failed ${count} times in ${policy.hot_failure_window_minutes} minutes`,
           evidence_count: count,
         });
       }
     }
   }
 
-  // Rule 2: User complaints about a skill (detected from prompt)
-  const complaintPatterns = /不好用|不对|wrong|broken|doesn'?t work|有问题|不行|bug|失败/i;
-  if (signal.prompt && complaintPatterns.test(signal.prompt) && signal.skills_invoked.length > 0) {
+  // Rule 2: User complaints about a skill
+  const complaintRe = new RegExp(policy.complaint_patterns.join('|'), 'i');
+  if (signal.prompt && complaintRe.test(signal.prompt) && signal.skills_invoked.length > 0) {
     for (const sk of signal.skills_invoked) {
       addToQueue(queue, {
         type: 'user_complaint',
@@ -177,9 +273,9 @@ function checkHotEvolution(signal) {
     }
   }
 
-  // Rule 3: Missing skill detection (output mentions capability not found)
-  const missingPatterns = /没有找到.{0,10}技能|skill not found|no skill.{0,10}(available|installed)|能力不足|找不到/i;
-  if (signal.outcome !== 'success' && signal.prompt && missingPatterns.test((signal.error || '') + (signal.prompt || ''))) {
+  // Rule 3: Missing skill detection
+  const missingRe = new RegExp(policy.missing_skill_patterns.join('|'), 'i');
+  if (signal.outcome !== 'success' && signal.prompt && missingRe.test((signal.error || '') + (signal.prompt || ''))) {
     addToQueue(queue, {
       type: 'skill_gap',
       skill_name: null,
