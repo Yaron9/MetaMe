@@ -1566,6 +1566,19 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     }
   }
 
+  // --- /bind-dir <path>: /agent bind 目录选择器的内部回调 ---
+  if (text.startsWith('/bind-dir ')) {
+    const dirPath = expandPath(text.slice(10).trim());
+    const agentName = pendingBinds.get(String(chatId));
+    if (!agentName) {
+      await bot.sendMessage(chatId, '❌ 没有待完成的 /agent bind，请重新发送');
+      return;
+    }
+    pendingBinds.delete(String(chatId));
+    await doBindAgent(bot, chatId, agentName, dirPath);
+    return;
+  }
+
   // --- /agent-dir <path>: /agent new 向导的目录选择回调 ---
   if (text.startsWith('/agent-dir ')) {
     const dirPath = expandPath(text.slice(11).trim());
