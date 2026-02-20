@@ -718,7 +718,7 @@ const { shortenPath, expandPath } = createPathMap();
  */
 async function sendDirPicker(bot, chatId, mode, title) {
   const dirs = listProjectDirs();
-  const cmd = mode === 'new' ? '/new' : '/cd';
+  const cmd = mode === 'new' ? '/new' : mode === 'bind' ? '/bind-dir' : '/cd';
   if (bot.sendButtons) {
     const buttons = dirs.map(d => [{ text: d.label, callback_data: `${cmd} ${shortenPath(d.path)}` }]);
     buttons.push([{ text: 'Browse...', callback_data: `/browse ${mode} ${shortenPath(HOME)}` }]);
@@ -735,7 +735,7 @@ async function sendDirPicker(bot, chatId, mode, title) {
  * Send directory browser: list subdirs of a path with .. parent nav
  */
 async function sendBrowse(bot, chatId, mode, dirPath) {
-  const cmd = mode === 'new' ? '/new' : '/cd';
+  const cmd = mode === 'new' ? '/new' : mode === 'bind' ? '/bind-dir' : '/cd';
   try {
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
     const subdirs = entries
@@ -875,6 +875,35 @@ async function sendDirListing(bot, chatId, baseDir, arg) {
 /**
  * Unified command handler — shared by Telegram & Feishu
  */
+
+async function doBindAgent(bot, chatId, agentName, agentCwd) {
+  try {
+    const cfg = loadConfig();
+    const isTg = typeof chatId === 'number';
+    const ak = isTg ? 'telegram' : 'feishu';
+    if (!cfg[ak]) cfg[ak] = {};
+    if (!cfg[ak].allowed_chat_ids) cfg[ak].allowed_chat_ids = [];
+    if (!cfg[ak].chat_agent_map) cfg[ak].chat_agent_map = {};
+    const idVal = isTg ? chatId : String(chatId);
+    if (!cfg[ak].allowed_chat_ids.includes(idVal)) cfg[ak].allowed_chat_ids.push(idVal);
+    const projectKey = agentName.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() || String(chatId);
+    cfg[ak].chat_agent_map[String(chatId)] = projectKey;
+    if (!cfg.projects) cfg.projects = {};
+    if (!cfg.projects[projectKey]) {
+      cfg.projects[projectKey] = { name: agentName, cwd: agentCwd, nicknames: [agentName] };
+    } else {
+      cfg.projects[projectKey].name = agentName;
+      cfg.projects[projectKey].cwd = agentCwd;
+    }
+    fs.writeFileSync(CONFIG_FILE, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+    backupConfig();
+    config = loadConfig();
+    await bot.sendMessage(chatId, `✅ 已绑定\n名称: ${agentName}\n目录: ${agentCwd}`);
+  } catch (e) {
+    await bot.sendMessage(chatId, `❌ 绑定失败: ${e.message}`);
+  }
+}
+
 async function handleCommand(bot, chatId, text, config, executeTaskByName) {
   const state = loadState();
 
@@ -884,56 +913,41 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName) {
     return;
   }
 
-  // --- /bind <name> <cwd>: register this chat as a dedicated agent channel ---
-  // Example: /bind 小美 ~/   or   /bind DevBot ~/AGI/MyProject
-  if (text.startsWith('/bind ')) {
-    const parts = text.slice(6).trim().split(/\s+/);
+  // --- /bind <name> [cwd]: register this chat as a dedicated agent channel ---
+  // With cwd:    /bind 小美 ~/          → bind immediately
+  // Without cwd: /bind 教授             → show directory picker
+  if (text.startsWith('/bind ') || text === '/bind') {
+    const args = text.slice(5).trim();
+    const parts = args.split(/\s+/);
     const agentName = parts[0];
-    const agentCwd = parts.slice(1).join(' ') || '~';
+    const agentCwd = parts.slice(1).join(' ');
+
     if (!agentName) {
-      await bot.sendMessage(chatId, '用法: /bind <名称> <工作目录>\n例: /bind 小美 ~/');
+      await bot.sendMessage(chatId, '用法: /bind <名称> [工作目录]\n例: /bind 小美 ~/\n或:  /bind 教授  (弹出目录选择)');
       return;
     }
-    try {
-      const cfg = loadConfig();
-      const adapterKey = cfg.feishu && cfg.feishu.allowed_chat_ids !== undefined ? 'feishu' : 'telegram';
-      // Detect which adapter this chatId belongs to
-      const isTg = typeof chatId === 'number';
-      const ak = isTg ? 'telegram' : 'feishu';
 
-      if (!cfg[ak]) cfg[ak] = {};
-      if (!cfg[ak].allowed_chat_ids) cfg[ak].allowed_chat_ids = [];
-      if (!cfg[ak].chat_agent_map) cfg[ak].chat_agent_map = {};
-
-      // Add to whitelist
-      const idStr = String(chatId);
-      if (!cfg[ak].allowed_chat_ids.includes(isTg ? chatId : idStr)) {
-        cfg[ak].allowed_chat_ids.push(isTg ? chatId : idStr);
-      }
-
-      // Generate a safe project key from name
-      const projectKey = agentName.replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_').toLowerCase() || idStr;
-
-      // Add to chat_agent_map
-      cfg[ak].chat_agent_map[idStr] = projectKey;
-
-      // Create project entry if not exists
-      if (!cfg.projects) cfg.projects = {};
-      if (!cfg.projects[projectKey]) {
-        cfg.projects[projectKey] = { name: agentName, cwd: agentCwd, nicknames: [agentName] };
-      } else {
-        cfg.projects[projectKey].cwd = agentCwd;
-        cfg.projects[projectKey].name = agentName;
-      }
-
-      fs.writeFileSync(CONFIG_FILE, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
-      backupConfig();
-      config = loadConfig();
-
-      await bot.sendMessage(chatId, `✅ 已绑定\n名称: ${agentName}\n目录: ${agentCwd}\nChat ID: ${chatId}`);
-    } catch (e) {
-      await bot.sendMessage(chatId, `❌ 绑定失败: ${e.message}`);
+    if (!agentCwd) {
+      // No cwd given — show directory picker
+      pendingBinds.set(String(chatId), agentName);
+      await sendDirPicker(bot, chatId, 'bind', `为「${agentName}」选择工作目录:`);
+      return;
     }
+
+    await doBindAgent(bot, chatId, agentName, agentCwd);
+    return;
+  }
+
+  // --- /bind-dir <path>: called by directory picker to complete a pending bind ---
+  if (text.startsWith('/bind-dir ')) {
+    const dirPath = expandPath(text.slice(10).trim());
+    const agentName = pendingBinds.get(String(chatId));
+    if (!agentName) {
+      await bot.sendMessage(chatId, '❌ 没有待完成的 /bind，请重新发送 /bind <名称>');
+      return;
+    }
+    pendingBinds.delete(String(chatId));
+    await doBindAgent(bot, chatId, agentName, dirPath);
     return;
   }
 
@@ -2469,6 +2483,9 @@ const CONTENT_EXTENSIONS = new Set([
 
 // Active Claude processes per chat (for /stop)
 const activeProcesses = new Map(); // chatId -> { child, aborted }
+
+// Pending /bind flows: waiting for user to pick a directory
+const pendingBinds = new Map(); // chatId -> agentName
 
 // Message queue for messages received while a task is running
 const messageQueue = new Map(); // chatId -> { messages: string[], notified: false }
