@@ -642,9 +642,10 @@ async function startTelegramBridge(config, executeTaskByName) {
           const chatId = msg.chat.id;
 
           // Security: check whitelist (empty = deny all) — read live config to support hot-reload
-          // Exception: /bind is allowed from any chat so users can self-register new groups
+          // Exception: /bind and /agent bind/new are allowed from any chat so users can self-register new groups
           const allowedIds = (loadConfig().telegram && loadConfig().telegram.allowed_chat_ids) || [];
-          const isBindCmd = msg.text && msg.text.trim().startsWith('/bind');
+          const trimmedText = msg.text && msg.text.trim();
+          const isBindCmd = trimmedText && (trimmedText.startsWith('/bind') || trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
           if (!allowedIds.includes(chatId) && !isBindCmd) {
             log('WARN', `Rejected message from unauthorized chat: ${chatId}`);
             continue;
@@ -818,7 +819,7 @@ async function sendDirPicker(bot, chatId, mode, title) {
  * - Shows up to 12 subdirs per page with pagination
  */
 async function sendBrowse(bot, chatId, mode, dirPath, title, page = 0) {
-  const cmd = mode === 'new' ? '/new' : mode === 'bind' ? '/bind-dir' : '/cd';
+  const cmd = mode === 'new' ? '/new' : mode === 'bind' ? '/bind-dir' : mode === 'agent-new' ? '/agent-dir' : '/cd';
   const PAGE_SIZE = 10;
   try {
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
@@ -1405,21 +1406,214 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     return;
   }
 
-  if (text === '/agent') {
-    const projects = config.projects || {};
-    const entries = Object.entries(projects).filter(([, p]) => p.cwd);
-    if (entries.length === 0) {
-      await bot.sendMessage(chatId, 'No projects configured. Add projects with cwd to daemon.yaml.');
+  // ─── /agent 命令体系 ────────────────────────────────────────────────
+  // /agent bind <名称> [目录] — 把当前群绑定为专属 agent 频道
+  // /agent list              — 查看所有已配置的 agent
+  // /agent new               — 多步向导新建 agent
+  // /agent edit              — 编辑当前 agent 的 CLAUDE.md 角色定义
+  // /agent reset             — 删除当前 agent 的角色 section
+  // /agent                   — 弹出 agent 切换选择器（无参数）
+  // ─────────────────────────────────────────────────────────────────────
+
+  // 处理 /agent new 多步向导状态机中的文本输入（name/desc 步骤）
+  {
+    const flow = pendingAgentFlows.get(String(chatId));
+    if (flow && flow.step === 'name' && text && !text.startsWith('/')) {
+      // 步骤2: 用户回复了 Agent 名称
+      flow.name = text.trim();
+      flow.step = 'desc';
+      pendingAgentFlows.set(String(chatId), flow);
+      await bot.sendMessage(chatId, `好的，Agent 名称是「${flow.name}」\n\n请描述这个 Agent 的角色和职责（用自然语言）：`);
       return;
     }
-    const currentSession = getSession(chatId);
-    const currentCwd = currentSession?.cwd ? path.resolve(expandPath(currentSession.cwd)) : null;
-    const buttons = entries.map(([key, p]) => {
-      const projCwd = normalizeCwd(p.cwd);
-      const active = currentCwd && path.resolve(projCwd) === currentCwd ? ' ◀' : '';
-      return [{ text: `${p.icon || '🤖'} ${p.name || key}${active}`, callback_data: `/cd ${projCwd}` }];
-    });
-    await bot.sendButtons(chatId, '切换对话对象', buttons);
+    if (flow && flow.step === 'desc' && text && !text.startsWith('/')) {
+      // 步骤3: 用户回复了角色描述
+      pendingAgentFlows.delete(String(chatId));
+      const { dir, name } = flow;
+      const description = text.trim();
+      await bot.sendMessage(chatId, `⏳ 正在配置 Agent「${name}」，稍等...`);
+      try {
+        // a. 写入 config（projects 里新增条目）并绑定当前群
+        await doBindAgent(bot, chatId, name, dir);
+        // b. 智能合并 CLAUDE.md
+        const mergeResult = await mergeAgentRole(dir, description);
+        if (mergeResult.error) {
+          await bot.sendMessage(chatId, `⚠️ CLAUDE.md 合并失败: ${mergeResult.error}，其他配置已保存`);
+        } else if (mergeResult.created) {
+          await bot.sendMessage(chatId, `📝 已创建 CLAUDE.md 并写入角色定义`);
+        } else {
+          await bot.sendMessage(chatId, `📝 已将角色定义合并进现有 CLAUDE.md`);
+        }
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ 创建 Agent 失败: ${e.message}`);
+      }
+      return;
+    }
+  }
+
+  // /agent edit 状态机：等待用户输入修改意图
+  {
+    const editFlow = pendingAgentFlows.get(String(chatId) + ':edit');
+    if (editFlow && text && !text.startsWith('/')) {
+      pendingAgentFlows.delete(String(chatId) + ':edit');
+      const { cwd } = editFlow;
+      await bot.sendMessage(chatId, '⏳ 正在更新 CLAUDE.md...');
+      const mergeResult = await mergeAgentRole(cwd, text.trim());
+      if (mergeResult.error) {
+        await bot.sendMessage(chatId, `❌ 更新失败: ${mergeResult.error}`);
+      } else {
+        await bot.sendMessage(chatId, '✅ CLAUDE.md 已更新');
+      }
+      return;
+    }
+  }
+
+  if (text === '/agent' || text.startsWith('/agent ')) {
+    const agentArg = text === '/agent' ? '' : text.slice(7).trim();
+    const agentParts = agentArg.split(/\s+/);
+    const agentSub = agentParts[0]; // bind / list / new / edit / reset / ''
+
+    // /agent bind <名称> [目录] — 替代旧的 /bind
+    if (agentSub === 'bind') {
+      const bindName = agentParts[1];
+      const bindCwd = agentParts.slice(2).join(' ');
+      if (!bindName) {
+        await bot.sendMessage(chatId, '用法: /agent bind <名称> [工作目录]\n例: /agent bind 小美 ~/\n或:  /agent bind 教授  (弹出目录选择)');
+        return;
+      }
+      if (!bindCwd) {
+        pendingBinds.set(String(chatId), bindName);
+        await sendDirPicker(bot, chatId, 'bind', `为「${bindName}」选择工作目录:`);
+        return;
+      }
+      await doBindAgent(bot, chatId, bindName, expandPath(bindCwd));
+      return;
+    }
+
+    // /agent list — 查看所有已配置的 agent
+    if (agentSub === 'list') {
+      const cfg = loadConfig();
+      const projects = cfg.projects || {};
+      const entries = Object.entries(projects).filter(([, p]) => p.cwd);
+      if (entries.length === 0) {
+        await bot.sendMessage(chatId, '暂无已配置的 Agent。\n使用 /agent new 创建，或 /agent bind <名称> 绑定目录。');
+        return;
+      }
+      // 找出当前群绑定的 agent
+      const agentMap = (cfg.feishu && cfg.feishu.chat_agent_map) ||
+                       (cfg.telegram && cfg.telegram.chat_agent_map) || {};
+      const boundKey = agentMap[String(chatId)];
+      const lines = ['📋 已配置的 Agent：', ''];
+      for (const [key, p] of entries) {
+        const icon = p.icon || '🤖';
+        const name = p.name || key;
+        const displayCwd = (p.cwd || '').replace(HOME, '~');
+        const bound = key === boundKey ? ' ◀ 当前' : '';
+        lines.push(`${icon} ${name}${bound}`);
+        lines.push(`   目录: ${displayCwd}`);
+        lines.push(`   Key: ${key}`);
+        lines.push('');
+      }
+      await bot.sendMessage(chatId, lines.join('\n').trimEnd());
+      return;
+    }
+
+    // /agent new — 多步向导新建 agent
+    if (agentSub === 'new') {
+      pendingAgentFlows.set(String(chatId), { step: 'dir' });
+      await sendBrowse(bot, chatId, 'agent-new', HOME, '步骤1/3：选择这个 Agent 的工作目录');
+      return;
+    }
+
+    // /agent edit — 编辑当前 agent 的 CLAUDE.md 角色定义
+    if (agentSub === 'edit') {
+      const cfg = loadConfig();
+      const agentMap = (cfg.feishu && cfg.feishu.chat_agent_map) ||
+                       (cfg.telegram && cfg.telegram.chat_agent_map) || {};
+      const boundKey = agentMap[String(chatId)];
+      const boundProj = boundKey && cfg.projects && cfg.projects[boundKey];
+      if (!boundProj || !boundProj.cwd) {
+        await bot.sendMessage(chatId, '❌ 当前群未绑定 Agent，请先使用 /agent bind 或 /agent new');
+        return;
+      }
+      const cwd = normalizeCwd(boundProj.cwd);
+      const claudeMdPath = path.join(cwd, 'CLAUDE.md');
+      let currentContent = '（CLAUDE.md 不存在）';
+      if (fs.existsSync(claudeMdPath)) {
+        currentContent = fs.readFileSync(claudeMdPath, 'utf8');
+        // 只展示前 500 字符
+        if (currentContent.length > 500) {
+          currentContent = currentContent.slice(0, 500) + '\n...(已截断)';
+        }
+      }
+      pendingAgentFlows.set(String(chatId) + ':edit', { cwd });
+      await bot.sendMessage(chatId, `📄 当前 CLAUDE.md 内容:\n\`\`\`\n${currentContent}\n\`\`\`\n\n请描述你想做的修改（用自然语言，例如：「把角色改成后端工程师，专注 Python」）：`);
+      return;
+    }
+
+    // /agent reset — 删除 CLAUDE.md 里的角色 section
+    if (agentSub === 'reset') {
+      const cfg = loadConfig();
+      const agentMap = (cfg.feishu && cfg.feishu.chat_agent_map) ||
+                       (cfg.telegram && cfg.telegram.chat_agent_map) || {};
+      const boundKey = agentMap[String(chatId)];
+      const boundProj = boundKey && cfg.projects && cfg.projects[boundKey];
+      if (!boundProj || !boundProj.cwd) {
+        await bot.sendMessage(chatId, '❌ 当前群未绑定 Agent，请先使用 /agent bind 或 /agent new');
+        return;
+      }
+      const cwd = normalizeCwd(boundProj.cwd);
+      const claudeMdPath = path.join(cwd, 'CLAUDE.md');
+      if (!fs.existsSync(claudeMdPath)) {
+        await bot.sendMessage(chatId, '⚠️ CLAUDE.md 不存在，无需重置');
+        return;
+      }
+      let content = fs.readFileSync(claudeMdPath, 'utf8');
+      // 用正则删除 ## Agent 角色 section（到下一个 ## 或文件末尾）
+      content = content.replace(/^## Agent 角色\n[\s\S]*?(?=^## |\Z)/m, '').trimStart();
+      // 如果没匹配到，给出提示
+      if (content === fs.readFileSync(claudeMdPath, 'utf8').trimStart()) {
+        await bot.sendMessage(chatId, '⚠️ 未找到「## Agent 角色」section，CLAUDE.md 未修改');
+        return;
+      }
+      fs.writeFileSync(claudeMdPath, content, 'utf8');
+      await bot.sendMessage(chatId, '✅ 已删除角色 section，请重新发送角色描述（/agent edit 或 /agent new）');
+      return;
+    }
+
+    // /agent（无参数）— 弹出 agent 切换选择器
+    {
+      const projects = config.projects || {};
+      const entries = Object.entries(projects).filter(([, p]) => p.cwd);
+      if (entries.length === 0) {
+        await bot.sendMessage(chatId, '暂无已配置的 Agent。\n使用 /agent new 新建，或 /agent bind <名称> 绑定目录。');
+        return;
+      }
+      const currentSession = getSession(chatId);
+      const currentCwd = currentSession?.cwd ? path.resolve(expandPath(currentSession.cwd)) : null;
+      const buttons = entries.map(([key, p]) => {
+        const projCwd = normalizeCwd(p.cwd);
+        const active = currentCwd && path.resolve(projCwd) === currentCwd ? ' ◀' : '';
+        return [{ text: `${p.icon || '🤖'} ${p.name || key}${active}`, callback_data: `/cd ${projCwd}` }];
+      });
+      await bot.sendButtons(chatId, '切换对话对象', buttons);
+      return;
+    }
+  }
+
+  // --- /agent-dir <path>: /agent new 向导的目录选择回调 ---
+  if (text.startsWith('/agent-dir ')) {
+    const dirPath = expandPath(text.slice(11).trim());
+    const flow = pendingAgentFlows.get(String(chatId));
+    if (!flow || flow.step !== 'dir') {
+      await bot.sendMessage(chatId, '❌ 没有待完成的 /agent new，请重新发送 /agent new');
+      return;
+    }
+    flow.dir = dirPath;
+    flow.step = 'name';
+    pendingAgentFlows.set(String(chatId), flow);
+    const displayPath = dirPath.replace(HOME, '~');
+    await bot.sendMessage(chatId, `✓ 已选择目录：${displayPath}\n\n步骤2/3：给这个 Agent 起个名字？`);
     return;
   }
 
@@ -2194,8 +2388,13 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       '/last — 继续电脑上最近的对话',
       '/cd last — 切到电脑最近的项目目录',
       '',
-      '🤖 Agent 切换:',
-      '/agent — 选择对话的项目/Agent',
+      '🤖 Agent 管理:',
+      '/agent — 切换 Agent',
+      '/agent new — 向导新建 Agent',
+      '/agent bind <名称> [目录] — 绑定当前群',
+      '/agent list — 查看所有 Agent',
+      '/agent edit — 编辑当前 Agent 角色',
+      '/agent reset — 重置当前 Agent 角色',
       '',
       '📂 Session 管理:',
       '/new [path] [name] — 新建会话',
@@ -3312,10 +3511,11 @@ async function startFeishuBridge(config, executeTaskByName) {
   try {
     const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo, senderId) => {
       // Security: check whitelist (empty = deny all) — read live config to support hot-reload
-      // Exception: /bind is allowed from any chat so users can self-register new groups
+      // Exception: /bind and /agent bind/new are allowed from any chat so users can self-register new groups
       const liveCfg = loadConfig();
       const allowedIds = (liveCfg.feishu && liveCfg.feishu.allowed_chat_ids) || [];
-      const isBindCmd = text && text.trim().startsWith('/bind');
+      const trimmedText = text && text.trim();
+      const isBindCmd = trimmedText && (trimmedText.startsWith('/bind') || trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
       if (!allowedIds.includes(chatId) && !isBindCmd) {
         log('WARN', `Feishu: rejected message from ${chatId}`);
         return;
