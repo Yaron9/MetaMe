@@ -155,6 +155,17 @@ npm publish --otp=<6位验证码>
 >
 > 它们共存互不干扰。排查问题时**只操作本项目的进程**，看到 `metame-desktop` / `opencode-cli` 相关进程一律跳过。
 
+## ⚠️ 已踩过的坑（必看，防止重蹈覆辙）
+
+### 坑1: askClaude 函数参数缺失导致 ReferenceError 被静默吞掉（2026-02-20）
+**症状**：飞书消息收到、发出 🤔，之后无任何回复，日志无报错。
+**根因**：`handleCommand(readOnly)` 调 `askClaude` 时忘记传 `readOnly`；`askClaude` 内部访问未声明变量，抛 `ReferenceError`，被 feishu-adapter 的 `.catch(() => {})` 静默吞掉。
+**教训**：
+- 给 `askClaude` 等核心函数新增参数时，**同时**更新：函数签名 + 所有调用处
+- feishu/telegram 的事件回调都有 `.catch(() => {})` 兜底，内部异常不会出现在日志里，必须在 `handleCommand`/`askClaude` 层面加 try/catch 错误日志
+
+---
+
 ## 已知问题 / TODO
 
 - [ ] `README中文版.md` 可能和英文版不同步，改 README 后检查一下
