@@ -619,8 +619,10 @@ async function startTelegramBridge(config, executeTaskByName) {
           const chatId = msg.chat.id;
 
           // Security: check whitelist (empty = deny all) — read live config to support hot-reload
+          // Exception: /bind is allowed from any chat so users can self-register new groups
           const allowedIds = (loadConfig().telegram && loadConfig().telegram.allowed_chat_ids) || [];
-          if (!allowedIds.includes(chatId)) {
+          const isBindCmd = msg.text && msg.text.trim().startsWith('/bind');
+          if (!allowedIds.includes(chatId) && !isBindCmd) {
             log('WARN', `Rejected message from unauthorized chat: ${chatId}`);
             continue;
           }
@@ -3129,8 +3131,10 @@ async function startFeishuBridge(config, executeTaskByName) {
   try {
     const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo) => {
       // Security: check whitelist (empty = deny all) — read live config to support hot-reload
+      // Exception: /bind is allowed from any chat so users can self-register new groups
       const allowedIds = (loadConfig().feishu && loadConfig().feishu.allowed_chat_ids) || [];
-      if (!allowedIds.includes(chatId)) {
+      const isBindCmd = text && text.trim().startsWith('/bind');
+      if (!allowedIds.includes(chatId) && !isBindCmd) {
         log('WARN', `Feishu: rejected message from ${chatId}`);
         return;
       }
