@@ -295,6 +295,8 @@ function checkHotEvolution(signal) {
 
 /**
  * Batch-analyze accumulated skill signals via Haiku.
+ * All params come from evolution_policy.yaml — including the prompt itself.
+ * Every N runs, triggers self-evaluation to optimize the policy.
  * Returns { updates, missing_skills } or null if nothing to process.
  */
 function distillSkills() {
@@ -302,21 +304,20 @@ function distillSkills() {
   let yaml;
   try { yaml = require('js-yaml'); } catch { return null; }
 
+  const policy = loadPolicy();
+
   // Read signals
   if (!fs.existsSync(SKILL_SIGNAL_FILE)) return null;
   const content = fs.readFileSync(SKILL_SIGNAL_FILE, 'utf8').trim();
   if (!content) return null;
 
   const lines = content.split('\n');
-  if (lines.length < MIN_SIGNALS_FOR_DISTILL) return null;
-
   const signals = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-  if (signals.length < MIN_SIGNALS_FOR_DISTILL) return null;
+  if (signals.length < policy.min_signals_for_distill) return null;
 
   // Get installed skills list
   const installedSkills = listInstalledSkills();
   if (installedSkills.length === 0) {
-    // No skills installed, nothing to evolve
     clearSignals();
     return null;
   }
@@ -343,49 +344,19 @@ function distillSkills() {
     return parts.join(' ');
   }).join('\n');
 
-  const prompt = `You are a skill evolution analyzer for an AI coding assistant called MetaMe.
-Analyze recent skill usage signals and provide actionable evolution insights.
-
-INSTALLED SKILLS:
-${installedSkills.map(s => `- ${s.name}: ${s.description || 'no description'}`).join('\n')}
-
-RECENT SKILL SIGNALS (${signals.length} interactions):
-${signalSummary}
-${patternContext}
-
-RULES:
-1. Only reference skills in INSTALLED SKILLS or explicitly invoked in signals.
-2. For "updates": provide specific, concrete improvements (not vague suggestions).
-3. For "missing_skills": only when user repeatedly attempted a task with no matching skill (3+ signals).
-4. Minimum evidence: updates need 2+ related signals, missing_skills need 3+ failed attempts.
-5. Do NOT suggest for one-off tasks.
-6. Maximum 3 updates and 2 missing_skills per analysis.
-
-Respond with ONLY a JSON code block:
-\`\`\`json
-{
-  "updates": [
-    {
-      "skill_name": "exact-installed-skill-name",
-      "category": "fix|preference|context",
-      "insight": "specific actionable text",
-      "evidence_count": 3
-    }
-  ],
-  "missing_skills": [
-    {
-      "task_pattern": "what the user keeps trying to do",
-      "search_query": "suggested search term",
-      "evidence_count": 4
-    }
-  ]
-}
-\`\`\`
-
-If no actionable insights, respond with exactly: NO_EVOLUTION`;
+  // Build prompt from policy template (all params injectable)
+  const installedSkillsStr = installedSkills.map(s => `- ${s.name}: ${s.description || 'no description'}`).join('\n');
+  const prompt = policy.prompt_template
+    .replace(/\$\{installedSkills\}/g, installedSkillsStr)
+    .replace(/\$\{signalCount\}/g, String(signals.length))
+    .replace(/\$\{signalSummary\}/g, signalSummary)
+    .replace(/\$\{patternContext\}/g, patternContext)
+    .replace(/\$\{minEvidenceForUpdate\}/g, String(policy.min_evidence_for_update))
+    .replace(/\$\{minEvidenceForGap\}/g, String(policy.min_evidence_for_gap))
+    .replace(/\$\{maxUpdates\}/g, String(policy.max_updates_per_analysis))
+    .replace(/\$\{maxGaps\}/g, String(policy.max_gaps_per_analysis));
 
   try {
-    // Provider env for distill
     let distillEnv = {};
     try {
       const { buildDistillEnv } = require('./providers');
@@ -401,10 +372,10 @@ If no actionable insights, respond with exactly: NO_EVOLUTION`;
 
     if (result.includes('NO_EVOLUTION')) {
       clearSignals();
+      bumpRunCount(yaml, policy);
       return { updates: [], missing_skills: [] };
     }
 
-    // Parse JSON from response
     const jsonMatch = result.match(/```json\s*([\s\S]*?)```/);
     if (!jsonMatch) {
       clearSignals();
@@ -446,13 +417,137 @@ If no actionable insights, respond with exactly: NO_EVOLUTION`;
       saveEvolutionQueue(yaml, queue);
     }
 
+    // Log this run for self-evaluation
+    logEvolutionRun(yaml, policy, signals.length, updates.length, missingSkills.length);
+
     clearSignals();
+
+    // Self-evaluation: periodically let Haiku review and rewrite the policy
+    bumpRunCount(yaml, policy);
+    if (policy.cold_path_run_count > 0 && policy.cold_path_run_count % policy.self_eval_interval === 0) {
+      selfEvaluatePolicy(yaml, policy, execSync, distillEnv);
+    }
+
     return { updates, missing_skills: missingSkills };
 
   } catch (err) {
-    // Non-fatal: don't clear signals so they can be retried
     try { console.log(`⚠️ Skill evolution analysis failed: ${err.message}`); } catch {}
     return null;
+  }
+}
+
+/**
+ * Increment cold-path run counter in policy.
+ */
+function bumpRunCount(yaml, policy) {
+  policy.cold_path_run_count = (policy.cold_path_run_count || 0) + 1;
+  savePolicy(yaml, policy);
+}
+
+/**
+ * Log each evolution run for self-evaluation audit trail.
+ */
+function logEvolutionRun(yaml, policy, signalCount, updateCount, gapCount) {
+  const logFile = path.join(METAME_DIR, 'evolution_log.yaml');
+  let log = { runs: [] };
+  try {
+    if (fs.existsSync(logFile)) log = yaml.load(fs.readFileSync(logFile, 'utf8')) || { runs: [] };
+  } catch {}
+
+  log.runs.push({
+    ts: new Date().toISOString(),
+    signals: signalCount,
+    updates: updateCount,
+    gaps: gapCount,
+    policy_version: policy.version,
+  });
+
+  // Keep last 50 runs
+  if (log.runs.length > 50) log.runs = log.runs.slice(-50);
+  try { fs.writeFileSync(logFile, yaml.dump(log, { lineWidth: -1 }), 'utf8'); } catch {}
+}
+
+/**
+ * Self-evaluation: Haiku reviews the evolution_log and current policy,
+ * then rewrites evolution_policy.yaml if improvements are warranted.
+ * This is how the system optimizes its own parameters.
+ */
+function selfEvaluatePolicy(yaml, policy, execSync, distillEnv) {
+  try {
+    // Read evolution log
+    const logFile = path.join(METAME_DIR, 'evolution_log.yaml');
+    if (!fs.existsSync(logFile)) return;
+    const log = yaml.load(fs.readFileSync(logFile, 'utf8'));
+    if (!log?.runs || log.runs.length < 3) return;
+
+    const recentRuns = log.runs.slice(-10);
+    const runSummary = recentRuns.map(r =>
+      `${r.ts}: ${r.signals} signals → ${r.updates} updates, ${r.gaps} gaps (policy v${r.policy_version})`
+    ).join('\n');
+
+    // Read queue effectiveness
+    const queue = loadEvolutionQueue(yaml);
+    const totalNotified = (queue.items || []).filter(i => i.status === 'notified').length;
+    const totalInstalled = (queue.items || []).filter(i => i.status === 'installed').length;
+    const totalDismissed = (queue.items || []).filter(i => i.status === 'dismissed').length;
+
+    const evalPrompt = `You are a meta-optimization system. Your job is to evaluate and improve the skill evolution policy for an AI assistant called MetaMe.
+
+CURRENT POLICY:
+${yaml.dump(policy, { lineWidth: 120 })}
+
+RECENT EVOLUTION RUNS (last ${recentRuns.length}):
+${runSummary}
+
+QUEUE STATS: ${totalNotified} notified, ${totalInstalled} installed by user, ${totalDismissed} dismissed by user
+
+EVALUATE:
+1. Are the thresholds appropriate? (too sensitive = noise, too strict = misses real issues)
+2. Is the prompt_template effective? (are runs producing useful updates, or mostly NO_EVOLUTION?)
+3. Are complaint_patterns and missing_skill_patterns catching real issues?
+4. Should self_eval_interval be adjusted?
+
+If the policy is working well, respond with exactly: NO_CHANGE
+
+If improvements are needed, respond with a YAML code block containing ONLY the fields that should change:
+\`\`\`yaml
+# Only include fields that need changing
+hot_failure_threshold: 4
+min_signals_for_distill: 5
+version: ${(policy.version || 1) + 1}
+\`\`\`
+
+RULES:
+- Increment version when making changes
+- Never remove fields, only modify values
+- Be conservative: only change what the data clearly supports
+- prompt_template changes should be surgical, not full rewrites`;
+
+    const result = execSync('claude -p --model haiku --no-session-persistence', {
+      input: evalPrompt,
+      encoding: 'utf8',
+      timeout: 30000,
+      env: { ...process.env, ...distillEnv },
+    });
+
+    if (result.includes('NO_CHANGE')) {
+      console.log('🧬 Policy self-eval: no changes needed.');
+      return;
+    }
+
+    const yamlMatch = result.match(/```yaml\s*([\s\S]*?)```/);
+    if (!yamlMatch) return;
+
+    const patchData = yaml.load(yamlMatch[1]);
+    if (!patchData || typeof patchData !== 'object') return;
+
+    // Apply patch (merge, don't overwrite entirely)
+    const newPolicy = { ...policy, ...patchData };
+    savePolicy(yaml, newPolicy);
+    console.log(`🧬 Policy self-evolved: v${policy.version} → v${newPolicy.version}`);
+
+  } catch (err) {
+    try { console.log(`⚠️ Policy self-eval failed (non-fatal): ${err.message}`); } catch {}
   }
 }
 
