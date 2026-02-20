@@ -614,7 +614,8 @@ function checkEvolutionQueue() {
 
   for (const item of pendingItems) {
     // Require minimum evidence before notifying
-    const minEvidence = item.type === 'skill_gap' ? 3 : 2;
+    const policy = loadPolicy();
+    const minEvidence = item.type === 'skill_gap' ? policy.min_evidence_for_gap : policy.min_evidence_for_update;
     if ((item.evidence_count || 1) < minEvidence) continue;
 
     item.status = 'notified';
