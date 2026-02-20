@@ -62,36 +62,12 @@ for (const script of BUNDLED_SCRIPTS) {
   }
 }
 
-// Auto-restart daemon if scripts were updated and daemon is running
+// Daemon restart on script update:
+// Don't kill daemon here — daemon's own file watcher detects ~/.metame/daemon.js changes
+// and has defer logic (waits for active Claude tasks to finish before restarting).
+// Killing here bypasses that and interrupts ongoing conversations.
 if (scriptsUpdated) {
-  const DAEMON_PID_FILE = path.join(METAME_DIR, 'daemon.pid');
-  try {
-    if (fs.existsSync(DAEMON_PID_FILE)) {
-      const pid = parseInt(fs.readFileSync(DAEMON_PID_FILE, 'utf8').trim(), 10);
-      process.kill(pid, 0); // throws if not running
-      process.kill(pid, 'SIGTERM');
-      // Wait briefly for clean shutdown, then restart
-      setTimeout(() => {
-        try { process.kill(pid, 0); process.kill(pid, 'SIGKILL'); } catch { /* already dead */ }
-      }, 2000);
-      const DAEMON_SCRIPT = path.join(METAME_DIR, 'daemon.js');
-      setTimeout(() => {
-        // Use caffeinate on macOS to prevent sleep while daemon is running
-        const isNotWindows = process.platform !== 'win32';
-        const cmd = isNotWindows ? 'caffeinate' : process.execPath;
-        const args = isNotWindows ? ['-i', process.execPath, DAEMON_SCRIPT] : [DAEMON_SCRIPT];
-        const bg = spawn(cmd, args, {
-          detached: true,
-          stdio: 'ignore',
-          env: { ...process.env, HOME: HOME_DIR, METAME_ROOT: __dirname },
-        });
-        bg.unref();
-        console.log(`🔄 Daemon auto-restarted (PID: ${bg.pid}) — scripts updated.`);
-      }, 3000);
-    }
-  } catch {
-    // Daemon not running or restart failed — non-fatal
-  }
+  console.log('📦 Scripts synced to ~/.metame/ — daemon will auto-restart when idle.');
 }
 
 // Load daemon config for local launch flags
