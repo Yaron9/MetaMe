@@ -1504,8 +1504,13 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       fullMatch = recentSessions.find(s => s.sessionId.startsWith(arg))
         || allSessions.find(s => s.sessionId.startsWith(arg));
     }
-    const sessionId = fullMatch ? fullMatch.sessionId : arg;
-    const cwd = (fullMatch && fullMatch.projectPath) || (getSession(chatId) && getSession(chatId).cwd) || HOME;
+    if (!fullMatch) {
+      // No match found — treat as normal message, not a /resume command
+      // (e.g. "/resume 看到的session信息太少了" is feedback, not a session ID)
+      return null; // fall through to askClaude
+    }
+    const sessionId = fullMatch.sessionId;
+    const cwd = fullMatch.projectPath || (getSession(chatId) && getSession(chatId).cwd) || HOME;
 
     const state2 = loadState();
     state2.sessions[chatId] = {
@@ -1514,8 +1519,8 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       started: true,
     };
     saveState(state2);
-    const name = fullMatch ? fullMatch.customTitle : null;
-    const label = name || (fullMatch ? (fullMatch.summary || fullMatch.firstPrompt || '').slice(0, 40) : sessionId.slice(0, 8));
+    const name = fullMatch.customTitle;
+    const label = name || (fullMatch.summary || fullMatch.firstPrompt || '').slice(0, 40) || sessionId.slice(0, 8);
     await bot.sendMessage(chatId, `Resumed: ${label}\nWorkdir: ${cwd}`);
     return;
   }
