@@ -81,6 +81,24 @@ Chain skills into workflows — research, write, publish — fully automated:
           prompt: "Publish it"
 ```
 
+### 4. Skills That Evolve Themselves
+
+MetaMe has a living skill ecosystem. Skills aren't static configs — they grow.
+
+- **Auto-discovery**: When a task fails or a capability is missing, MetaMe's skill-scout automatically searches for, installs, and verifies new skills.
+- **Learning by watching**: Can't automate a complex browser workflow? Say "我来演示" and MetaMe records your actions, then converts them into a reusable skill.
+- **Post-task evolution**: After every significant task, the skill-evolution-manager reviews what worked and what didn't, then surgically updates the relevant skills with new knowledge.
+- **Composable**: Skills chain together in workflows. A `deep-research` skill feeds into `tech-writing`, which feeds into `wechat-publisher` — each one improving from real usage.
+
+```
+Task fails → skill-scout finds a skill → installs → retries → succeeds
+                                                          ↓
+                                          skill-evolution-manager
+                                          updates skill with lessons learned
+```
+
+This is the difference between a tool library and an organism. OpenClaw has a skill marketplace; MetaMe has skills that **learn from their own failures**.
+
 ---
 
 ## Quick Start
@@ -126,6 +144,7 @@ Done. Open Telegram, message your bot.
 |-----------|-------------|
 | **Cognitive Profile** | Learns how you think across sessions. Schema-enforced, 800-token budget, auto-distilled via Haiku. Lock any value with `# [LOCKED]`. |
 | **Mobile Bridge** | Full Claude Code via Telegram/Feishu. Stateful sessions, file transfer both ways, real-time streaming status. |
+| **Skill Evolution** | Self-healing skill system. Auto-discovers missing skills, learns from browser recordings, evolves after every task. Skills get smarter over time. |
 | **Heartbeat Tasks** | Scheduled Claude runs with cron-like intervals. Preconditions, workflows, push notifications. |
 | **Multi-Agent** | Multiple projects with dedicated chat groups. `/bind` for one-tap setup. True parallel execution. |
 | **Browser Automation** | Built-in Playwright MCP. Browser control out of the box for every user. |
