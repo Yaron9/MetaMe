@@ -531,21 +531,39 @@ function executeWorkflow(task, config) {
 }
 
 // ---------------------------------------------------------
-// AGENT DISPATCH — file-based inter-agent communication
+// AGENT DISPATCH — virtual chatId inter-agent communication
 // ---------------------------------------------------------
 
-// Ensure dispatch directory exists
-if (!fs.existsSync(DISPATCH_DIR)) {
-  fs.mkdirSync(DISPATCH_DIR, { recursive: true });
+// Late-bound reference to handleCommand (defined later in file)
+let _handleCommand = null;
+function setDispatchHandler(fn) { _handleCommand = fn; }
+
+/**
+ * Create a null bot that captures Claude's output without sending to Feishu/Telegram.
+ */
+function createNullBot(onOutput) {
+  const noop = async () => ({ message_id: '_virtual' });
+  return {
+    sendMessage:   async (chatId, text) => { if (onOutput) onOutput(text); return { message_id: '_virtual' }; },
+    sendMarkdown:  async (chatId, text) => { if (onOutput) onOutput(text); return { message_id: '_virtual' }; },
+    sendCard:      async (chatId, card) => { if (onOutput) onOutput(typeof card === 'object' ? JSON.stringify(card) : card); return { message_id: '_virtual' }; },
+    sendButtons:   async (chatId, text) => { if (onOutput) onOutput(text); return { message_id: '_virtual' }; },
+    sendTyping:    async () => {},
+    editMessage:   async () => {},
+    deleteMessage: async () => {},
+    sendFile:      noop,
+    downloadFile:  noop,
+  };
 }
 
 /**
- * Dispatch a task/message to another agent's inbox.
+ * Dispatch a task/message to another agent via virtual chatId.
  * @param {string} targetProject - project key (e.g. 'digital_me', 'desktop')
  * @param {object} message - { from, type, priority, payload, callback, chain }
- * @returns {{ success: boolean, error?: string }}
+ * @param {object} config - current daemon config
+ * @returns {{ success: boolean, id?: string, error?: string }}
  */
-function dispatchTask(targetProject, message) {
+function dispatchTask(targetProject, message, config) {
   const LIMITS = { max_per_hour_per_target: 5, max_total_per_hour: 20, max_depth: 2 };
 
   // Anti-storm: check chain depth
@@ -561,7 +579,7 @@ function dispatchTask(targetProject, message) {
     return { success: false, error: 'cycle_detected' };
   }
 
-  // Anti-storm: rate limiting (read dispatch log, count recent dispatches)
+  // Anti-storm: rate limiting via dispatch log
   try {
     if (fs.existsSync(DISPATCH_LOG)) {
       const lines = fs.readFileSync(DISPATCH_LOG, 'utf8').trim().split('\n').filter(Boolean);
@@ -569,7 +587,6 @@ function dispatchTask(targetProject, message) {
       const recent = lines
         .map(l => { try { return JSON.parse(l); } catch { return null; } })
         .filter(e => e && new Date(e.dispatched_at).getTime() > oneHourAgo);
-
       const toTarget = recent.filter(e => e.to === targetProject).length;
       if (toTarget >= LIMITS.max_per_hour_per_target) {
         log('WARN', `Dispatch blocked: rate limit to ${targetProject} (${toTarget}/${LIMITS.max_per_hour_per_target} per hour)`);
@@ -584,7 +601,11 @@ function dispatchTask(targetProject, message) {
     log('WARN', `Dispatch rate check failed: ${e.message}`);
   }
 
-  // Build the full message
+  if (!_handleCommand) {
+    log('WARN', 'Dispatch: handleCommand not yet bound, dropping task');
+    return { success: false, error: 'handler_not_ready' };
+  }
+
   const fullMsg = {
     id: `d_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     from: message.from || 'unknown',
@@ -595,69 +616,56 @@ function dispatchTask(targetProject, message) {
     callback: message.callback || false,
     chain: [...chain, message.from || 'unknown'],
     created_at: new Date().toISOString(),
-    expires_at: message.expires_at || new Date(Date.now() + 86400_000).toISOString(),
   };
 
-  // Write to target inbox (atomic append)
-  const inboxFile = path.join(DISPATCH_DIR, `inbox-${targetProject}.jsonl`);
-  fs.appendFileSync(inboxFile, JSON.stringify(fullMsg) + '\n', 'utf8');
-
-  // Write to dispatch log
+  // Write to dispatch log for audit / rate-limiting
+  if (!fs.existsSync(DISPATCH_DIR)) fs.mkdirSync(DISPATCH_DIR, { recursive: true });
   fs.appendFileSync(DISPATCH_LOG, JSON.stringify({ ...fullMsg, dispatched_at: new Date().toISOString() }) + '\n', 'utf8');
 
-  log('INFO', `Dispatched ${fullMsg.type} to ${targetProject}: ${(fullMsg.payload.title || fullMsg.payload.prompt || '').slice(0, 80)}`);
+  const prompt = fullMsg.payload.prompt || fullMsg.payload.title || 'No prompt provided';
+  log('INFO', `Dispatching ${fullMsg.type} to ${targetProject} via virtual chatId: ${prompt.slice(0, 80)}`);
+
+  // Route via virtual chatId + null bot (zero polling delay)
+  const virtualChatId = `_agent_${targetProject}`;
+  const nullBot = createNullBot((output) => {
+    log('INFO', `Dispatch output from ${targetProject}: ${String(output).slice(0, 200)}`);
+    if (fullMsg.callback && fullMsg.from && config) {
+      dispatchTask(fullMsg.from, {
+        from: targetProject,
+        type: 'callback',
+        priority: 'normal',
+        payload: {
+          title: `任务完成: ${fullMsg.payload.title || fullMsg.id}`,
+          original_id: fullMsg.id,
+          output: String(output).slice(0, 500),
+        },
+        chain: [], // reset chain for callbacks
+      }, config);
+    }
+  });
+  _handleCommand(nullBot, virtualChatId, prompt, config).catch(e => {
+    log('ERROR', `Dispatch handleCommand failed for ${targetProject}: ${e.message}`);
+  });
+
   return { success: true, id: fullMsg.id };
-}
-
-/**
- * Scan inbox for a given project, return messages and clear the file.
- * @param {string} projectKey
- * @returns {Array} messages
- */
-function scanInbox(projectKey) {
-  const inboxFile = path.join(DISPATCH_DIR, `inbox-${projectKey}.jsonl`);
-  if (!fs.existsSync(inboxFile)) return [];
-
-  const content = fs.readFileSync(inboxFile, 'utf8').trim();
-  if (!content) return [];
-
-  // Atomic clear: write empty → rename
-  const tmpFile = inboxFile + '.tmp';
-  fs.writeFileSync(tmpFile, '', 'utf8');
-  fs.renameSync(tmpFile, inboxFile);
-
-  const now = Date.now();
-  return content.split('\n')
-    .filter(Boolean)
-    .map(line => { try { return JSON.parse(line); } catch { return null; } })
-    .filter(msg => msg && (!msg.expires_at || new Date(msg.expires_at).getTime() > now));
 }
 
 /**
  * Physiological heartbeat: zero-token awareness check.
  * Runs every tick unconditionally.
  */
-function physiologicalHeartbeat(config, processInboxMessage) {
+function physiologicalHeartbeat() {
   // 1. Update last_alive timestamp
   const state = loadState();
   state.last_alive = new Date().toISOString();
   state.memory_mb = Math.round(process.memoryUsage().rss / 1024 / 1024);
   saveState(state);
 
-  // 2. Scan inbox for all projects
-  for (const [key, proj] of Object.entries(config.projects || {})) {
-    const messages = scanInbox(key);
-    for (const msg of messages) {
-      log('INFO', `Inbox ${key}: received ${msg.type} from ${msg.from} — ${(msg.payload.title || msg.payload.prompt || '').slice(0, 60)}`);
-      processInboxMessage(key, proj, msg);
-    }
-  }
-
-  // 3. Rotate dispatch-log weekly (keep 7 days)
+  // 2. Rotate dispatch-log if > 512KB (keep 7 days)
   try {
     if (fs.existsSync(DISPATCH_LOG)) {
       const stat = fs.statSync(DISPATCH_LOG);
-      if (stat.size > 512 * 1024) { // > 512KB, truncate to recent entries
+      if (stat.size > 512 * 1024) {
         const lines = fs.readFileSync(DISPATCH_LOG, 'utf8').trim().split('\n');
         const sevenDaysAgo = Date.now() - 7 * 86400_000;
         const recent = lines.filter(l => {
@@ -674,7 +682,7 @@ function physiologicalHeartbeat(config, processInboxMessage) {
 // ---------------------------------------------------------
 // HEARTBEAT SCHEDULER
 // ---------------------------------------------------------
-function startHeartbeat(config, notifyFn, processInboxMessage) {
+function startHeartbeat(config, notifyFn) {
   const legacyTasks = (config.heartbeat && config.heartbeat.tasks) || [];
   const projectTasks = [];
   const legacyNames = new Set(legacyTasks.map(t => t.name));
@@ -691,9 +699,6 @@ function startHeartbeat(config, notifyFn, processInboxMessage) {
   log('INFO', `Heartbeat scheduler started (check every ${checkIntervalSec}s, ${enabledTasks.length}/${tasks.length} tasks enabled)`);
 
   // Even with zero tasks, the physiological heartbeat still runs
-  if (enabledTasks.length === 0 && !processInboxMessage) {
-    return;
-  }
 
   // Track next run times
   const nextRun = {};
@@ -720,9 +725,7 @@ function startHeartbeat(config, notifyFn, processInboxMessage) {
 
   const timer = setInterval(() => {
     // ① Physiological heartbeat (zero token, pure awareness)
-    if (processInboxMessage) {
-      physiologicalHeartbeat(config, processInboxMessage);
-    }
+    physiologicalHeartbeat();
 
     // ② Task heartbeat (burns tokens on schedule)
     const currentTime = Date.now();
@@ -1280,7 +1283,9 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
   // Configure in daemon.yaml: feishu.chat_agent_map or telegram.chat_agent_map
   //   e.g.  chat_agent_map: { "oc_xxx": "personal", "oc_yyy": "metame" }
   const chatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
-  const mappedKey = chatAgentMap[String(chatId)];
+  const _chatIdStr = String(chatId);
+  const mappedKey = chatAgentMap[_chatIdStr] ||
+    (_chatIdStr.startsWith('_agent_') ? _chatIdStr.slice(7) : null);
   if (mappedKey && config.projects && config.projects[mappedKey]) {
     const proj = config.projects[mappedKey];
     const projCwd = normalizeCwd(proj.cwd);
@@ -1970,18 +1975,11 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     const args = text.slice('/dispatch'.length).trim();
 
     if (!args || args === 'status') {
-      // Show dispatch status
+      // Show dispatch status from log
       let msg = '📬 Agent Dispatch 状态\n─────────────\n';
       for (const [key, proj] of Object.entries(config.projects || {})) {
-        const inboxFile = path.join(DISPATCH_DIR, `inbox-${key}.jsonl`);
-        let pending = 0;
-        if (fs.existsSync(inboxFile)) {
-          const content = fs.readFileSync(inboxFile, 'utf8').trim();
-          if (content) pending = content.split('\n').filter(Boolean).length;
-        }
-        msg += `${proj.icon || '🤖'} ${proj.name || key} — ${pending > 0 ? `📨 ${pending} 待处理` : '空闲'}\n`;
+        msg += `${proj.icon || '🤖'} ${proj.name || key} — 就绪\n`;
       }
-      // Recent dispatch log
       if (fs.existsSync(DISPATCH_LOG)) {
         const lines = fs.readFileSync(DISPATCH_LOG, 'utf8').trim().split('\n').filter(Boolean);
         const recent = lines.slice(-5).reverse();
@@ -2044,10 +2042,10 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
         priority: 'normal',
         payload: { title: prompt.slice(0, 60), prompt },
         callback: true,
-      });
+      }, config);
 
       if (result.success) {
-        await bot.sendMessage(chatId, `✅ 已派发给 ${targetName} (id: ${result.id.slice(0, 12)})\n下个心跳周期（≤60s）自动执行。`);
+        await bot.sendMessage(chatId, `✅ 已派发给 ${targetName} (id: ${result.id.slice(0, 12)})\n正在异步执行中…`);
       } else {
         await bot.sendMessage(chatId, `❌ 派发失败: ${result.error}`);
       }
@@ -3907,6 +3905,9 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
   }
 }
 
+// Bind handleCommand for agent dispatch (must come after handleCommand definition)
+setDispatchHandler(handleCommand);
+
 // ---------------------------------------------------------
 // FEISHU BOT BRIDGE
 // ---------------------------------------------------------
@@ -4165,70 +4166,8 @@ async function main() {
     }
   };
 
-  // Inbox message handler: called by physiological heartbeat when messages arrive
-  // Safe notify: only notify if the project has a mapped Feishu chat, skip otherwise
-  const projectNotifyFn = (message, projObj) => {
-    const chatAgentMap = (config.feishu && config.feishu.chat_agent_map) || {};
-    const fsIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
-    const hasMappedChat = fsIds.some(id => chatAgentMap[id] === projObj.key);
-    if (hasMappedChat) notifyFn(message, projObj).catch(() => {});
-    else log('INFO', `No Feishu chat mapped for project ${projObj.key}, skipping notify`);
-  };
-
-  const processInboxMessage = (projectKey, proj, msg) => {
-    const projObj = { key: projectKey, name: proj.name || projectKey, color: proj.color || 'blue', icon: proj.icon || '🤖' };
-
-    if (msg.type === 'task') {
-      // Build a temporary task and execute via existing executeTask() (now async → returns Promise)
-      const task = {
-        name: `dispatch-${msg.id}`,
-        prompt: msg.payload.prompt || msg.payload.title || 'No prompt provided',
-        model: msg.payload.model || 'sonnet',
-        timeout: msg.payload.timeout || 300000,
-        cwd: proj.cwd ? proj.cwd.replace(/^~/, HOME) : undefined,
-        allowedTools: msg.payload.allowedTools || (config.daemon && config.daemon.session_allowed_tools) || [],
-        enabled: true,
-        _project: projObj,
-      };
-
-      Promise.resolve(executeTask(task, config)).then(result => {
-        log('INFO', `Dispatch task ${msg.id} result: ${result.success ? 'OK' : 'FAIL'}`);
-
-        // Notify the target project's chat
-        if (result.success && !result.skipped) {
-          projectNotifyFn(`📬 *来自 ${msg.from}* 的任务已完成\n\n${(result.output || '').slice(0, 500)}`, projObj);
-        } else if (!result.success) {
-          projectNotifyFn(`📬 *来自 ${msg.from}* 的任务失败: ${result.error}`, projObj);
-        }
-
-        // Callback to sender — use empty chain to bypass cycle detection for callbacks
-        if (msg.callback && msg.from) {
-          dispatchTask(msg.from, {
-            from: projectKey,
-            type: 'callback',
-            priority: 'normal',
-            payload: {
-              title: `任务完成: ${msg.payload.title || msg.id}`,
-              original_id: msg.id,
-              success: result.success,
-              output: (result.output || '').slice(0, 500),
-            },
-            chain: [], // reset chain for callbacks — they're responses, not forwards
-          });
-        }
-      }).catch(e => {
-        log('ERROR', `Dispatch task ${msg.id} threw: ${e.message}`);
-      });
-
-    } else if (msg.type === 'callback') {
-      projectNotifyFn(`✅ *${msg.from}* 回报: ${msg.payload.title || '任务完成'}`, projObj);
-    } else if (msg.type === 'message') {
-      projectNotifyFn(`💬 *${msg.from}*: ${msg.payload.text || msg.payload.title || '(empty)'}`, projObj);
-    }
-  };
-
-  // Start heartbeat scheduler (with physiological heartbeat)
-  let heartbeatTimer = startHeartbeat(config, notifyFn, processInboxMessage);
+  // Start heartbeat scheduler
+  let heartbeatTimer = startHeartbeat(config, notifyFn);
 
   // Hot reload: re-read config and restart heartbeat scheduler
   function reloadConfig() {
@@ -4237,7 +4176,7 @@ async function main() {
     config = newConfig;
     refreshLogMaxSize(config);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
-    heartbeatTimer = startHeartbeat(config, notifyFn, processInboxMessage);
+    heartbeatTimer = startHeartbeat(config, notifyFn);
     const legacyCount = (config.heartbeat && config.heartbeat.tasks || []).length;
     const projectCount = Object.values(config.projects || {}).reduce((n, p) => n + (p.heartbeat_tasks || []).length, 0);
     const totalCount = legacyCount + projectCount;
