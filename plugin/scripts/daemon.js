@@ -2209,7 +2209,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     await bot.sendMessage(chatId, 'Daily token budget exceeded.');
     return;
   }
-  await askClaude(bot, chatId, text, config);
+  await askClaude(bot, chatId, text, config, readOnly);
 }
 
 // ---------------------------------------------------------
@@ -2938,7 +2938,7 @@ function lazyDistill() {
  * Shared ask logic — full Claude Code session (stateful, with tools)
  * Now uses spawn (async) instead of execSync to allow parallel requests.
  */
-async function askClaude(bot, chatId, prompt, config) {
+async function askClaude(bot, chatId, prompt, config, readOnly = false) {
   log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
   // Trigger background distill on first message / every 4h
   try { lazyDistill(); } catch { /* non-fatal */ }
