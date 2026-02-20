@@ -1409,10 +1409,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     } else {
       let msg = '📋 Recent sessions:\n\n';
       allSessions.forEach((s, i) => {
-        const proj = s.projectPath ? path.basename(s.projectPath) : '~';
-        const title = s.customTitle || s.summary || (s.firstPrompt || '').slice(0, 40) || '';
-        const shortId = s.sessionId.slice(0, 8);
-        msg += `${i + 1}. 📁${proj} | ${title}\n   /resume ${shortId}\n`;
+        msg += sessionRichLabel(s, i + 1) + '\n';
       });
       await bot.sendMessage(chatId, msg);
     }
@@ -1480,9 +1477,9 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
         });
         await bot.sendButtons(chatId, title, buttons);
       } else {
-        let msg = `${title}\n`;
+        let msg = `${title}\n\n`;
         recentSessions.forEach((s, i) => {
-          msg += `${i + 1}. ${sessionLabel(s)}\n   /resume ${s.sessionId.slice(0, 8)}\n`;
+          msg += sessionRichLabel(s, i + 1) + '\n';
         });
         await bot.sendMessage(chatId, msg);
       }
@@ -2848,6 +2845,31 @@ function sessionLabel(s) {
   }
 
   return `${ago} ${proj ? proj + ': ' : ''}${title || ''} #${shortId}`;
+}
+
+/**
+ * Format a session entry into a rich text block for non-button contexts (Feishu text).
+ * Shows: name, title/summary, project, time, and /resume shortcut.
+ */
+function sessionRichLabel(s, index) {
+  const name = s.customTitle || '';
+  const summary = s.summary || '';
+  const proj = s.projectPath ? path.basename(s.projectPath) : '~';
+  const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
+  const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
+  const ago = formatRelativeTime(new Date(timeMs).toISOString());
+  const shortId = s.sessionId.slice(0, 8);
+
+  let line = `${index}. `;
+  if (name) line += `[${name}] `;
+  line += `📁${proj} · ${ago}`;
+  if (summary && summary !== name) line += `\n   💡 ${summary.slice(0, 50)}${summary.length > 50 ? '..' : ''}`;
+  else if (!name && s.firstPrompt) {
+    const preview = s.firstPrompt.replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '').slice(0, 50);
+    if (preview) line += `\n   🗨️ ${preview}${s.firstPrompt.length > 50 ? '..' : ''}`;
+  }
+  line += `\n   /resume ${shortId}`;
+  return line;
 }
 
 /**
