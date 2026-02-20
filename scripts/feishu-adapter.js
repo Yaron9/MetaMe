@@ -222,7 +222,7 @@ function createBot(config) {
     async sendButtons(chatId, title, buttons) {
       // Feishu cards: each action element holds up to 3 buttons.
       // For a vertical list, put each button in its own action element.
-      const elements = buttons.map(row => ({
+      const buttonElements = buttons.map(row => ({
         tag: 'action',
         actions: [{
           tag: 'button',
@@ -231,10 +231,24 @@ function createBot(config) {
           value: { cmd: row[0].callback_data },
         }],
       }));
+
+      // Split title into header (first line) + body (rest as markdown in card body)
+      // Feishu card header is single-line plain text — multi-line content gets truncated
+      const lines = title.split('\n');
+      const headerText = lines[0].slice(0, 60);
+      const bodyText = lines.slice(1).join('\n').trim();
+
+      const elements = [];
+      if (bodyText) {
+        elements.push({ tag: 'div', text: { tag: 'lark_md', content: bodyText } });
+        elements.push({ tag: 'hr' });
+      }
+      elements.push(...buttonElements);
+
       const card = {
         config: { wide_screen_mode: true },
         header: {
-          title: { tag: 'plain_text', content: title },
+          title: { tag: 'plain_text', content: headerText },
           template: 'blue',
         },
         elements,
