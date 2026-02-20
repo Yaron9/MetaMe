@@ -2353,7 +2353,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     try { execSync('git rev-parse --is-inside-work-tree', { cwd, stdio: 'ignore', timeout: 3000 }); isGitRepo = true; } catch { }
     const checkpoints = isGitRepo ? listCheckpoints(cwd) : [];
     if (!isGitRepo) {
-      await bot.sendMessage(chatId, `⚠️ 当前项目不在 git 仓库中，无法使用 /undo\n📁 ${cwd}\n\n切换到 git 项目后重试（/bind 切换项目）`);
+      await bot.sendMessage(chatId, `⚠️ 当前项目不在 git 仓库中，无法使用 /undo\n📁 ${cwd}\n\n切换到 git 项目后重试（/agent bind 或 /cd 切换目录）`);
       return;
     }
     if (checkpoints.length === 0) {
