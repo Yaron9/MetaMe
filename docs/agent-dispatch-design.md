@@ -49,9 +49,49 @@ Claude Code 官方的多 agent 协作采用**纯文件系统协议**：
 
 ---
 
-## 3. 核心设计
+## 3. 双心跳模型
 
-### 3.1 Inbox 文件结构
+daemon 的心跳分为两层：
+
+```
+setInterval(() => {           // 每 60s
+  // ① 生理心跳（零 token，纯觉知）
+  physiologicalHeartbeat();   // 扫 inbox、健康检查、状态上报
+
+  // ② 任务心跳（按需烧 token）
+  taskHeartbeat();            // daily-write、数据复盘等定时任务
+}, 60_000);
+```
+
+### 生理心跳（physiological）
+
+每 60s 无条件执行，零 LLM 调用：
+
+| 检查项 | 做什么 | 开销 |
+|--------|--------|------|
+| **inbox 扫描** | 读 `inbox-{project}.jsonl`，有新任务就唤醒执行 | `fs.readFileSync` |
+| **健康自检** | 检查 daemon 进程存活、内存、飞书连接状态 | `process.memoryUsage()` |
+| **状态上报** | 更新 `daemon_state.json` 的 `last_alive` 时间戳 | `fs.writeFileSync` |
+| **过期清理** | 丢弃 inbox 中过期消息、轮转 dispatch-log | 条件触发 |
+
+这是 agent 的"心跳"——证明它活着、保持觉知、随时响应。
+
+### 任务心跳（task）
+
+按 interval 调度，precondition 门控，通过才 spawn claude：
+
+- `daily-write`（24h，sonnet）
+- `wechat-qa-reminder`（24h，haiku）
+- `weekly-review`（7d，sonnet）
+- ...
+
+**只有任务心跳花 token，生理心跳永远免费。**
+
+---
+
+## 4. Inbox 协议
+
+### 4.1 文件结构
 
 每个 project 有一个 inbox 文件：
 
@@ -65,7 +105,7 @@ Claude Code 官方的多 agent 协作采用**纯文件系统协议**：
 
 使用 JSONL（每行一条消息），追加写入，扫描后截断。
 
-### 3.2 消息格式
+### 4.2 消息格式
 
 ```jsonc
 {
@@ -85,7 +125,7 @@ Claude Code 官方的多 agent 协作采用**纯文件系统协议**：
 }
 ```
 
-### 3.3 写入协议（原子性保证）
+### 4.3 写入协议（原子性保证）
 
 ```javascript
 // 写入方（发送消息）
@@ -105,7 +145,7 @@ function dispatchTask(targetProject, message) {
 }
 ```
 
-### 3.4 读取协议（heartbeat 集成）
+### 4.4 读取协议（生理心跳集成）
 
 在现有 heartbeat 循环中加入 inbox 扫描：
 
@@ -131,7 +171,7 @@ function scanInbox(projectKey, config) {
 }
 ```
 
-### 3.5 执行流程
+### 4.5 执行流程
 
 ```
 heartbeat tick (60s)
@@ -151,9 +191,9 @@ heartbeat tick (60s)
 
 ---
 
-## 4. 防风暴机制
+## 5. 防风暴机制
 
-### 4.1 频率限制
+### 5.1 频率限制
 
 ```javascript
 const DISPATCH_LIMITS = {
@@ -163,7 +203,7 @@ const DISPATCH_LIMITS = {
 };
 ```
 
-### 4.2 循环检测
+### 5.2 循环检测
 
 每条消息携带 `chain` 字段记录流转路径：
 
@@ -175,7 +215,7 @@ const DISPATCH_LIMITS = {
 
 发送前检查：如果 `chain` 中已包含目标 project，拒绝发送（防止 A→B→A 循环）。
 
-### 4.3 过期清理
+### 5.3 过期清理
 
 - 消息默认 24h 过期
 - scanInbox 时自动丢弃过期消息
@@ -183,9 +223,9 @@ const DISPATCH_LIMITS = {
 
 ---
 
-## 5. 王总视角：全局任务追踪
+## 6. 王总视角：全局任务追踪
 
-### 5.1 /dispatch 命令（飞书/Telegram）
+### 6.1 /dispatch 命令（飞书/Telegram）
 
 ```
 /dispatch status          → 查看所有进行中的跨 agent 任务
@@ -193,7 +233,7 @@ const DISPATCH_LIMITS = {
 /dispatch to 老马 "xxx"   → 手动下发任务
 ```
 
-### 5.2 /status 命令增强
+### 6.2 /status 命令增强
 
 现有 `/status` 追加 dispatch 信息：
 
@@ -211,7 +251,7 @@ const DISPATCH_LIMITS = {
 
 ---
 
-## 6. 实施计划
+## 7. 实施计划
 
 ### Phase 1：文件 inbox + heartbeat 扫描（最小可用）
 
@@ -232,7 +272,7 @@ const DISPATCH_LIMITS = {
 
 ---
 
-## 7. 与飞书的关系
+## 8. 与飞书的关系
 
 **飞书仍然是人机接口，不是 agent-to-agent 接口。**
 
@@ -248,7 +288,7 @@ agent ←→ inbox 文件 ←→ agent（机机通道）
 
 ---
 
-## 8. 安全边界
+## 9. 安全边界
 
 | 操作 | 权限 |
 |------|------|
@@ -260,7 +300,7 @@ agent ←→ inbox 文件 ←→ agent（机机通道）
 
 ---
 
-## 9. 一句话总结
+## 10. 一句话总结
 
 **文件即通道，heartbeat 即调度，daemon 即总线。**
 
