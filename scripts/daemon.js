@@ -1393,29 +1393,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       return;
     }
     if (bot.sendButtons) {
-      // Rich card: each session = description + switch button, separated by hr
-      const elements = [];
-      allSessions.forEach((s, i) => {
-        if (i > 0) elements.push({ tag: 'hr' });
-        const proj = s.projectPath ? path.basename(s.projectPath) : '~';
-        const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
-        const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
-        const ago = formatRelativeTime(new Date(timeMs).toISOString());
-        const name = s.customTitle || '';
-        const summary = s.summary || '';
-        const shortId = s.sessionId.slice(0, 6);
-        let desc = `**${i + 1}.** `;
-        if (name) desc += `**${name}**  `;
-        desc += `📁${proj} · ${ago}`;
-        if (summary && summary !== name) desc += `\n${summary.slice(0, 60)}`;
-        else if (!name && s.firstPrompt) {
-          const preview = s.firstPrompt.replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '').replace(/\n?\[System hints[\s\S]*/i, '').trim().slice(0, 60);
-          if (preview) desc += `\n${preview}`;
-        }
-        elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
-        elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Switch #${shortId}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
-      });
-      await bot.sendCard(chatId, '📋 Recent Sessions', elements);
+      await bot.sendCard(chatId, '📋 Recent Sessions', buildSessionCardElements(allSessions));
     } else {
       let msg = '📋 Recent sessions:\n\n';
       allSessions.forEach((s, i) => {
@@ -1500,28 +1478,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       }
       const headerTitle = curCwd ? `📋 Sessions in ${path.basename(curCwd)}` : '📋 Recent Sessions';
       if (bot.sendCard) {
-        const elements = [];
-        recentSessions.forEach((s, i) => {
-          if (i > 0) elements.push({ tag: 'hr' });
-          const proj = s.projectPath ? path.basename(s.projectPath) : '~';
-          const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
-          const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
-          const ago = formatRelativeTime(new Date(timeMs).toISOString());
-          const name = s.customTitle || '';
-          const summary = s.summary || '';
-          const shortId = s.sessionId.slice(0, 6);
-          let desc = `**${i + 1}.** `;
-          if (name) desc += `**${name}**  `;
-          desc += `📁${proj} · ${ago}`;
-          if (summary && summary !== name) desc += `\n${summary.slice(0, 60)}`;
-          else if (!name && s.firstPrompt) {
-            const preview = s.firstPrompt.replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '').replace(/\n?\[System hints[\s\S]*/i, '').trim().slice(0, 60);
-            if (preview) desc += `\n${preview}`;
-          }
-          elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
-          elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Switch #${shortId}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
-        });
-        await bot.sendCard(chatId, headerTitle, elements);
+        await bot.sendCard(chatId, headerTitle, buildSessionCardElements(recentSessions));
       } else if (bot.sendButtons) {
         const buttons = recentSessions.map(s => {
           return [{ text: sessionLabel(s), callback_data: `/resume ${s.sessionId}` }];
@@ -2959,12 +2916,29 @@ function sessionLabel(s) {
 }
 
 /**
+ * Get the display title for a session using fallback chain: name → summary → firstPrompt
+ */
+function sessionDisplayTitle(s, maxLen) {
+  maxLen = maxLen || 50;
+  if (s.customTitle) return s.customTitle;
+  if (s.summary) return s.summary.slice(0, maxLen);
+  if (s.firstPrompt) {
+    const clean = s.firstPrompt
+      .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+      .replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '')
+      .replace(/\n?\[System hints[\s\S]*/i, '')
+      .trim();
+    if (clean && clean.length > 2) return clean.slice(0, maxLen);
+  }
+  return '';
+}
+
+/**
  * Format a session entry into a rich text block for non-button contexts (Feishu text).
  * Shows: name, title/summary, project, time, and /resume shortcut.
  */
 function sessionRichLabel(s, index) {
-  const name = s.customTitle || '';
-  const summary = s.summary || '';
+  const title = sessionDisplayTitle(s, 50);
   const proj = s.projectPath ? path.basename(s.projectPath) : '~';
   const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
   const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
@@ -2972,15 +2946,31 @@ function sessionRichLabel(s, index) {
   const shortId = s.sessionId.slice(0, 8);
 
   let line = `${index}. `;
-  if (name) line += `[${name}] `;
-  line += `📁${proj} · ${ago}`;
-  if (summary && summary !== name) line += `\n   💡 ${summary.slice(0, 50)}${summary.length > 50 ? '..' : ''}`;
-  else if (!name && s.firstPrompt) {
-    const preview = s.firstPrompt.replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '').replace(/\n?\[System hints[\s\S]*/i, '').trim().slice(0, 50);
-    if (preview && preview.length > 2) line += `\n   🗨️ ${preview}${preview.length >= 50 ? '..' : ''}`;
-  }
+  if (title) line += `${title}${title.length >= 50 ? '..' : ''}`;
+  else line += `(unnamed)`;
+  line += `\n   📁${proj} · ${ago}`;
   line += `\n   /resume ${shortId}`;
   return line;
+}
+
+/**
+ * Build Feishu card elements for a list of sessions (used by /sessions and /resume)
+ */
+function buildSessionCardElements(sessions) {
+  const elements = [];
+  sessions.forEach((s, i) => {
+    if (i > 0) elements.push({ tag: 'hr' });
+    const title = sessionDisplayTitle(s, 60);
+    const proj = s.projectPath ? path.basename(s.projectPath) : '~';
+    const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
+    const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
+    const ago = formatRelativeTime(new Date(timeMs).toISOString());
+    const shortId = s.sessionId.slice(0, 6);
+    let desc = `**${i + 1}. ${title || '(unnamed)'}**\n📁${proj} · ${ago}`;
+    elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
+    elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Switch #${shortId}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
+  });
+  return elements;
 }
 
 /**
