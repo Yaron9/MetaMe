@@ -23,6 +23,17 @@ try {
   }
 }
 
+// Timeout wrapper: prevents SDK calls from hanging indefinitely when
+// Feishu's token refresh HTTP request has no response (e.g. network down)
+function withTimeout(promise, ms = 10000) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Feishu API timeout after ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
 function createBot(config) {
   const { app_id, app_secret } = config;
   if (!app_id || !app_secret) throw new Error('app_id and app_secret are required');
@@ -38,14 +49,14 @@ function createBot(config) {
      * Send a plain text message
      */
     async sendMessage(chatId, text) {
-      const res = await client.im.message.create({
+      const res = await withTimeout(client.im.message.create({
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: chatId,
           msg_type: 'text',
           content: JSON.stringify({ text }),
         },
-      });
+      }));
       // Return Telegram-compatible shape so daemon can edit it later
       const msgId = res?.data?.message_id;
       return msgId ? { message_id: msgId } : null;
@@ -55,10 +66,10 @@ function createBot(config) {
     async editMessage(chatId, messageId, text) {
       if (this._editBroken) return false;
       try {
-        await client.im.message.patch({
+        await withTimeout(client.im.message.patch({
           path: { message_id: messageId },
           data: { content: JSON.stringify({ text }) },
-        });
+        }));
         return true;
       } catch (e) {
         const code = e?.code || e?.response?.data?.code;
@@ -109,14 +120,14 @@ function createBot(config) {
         body: { elements },
       };
 
-      const res = await client.im.message.create({
+      const res = await withTimeout(client.im.message.create({
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: chatId,
           msg_type: 'interactive',
           content: JSON.stringify(card),
         },
-      });
+      }));
       const msgId = res?.data?.message_id;
       return msgId ? { message_id: msgId } : null;
     },
@@ -136,10 +147,10 @@ function createBot(config) {
           header: { title: { tag: 'plain_text', content: title }, template: color },
           body: { elements: [] },
         };
-        const res = await client.im.message.create({
+        const res = await withTimeout(client.im.message.create({
           params: { receive_id_type: 'chat_id' },
           data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
-        });
+        }));
         const msgId = res?.data?.message_id;
         return msgId ? { message_id: msgId } : null;
       }
@@ -180,10 +191,10 @@ function createBot(config) {
         header: { title: { tag: 'plain_text', content: title }, template: color },
         body: { elements },
       };
-      const res = await client.im.message.create({
+      const res = await withTimeout(client.im.message.create({
         params: { receive_id_type: 'chat_id' },
         data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
-      });
+      }));
       const msgId = res?.data?.message_id;
       return msgId ? { message_id: msgId } : null;
     },
@@ -193,7 +204,7 @@ function createBot(config) {
      */
     async deleteMessage(chatId, messageId) {
       try {
-        await client.im.message.delete({ path: { message_id: messageId } });
+        await withTimeout(client.im.message.delete({ path: { message_id: messageId } }), 5000);
       } catch { /* non-fatal — message may already be deleted or expired */ }
     },
 
@@ -228,14 +239,14 @@ function createBot(config) {
         },
         elements,
       };
-      await client.im.message.create({
+      await withTimeout(client.im.message.create({
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: chatId,
           msg_type: 'interactive',
           content: JSON.stringify(card),
         },
-      });
+      }));
     },
 
     /**
