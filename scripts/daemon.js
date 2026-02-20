@@ -928,12 +928,18 @@ async function doBindAgent(bot, chatId, agentName, agentCwd) {
   }
 }
 
-async function handleCommand(bot, chatId, text, config, executeTaskByName) {
+async function handleCommand(bot, chatId, text, config, executeTaskByName, senderId = null) {
   const state = loadState();
 
-  // --- /chatid: reply with current chatId (useful for setting up chat_agent_map) ---
+  // --- /chatid: reply with current chatId ---
   if (text === '/chatid') {
     await bot.sendMessage(chatId, `Chat ID: \`${chatId}\``);
+    return;
+  }
+
+  // --- /myid: reply with sender's user open_id (for configuring operator_ids) ---
+  if (text === '/myid') {
+    await bot.sendMessage(chatId, senderId ? `Your ID: \`${senderId}\`` : 'ID not available (Telegram not supported)');
     return;
   }
 
@@ -3155,13 +3161,30 @@ async function startFeishuBridge(config, executeTaskByName) {
   const { createBot } = require(path.join(__dirname, 'feishu-adapter.js'));
   const bot = createBot(config.feishu);
   try {
-    const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo) => {
+    const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo, senderId) => {
       // Security: check whitelist (empty = deny all) — read live config to support hot-reload
       // Exception: /bind is allowed from any chat so users can self-register new groups
-      const allowedIds = (loadConfig().feishu && loadConfig().feishu.allowed_chat_ids) || [];
+      const liveCfg = loadConfig();
+      const allowedIds = (liveCfg.feishu && liveCfg.feishu.allowed_chat_ids) || [];
       const isBindCmd = text && text.trim().startsWith('/bind');
       if (!allowedIds.includes(chatId) && !isBindCmd) {
         log('WARN', `Feishu: rejected message from ${chatId}`);
+        return;
+      }
+
+      // Operator check: if operator_ids configured, non-operators get feedback-only mode
+      const operatorIds = (liveCfg.feishu && liveCfg.feishu.operator_ids) || [];
+      if (operatorIds.length > 0 && senderId && !operatorIds.includes(senderId) && !isBindCmd) {
+        log('INFO', `Feishu: feedback message from non-operator ${senderId} in ${chatId}: ${(text || '').slice(0, 50)}`);
+        // Forward feedback to operator chats and acknowledge
+        const feedback = `📨 反馈来自群「${chatId}」\n${text || '[文件]'}`;
+        const opAllowedIds = (liveCfg.feishu && liveCfg.feishu.allowed_chat_ids) || [];
+        for (const opChatId of opAllowedIds) {
+          if (opChatId !== chatId) {
+            try { await bot.sendMessage(opChatId, feedback); } catch {}
+          }
+        }
+        await bot.sendMessage(chatId, '✅ 反馈已收到，感谢！');
         return;
       }
 
@@ -3207,7 +3230,7 @@ async function startFeishuBridge(config, executeTaskByName) {
             log('INFO', `Session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
           }
         }
-        await handleCommand(bot, chatId, text, config, executeTaskByName);
+        await handleCommand(bot, chatId, text, config, executeTaskByName, senderId);
       }
     });
 

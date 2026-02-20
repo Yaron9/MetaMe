@@ -406,6 +406,7 @@ function createBot(config) {
               if (isDuplicate(msg.message_id)) return;
 
               const chatId = msg.chat_id;
+              const senderId = data.sender && data.sender.sender_id && data.sender.sender_id.open_id || null;
               let text = '';
               let fileInfo = null;
 
@@ -434,7 +435,7 @@ function createBot(config) {
 
               if (text || fileInfo) {
                 // Fire-and-forget: don't block the event loop (SDK needs fast ack)
-                Promise.resolve().then(() => onMessage(chatId, text, data, fileInfo)).catch(() => {});
+                Promise.resolve().then(() => onMessage(chatId, text, data, fileInfo, senderId)).catch(() => {});
               }
             } catch (e) {
               // Non-fatal
