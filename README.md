@@ -57,6 +57,7 @@
 * **🔀 Parallel Multi-Agent Chats (v1.3.19):** Assign each agent its own dedicated Feishu/Telegram group. Messages in different groups execute in parallel — no waiting for each other. Route `chatId → agent` via `chat_agent_map` in `daemon.yaml`. Create a new group, send `/bind <name>` to register it instantly.
 * **🔧 Config Hot-Reload Fix (v1.3.19):** `allowed_chat_ids` is now read dynamically on every message — no restart needed after editing `daemon.yaml`. `/fix` config restore now merges current `chatId` settings so manually-added groups are never lost.
 * **🛡️ Daemon Auto-Restart via LaunchAgent (v1.3.19):** MetaMe's npm daemon is now managed by macOS launchd. Crashes or unexpected exits trigger an automatic restart after 5 seconds.
+* **👥 Operator Permissions & Read-Only Mode (v1.3.19):** Add `operator_ids` to restrict who can execute Claude commands in shared groups. Non-operators can still chat and query (read/search/web only) — they just can't edit files, run bash, or trigger slash commands. Use `/myid` to discover any user's Feishu open_id.
 
 ## 🛠 Prerequisites
 
@@ -346,6 +347,7 @@ Bot: 回退到哪一轮？
 | `/reload` | Manually reload daemon.yaml (also auto-reloads on file change) |
 | `/bind <name>` | Register current group as a dedicated agent chat — opens directory browser to pick working directory |
 | `/chatid` | Show the current group's chat ID |
+| `/myid` | Show your own Feishu sender open_id (for configuring `operator_ids`) |
 
 **Heartbeat Tasks:**
 
@@ -400,6 +402,7 @@ Each step runs in the same Claude Code session. Step outputs automatically becom
 **Security:**
 
 * `allowed_chat_ids` whitelist — unauthorized users silently ignored (empty = deny all)
+* `operator_ids` — within an allowed group, restrict command execution to specific users; non-operators get read-only chat mode
 * `dangerously_skip_permissions` enabled by default for mobile (users can't click "allow" on phone — security relies on the chat ID whitelist)
 * `~/.metame/` directory set to mode 700
 * Bot tokens stored locally, never transmitted
@@ -498,6 +501,26 @@ In any authorized group, send `/chatid` and the bot replies with the current gro
 |---------|-------------|
 | `/bind <name>` | Register current group as a dedicated agent chat — opens directory browser to pick working directory |
 | `/chatid` | Show the current group's chat ID |
+| `/myid` | Show your own Feishu sender open_id |
+
+**Operator Permissions (`operator_ids`):**
+
+In shared groups (e.g., a group with a colleague or tester), you can restrict who can execute Claude commands. Non-operators get a read-only chat mode — they can ask questions and search, but can't edit files, run bash, or trigger slash commands.
+
+```yaml
+feishu:
+  operator_ids:
+    - "ou_abc123yourid"   # Only these users can execute commands
+```
+
+Use `/myid` in any Feishu group to get a user's open_id. Then add it to `operator_ids` to grant full access.
+
+| User type | Chat & query | Slash commands | Write / Edit / Bash |
+|-----------|:---:|:---:|:---:|
+| Operator | ✅ | ✅ | ✅ |
+| Non-operator | ✅ | ❌ | ❌ |
+
+> If `operator_ids` is empty, all whitelisted users have full access (default behavior).
 
 ### Provider Relay — Third-Party Model Support (v1.3.11)
 
@@ -702,7 +725,7 @@ A: No. Your profile stays local at `~/.claude_profile.yaml`. MetaMe simply passe
 
 | Version | Highlights |
 |---------|------------|
-| **v1.3.19** | **Parallel multi-agent group chats** — `chat_agent_map` routes chatId → agent for true parallel execution; `/bind` command for one-tap group registration with directory browser; `/chatid` to look up group ID; `allowed_chat_ids` hot-reload fix (read per message, no restart); `/fix` now merges current chatId config; daemon auto-restart via macOS LaunchAgent (5-second recovery) |
+| **v1.3.19** | **Parallel multi-agent group chats** — `chat_agent_map` routes chatId → agent for true parallel execution; `/bind` command for one-tap group registration with Finder-style directory browser; `/chatid` to look up group ID; `allowed_chat_ids` hot-reload fix (read per message, no restart); `/fix` now merges current chatId config; daemon auto-restart via macOS LaunchAgent (5-second recovery); **operator_ids** permission layer — non-operators get read-only chat mode (query/search, no write/execute); `/myid` command to retrieve Feishu open_id |
 | **v1.3.18** | **Multi-agent project isolation** — `projects` in `daemon.yaml` with per-project heartbeat tasks, Feishu colored cards per project, `/agent` picker button, nickname routing (say agent name to switch instantly), reply-to-message session restoration, fix `~` expansion in project cwd |
 | **v1.3.17** | **Windows support** (WSL one-command installer), `install-systemd` for Linux/WSL daemon auto-start. Fix onboarding (Genesis interview was never injected, CLAUDE.md accumulated across runs). Marker-based cleanup, unified protocols, `--append-system-prompt` guarantees interview activation, Feishu auto-fetch chat ID, full mobile permissions, fix `/publish` false-success, auto-restart daemon on script update |
 | **v1.3.16** | Git-based `/undo` (auto-checkpoint before each turn, `git reset --hard` rollback), `/nosleep` toggle (macOS caffeinate), custom provider model passthrough (`/model` accepts any name for non-anthropic providers), auto-fallback to anthropic/opus on provider failure, message queue works on Telegram (fire-and-forget poll loop), lazy background distill |
