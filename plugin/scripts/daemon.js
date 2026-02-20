@@ -125,7 +125,7 @@ function loadConfig() {
 
 function backupConfig() {
   const bak = CONFIG_FILE + '.bak';
-  try { fs.copyFileSync(CONFIG_FILE, bak); } catch {}
+  try { fs.copyFileSync(CONFIG_FILE, bak); } catch { }
 }
 
 function restoreConfig() {
@@ -136,7 +136,7 @@ function restoreConfig() {
     // Preserve security-critical fields from current config (chat IDs, agent map)
     // so a /fix never loses manually-added channels
     let curCfg = {};
-    try { curCfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {}; } catch {}
+    try { curCfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {}; } catch { }
     for (const adapter of ['feishu', 'telegram']) {
       if (curCfg[adapter] && bakCfg[adapter]) {
         const curIds = curCfg[adapter].allowed_chat_ids || [];
@@ -624,7 +624,7 @@ async function startTelegramBridge(config, executeTaskByName) {
           if (update.callback_query) {
             const cb = update.callback_query;
             const chatId = cb.message && cb.message.chat.id;
-            bot.answerCallback(cb.id).catch(() => {});
+            bot.answerCallback(cb.id).catch(() => { });
             if (chatId && cb.data) {
               const allowedIds = (loadConfig().telegram && loadConfig().telegram.allowed_chat_ids) || [];
               if (!allowedIds.includes(chatId)) continue;
@@ -721,10 +721,10 @@ async function startTelegramBridge(config, executeTaskByName) {
 }
 
 // ── Timing constants ─────────────────────────────────────────────────────────
-const CLAUDE_COOLDOWN_MS  = 10000; // 10s between Claude calls per chat
-const STATUS_THROTTLE_MS  = 3000;  // Min 3s between streaming status updates
+const CLAUDE_COOLDOWN_MS = 10000; // 10s between Claude calls per chat
+const STATUS_THROTTLE_MS = 3000;  // Min 3s between streaming status updates
 const FALLBACK_THROTTLE_MS = 8000; // 8s between fallback status updates
-const DEDUP_TTL_MS        = 60000; // Feishu message dedup window (60s)
+const DEDUP_TTL_MS = 60000; // Feishu message dedup window (60s)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Rate limiter for /ask and /run — prevents rapid-fire Claude calls
@@ -1003,7 +1003,13 @@ ${existing}
   if (error || !output) {
     return { error: error || '合并失败' };
   }
-  fs.writeFileSync(claudeMdPath, output, 'utf8');
+
+  let cleanOutput = output.trim();
+  if (cleanOutput.startsWith('```')) {
+    cleanOutput = cleanOutput.replace(/^```[a-zA-Z]*\n/, '').replace(/\n```$/, '');
+  }
+
+  fs.writeFileSync(claudeMdPath, cleanOutput, 'utf8');
   return { merged: true };
 }
 
@@ -1114,7 +1120,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
   // Configure in daemon.yaml: feishu.chat_agent_map or telegram.chat_agent_map
   //   e.g.  chat_agent_map: { "oc_xxx": "personal", "oc_yyy": "metame" }
   const chatAgentMap = (config.feishu && config.feishu.chat_agent_map) ||
-                       (config.telegram && config.telegram.chat_agent_map) || {};
+    (config.telegram && config.telegram.chat_agent_map) || {};
   const mappedKey = chatAgentMap[String(chatId)];
   if (mappedKey && config.projects && config.projects[mappedKey]) {
     const proj = config.projects[mappedKey];
@@ -1153,7 +1159,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       // In a dedicated agent group, use the agent's bound cwd directly
       const newCfg = loadConfig();
       const agentMap = (newCfg.feishu && newCfg.feishu.chat_agent_map) ||
-                       (newCfg.telegram && newCfg.telegram.chat_agent_map) || {};
+        (newCfg.telegram && newCfg.telegram.chat_agent_map) || {};
       const boundKey = agentMap[String(chatId)];
       const boundProj = boundKey && newCfg.projects && newCfg.projects[boundKey];
       if (boundProj && boundProj.cwd) {
@@ -1501,7 +1507,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       }
       // 找出当前群绑定的 agent
       const agentMap = (cfg.feishu && cfg.feishu.chat_agent_map) ||
-                       (cfg.telegram && cfg.telegram.chat_agent_map) || {};
+        (cfg.telegram && cfg.telegram.chat_agent_map) || {};
       const boundKey = agentMap[String(chatId)];
       const lines = ['📋 已配置的 Agent：', ''];
       for (const [key, p] of entries) {
@@ -1529,7 +1535,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     if (agentSub === 'edit') {
       const cfg = loadConfig();
       const agentMap = (cfg.feishu && cfg.feishu.chat_agent_map) ||
-                       (cfg.telegram && cfg.telegram.chat_agent_map) || {};
+        (cfg.telegram && cfg.telegram.chat_agent_map) || {};
       const boundKey = agentMap[String(chatId)];
       const boundProj = boundKey && cfg.projects && cfg.projects[boundKey];
       if (!boundProj || !boundProj.cwd) {
@@ -1555,7 +1561,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     if (agentSub === 'reset') {
       const cfg = loadConfig();
       const agentMap = (cfg.feishu && cfg.feishu.chat_agent_map) ||
-                       (cfg.telegram && cfg.telegram.chat_agent_map) || {};
+        (cfg.telegram && cfg.telegram.chat_agent_map) || {};
       const boundKey = agentMap[String(chatId)];
       const boundProj = boundKey && cfg.projects && cfg.projects[boundKey];
       if (!boundProj || !boundProj.cwd) {
@@ -1570,7 +1576,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       }
       let content = fs.readFileSync(claudeMdPath, 'utf8');
       // 用正则删除 ## Agent 角色 section（到下一个 ## 或文件末尾）
-      content = content.replace(/^## Agent 角色\n[\s\S]*?(?=^## |\Z)/m, '').trimStart();
+      content = content.replace(/(?:^|\n)## Agent 角色\n[\s\S]*?(?=\n## |$)/, '').trimStart();
       // 如果没匹配到，给出提示
       if (content === fs.readFileSync(claudeMdPath, 'utf8').trimStart()) {
         await bot.sendMessage(chatId, '⚠️ 未找到「## Agent 角色」section，CLAUDE.md 未修改');
@@ -1840,7 +1846,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
   if (text === '/budget') {
     const limit = (config.budget && config.budget.daily_limit) || 50000;
     const used = state.budget.tokens_used;
-    await bot.sendMessage(chatId, `Budget: ${used}/${limit} tokens (${((used/limit)*100).toFixed(1)}%)`);
+    await bot.sendMessage(chatId, `Budget: ${used}/${limit} tokens (${((used / limit) * 100).toFixed(1)}%)`);
     return;
   }
 
@@ -2147,7 +2153,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
                     break; // Found a message before checkpoint, stop
                   }
                 }
-              } catch {}
+              } catch { }
             }
             if (cutIdx > 0) {
               const kept = lines.slice(0, cutIdx);
@@ -2783,7 +2789,7 @@ function spawnClaudeAsync(args, input, cwd, timeoutMs = 300000) {
       killed = true;
       child.kill('SIGTERM');
       // Fix: escalate to SIGKILL if SIGTERM is ignored
-      setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 5000);
+      setTimeout(() => { try { child.kill('SIGKILL'); } catch { } }, 5000);
     }, timeoutMs);
 
     child.stdout.on('data', (data) => { stdout += data.toString(); });
@@ -2853,7 +2859,7 @@ function saveActivePids() {
       if (proc.child && proc.child.pid) pids[chatId] = proc.child.pid;
     }
     fs.writeFileSync(ACTIVE_PIDS_FILE, JSON.stringify(pids), 'utf8');
-  } catch {}
+  } catch { }
 }
 function getProcessName(pid) {
   try {
@@ -2874,10 +2880,10 @@ function killOrphanPids() {
         }
         process.kill(pid, 'SIGKILL');
         log('INFO', `Killed orphan claude PID ${pid} (chatId: ${chatId})`);
-      } catch {}
+      } catch { }
     }
     fs.unlinkSync(ACTIVE_PIDS_FILE);
-  } catch {}
+  } catch { }
 }
 
 // Pending /bind flows: waiting for user to pick a directory
@@ -3014,7 +3020,7 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
       killed = true;
       child.kill('SIGTERM');
       // Fix: escalate to SIGKILL if SIGTERM is ignored
-      setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 5000);
+      setTimeout(() => { try { child.kill('SIGKILL'); } catch { } }, 5000);
     }, timeoutMs);
 
     child.stdout.on('data', (data) => {
@@ -3114,7 +3120,7 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
                     : `${displayEmoji} ${displayName}...`;
 
                   if (onStatus) {
-                    onStatus(status).catch(() => {});
+                    onStatus(status).catch(() => { });
                   }
                 }
               }
@@ -3224,9 +3230,9 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
   } catch (e) {
     log('ERROR', `Failed to send ack to ${chatId}: ${e.message}`);
   }
-  await bot.sendTyping(chatId).catch(() => {});
+  await bot.sendTyping(chatId).catch(() => { });
   const typingTimer = setInterval(() => {
-    bot.sendTyping(chatId).catch(() => {});
+    bot.sendTyping(chatId).catch(() => { });
   }, 4000);
 
   // Agent nickname routing: "贾维斯" / "小美，帮我..." → switch project session
@@ -3368,7 +3374,7 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
 
   // Clean up status message
   if (statusMsgId && bot.deleteMessage) {
-    bot.deleteMessage(chatId, statusMsgId).catch(() => {});
+    bot.deleteMessage(chatId, statusMsgId).catch(() => { });
   }
 
   // When Claude completes with no text output (pure tool work), send a done notice
@@ -3440,7 +3446,7 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
 
     // Auto-name: if this was the first message and session has no name, generate one
     if (wasNew && !getSessionName(session.id)) {
-      autoNameSession(chatId, session.id, prompt, session.cwd).catch(() => {});
+      autoNameSession(chatId, session.id, prompt, session.cwd).catch(() => { });
     }
   } else {
     const errMsg = error || 'Unknown error';
@@ -3612,7 +3618,7 @@ function killExistingDaemon() {
   } catch {
     // Process doesn't exist or already dead
   }
-  try { fs.unlinkSync(PID_FILE); } catch {}
+  try { fs.unlinkSync(PID_FILE); } catch { }
 }
 
 function writePid() {
@@ -3756,7 +3762,7 @@ async function main() {
       const r = reloadConfig();
       if (r.success) {
         log('INFO', `Auto-reload OK: ${r.tasks} tasks`);
-        notifyFn(`🔄 Config auto-reloaded. ${r.tasks} heartbeat tasks active.`).catch(() => {});
+        notifyFn(`🔄 Config auto-reloaded. ${r.tasks} heartbeat tasks active.`).catch(() => { });
       } else {
         log('ERROR', `Auto-reload failed: ${r.error}`);
       }
@@ -3785,7 +3791,7 @@ async function main() {
 
   // Notify once on startup (single message, no duplicates)
   await sleep(1500); // Let polling settle
-  await notifyFn('✅ Daemon ready.').catch(() => {});
+  await notifyFn('✅ Daemon ready.').catch(() => { });
 
   // Graceful shutdown
   const shutdown = () => {
@@ -3797,11 +3803,11 @@ async function main() {
     if (feishuBridge) feishuBridge.stop();
     // Fix1: kill all tracked claude child processes before exiting
     for (const [cid, proc] of activeProcesses) {
-      try { proc.child.kill('SIGKILL'); } catch {}
+      try { proc.child.kill('SIGKILL'); } catch { }
       log('INFO', `Shutdown: killed claude child for chatId ${cid}`);
     }
     activeProcesses.clear();
-    try { if (fs.existsSync(ACTIVE_PIDS_FILE)) fs.unlinkSync(ACTIVE_PIDS_FILE); } catch {}
+    try { if (fs.existsSync(ACTIVE_PIDS_FILE)) fs.unlinkSync(ACTIVE_PIDS_FILE); } catch { }
     cleanPid();
     const s = loadState();
     s.pid = null;
