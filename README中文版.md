@@ -54,6 +54,9 @@
 * **🏥 应急恢复 (v1.3.13)：** `/doctor` 交互式诊断 + 一键修复、`/sh` 手机直接执行电脑 shell 命令（完全绕过 Claude，断线时的最后生命线）、配置修改前自动备份、`/fix` 一键恢复上次正常配置。`/model` 交互式模型切换，切换前自动备份。
 * **🌐 浏览器自动化 (v1.3.15)：** 原生 Playwright MCP 集成——首次运行自动注册。每个 MetaMe 用户开箱即获浏览器操控能力。配合 Skills 可实现播客发布、表单填写、网页抓取等自动化工作流。
 * **📂 交互式文件浏览器 (v1.3.15)：** `/list` 显示可点击按钮卡片——文件夹点击展开，文件点击下载。文件夹按钮使用绝对路径，重启不过期。零 token 消耗。
+* **🔀 多 Agent 专属群并行执行 (v1.3.19)：** 为每个 Agent 创建独立飞书/Telegram 群，不同群同时发消息真正并行执行、互不等待。通过 `daemon.yaml` 中的 `chat_agent_map` 配置 chatId → Agent 路由。新建群后发 `/bind <名称>` 即可一键完成全部配置。
+* **🔧 配置热重载修复 (v1.3.19)：** `allowed_chat_ids` 改为每条消息动态读取——修改 `daemon.yaml` 后立即生效，无需重启。`/fix` 恢复备份时自动合并当前 chatId 配置，不再丢失手动添加的群组。
+* **🛡️ Daemon 自动保活 LaunchAgent (v1.3.19)：** MetaMe npm daemon 现在由 macOS launchd 管理，崩溃或意外退出后 5 秒自动重启。
 
 ## 🛠 前置要求
 
@@ -306,6 +309,8 @@ Bot: 回退到哪一轮？
 | `/budget` | 今日 token 用量 |
 | `/quiet` | 静默镜像/反思 48 小时 |
 | `/reload` | 手动重载 daemon.yaml（文件变化时也会自动重载） |
+| `/bind <名称>` | 将当前群注册为专属 Agent 群，弹出目录浏览器选择工作目录 |
+| `/chatid` | 显示当前群的 chatId |
 
 **心跳任务：**
 
@@ -363,6 +368,54 @@ heartbeat:
 * 不使用 `--dangerously-skip-permissions`——标准 `-p` 模式权限
 * `~/.metame/` 目录权限 700
 * Bot token 仅存本地，不外传
+
+### 多 Agent 专属群并行执行 & `/bind` 命令 (v1.3.19)
+
+为每个 Agent 创建独立的群聊——不同群里的消息同时执行，互不等待、真正并行。
+
+**工作原理：**
+
+在 `daemon.yaml` 的 `chat_agent_map` 中把每个 `chatId` 映射到一个 Agent。消息到达时，daemon 查找该群归属哪个 Agent，把 Claude 调用分发到对应的工作目录——完全并行。
+
+**配置方式 — `/bind` 命令（推荐）：**
+
+1. 新建一个飞书或 Telegram 群，把 bot 拉进来。
+2. 在群里发 `/bind <名称>`（例如 `/bind 后端`）。
+3. Bot 弹出 Finder 风格的目录浏览器——点击文件夹逐级导航，点击文件夹名选定为工作目录。
+4. 完成。Bot 自动执行：
+   - 将该群 `chatId` 加入 `allowed_chat_ids` 白名单
+   - 在 `chat_agent_map` 中创建路由条目
+   - 在 `projects` 中创建 Agent 配置
+   - 发送欢迎卡片
+
+> **免白名单：** `/bind` 命令无需预先配置，新群可直接自注册——不用提前把 chatId 加到 `allowed_chat_ids`。
+
+> **重新绑定：** 在同一个群再次发 `/bind <名称>` 即可覆盖之前的配置。
+
+**手动配置**（`~/.metame/daemon.yaml`）：
+
+```yaml
+chat_agent_map:
+  "oc_abc123": "backend"          # chatId → project key
+  "oc_def456": "frontend"
+
+projects:
+  backend:
+    name: "后端 API"
+    cwd: "~/projects/api"
+  frontend:
+    name: "前端应用"
+    cwd: "~/projects/app"
+```
+
+**`/chatid` 命令：**
+
+在任意已授权群中发 `/chatid`，bot 回复当前群的 chatId。适合手动配置时查询。
+
+| 命令 | 说明 |
+|------|------|
+| `/bind <名称>` | 将当前群注册为专属 Agent 群——弹出目录浏览器选择工作目录 |
+| `/chatid` | 显示当前群的 chatId |
 
 ### 第三方模型中继 — Provider Relay (v1.3.11)
 
@@ -549,6 +602,8 @@ A: 不会。你的档案只保存在本地的 `~/.claude_profile.yaml` 中。Met
 
 | 版本 | 主要更新 |
 |------|----------|
+| **v1.3.19** | **多 Agent 专属群并行执行** — `chat_agent_map` 配置 chatId → Agent 路由，真正并行；`/bind` 一键注册专属群（含目录浏览器）；`/chatid` 查询群 ID；`allowed_chat_ids` 热重载修复（每条消息动态读取，无需重启）；`/fix` 自动合并当前 chatId 配置；Daemon 由 macOS LaunchAgent 管理，5 秒自动保活 |
+| **v1.3.18** | **多 Agent 项目隔离** — `daemon.yaml` 支持 `projects` 配置，每项目独立心跳任务、飞书彩色卡片、`/agent` 选择器按钮、昵称路由（说 Agent 名字即切换）、回复消息自动恢复会话、修复项目 cwd 中 `~` 展开 |
 | **v1.3.15** | 原生 Playwright MCP（浏览器自动化）、`/list` 交互式文件浏览器、飞书图片下载修复、Skill/MCP/Agent 状态推送、热重启可靠性优化 |
 | **v1.3.14** | 修复全新安装时 daemon 崩溃（缺少打包脚本） |
 | **v1.3.13** | `/doctor` 交互式诊断、`/sh` 直接 shell、`/fix` 配置恢复、`/model` 交互式切换 + 自动备份、daemon 状态缓存与配置备份/恢复 |
