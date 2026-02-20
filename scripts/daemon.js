@@ -1029,6 +1029,19 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
   if (text === '/new' || text.startsWith('/new ')) {
     const arg = text.slice(4).trim();
     if (!arg) {
+      // In a dedicated agent group, use the agent's bound cwd directly
+      const liveCfg2 = loadConfig();
+      const agentMap2 = (liveCfg2.feishu && liveCfg2.feishu.chat_agent_map) ||
+                        (liveCfg2.telegram && liveCfg2.telegram.chat_agent_map) || {};
+      const boundKey = agentMap2[String(chatId)];
+      const boundProj = boundKey && liveCfg2.projects && liveCfg2.projects[boundKey];
+      if (boundProj && boundProj.cwd) {
+        const boundCwd = expandPath(boundProj.cwd).replace(/^~/, HOME);
+        const session = createSession(chatId, boundCwd, '');
+        await bot.sendMessage(chatId, `✅ 新会话已创建\nWorkdir: ${session.cwd}`);
+        return;
+      }
+      // Non-dedicated group: show directory picker
       await sendDirPicker(bot, chatId, 'new', 'Pick a workdir:');
       return;
     }
