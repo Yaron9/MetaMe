@@ -967,6 +967,46 @@ async function sendDirListing(bot, chatId, baseDir, arg) {
 }
 
 /**
+ * 智能合并 Agent 角色描述到 CLAUDE.md
+ * 如果目录中没有 CLAUDE.md，直接创建；否则调用 Claude 合并。
+ */
+async function mergeAgentRole(cwd, description) {
+  const claudeMdPath = path.join(cwd, 'CLAUDE.md');
+  if (!fs.existsSync(claudeMdPath)) {
+    // 直接创建，无需调 Claude
+    const content = `## Agent 角色\n\n${description}\n`;
+    fs.writeFileSync(claudeMdPath, content, 'utf8');
+    return { created: true };
+  }
+
+  const existing = fs.readFileSync(claudeMdPath, 'utf8');
+  const prompt = `现有 CLAUDE.md 内容：
+---
+${existing}
+---
+
+用户为这个 Agent 定义的角色和职责：
+"${description}"
+
+请将用户意图合并进 CLAUDE.md：
+1. 找到现有角色/职责相关章节 → 更新替换
+2. 没有专属章节但有相关内容 → 合并进去
+3. 完全没有相关内容 → 在文件最顶部新增 ## Agent 角色 section
+4. 输出完整 CLAUDE.md 内容，保持原有其他内容不变
+5. 保持简洁，禁止重复
+
+直接输出完整 CLAUDE.md 内容，不要加任何解释或代码块标记。`;
+
+  const claudeArgs = ['-p', '--output-format', 'text', '--max-turns', '1'];
+  const { output, error } = await spawnClaudeAsync(claudeArgs, prompt, HOME, 60000);
+  if (error || !output) {
+    return { error: error || '合并失败' };
+  }
+  fs.writeFileSync(claudeMdPath, output, 'utf8');
+  return { merged: true };
+}
+
+/**
  * Unified command handler — shared by Telegram & Feishu
  */
 
@@ -2643,6 +2683,10 @@ function killOrphanPids() {
 
 // Pending /bind flows: waiting for user to pick a directory
 const pendingBinds = new Map(); // chatId -> agentName
+
+// Pending /agent new 多步向导状态机
+// chatId -> { step: 'dir'|'name'|'desc', dir: string, name: string }
+const pendingAgentFlows = new Map();
 
 // Message queue for messages received while a task is running
 const messageQueue = new Map(); // chatId -> { messages: string[], notified: false }
