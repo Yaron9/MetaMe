@@ -51,13 +51,22 @@ function createBot(config) {
       return msgId ? { message_id: msgId } : null;
     },
 
+    _editBroken: false, // Set to true if patch API consistently fails
     async editMessage(chatId, messageId, text) {
+      if (this._editBroken) return false;
       try {
         await client.im.message.patch({
           path: { message_id: messageId },
           data: { content: JSON.stringify({ text }) },
         });
-      } catch { /* non-fatal */ }
+        return true;
+      } catch (e) {
+        const code = e?.code || e?.response?.data?.code;
+        if (code === 230001 || code === 230002 || /permission|forbidden/i.test(String(e))) {
+          this._editBroken = true;
+        }
+        return false;
+      }
     },
 
     /**
@@ -69,13 +78,12 @@ function createBot(config) {
         .replace(/^(#{1,3})\s+(.+)$/gm, '**$2**')   // headers → bold
         .replace(/^---+$/gm, '─────────────────────');  // hr → unicode line
 
-      // Split into chunks if too long (lark_md element limit ~4000 chars)
+      // Split into chunks if too long (element limit ~4000 chars)
       const MAX_CHUNK = 3800;
       const chunks = [];
       if (content.length <= MAX_CHUNK) {
         chunks.push(content);
       } else {
-        // Split on double newlines to avoid breaking mid-paragraph
         const paragraphs = content.split(/\n\n/);
         let buf = '';
         for (const p of paragraphs) {
@@ -89,14 +97,16 @@ function createBot(config) {
         if (buf) chunks.push(buf);
       }
 
+      // V2 schema: markdown element with normal text size
       const elements = chunks.map(c => ({
-        tag: 'div',
-        text: { tag: 'lark_md', content: c },
+        tag: 'markdown',
+        content: c,
+        text_size: 'x-large',
       }));
 
       const card = {
-        config: { wide_screen_mode: true },
-        elements,
+        schema: '2.0',
+        body: { elements },
       };
 
       const res = await client.im.message.create({
@@ -119,11 +129,56 @@ function createBot(config) {
      * @param {string} color - header color: blue|orange|green|red|grey|purple|turquoise
      */
     async sendCard(chatId, { title, body, color = 'blue' }) {
-      const elements = body ? [{ tag: 'div', text: { tag: 'lark_md', content: body } }] : [];
+      // Use card schema V2 for better text sizing
+      if (!body) {
+        const card = {
+          schema: '2.0',
+          header: { title: { tag: 'plain_text', content: title }, template: color },
+          body: { elements: [] },
+        };
+        const res = await client.im.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
+        });
+        const msgId = res?.data?.message_id;
+        return msgId ? { message_id: msgId } : null;
+      }
+
+      // Convert standard markdown → lark_md
+      let content = body
+        .replace(/^(#{1,3})\s+(.+)$/gm, '**$2**')
+        .replace(/^---+$/gm, '─────────────────────');
+
+      // Split into chunks (lark_md element limit ~4000 chars)
+      const MAX_CHUNK = 3800;
+      const chunks = [];
+      if (content.length <= MAX_CHUNK) {
+        chunks.push(content);
+      } else {
+        const paragraphs = content.split(/\n\n/);
+        let buf = '';
+        for (const p of paragraphs) {
+          if (buf.length + p.length + 2 > MAX_CHUNK && buf) {
+            chunks.push(buf);
+            buf = p;
+          } else {
+            buf = buf ? buf + '\n\n' + p : p;
+          }
+        }
+        if (buf) chunks.push(buf);
+      }
+
+      // V2: use markdown element with text_size for readable font
+      const elements = chunks.map(c => ({
+        tag: 'markdown',
+        content: c,
+        text_size: 'x-large',
+      }));
+
       const card = {
-        config: { wide_screen_mode: true },
+        schema: '2.0',
         header: { title: { tag: 'plain_text', content: title }, template: color },
-        elements,
+        body: { elements },
       };
       const res = await client.im.message.create({
         params: { receive_id_type: 'chat_id' },
@@ -131,6 +186,15 @@ function createBot(config) {
       });
       const msgId = res?.data?.message_id;
       return msgId ? { message_id: msgId } : null;
+    },
+
+    /**
+     * Delete a message by ID
+     */
+    async deleteMessage(chatId, messageId) {
+      try {
+        await client.im.message.delete({ path: { message_id: messageId } });
+      } catch { /* non-fatal — message may already be deleted or expired */ }
     },
 
     /**

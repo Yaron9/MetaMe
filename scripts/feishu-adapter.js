@@ -101,7 +101,7 @@ function createBot(config) {
       const elements = chunks.map(c => ({
         tag: 'markdown',
         content: c,
-        text_size: 'normal',
+        text_size: 'x-large',
       }));
 
       const card = {
@@ -172,7 +172,7 @@ function createBot(config) {
       const elements = chunks.map(c => ({
         tag: 'markdown',
         content: c,
-        text_size: 'normal',
+        text_size: 'x-large',
       }));
 
       const card = {
