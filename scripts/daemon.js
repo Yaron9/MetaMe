@@ -533,6 +533,7 @@ function startHeartbeat(config, notifyFn) {
   const now = Date.now();
   const state = loadState();
 
+  let newTaskIndex = 0;
   for (const task of enabledTasks) {
     const intervalSec = parseInterval(task.interval);
     const lastRun = state.tasks[task.name] && state.tasks[task.name].last_run;
@@ -540,8 +541,10 @@ function startHeartbeat(config, notifyFn) {
       const elapsed = (now - new Date(lastRun).getTime()) / 1000;
       nextRun[task.name] = now + Math.max(0, (intervalSec - elapsed)) * 1000;
     } else {
-      // First run: execute after one check interval
-      nextRun[task.name] = now + checkIntervalSec * 1000;
+      // First run: stagger new tasks to avoid thundering herd
+      // Each new task waits an additional check interval beyond the first
+      newTaskIndex++;
+      nextRun[task.name] = now + checkIntervalSec * 1000 * newTaskIndex;
     }
   }
 
@@ -3672,20 +3675,24 @@ async function main() {
   let telegramBridge = null;
   let feishuBridge = null;
 
-  // Notification function (sends to all enabled channels)
-  // project: optional { key, name, color, icon } — triggers colored card on Feishu
+  // Notification function
+  // project: optional { key, name, color, icon } — sends to that project's specific chat only
+  // If no project, sends to ALL allowed_chat_ids (use adminNotifyFn for system-only messages)
   const notifyFn = async (message, project = null) => {
-    if (telegramBridge && telegramBridge.bot) {
-      const tgIds = (config.telegram && config.telegram.allowed_chat_ids) || [];
-      for (const chatId of tgIds) {
-        try { await telegramBridge.bot.sendMarkdown(chatId, message); } catch (e) {
-          log('ERROR', `Telegram notify failed ${chatId}: ${e.message}`);
-        }
-      }
-    }
     if (feishuBridge && feishuBridge.bot) {
+      // If a project is specified, only notify chats mapped to that project
+      const chatAgentMap = (config.feishu && config.feishu.chat_agent_map) || {};
       const fsIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
-      for (const chatId of fsIds) {
+      let targetIds;
+      if (project) {
+        // Send only to chats belonging to this project
+        targetIds = fsIds.filter(id => chatAgentMap[id] === project.key);
+        // Fallback: if no mapped chat found, send to first chat (admin)
+        if (targetIds.length === 0) targetIds = fsIds.slice(0, 1);
+      } else {
+        targetIds = fsIds;
+      }
+      for (const chatId of targetIds) {
         try {
           if (project && feishuBridge.bot.sendCard) {
             await feishuBridge.bot.sendCard(chatId, {
@@ -3698,6 +3705,27 @@ async function main() {
           }
         } catch (e) {
           log('ERROR', `Feishu notify failed ${chatId}: ${e.message}`);
+        }
+      }
+    }
+    if (telegramBridge && telegramBridge.bot) {
+      const tgIds = (config.telegram && config.telegram.allowed_chat_ids) || [];
+      for (const chatId of tgIds) {
+        try { await telegramBridge.bot.sendMarkdown(chatId, message); } catch (e) {
+          log('ERROR', `Telegram notify failed ${chatId}: ${e.message}`);
+        }
+      }
+    }
+  };
+
+  // Admin-only notify: system messages sent only to the primary (first) chat
+  const adminNotifyFn = async (message) => {
+    if (feishuBridge && feishuBridge.bot) {
+      const fsIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
+      const adminId = fsIds[0];
+      if (adminId) {
+        try { await feishuBridge.bot.sendMessage(adminId, message); } catch (e) {
+          log('ERROR', `Feishu admin notify failed ${adminId}: ${e.message}`);
         }
       }
     }
@@ -3734,7 +3762,7 @@ async function main() {
       const r = reloadConfig();
       if (r.success) {
         log('INFO', `Auto-reload OK: ${r.tasks} tasks`);
-        notifyFn(`🔄 Config auto-reloaded. ${r.tasks} heartbeat tasks active.`).catch(() => { });
+        adminNotifyFn(`🔄 Config auto-reloaded. ${r.tasks} heartbeat tasks active.`).catch(() => { });
       } else {
         log('ERROR', `Auto-reload failed: ${r.error}`);
       }
@@ -3780,7 +3808,7 @@ async function main() {
 
   // Notify once on startup (single message, no duplicates)
   await sleep(1500); // Let polling settle
-  await notifyFn('✅ Daemon ready.').catch(() => { });
+  await adminNotifyFn('✅ Daemon ready.').catch(() => { });
 
   // Graceful shutdown
   const shutdown = () => {
