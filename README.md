@@ -54,6 +54,9 @@
 * **🏥 Emergency Recovery (v1.3.13):** `/doctor` interactive diagnostics with one-tap fix buttons, `/sh` direct shell access from your phone (bypasses Claude entirely — the lifeline when everything else is broken), automatic config backup before any setting change, `/fix` to restore last known good config. `/model` interactive model switcher with auto-backup.
 * **🌐 Browser Automation (v1.3.15):** Native Playwright MCP integration — auto-registered on first run. Every MetaMe user gets browser control capability out of the box. Combined with Skills, enables workflows like automated podcast publishing, form filling, and web scraping.
 * **📂 Interactive File Browser (v1.3.15):** `/list` shows clickable button cards — folders expand inline, files download on tap. Folder buttons survive daemon restarts (absolute paths, no expiry). Zero token cost.
+* **🔀 Parallel Multi-Agent Chats (v1.3.19):** Assign each agent its own dedicated Feishu/Telegram group. Messages in different groups execute in parallel — no waiting for each other. Route `chatId → agent` via `chat_agent_map` in `daemon.yaml`. Create a new group, send `/bind <name>` to register it instantly.
+* **🔧 Config Hot-Reload Fix (v1.3.19):** `allowed_chat_ids` is now read dynamically on every message — no restart needed after editing `daemon.yaml`. `/fix` config restore now merges current `chatId` settings so manually-added groups are never lost.
+* **🛡️ Daemon Auto-Restart via LaunchAgent (v1.3.19):** MetaMe's npm daemon is now managed by macOS launchd. Crashes or unexpected exits trigger an automatic restart after 5 seconds.
 
 ## 🛠 Prerequisites
 
@@ -341,6 +344,8 @@ Bot: 回退到哪一轮？
 | `/budget` | Today's token usage |
 | `/quiet` | Silence mirror/reflections for 48h |
 | `/reload` | Manually reload daemon.yaml (also auto-reloads on file change) |
+| `/bind <name>` | Register current group as a dedicated agent chat — opens directory browser to pick working directory |
+| `/chatid` | Show the current group's chat ID |
 
 **Heartbeat Tasks:**
 
@@ -445,6 +450,54 @@ projects:
 - Nickname + content → switch then send content to Claude
 
 **Heartbeat task notifications** arrive as colored Feishu cards — each project's color is distinct, so you can tell at a glance which agent sent the update.
+
+### Parallel Multi-Agent Chats & `/bind` Command (v1.3.19)
+
+Give each agent its own dedicated group chat — messages to different groups execute simultaneously without blocking each other.
+
+**How it works:**
+
+Each group is mapped to a specific agent via `chat_agent_map` in `daemon.yaml`. When a message arrives in a group, the daemon looks up which agent owns that `chatId` and dispatches the Claude call to that agent's working directory — fully parallel.
+
+**Setup — `/bind` command (recommended):**
+
+1. Create a new Feishu or Telegram group and add your bot.
+2. In the group, send `/bind <name>` (e.g., `/bind backend`).
+3. The bot opens a Finder-style directory browser — tap folders to navigate, tap a folder name to select it as the working directory.
+4. Done. The bot automatically:
+   - Adds the group's `chatId` to `allowed_chat_ids`
+   - Creates a `chat_agent_map` entry routing this group to the agent
+   - Creates a `projects` entry for the agent
+   - Sends a welcome card
+
+> **No whitelist required:** `/bind` works in any group — the new group self-registers without needing to be pre-approved in `allowed_chat_ids`.
+
+> **Re-binding:** Send `/bind <name>` again in the same group to overwrite the previous configuration.
+
+**Manual setup** (`~/.metame/daemon.yaml`):
+
+```yaml
+chat_agent_map:
+  "oc_abc123": "backend"          # chatId → project key
+  "oc_def456": "frontend"
+
+projects:
+  backend:
+    name: "Backend API"
+    cwd: "~/projects/api"
+  frontend:
+    name: "Frontend App"
+    cwd: "~/projects/app"
+```
+
+**`/chatid` command:**
+
+In any authorized group, send `/chatid` and the bot replies with the current group's `chatId`. Useful for manual configuration.
+
+| Command | Description |
+|---------|-------------|
+| `/bind <name>` | Register current group as a dedicated agent chat — opens directory browser to pick working directory |
+| `/chatid` | Show the current group's chat ID |
 
 ### Provider Relay — Third-Party Model Support (v1.3.11)
 
@@ -649,6 +702,7 @@ A: No. Your profile stays local at `~/.claude_profile.yaml`. MetaMe simply passe
 
 | Version | Highlights |
 |---------|------------|
+| **v1.3.19** | **Parallel multi-agent group chats** — `chat_agent_map` routes chatId → agent for true parallel execution; `/bind` command for one-tap group registration with directory browser; `/chatid` to look up group ID; `allowed_chat_ids` hot-reload fix (read per message, no restart); `/fix` now merges current chatId config; daemon auto-restart via macOS LaunchAgent (5-second recovery) |
 | **v1.3.18** | **Multi-agent project isolation** — `projects` in `daemon.yaml` with per-project heartbeat tasks, Feishu colored cards per project, `/agent` picker button, nickname routing (say agent name to switch instantly), reply-to-message session restoration, fix `~` expansion in project cwd |
 | **v1.3.17** | **Windows support** (WSL one-command installer), `install-systemd` for Linux/WSL daemon auto-start. Fix onboarding (Genesis interview was never injected, CLAUDE.md accumulated across runs). Marker-based cleanup, unified protocols, `--append-system-prompt` guarantees interview activation, Feishu auto-fetch chat ID, full mobile permissions, fix `/publish` false-success, auto-restart daemon on script update |
 | **v1.3.16** | Git-based `/undo` (auto-checkpoint before each turn, `git reset --hard` rollback), `/nosleep` toggle (macOS caffeinate), custom provider model passthrough (`/model` accepts any name for non-anthropic providers), auto-fallback to anthropic/opus on provider failure, message queue works on Telegram (fire-and-forget poll loop), lazy background distill |
