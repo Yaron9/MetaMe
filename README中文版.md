@@ -57,6 +57,7 @@
 * **🔀 多 Agent 专属群并行执行 (v1.3.19)：** 为每个 Agent 创建独立飞书/Telegram 群，不同群同时发消息真正并行执行、互不等待。通过 `daemon.yaml` 中的 `chat_agent_map` 配置 chatId → Agent 路由。新建群后发 `/bind <名称>` 即可一键完成全部配置。
 * **🔧 配置热重载修复 (v1.3.19)：** `allowed_chat_ids` 改为每条消息动态读取——修改 `daemon.yaml` 后立即生效，无需重启。`/fix` 恢复备份时自动合并当前 chatId 配置，不再丢失手动添加的群组。
 * **🛡️ Daemon 自动保活 LaunchAgent (v1.3.19)：** MetaMe npm daemon 现在由 macOS launchd 管理，崩溃或意外退出后 5 秒自动重启。
+* **👥 Operator 权限 & 只读聊天模式 (v1.3.19)：** 在共享群（如有同事或测试用户）中，通过 `operator_ids` 限制哪些用户能执行 Claude 命令。非 operator 可以正常聊天和查询（读取/搜索/网页），但不能编辑文件、执行 bash 或触发斜杠命令。用 `/myid` 获取任意飞书用户的 open_id。
 
 ## 🛠 前置要求
 
@@ -311,6 +312,7 @@ Bot: 回退到哪一轮？
 | `/reload` | 手动重载 daemon.yaml（文件变化时也会自动重载） |
 | `/bind <名称>` | 将当前群注册为专属 Agent 群，弹出目录浏览器选择工作目录 |
 | `/chatid` | 显示当前群的 chatId |
+| `/myid` | 显示你自己的飞书 sender open_id（用于配置 `operator_ids`） |
 
 **心跳任务：**
 
@@ -364,8 +366,9 @@ heartbeat:
 
 **安全模型：**
 
-* `allowed_chat_ids` 白名单——未授权用户静默忽略
-* 不使用 `--dangerously-skip-permissions`——标准 `-p` 模式权限
+* `allowed_chat_ids` 白名单——未授权用户静默忽略（空列表 = 拒绝所有）
+* `operator_ids`——在已授权群内，限制命令执行权限到特定用户；非 operator 进入只读聊天模式
+* 手机端默认开启 `dangerously_skip_permissions`（手机无法点击「允许」，安全靠 chatId 白名单保证）
 * `~/.metame/` 目录权限 700
 * Bot token 仅存本地，不外传
 
@@ -416,6 +419,26 @@ projects:
 |------|------|
 | `/bind <名称>` | 将当前群注册为专属 Agent 群——弹出目录浏览器选择工作目录 |
 | `/chatid` | 显示当前群的 chatId |
+| `/myid` | 显示你的飞书 open_id |
+
+**Operator 权限管理（`operator_ids`）：**
+
+在有多个用户的共享群中（例如带测试用户的群），可以限制哪些人能执行 Claude 命令。非 operator 进入只读聊天模式——可以提问和查询，但不能编辑文件、跑 bash 或触发斜杠命令。
+
+```yaml
+feishu:
+  operator_ids:
+    - "ou_abc123yourid"   # 只有这些用户可以执行命令
+```
+
+用 `/myid` 在飞书群中获取某用户的 open_id，加入 `operator_ids` 即授予完整执行权限。
+
+| 用户类型 | 聊天 & 查询 | 斜杠命令 | 写 / 改 / 执行 |
+|---------|:---:|:---:|:---:|
+| Operator | ✅ | ✅ | ✅ |
+| 非 Operator | ✅ | ❌ | ❌ |
+
+> 若 `operator_ids` 为空，所有白名单用户均有完整执行权限（默认行为）。
 
 ### 第三方模型中继 — Provider Relay (v1.3.11)
 
@@ -602,7 +625,7 @@ A: 不会。你的档案只保存在本地的 `~/.claude_profile.yaml` 中。Met
 
 | 版本 | 主要更新 |
 |------|----------|
-| **v1.3.19** | **多 Agent 专属群并行执行** — `chat_agent_map` 配置 chatId → Agent 路由，真正并行；`/bind` 一键注册专属群（含目录浏览器）；`/chatid` 查询群 ID；`allowed_chat_ids` 热重载修复（每条消息动态读取，无需重启）；`/fix` 自动合并当前 chatId 配置；Daemon 由 macOS LaunchAgent 管理，5 秒自动保活 |
+| **v1.3.19** | **多 Agent 专属群并行执行** — `chat_agent_map` 配置 chatId → Agent 路由，真正并行；`/bind` 一键注册专属群（含 Finder 风格目录浏览器）；`/chatid` 查询群 ID；`allowed_chat_ids` 热重载修复（每条消息动态读取，无需重启）；`/fix` 自动合并当前 chatId 配置；Daemon 由 macOS LaunchAgent 管理，5 秒自动保活；**operator_ids** 权限层——非 operator 进入只读聊天模式（可查询，不可写/执行）；`/myid` 获取飞书 open_id |
 | **v1.3.18** | **多 Agent 项目隔离** — `daemon.yaml` 支持 `projects` 配置，每项目独立心跳任务、飞书彩色卡片、`/agent` 选择器按钮、昵称路由（说 Agent 名字即切换）、回复消息自动恢复会话、修复项目 cwd 中 `~` 展开 |
 | **v1.3.15** | 原生 Playwright MCP（浏览器自动化）、`/list` 交互式文件浏览器、飞书图片下载修复、Skill/MCP/Agent 状态推送、热重启可靠性优化 |
 | **v1.3.14** | 修复全新安装时 daemon 崩溃（缺少打包脚本） |
