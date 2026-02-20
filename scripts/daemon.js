@@ -2520,6 +2520,8 @@ function spawnClaudeAsync(args, input, cwd, timeoutMs = 300000) {
     const timer = setTimeout(() => {
       killed = true;
       child.kill('SIGTERM');
+      // Fix: escalate to SIGKILL if SIGTERM is ignored
+      setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 5000);
     }, timeoutMs);
 
     child.stdout.on('data', (data) => { stdout += data.toString(); });
@@ -2579,6 +2581,31 @@ const CONTENT_EXTENSIONS = new Set([
 
 // Active Claude processes per chat (for /stop)
 const activeProcesses = new Map(); // chatId -> { child, aborted }
+
+// Fix3: persist child PIDs so next daemon startup can kill orphans
+const ACTIVE_PIDS_FILE = path.join(HOME, '.metame', 'active_claude_pids.json');
+function saveActivePids() {
+  try {
+    const pids = {};
+    for (const [chatId, proc] of activeProcesses) {
+      if (proc.child && proc.child.pid) pids[chatId] = proc.child.pid;
+    }
+    fs.writeFileSync(ACTIVE_PIDS_FILE, JSON.stringify(pids), 'utf8');
+  } catch {}
+}
+function killOrphanPids() {
+  try {
+    if (!fs.existsSync(ACTIVE_PIDS_FILE)) return;
+    const pids = JSON.parse(fs.readFileSync(ACTIVE_PIDS_FILE, 'utf8'));
+    for (const [chatId, pid] of Object.entries(pids)) {
+      try {
+        process.kill(pid, 'SIGKILL');
+        log('INFO', `Killed orphan claude PID ${pid} (chatId: ${chatId})`);
+      } catch {}
+    }
+    fs.unlinkSync(ACTIVE_PIDS_FILE);
+  } catch {}
+}
 
 // Pending /bind flows: waiting for user to pick a directory
 const pendingBinds = new Map(); // chatId -> agentName
@@ -2694,6 +2721,7 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
     // Track active process for /stop
     if (chatId) {
       activeProcesses.set(chatId, { child, aborted: false });
+      saveActivePids(); // Fix3: persist PID to disk
     }
 
     let buffer = '';
@@ -2707,6 +2735,8 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
     const timer = setTimeout(() => {
       killed = true;
       child.kill('SIGTERM');
+      // Fix: escalate to SIGKILL if SIGTERM is ignored
+      setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 5000);
     }, timeoutMs);
 
     child.stdout.on('data', (data) => {
@@ -2834,7 +2864,7 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
       // Clean up active process tracking
       const proc = chatId ? activeProcesses.get(chatId) : null;
       const wasAborted = proc && proc.aborted;
-      if (chatId) activeProcesses.delete(chatId);
+      if (chatId) { activeProcesses.delete(chatId); saveActivePids(); } // Fix3
 
       if (wasAborted) {
         resolve({ output: finalResult || null, error: 'Stopped by user', files: writtenFiles });
@@ -2849,7 +2879,7 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
 
     child.on('error', (err) => {
       clearTimeout(timer);
-      if (chatId) activeProcesses.delete(chatId);
+      if (chatId) { activeProcesses.delete(chatId); saveActivePids(); } // Fix3
       resolve({ output: null, error: err.message, files: [] });
     });
 
@@ -3346,6 +3376,7 @@ async function main() {
   saveState(state);
 
   log('INFO', `MetaMe daemon started (PID: ${process.pid})`);
+  killOrphanPids(); // Fix3: kill any claude processes left by previous daemon
 
   // Task executor lookup (always reads fresh config)
   function executeTaskByName(name) {
@@ -3466,6 +3497,13 @@ async function main() {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (telegramBridge) telegramBridge.stop();
     if (feishuBridge) feishuBridge.stop();
+    // Fix1: kill all tracked claude child processes before exiting
+    for (const [cid, proc] of activeProcesses) {
+      try { proc.child.kill('SIGKILL'); } catch {}
+      log('INFO', `Shutdown: killed claude child for chatId ${cid}`);
+    }
+    activeProcesses.clear();
+    try { if (fs.existsSync(ACTIVE_PIDS_FILE)) fs.unlinkSync(ACTIVE_PIDS_FILE); } catch {}
     cleanPid();
     const s = loadState();
     s.pid = null;
