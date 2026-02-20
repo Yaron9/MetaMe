@@ -3228,7 +3228,8 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
   }
 
   // Skill routing: detect skill first, then decide session
-  const skill = routeSkill(prompt);
+  // BUT: if agent was explicitly addressed by nickname, don't let skill routing hijack the session
+  const skill = agentMatch ? null : routeSkill(prompt);
 
   // Skills with dedicated pinned sessions (reused across days, no re-injection needed)
   const PINNED_SKILL_SESSIONS = new Set(['macos-mail-calendar', 'skill-manager']);
