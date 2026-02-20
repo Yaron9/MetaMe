@@ -2348,9 +2348,16 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     const arg = text.slice(5).trim();
 
     // Git-based undo: list checkpoints or reset to one
-    const checkpoints = listCheckpoints(cwd);
+    // First check if cwd is even a git repo
+    let isGitRepo = false;
+    try { execSync('git rev-parse --is-inside-work-tree', { cwd, stdio: 'ignore', timeout: 3000 }); isGitRepo = true; } catch { }
+    const checkpoints = isGitRepo ? listCheckpoints(cwd) : [];
+    if (!isGitRepo) {
+      await bot.sendMessage(chatId, `⚠️ 当前项目不在 git 仓库中，无法使用 /undo\n📁 ${cwd}\n\n切换到 git 项目后重试（/bind 切换项目）`);
+      return;
+    }
     if (checkpoints.length === 0) {
-      await bot.sendMessage(chatId, '⚠️ 没有可用的回退点（无 checkpoint commit）');
+      await bot.sendMessage(chatId, `⚠️ 还没有回退点\n📁 ${path.basename(cwd)}\n\nCheckpoint 在 Claude 修改文件前自动创建，先让 Claude 做点改动再试`);
       return;
     }
 
@@ -3327,7 +3334,7 @@ function gitCheckpoint(cwd) {
 function listCheckpoints(cwd, limit = 20) {
   try {
     const raw = execSync(
-      `git log --oneline --all --grep="${CHECKPOINT_PREFIX}" -n ${limit} --format="%H %s"`,
+      `git log --fixed-strings --oneline --all --grep="${CHECKPOINT_PREFIX}" -n ${limit} --format="%H %s"`,
       { cwd, encoding: 'utf8', timeout: 5000 }
     ).trim();
     if (!raw) return [];
@@ -4159,9 +4166,20 @@ async function main() {
   };
 
   // Inbox message handler: called by physiological heartbeat when messages arrive
+  // Safe notify: only notify if the project has a mapped Feishu chat, skip otherwise
+  const projectNotifyFn = (message, projObj) => {
+    const chatAgentMap = (config.feishu && config.feishu.chat_agent_map) || {};
+    const fsIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
+    const hasMappedChat = fsIds.some(id => chatAgentMap[id] === projObj.key);
+    if (hasMappedChat) notifyFn(message, projObj).catch(() => {});
+    else log('INFO', `No Feishu chat mapped for project ${projObj.key}, skipping notify`);
+  };
+
   const processInboxMessage = (projectKey, proj, msg) => {
+    const projObj = { key: projectKey, name: proj.name || projectKey, color: proj.color || 'blue', icon: proj.icon || '🤖' };
+
     if (msg.type === 'task') {
-      // Build a temporary task and execute via existing executeTask()
+      // Build a temporary task and execute via existing executeTask() (now async → returns Promise)
       const task = {
         name: `dispatch-${msg.id}`,
         prompt: msg.payload.prompt || msg.payload.title || 'No prompt provided',
@@ -4170,42 +4188,42 @@ async function main() {
         cwd: proj.cwd ? proj.cwd.replace(/^~/, HOME) : undefined,
         allowedTools: msg.payload.allowedTools || (config.daemon && config.daemon.session_allowed_tools) || [],
         enabled: true,
-        _project: { key: projectKey, name: proj.name || projectKey, color: proj.color || 'blue', icon: proj.icon || '🤖' },
+        _project: projObj,
       };
-      const result = executeTask(task, config);
-      log('INFO', `Dispatch task ${msg.id} result: ${result.success ? 'OK' : 'FAIL'}`);
 
-      // Notify the target project's chat
-      const projObj = task._project;
-      if (result.success && !result.skipped) {
-        notifyFn(`📬 *来自 ${msg.from}* 的任务已完成\n\n${result.output.slice(0, 500)}`, projObj);
-      } else if (!result.success) {
-        notifyFn(`📬 *来自 ${msg.from}* 的任务失败: ${result.error}`, projObj);
-      }
+      Promise.resolve(executeTask(task, config)).then(result => {
+        log('INFO', `Dispatch task ${msg.id} result: ${result.success ? 'OK' : 'FAIL'}`);
 
-      // Callback to sender
-      if (msg.callback && msg.from) {
-        dispatchTask(msg.from, {
-          from: projectKey,
-          type: 'callback',
-          priority: 'normal',
-          payload: {
-            title: `任务完成: ${msg.payload.title || msg.id}`,
-            original_id: msg.id,
-            success: result.success,
-            output: (result.output || '').slice(0, 500),
-          },
-          chain: msg.chain || [],
-        });
-      }
+        // Notify the target project's chat
+        if (result.success && !result.skipped) {
+          projectNotifyFn(`📬 *来自 ${msg.from}* 的任务已完成\n\n${(result.output || '').slice(0, 500)}`, projObj);
+        } else if (!result.success) {
+          projectNotifyFn(`📬 *来自 ${msg.from}* 的任务失败: ${result.error}`, projObj);
+        }
+
+        // Callback to sender — use empty chain to bypass cycle detection for callbacks
+        if (msg.callback && msg.from) {
+          dispatchTask(msg.from, {
+            from: projectKey,
+            type: 'callback',
+            priority: 'normal',
+            payload: {
+              title: `任务完成: ${msg.payload.title || msg.id}`,
+              original_id: msg.id,
+              success: result.success,
+              output: (result.output || '').slice(0, 500),
+            },
+            chain: [], // reset chain for callbacks — they're responses, not forwards
+          });
+        }
+      }).catch(e => {
+        log('ERROR', `Dispatch task ${msg.id} threw: ${e.message}`);
+      });
+
     } else if (msg.type === 'callback') {
-      // Notify the project's chat about callback
-      const projObj = { key: projectKey, name: proj.name || projectKey, color: proj.color || 'blue', icon: proj.icon || '🤖' };
-      notifyFn(`✅ *${msg.from}* 回报: ${msg.payload.title || '任务完成'}`, projObj);
+      projectNotifyFn(`✅ *${msg.from}* 回报: ${msg.payload.title || '任务完成'}`, projObj);
     } else if (msg.type === 'message') {
-      // Just log and notify, no execution
-      const projObj = { key: projectKey, name: proj.name || projectKey, color: proj.color || 'blue', icon: proj.icon || '🤖' };
-      notifyFn(`💬 *${msg.from}*: ${msg.payload.text || msg.payload.title || '(empty)'}`, projObj);
+      projectNotifyFn(`💬 *${msg.from}*: ${msg.payload.text || msg.payload.title || '(empty)'}`, projObj);
     }
   };
 
