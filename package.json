@@ -1,6 +1,6 @@
 {
     "name": "metame-cli",
-    "version": "1.3.21",
+    "version": "1.3.22",
     "description": "The Cognitive Profile Layer for Claude Code. Knows how you think, not just what you said.",
     "main": "index.js",
     "bin": {
