@@ -928,7 +928,7 @@ async function doBindAgent(bot, chatId, agentName, agentCwd) {
   }
 }
 
-async function handleCommand(bot, chatId, text, config, executeTaskByName, senderId = null) {
+async function handleCommand(bot, chatId, text, config, executeTaskByName, senderId = null, readOnly = false) {
   const state = loadState();
 
   // --- /chatid: reply with current chatId ---
@@ -2927,7 +2927,11 @@ async function askClaude(bot, chatId, prompt, config) {
   const daemonCfg = loadConfig().daemon || {};
   const model = daemonCfg.model || 'opus';
   args.push('--model', model);
-  if (daemonCfg.dangerously_skip_permissions) {
+  if (readOnly) {
+    // Read-only mode for non-operator users: query/chat only, no write/edit/execute
+    const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Task'];
+    for (const tool of READ_ONLY_TOOLS) args.push('--allowedTools', tool);
+  } else if (daemonCfg.dangerously_skip_permissions) {
     args.push('--dangerously-skip-permissions');
   } else {
     const sessionAllowed = daemonCfg.session_allowed_tools || [];
@@ -3172,19 +3176,19 @@ async function startFeishuBridge(config, executeTaskByName) {
         return;
       }
 
-      // Operator check: if operator_ids configured, non-operators get feedback-only mode
+      // Operator check: if operator_ids configured, non-operators get read-only chat mode
       const operatorIds = (liveCfg.feishu && liveCfg.feishu.operator_ids) || [];
       if (operatorIds.length > 0 && senderId && !operatorIds.includes(senderId) && !isBindCmd) {
-        log('INFO', `Feishu: feedback message from non-operator ${senderId} in ${chatId}: ${(text || '').slice(0, 50)}`);
-        // Forward feedback to operator chats and acknowledge
-        const feedback = `📨 反馈来自群「${chatId}」\n${text || '[文件]'}`;
-        const opAllowedIds = (liveCfg.feishu && liveCfg.feishu.allowed_chat_ids) || [];
-        for (const opChatId of opAllowedIds) {
-          if (opChatId !== chatId) {
-            try { await bot.sendMessage(opChatId, feedback); } catch {}
-          }
+        log('INFO', `Feishu: read-only message from non-operator ${senderId} in ${chatId}: ${(text || '').slice(0, 50)}`);
+        // Block slash commands for non-operators
+        if (text && text.startsWith('/')) {
+          await bot.sendMessage(chatId, '⚠️ 该操作需要授权，请联系管理员。');
+          return;
         }
-        await bot.sendMessage(chatId, '✅ 反馈已收到，感谢！');
+        // Allow read-only chat (query/answer only, no write/edit/execute)
+        if (text) {
+          await handleCommand(bot, chatId, text, config, executeTaskByName, senderId, true);
+        }
         return;
       }
 
