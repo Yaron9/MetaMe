@@ -883,6 +883,10 @@ async function sendDirListing(bot, chatId, baseDir, arg) {
  */
 
 async function doBindAgent(bot, chatId, agentName, agentCwd) {
+  // /bind sets the session context (cwd, CLAUDE.md, project configs) for this chat.
+  // The agent can still read/write any path on the machine — bind only defines
+  // which project directory Claude Code uses as its working directory.
+  // Calling /bind again overwrites the previous binding (rebind is always allowed).
   try {
     const cfg = loadConfig();
     const isTg = typeof chatId === 'number';
@@ -895,7 +899,8 @@ async function doBindAgent(bot, chatId, agentName, agentCwd) {
     const projectKey = agentName.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() || String(chatId);
     cfg[ak].chat_agent_map[String(chatId)] = projectKey;
     if (!cfg.projects) cfg.projects = {};
-    if (!cfg.projects[projectKey]) {
+    const isNew = !cfg.projects[projectKey];
+    if (isNew) {
       cfg.projects[projectKey] = { name: agentName, cwd: agentCwd, nicknames: [agentName] };
     } else {
       cfg.projects[projectKey].name = agentName;
@@ -904,7 +909,21 @@ async function doBindAgent(bot, chatId, agentName, agentCwd) {
     fs.writeFileSync(CONFIG_FILE, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
     backupConfig();
     config = loadConfig();
-    await bot.sendMessage(chatId, `✅ 已绑定\n名称: ${agentName}\n目录: ${agentCwd}`);
+
+    const proj = cfg.projects[projectKey];
+    const icon = proj.icon || '🤖';
+    const color = proj.color || 'blue';
+    const action = isNew ? '绑定成功' : '重新绑定';
+    const displayCwd = agentCwd.replace(HOME, '~');
+    if (bot.sendCard) {
+      await bot.sendCard(chatId, {
+        title: `${icon} ${agentName} — ${action}`,
+        body: `**工作目录**\n${displayCwd}\n\n直接发消息即可开始对话，无需 @bot`,
+        color,
+      });
+    } else {
+      await bot.sendMessage(chatId, `${icon} ${agentName} ${action}\n目录: ${displayCwd}`);
+    }
   } catch (e) {
     await bot.sendMessage(chatId, `❌ 绑定失败: ${e.message}`);
   }
