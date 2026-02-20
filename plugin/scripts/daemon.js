@@ -2363,18 +2363,15 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       // /undo (no arg) — show recent checkpoints to pick from
       const recent = checkpoints.slice(0, 6); // newest first (already sorted)
       if (bot.sendButtons) {
-        const buttons = recent.map((cp, idx) => {
-          // Extract timestamp from message: "[metame-checkpoint] 2026-02-08T12-34-56"
-          const ts = cp.message.replace(CHECKPOINT_PREFIX, '').trim();
-          const label = ts || cp.hash.slice(0, 8);
+        const buttons = recent.map((cp) => {
+          const label = cpDisplayLabel(cp.message);
           return [{ text: `⏪ ${label}`, callback_data: `/undo ${cp.hash.slice(0, 10)}` }];
         });
         await bot.sendButtons(chatId, `📌 ${checkpoints.length} 个回退点 (git checkpoint):`, buttons);
       } else {
         let msg = '回退到哪个点？回复 /undo <hash>\n\n';
         recent.forEach(cp => {
-          const ts = cp.message.replace(CHECKPOINT_PREFIX, '').trim();
-          msg += `${cp.hash.slice(0, 8)} ${ts}\n`;
+          msg += `${cp.hash.slice(0, 8)} ${cpDisplayLabel(cp.message)}\n`;
         });
         await bot.sendMessage(chatId, msg);
       }
@@ -2407,13 +2404,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
           const lines = fileContent.split('\n').filter(l => l.trim());
           // Find the last user message that was sent BEFORE this checkpoint
           // Use the checkpoint timestamp from the commit message
-          const cpTs = match.message.replace(CHECKPOINT_PREFIX, '').trim().replace(/-/g, (m, offset) => {
-            // Convert "2026-02-08T12-34-56" back to approximate ISO
-            if (offset === 4 || offset === 7) return '-'; // date separators
-            if (offset === 10) return 'T';
-            if (offset === 13 || offset === 16) return ':';
-            return m;
-          });
+          const cpTs = cpExtractTimestamp(match.message);
           const cpTime = new Date(cpTs).getTime();
           if (cpTime) {
             // Find the first user message AFTER checkpoint time → truncate before it
@@ -2444,8 +2435,8 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
 
       const fileList = diffFiles ? diffFiles.split('\n').map(f => path.basename(f)).join(', ') : '';
       const fileCount = diffFiles ? diffFiles.split('\n').length : 0;
-      const ts = match.message.replace(CHECKPOINT_PREFIX, '').trim();
-      let msg = `⏪ 已回退到 ${ts}\n🔀 git reset --hard ${match.hash.slice(0, 8)}`;
+      const label = cpDisplayLabel(match.message);
+      let msg = `⏪ 已回退\n📝 ${label}\n🔀 git reset --hard ${match.hash.slice(0, 8)}`;
       if (fileCount > 0) {
         msg += `\n📁 ${fileCount} 个文件恢复: ${fileList}`;
       }
@@ -3303,10 +3294,53 @@ const CHECKPOINT_PREFIX = '[metame-checkpoint]';
 const MAX_CHECKPOINTS = 20;
 
 /**
+ * Extract ISO timestamp string from a checkpoint commit message.
+ * Handles both formats:
+ *   old: "[metame-checkpoint] 2026-02-08T10-30-00"
+ *   new: "[metame-checkpoint] Before: xxx (2026-02-08T10-30-00)"
+ */
+function cpExtractTimestamp(message) {
+  // New format: timestamp in parens at end
+  const parenMatch = message.match(/\((\d{4}-\d{2}-\d{2}T[\d-]{8})\)$/);
+  if (parenMatch) {
+    return parenMatch[1].replace(/-/g, (m, offset) => {
+      if (offset === 4 || offset === 7) return '-';
+      if (offset === 10) return 'T';
+      if (offset === 13 || offset === 16) return ':';
+      return m;
+    });
+  }
+  // Old format: timestamp directly after prefix
+  const raw = message.replace(CHECKPOINT_PREFIX, '').trim();
+  return raw.replace(/-/g, (m, offset) => {
+    if (offset === 4 || offset === 7) return '-';
+    if (offset === 10) return 'T';
+    if (offset === 13 || offset === 16) return ':';
+    return m;
+  });
+}
+
+/**
+ * Human-readable display label for a checkpoint (for /undo list buttons).
+ * Shows "Before: <label> (HH:MM)" or just the timestamp.
+ */
+function cpDisplayLabel(message) {
+  // New format: "[metame-checkpoint] Before: xxx (2026-02-08T10-30-00)"
+  const newMatch = message.match(/Before:\s*(.+?)\s*\((\d{4}-\d{2}-\d{2}T([\d-]{8}))\)$/);
+  if (newMatch) {
+    const label = newMatch[1].slice(0, 30);
+    const time = newMatch[3].replace(/-/g, ':').slice(0, 5); // HH:MM
+    return `${label} (${time})`;
+  }
+  // Old format: just the timestamp
+  return message.replace(CHECKPOINT_PREFIX, '').trim();
+}
+
+/**
  * Create a git checkpoint commit before a Claude turn.
  * Returns the commit hash or null if nothing to commit / not a git repo.
  */
-function gitCheckpoint(cwd) {
+function gitCheckpoint(cwd, label) {
   try {
     // Quick check: is this a git repo?
     execSync('git rev-parse --is-inside-work-tree', { cwd, stdio: 'ignore' });
@@ -3316,10 +3350,14 @@ function gitCheckpoint(cwd) {
     const status = execSync('git status --porcelain', { cwd, encoding: 'utf8', timeout: 5000 }).trim();
     if (!status) return null; // Working tree clean, no checkpoint needed
     const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const msg = `${CHECKPOINT_PREFIX} ${ts}`;
+    // Include user prompt as label so /undo list is human-readable
+    const safeLabel = label
+      ? ' Before: ' + label.replace(/["\n\r]/g, ' ').slice(0, 60).trim()
+      : '';
+    const msg = `${CHECKPOINT_PREFIX}${safeLabel} (${ts})`;
     execSync(`git commit -m "${msg}" --no-verify`, { cwd, stdio: 'ignore', timeout: 10000 });
     const hash = execSync('git rev-parse HEAD', { cwd, encoding: 'utf8', timeout: 3000 }).trim();
-    log('INFO', `Git checkpoint: ${hash.slice(0, 8)} in ${path.basename(cwd)}`);
+    log('INFO', `Git checkpoint: ${hash.slice(0, 8)} in ${path.basename(cwd)}${safeLabel}`);
     return hash;
   } catch {
     return null; // Not a git repo or git error — silently skip
@@ -3739,7 +3777,8 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
   const fullPrompt = routedPrompt + daemonHint;
 
   // Git checkpoint before Claude modifies files (for /undo)
-  gitCheckpoint(session.cwd);
+  // Pass the user prompt as label so checkpoint list is human-readable
+  gitCheckpoint(session.cwd, prompt);
 
   // Use streaming mode to show progress
   // Telegram: edit status msg in-place; Feishu: edit or fallback to new messages
