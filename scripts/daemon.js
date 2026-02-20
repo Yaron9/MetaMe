@@ -3742,20 +3742,37 @@ async function main() {
   });
 
   // Auto-restart: watch daemon.js for code changes (hot restart)
+  // If Claude tasks are running, defer restart until they complete.
   const DAEMON_SCRIPT = path.join(METAME_DIR, 'daemon.js');
   const _startTime = Date.now();
   let _restartDebounce = null;
+  let _pendingRestart = false;
   fs.watchFile(DAEMON_SCRIPT, { interval: 3000 }, (curr, prev) => {
     if (curr.mtimeMs === prev.mtimeMs) return;
     // Ignore file changes within 10s of startup (avoids restart loop)
     if (Date.now() - _startTime < 10000) return;
     if (_restartDebounce) clearTimeout(_restartDebounce);
     _restartDebounce = setTimeout(() => {
-      log('INFO', 'daemon.js changed on disk — exiting for restart...');
-      // Don't notify here — the NEW process will notify after startup
-      process.exit(0);
+      if (activeProcesses.size > 0) {
+        // Active Claude tasks running — defer restart
+        log('INFO', `daemon.js changed on disk — deferring restart (${activeProcesses.size} active task(s))`);
+        _pendingRestart = true;
+      } else {
+        log('INFO', 'daemon.js changed on disk — exiting for restart...');
+        process.exit(0);
+      }
     }, 2000);
   });
+  // Hook: after every Claude task completes, check if restart is pending
+  const _origDelete = activeProcesses.delete.bind(activeProcesses);
+  activeProcesses.delete = function(key) {
+    const result = _origDelete(key);
+    if (_pendingRestart && activeProcesses.size === 0) {
+      log('INFO', 'All tasks completed — executing deferred restart...');
+      setTimeout(() => process.exit(0), 500);
+    }
+    return result;
+  };
 
   // Start bridges (both can run simultaneously)
   telegramBridge = await startTelegramBridge(config, executeTaskByName);
