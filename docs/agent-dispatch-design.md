@@ -211,40 +211,7 @@ const DISPATCH_LIMITS = {
 
 ---
 
-## 6. metame-desktop 特殊通道
-
-老马（metame-desktop）基于 OpenCode fork，已有 HTTP API：
-
-```bash
-POST http://localhost:4096/session/{id}/prompt
-```
-
-对 metame-desktop **可以同时支持两种通道**：
-- **inbox 文件**：通用方案，所有 agent 统一
-- **HTTP 直调**：低延迟方案，daemon 检测到目标是 desktop 时直接调 API
-
-```javascript
-async function dispatchToDesktop(message) {
-  // 优先 HTTP（零延迟）
-  try {
-    const resp = await fetch('http://localhost:4096/session', { method: 'POST' });
-    const session = await resp.json();
-    await fetch(`http://localhost:4096/session/${session.id}/prompt`, {
-      method: 'POST',
-      body: JSON.stringify({ parts: [{ type: 'text', text: message.payload.prompt }] })
-    });
-    return { success: true, channel: 'http' };
-  } catch {
-    // 降级到 inbox 文件
-    dispatchTask('desktop', message);
-    return { success: true, channel: 'inbox_fallback' };
-  }
-}
-```
-
----
-
-## 7. 实施计划
+## 6. 实施计划
 
 ### Phase 1：文件 inbox + heartbeat 扫描（最小可用）
 
@@ -263,15 +230,9 @@ async function dispatchToDesktop(message) {
 2. 飞书群内通知任务进度
 3. dispatch-log 可视化
 
-### Phase 3：metame-desktop HTTP 直调
-
-1. 检测 OpenCode server 是否运行
-2. 优先 HTTP，降级 inbox
-3. 双向：desktop 也能通过 inbox 给其他 agent 发任务
-
 ---
 
-## 8. 与飞书的关系
+## 7. 与飞书的关系
 
 **飞书仍然是人机接口，不是 agent-to-agent 接口。**
 
@@ -287,7 +248,7 @@ agent ←→ inbox 文件 ←→ agent（机机通道）
 
 ---
 
-## 9. 安全边界
+## 8. 安全边界
 
 | 操作 | 权限 |
 |------|------|
@@ -299,7 +260,7 @@ agent ←→ inbox 文件 ←→ agent（机机通道）
 
 ---
 
-## 10. 一句话总结
+## 9. 一句话总结
 
 **文件即通道，heartbeat 即调度，daemon 即总线。**
 
