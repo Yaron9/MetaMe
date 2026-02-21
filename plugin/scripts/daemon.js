@@ -3900,7 +3900,9 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
     try {
       const memory = require('./memory');
       const _cid = String(chatId);
-      const projectKey = chatAgentMap[_cid] || (_cid.startsWith('_agent_') ? _cid.slice(7) : null);
+      const _cfg = loadConfig();
+      const _agentMap = { ...(_cfg.telegram ? _cfg.telegram.chat_agent_map : {}), ...(_cfg.feishu ? _cfg.feishu.chat_agent_map : {}) };
+      const projectKey = _agentMap[_cid] || (_cid.startsWith('_agent_') ? _cid.slice(7) : null);
       const recent = memory.recentSessions({ limit: 3, project: projectKey || undefined });
       if (recent.length > 0) {
         const items = recent.map(r => `- [${r.created_at}] ${r.summary}${r.keywords ? ' (keywords: ' + r.keywords + ')' : ''}`).join('\n');
@@ -3920,7 +3922,8 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
    - Do NOT read or summarize the file content (wastes tokens)
    - Add at END of response: [[FILE:/absolute/path/to/file]]
    - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
-   - Multiple files: use multiple [[FILE:...]] tags]` : '';
+   - Multiple files: use multiple [[FILE:...]] tags
+3. Formatting: NEVER use markdown tables (| col1 | col2 |) — they render as broken plaintext on mobile. Use bullet lists or numbered lists instead for comparisons/structured data.]` : '';
 
   const routedPrompt = skill ? `/${skill} ${prompt}` : prompt;
   const fullPrompt = routedPrompt + daemonHint + memoryHint;
