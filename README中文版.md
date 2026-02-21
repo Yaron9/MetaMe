@@ -229,6 +229,52 @@ metame daemon install-launchd   # 开机自启 + 崩溃重启
 | **元认知** | 检测行为模式（决策风格、舒适区、目标偏离），注入镜像观察。零额外 API 成本。 |
 | **应急工具** | `/doctor` 诊断、`/sh` 原始 shell、`/fix` 配置恢复、`/undo` 基于 git 的回退。 |
 
+## 定义你的智能体
+
+Agent 配置在 `~/.metame/daemon.yaml` 里——纯本地，不会上传，不进 Git，不进 npm 包。每个 Agent 有独立的群聊、工作目录和可选的心跳任务。
+
+```yaml
+projects:
+  assistant:                        # project key，dispatch_to 时使用
+    name: "个人助理"
+    icon: "💅"
+    color: "blue"                   # blue|orange|green|red|grey|purple
+    cwd: "~/AGI/MyAssistant"        # Claude 的工作目录
+    nicknames:
+      - "小美"
+      - "助理"
+    heartbeat_tasks: []             # 可选：该 Agent 的专属定时任务
+
+  coder:
+    name: "后端工程师"
+    icon: "🛠"
+    color: "orange"
+    cwd: "~/projects/backend"
+    heartbeat_tasks:
+      - name: "daily-review"
+        prompt: "回顾昨天的提交记录，标记潜在问题"
+        interval: "24h"
+        notify: true
+```
+
+然后把飞书/Telegram 群绑定到 Agent：
+
+```yaml
+feishu:
+  chat_agent_map:
+    oc_abc123: assistant      # 这个群 → 助理 Agent
+    oc_def456: coder          # 这个群 → 工程师 Agent
+```
+
+发给不同群的消息会路由到对应 Agent，在各自的 `cwd` 下独立运行 Claude 会话。**所有 Agent 共享你的认知画像**（`~/.claude_profile.yaml`）——它们都知道你是谁，有什么偏好。
+
+**Agent 之间互相派发任务**（从 Claude 会话或心跳任务中调用）：
+
+```bash
+~/.metame/bin/dispatch_to assistant "帮我安排明天的站会"
+~/.metame/bin/dispatch_to coder "跑一遍测试套件，把结果报告给我"
+```
+
 ## 手机端命令
 
 | 命令 | 作用 |

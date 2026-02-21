@@ -222,6 +222,52 @@ Done. Open Telegram, message your bot.
 | **Metacognition** | Detects behavioral patterns (decision style, comfort zones, goal drift) and injects mirror observations. Zero extra API cost. |
 | **Emergency Tools** | `/doctor` diagnostics, `/sh` raw shell, `/fix` config restore, `/undo` git-based rollback. |
 
+## Defining Your Agents
+
+Agents are defined in `~/.metame/daemon.yaml` — local only, never uploaded. Each agent gets its own chat group, working directory, and optional heartbeat tasks.
+
+```yaml
+projects:
+  assistant:                        # project key (used by dispatch_to)
+    name: "Personal Assistant"
+    icon: "💅"
+    color: "blue"                   # blue|orange|green|red|grey|purple
+    cwd: "~/AGI/MyAssistant"        # Claude's working directory
+    nicknames:
+      - "小美"
+      - "助理"
+    heartbeat_tasks: []             # optional scheduled tasks for this agent
+
+  coder:
+    name: "Backend Engineer"
+    icon: "🛠"
+    color: "orange"
+    cwd: "~/projects/backend"
+    heartbeat_tasks:
+      - name: "daily-review"
+        prompt: "Review yesterday's commits and flag any issues"
+        interval: "24h"
+        notify: true
+```
+
+Then bind a Telegram/Feishu group to an agent:
+
+```yaml
+feishu:
+  chat_agent_map:
+    oc_abc123: assistant      # this group → assistant agent
+    oc_def456: coder          # this group → coder agent
+```
+
+Messages sent to each group go to the corresponding agent, running in its `cwd` with its own Claude session. All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all know who you are.
+
+**Dispatch between agents** (from Claude or a heartbeat task):
+
+```bash
+~/.metame/bin/dispatch_to assistant "Schedule tomorrow's standup"
+~/.metame/bin/dispatch_to coder "Run the test suite and report results"
+```
+
 ## Mobile Commands
 
 | Command | Action |
