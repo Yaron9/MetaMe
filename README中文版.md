@@ -92,12 +92,42 @@ MetaMe 的记忆系统完全在后台自动运行——不打扰你，不需要�
   refresh token 轮换方案。token 有效期 15 分钟。
 ```
 
-### 4. 自主运行
+### 4. 心跳——可编程的神经系统
 
-定时任务跑在你的电脑上，结果推送到手机：
+大多数 AI 工具等你开口才响应。MetaMe 趁你睡觉的时候也在工作。
+
+心跳系统分三层：
+
+**Layer 0 — 内核（永远在线，零配置）**
+硬编码在 daemon 里，每 60 秒运行，不受配置文件影响：
+- 清空 dispatch 队列（处理其他 Agent 的 IPC 消息）
+- 维护 daemon 存活状态，轮转日志
+- 检测你是否空闲 → 自动生成会话连续性摘要
+
+**Layer 1 — 系统自进化（内置默认任务）**
+三个开箱即有的任务。只在你空闲时运行，绝不打扰正在进行的工作：
 
 ```yaml
-# ~/.metame/daemon.yaml
+- cognitive-distill   # 4h · 有信号才触发 → 蒸馏偏好更新画像
+- memory-extract      # 2h · 扫描会话   → 提取长期事实和主题标签
+- skill-evolve        # 6h · 有信号才触发 → 从任务结果演化技能
+```
+
+`precondition` 前置条件守卫：没有新数据时直接跳过，零 token 消耗。
+
+**Layer 2 — 你的任务（完全自定义）**
+任何你想让 Claude 定时做的事，按项目隔离，结果推送到手机：
+
+```yaml
+projects:
+  my_blog:
+    heartbeat_tasks:
+      - name: "daily-draft"
+        prompt: "调研 AI 热点，写一篇文章"
+        interval: "24h"
+        model: "sonnet"
+        notify: true
+
 heartbeat:
   tasks:
     - name: "morning-brief"
@@ -119,6 +149,8 @@ heartbeat:
         - skill: "wechat-publisher"
           prompt: "发布文章"
 ```
+
+任务参数：`require_idle`（用户活跃时推迟）、`precondition`（shell 守卫，条件不满足直接跳过）、`notify`（完成后推送手机）、`model`、`cwd`、`allowedTools`、`timeout`。
 
 ### 5. 会自我进化的技能系统
 
@@ -190,7 +222,7 @@ metame daemon install-launchd   # 开机自启 + 崩溃重启
 | **分层记忆** | 三层记忆：长期事实（语义召回）、会话摘要（连续性桥接）、会话索引（主题标签）。全自动，无需干预。 |
 | **手机桥接** | 通过 Telegram/飞书完整使用 Claude Code。有状态会话、双向文件互传、实时工具调用状态。 |
 | **技能进化** | 自愈技能系统。自动发现缺失技能、从浏览器录制中学习、每次任务后进化。技能越用越聪明。 |
-| **心跳任务** | 定时跑 Claude，支持前置条件、多步骤工作流、推送通知。 |
+| **心跳系统** | 三层可编程神经系统。Layer 0 内核永远在线（零配置）。Layer 1 系统自进化内置（蒸馏+记忆+技能）。Layer 2 自定义定时任务，支持 `require_idle`、`precondition`、`notify`、工作流。 |
 | **多 Agent** | 多项目独立群聊，`/bind` 一键配置，真正并行执行。 |
 | **浏览器自动化** | 内置 Playwright MCP，开箱即用。配合 Skill 实现发布、填表、抓取等自动化。 |
 | **模型中继** | 兼容任何 Anthropic API 中继。GPT-4、DeepSeek、Gemini 随意切换，零文件污染。 |

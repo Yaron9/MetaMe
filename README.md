@@ -92,12 +92,42 @@ idle 30min → memory consolidation triggered
   refresh token rotation. Token expiry set to 15min.
 ```
 
-### 4. Runs Autonomously
+### 4. Heartbeat — A Programmable Nervous System
 
-Schedule tasks that run on your machine and push results to your phone:
+Most AI tools react when you talk to them. MetaMe keeps running while you sleep.
+
+The heartbeat system is three-layered:
+
+**Layer 0 — Kernel (always on, zero config)**
+Built into the daemon. Runs every 60 seconds regardless of what's in your config:
+- Drains the dispatch queue (IPC messages from other agents)
+- Tracks daemon aliveness and rotates logs
+- Detects when you go idle → generates session continuity summaries
+
+**Layer 1 — System Evolution (built-in defaults)**
+Three tasks shipped out of the box. Only fire when you're idle — they never interrupt active work:
 
 ```yaml
-# ~/.metame/daemon.yaml
+- cognitive-distill   # 4h · has signals? → distill preferences into profile
+- memory-extract      # 2h · scan sessions → extract long-term facts + topic tags
+- skill-evolve        # 6h · has signals? → evolve skills from task outcomes
+```
+
+`precondition` guards mean zero tokens burned when there's nothing to process.
+
+**Layer 2 — Your Tasks (fully customizable)**
+Anything you want Claude to do on a schedule, per project, with push notifications:
+
+```yaml
+projects:
+  my_blog:
+    heartbeat_tasks:
+      - name: "daily-draft"
+        prompt: "Research top AI news and write an article"
+        interval: "24h"
+        model: "sonnet"
+        notify: true
+
 heartbeat:
   tasks:
     - name: "morning-brief"
@@ -106,7 +136,7 @@ heartbeat:
       notify: true
 ```
 
-Chain skills into workflows — research, write, publish — fully automated:
+Chain skills into multi-step workflows — research → write → publish — fully automated:
 
 ```yaml
     - name: "daily-content"
@@ -119,6 +149,8 @@ Chain skills into workflows — research, write, publish — fully automated:
         - skill: "wechat-publisher"
           prompt: "Publish it"
 ```
+
+Task options: `require_idle` (defer when you're active), `precondition` (shell guard — skip if false, zero tokens), `notify` (push result to phone), `model`, `cwd`, `allowedTools`, `timeout`.
 
 ### 5. Skills That Evolve Themselves
 
@@ -183,7 +215,7 @@ Done. Open Telegram, message your bot.
 | **Layered Memory** | Three-tier memory: long-term facts (semantic recall), session summaries (continuity bridge), session index (topic tags). All automatic. |
 | **Mobile Bridge** | Full Claude Code via Telegram/Feishu. Stateful sessions, file transfer both ways, real-time streaming status. |
 | **Skill Evolution** | Self-healing skill system. Auto-discovers missing skills, learns from browser recordings, evolves after every task. Skills get smarter over time. |
-| **Heartbeat Tasks** | Scheduled Claude runs with cron-like intervals. Preconditions, workflows, push notifications. |
+| **Heartbeat System** | Three-layer programmable nervous system. Layer 0 kernel always-on (zero config). Layer 1 system evolution built-in (distill + memory + skills). Layer 2 your custom scheduled tasks with `require_idle`, `precondition`, `notify`, workflows. |
 | **Multi-Agent** | Multiple projects with dedicated chat groups. `/bind` for one-tap setup. True parallel execution. |
 | **Browser Automation** | Built-in Playwright MCP. Browser control out of the box for every user. |
 | **Provider Relay** | Route through any Anthropic-compatible API. Use GPT-4, DeepSeek, Gemini — zero config file mutation. |
