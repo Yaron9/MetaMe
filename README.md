@@ -279,6 +279,8 @@ Done. Open Telegram, message your bot.
 
 | Metric | Value |
 |--------|-------|
+| Daemon memory (idle) | ~100 MB RSS — standard Node.js process baseline |
+| Daemon CPU (idle, between heartbeats) | ~0% — event-loop sleeping |
 | Cognitive profile injection | ~800 tokens/session (0.4% of 200k context) |
 | Dispatch latency (Unix socket) | <100ms |
 | Memory consolidation (per session) | ~1,500–2,000 tokens input + ~50–300 tokens output (Haiku) |
