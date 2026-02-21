@@ -3874,7 +3874,7 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
       const recent = memory.recentSessions({ limit: 3, project: projectKey || undefined });
       if (recent.length > 0) {
         const items = recent.map(r => `- [${r.created_at}] ${r.summary}${r.keywords ? ' (keywords: ' + r.keywords + ')' : ''}`).join('\n');
-        memoryHint = `\n\n[Session memory - recent context from past sessions, use to inform your responses:\n${items}]`;
+        memoryHint = `\n\n<!-- MEMORY:START -->\n[Session memory - recent context from past sessions, use to inform your responses:\n${items}]\n<!-- MEMORY:END -->`;
       }
       memory.close();
     } catch (e) {
