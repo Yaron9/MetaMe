@@ -366,13 +366,17 @@ feishu:
 
 > 记忆巩固和会话摘要均由后台 Haiku（`--model haiku`）处理。输入经代码硬截：skeleton 文本 ≤ 3,000 字符，摘要输出 ≤ 500 字符。两者均非每条消息触发——记忆巩固在睡眠模式（闲置 30 分钟）时触发，摘要每个闲置会话只生成一次。
 
-## 轻量插件版
+## 插件版
 
-不需要手机端？装 Claude Code 插件——只有画像注入 + 斜杠命令：
+与 npm CLI 功能完全一致——无需 npm，直接装进 Claude Code：
 
 ```bash
 claude plugin install github:Yaron9/MetaMe/plugin
 ```
+
+包含全部功能：认知画像注入、daemon（Telegram/飞书）、心跳任务、分层记忆、全部手机端命令、斜杠命令（`/metame:evolve`、`/metame:daemon`、`/metame:refresh` 等）。
+
+不想装全局 npm 包，用插件版。想要 `metame` 命令和首次采访，用 npm CLI（`metame-cli`）。
 
 ## 许可证
 
