@@ -3891,6 +3891,20 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
 
   // When Claude completes with no text output (pure tool work), send a done notice
   if (output === '' && !error) {
+    // Special case: if dispatch_to was called, send a "forwarded" confirmation
+    const dispatchedTargets = (toolUsageLog || [])
+      .filter(t => t.tool === 'Bash' && typeof t.context === 'string' && t.context.includes('dispatch_to'))
+      .map(t => { const m = t.context.match(/dispatch_to\s+(\S+)/); return m ? m[1] : null; })
+      .filter(Boolean);
+    if (dispatchedTargets.length > 0) {
+      const allProjects = (config && config.projects) || {};
+      const names = dispatchedTargets.map(k => (allProjects[k] && allProjects[k].name) || k).join('、');
+      const doneMsg = await bot.sendMessage(chatId, `✉️ 已转达给 ${names}，处理中…`);
+      if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session);
+      const wasNew = !session.started;
+      if (wasNew) markSessionStarted(chatId);
+      return;
+    }
     const filesDesc = files && files.length > 0 ? `\n修改了 ${files.length} 个文件` : '';
     const doneMsg = await bot.sendMessage(chatId, `✅ 完成${filesDesc}`);
     if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session);
