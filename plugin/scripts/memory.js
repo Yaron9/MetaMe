@@ -423,9 +423,10 @@ function getSession(sessionId) {
 function stats() {
   const db = getDb();
   const row = db.prepare('SELECT COUNT(*) as count, MIN(created_at) as oldest, MAX(created_at) as newest FROM sessions').get();
+  const factsRow = db.prepare('SELECT COUNT(*) as count FROM facts WHERE superseded_by IS NULL').get();
   let dbSizeKB = 0;
   try { dbSizeKB = Math.round(fs.statSync(DB_PATH).size / 1024); } catch { /* */ }
-  return { count: row.count, dbSizeKB, oldestDate: row.oldest || null, newestDate: row.newest || null };
+  return { count: row.count, facts: factsRow.count, dbSizeKB, oldestDate: row.oldest || null, newestDate: row.newest || null };
 }
 
 /**
