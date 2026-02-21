@@ -26,7 +26,7 @@ npm install -g metame-cli && metame
 
 ---
 
-> ### 🚀 v2.0 — Layered Memory Architecture
+> ### 🚀 v1.4.0 — Layered Memory Architecture
 >
 > MetaMe now has a **three-layer memory system** that works completely in the background:
 > - **Long-term facts** extracted from every session, recalled semantically on demand
