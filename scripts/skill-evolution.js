@@ -299,8 +299,18 @@ function checkHotEvolution(signal) {
  * Every N runs, triggers self-evaluation to optimize the policy.
  * Returns { updates, missing_skills } or null if nothing to process.
  */
-function distillSkills() {
-  const { execSync } = require('child_process');
+function callClaude(input, distillEnv, timeout) {
+  const { execFile } = require('child_process');
+  return new Promise((resolve, reject) => {
+    const proc = execFile('claude', ['-p', '--model', 'haiku', '--no-session-persistence'],
+      { env: { ...process.env, ...distillEnv }, timeout, maxBuffer: 10 * 1024 * 1024 },
+      (err, stdout) => { if (err) reject(err); else resolve(stdout.trim()); });
+    proc.stdin.write(input);
+    proc.stdin.end();
+  });
+}
+
+async function distillSkills() {
   let yaml;
   try { yaml = require('js-yaml'); } catch { return null; }
 
@@ -363,12 +373,7 @@ function distillSkills() {
       distillEnv = buildDistillEnv();
     } catch {}
 
-    const result = execSync('claude -p --model haiku --no-session-persistence', {
-      input: prompt,
-      encoding: 'utf8',
-      timeout: 30000,
-      env: { ...process.env, ...distillEnv },
-    });
+    const result = await callClaude(prompt, distillEnv, 90000);
 
     if (result.includes('NO_EVOLUTION')) {
       clearSignals();
@@ -425,7 +430,7 @@ function distillSkills() {
     // Self-evaluation: periodically let Haiku review and rewrite the policy
     bumpRunCount(yaml, policy);
     if (policy.cold_path_run_count > 0 && policy.cold_path_run_count % policy.self_eval_interval === 0) {
-      selfEvaluatePolicy(yaml, policy, execSync, distillEnv);
+      await selfEvaluatePolicy(yaml, policy, distillEnv);
     }
 
     return { updates, missing_skills: missingSkills };
@@ -472,7 +477,7 @@ function logEvolutionRun(yaml, policy, signalCount, updateCount, gapCount) {
  * then rewrites evolution_policy.yaml if improvements are warranted.
  * This is how the system optimizes its own parameters.
  */
-function selfEvaluatePolicy(yaml, policy, execSync, distillEnv) {
+async function selfEvaluatePolicy(yaml, policy, distillEnv) {
   try {
     // Read evolution log
     const logFile = path.join(METAME_DIR, 'evolution_log.yaml');
@@ -523,12 +528,7 @@ RULES:
 - Be conservative: only change what the data clearly supports
 - prompt_template changes should be surgical, not full rewrites`;
 
-    const result = execSync('claude -p --model haiku --no-session-persistence', {
-      input: evalPrompt,
-      encoding: 'utf8',
-      timeout: 30000,
-      env: { ...process.env, ...distillEnv },
-    });
+    const result = await callClaude(evalPrompt, distillEnv, 30000);
 
     if (result.includes('NO_CHANGE')) {
       console.log('🧬 Policy self-eval: no changes needed.');

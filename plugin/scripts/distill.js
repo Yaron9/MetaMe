@@ -12,7 +12,19 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
+const { execFile } = require('child_process');
+
+// Async wrapper for `claude -p` — non-blocking
+function callClaude(input, args, env, timeout) {
+  return new Promise((resolve, reject) => {
+    const proc = execFile('claude', args, { env, timeout, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(stdout.trim());
+    });
+    proc.stdin.write(input);
+    proc.stdin.end();
+  });
+}
 
 const HOME = os.homedir();
 const BUFFER_FILE = path.join(HOME, '.metame', 'raw_signals.jsonl');
@@ -39,7 +51,7 @@ try {
  * Main distillation process.
  * Returns { updated: boolean, summary: string }
  */
-function distill() {
+async function distill() {
   // 1. Check if buffer exists and has content
   if (!fs.existsSync(BUFFER_FILE)) {
     return { updated: false, behavior: null, summary: 'No signals to process.' };
@@ -184,16 +196,12 @@ Do NOT repeat existing unchanged values.`;
     // 6. Call Claude in print mode with haiku (+ provider env for relay support)
     let result;
     try {
-      result = execSync(
-        `claude -p --model haiku --no-session-persistence`,
-        {
-          input: distillPrompt,
-          encoding: 'utf8',
-          timeout: 60000, // 60s — runs in background, no rush
-          stdio: ['pipe', 'pipe', 'pipe'],
-          env: { ...process.env, ...distillEnv },
-        }
-      ).trim();
+      result = await callClaude(
+        distillPrompt,
+        ['-p', '--model', 'haiku', '--no-session-persistence'],
+        { ...process.env, ...distillEnv },
+        60000, // 60s — runs in background, no rush
+      );
     } catch (err) {
       // Don't cleanup buffer on API failure — retry next launch
       try { fs.unlinkSync(LOCK_FILE); } catch {}
@@ -785,7 +793,7 @@ function bootstrapSessionLog() {
  * Also force-runs after bootstrap (regardless of distill_count).
  * Writes results to profile growth.patterns (max 3).
  */
-function detectPatterns(forceRun) {
+async function detectPatterns(forceRun) {
   const yaml = require('js-yaml');
 
   // Read session log
@@ -856,16 +864,12 @@ patterns:
 If no clear patterns found: respond with exactly NO_PATTERNS`;
 
   try {
-    const result = execSync(
-      `claude -p --model haiku --no-session-persistence`,
-      {
-        input: patternPrompt,
-        encoding: 'utf8',
-        timeout: 30000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, ...distillEnv },
-      }
-    ).trim();
+    const result = await callClaude(
+      patternPrompt,
+      ['-p', '--model', 'haiku', '--no-session-persistence'],
+      { ...process.env, ...distillEnv },
+      30000,
+    );
 
     if (!result || result.includes('NO_PATTERNS')) return;
 
@@ -917,39 +921,41 @@ module.exports = { distill, writeSessionLog, bootstrapSessionLog, detectPatterns
 
 // Also allow direct execution
 if (require.main === module) {
-  // Bootstrap: if session_log is thin, batch-fill from history
-  const bootstrapped = bootstrapSessionLog();
-  if (bootstrapped > 0) {
-    console.log(`📊 MetaMe: Bootstrapped ${bootstrapped} historical sessions.`);
-    // Force pattern detection immediately after bootstrap
-    detectPatterns(true);
-  }
-
-  const result = distill();
-  // Write session log if behavior was detected
-  if (result.behavior) {
-    writeSessionLog(result.behavior, result.signalCount || 0, result.skeleton || null, result.sessionSummary || null);
-  }
-  // Run pattern detection (only triggers every 5th distill)
-  if (!bootstrapped) detectPatterns();
-
-  // Skill evolution: cold path — Haiku-powered batch analysis
-  try {
-    const skillEvo = require('./skill-evolution');
-    const evoResult = skillEvo.distillSkills();
-    if (evoResult && (evoResult.updates.length > 0 || evoResult.missing_skills.length > 0)) {
-      console.log(`🧬 Skill evolution: ${evoResult.updates.length} update(s), ${evoResult.missing_skills.length} gap(s) detected.`);
+  (async () => {
+    // Bootstrap: if session_log is thin, batch-fill from history
+    const bootstrapped = bootstrapSessionLog();
+    if (bootstrapped > 0) {
+      console.log(`📊 MetaMe: Bootstrapped ${bootstrapped} historical sessions.`);
+      // Force pattern detection immediately after bootstrap
+      await detectPatterns(true);
     }
-  } catch (e) {
-    // Non-fatal: skill evolution is optional
-    if (e.code !== 'MODULE_NOT_FOUND') {
-      console.log(`⚠️ Skill evolution skipped: ${e.message}`);
-    }
-  }
 
-  if (result.updated) {
-    console.log(`🧠 ${result.summary}`);
-  } else {
-    console.log(`💤 ${result.summary}`);
-  }
+    const result = await distill();
+    // Write session log if behavior was detected
+    if (result.behavior) {
+      writeSessionLog(result.behavior, result.signalCount || 0, result.skeleton || null, result.sessionSummary || null);
+    }
+    // Run pattern detection (only triggers every 5th distill)
+    if (!bootstrapped) await detectPatterns();
+
+    // Skill evolution: cold path — Haiku-powered batch analysis
+    try {
+      const skillEvo = require('./skill-evolution');
+      const evoResult = await skillEvo.distillSkills();
+      if (evoResult && (evoResult.updates.length > 0 || evoResult.missing_skills.length > 0)) {
+        console.log(`🧬 Skill evolution: ${evoResult.updates.length} update(s), ${evoResult.missing_skills.length} gap(s) detected.`);
+      }
+    } catch (e) {
+      // Non-fatal: skill evolution is optional
+      if (e.code !== 'MODULE_NOT_FOUND') {
+        console.log(`⚠️ Skill evolution skipped: ${e.message}`);
+      }
+    }
+
+    if (result.updated) {
+      console.log(`🧠 ${result.summary}`);
+    } else {
+      console.log(`💤 ${result.summary}`);
+    }
+  })();
 }
