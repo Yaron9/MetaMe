@@ -637,6 +637,9 @@ function dispatchTask(targetProject, message, config, replyFn) {
     prompt = `[系统提示：此消息由 ${senderIcon} ${senderName}（${senderKey}）转发，不是王总直接发送的。如需回复，可调用 ~/.metame/bin/dispatch_to ${senderKey} "回复内容"。]\n\n${rawPrompt}`;
   }
 
+  // Inject ack-first instruction for all dispatched tasks
+  prompt = `[行为要求：收到此任务后，请先用 dispatch_to 回复一条消息说明「收到，计划：xxx」，再开始执行。]\n\n${prompt}`;
+
   // Prefer target's real Feishu chatId so dispatch reuses the existing session
   // (--resume, no CLAUDE.md re-read, no token waste). Fall back to _agent_* virtual
   // chatId only if: target has no Feishu chat configured, OR caller requested new_session.
