@@ -88,6 +88,62 @@ function getDb() {
     try { _db.exec(t); } catch { /* trigger may already exist */ }
   }
 
+
+  // ── Facts table: atomic knowledge triples ──
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS facts (
+      id           TEXT PRIMARY KEY,
+      entity       TEXT NOT NULL,
+      relation     TEXT NOT NULL,
+      value        TEXT NOT NULL,
+      confidence   TEXT NOT NULL DEFAULT 'medium',
+      source_type  TEXT NOT NULL DEFAULT 'session',
+      source_id    TEXT,
+      project      TEXT NOT NULL DEFAULT '*',
+      tags         TEXT DEFAULT '[]',
+      created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      superseded_by TEXT
+    )
+  `);
+
+  // FTS5 index for facts (separate from sessions_fts, zero compatibility risk)
+  try {
+    _db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
+        entity, relation, value, tags,
+        content='facts',
+        content_rowid='rowid',
+        tokenize='trigram'
+      )
+    `);
+  } catch { /* already exists */ }
+
+  // Triggers to keep facts_fts in sync
+  const factTriggers = [
+    `CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
+       INSERT INTO facts_fts(rowid, entity, relation, value, tags)
+       VALUES (new.rowid, new.entity, new.relation, new.value, new.tags);
+     END`,
+    `CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
+       INSERT INTO facts_fts(facts_fts, rowid, entity, relation, value, tags)
+       VALUES ('delete', old.rowid, old.entity, old.relation, old.value, old.tags);
+     END`,
+    `CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
+       INSERT INTO facts_fts(facts_fts, rowid, entity, relation, value, tags)
+       VALUES ('delete', old.rowid, old.entity, old.relation, old.value, old.tags);
+       INSERT INTO facts_fts(rowid, entity, relation, value, tags)
+       VALUES (new.rowid, new.entity, new.relation, new.value, new.tags);
+     END`,
+  ];
+  for (const t of factTriggers) {
+    try { _db.exec(t); } catch { /* trigger may already exist */ }
+  }
+
+  // Indexes
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_entity  ON facts(entity)'); } catch {}
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_project ON facts(project)'); } catch {}
+
   return _db;
 }
 
@@ -119,6 +175,113 @@ function saveSession({ sessionId, project, summary, keywords = '', mood = '', to
   `);
   stmt.run(sessionId, project, summary.slice(0, 10000), keywords.slice(0, 1000), mood.slice(0, 100), tokenCost);
   return { ok: true, id: sessionId };
+}
+
+/**
+ * Save atomic facts extracted from a session.
+ *
+ * @param {string} sessionId - Source session ID
+ * @param {string} project   - Project key ('metame', 'desktop', '*' for global)
+ * @param {Array}  facts     - Array of { entity, relation, value, confidence, tags }
+ * @returns {{ saved: number, skipped: number }}
+ */
+function saveFacts(sessionId, project, facts) {
+  if (!Array.isArray(facts) || facts.length === 0) return { saved: 0, skipped: 0 };
+  const db = getDb();
+
+  // Load existing facts for dedup check
+  const existing = db.prepare(
+    "SELECT entity, relation, value FROM facts WHERE project IN (?, '*')"
+  ).all(project);
+
+  const insert = db.prepare(`
+    INSERT INTO facts (id, entity, relation, value, confidence, source_type, source_id, project, tags, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 'session', ?, ?, ?, datetime('now'), datetime('now'))
+    ON CONFLICT(id) DO NOTHING
+  `);
+
+  let saved = 0;
+  let skipped = 0;
+
+  for (const f of facts) {
+    // Basic validation
+    if (!f.entity || !f.relation || !f.value) { skipped++; continue; }
+    if (f.value.length < 20 || f.value.length > 300) { skipped++; continue; }
+
+    // Dedup: same entity+relation with similar value prefix
+    const dupKey = `${f.entity}::${f.relation}`;
+    const prefix = f.value.slice(0, 50);
+    const isDup = existing.some(e =>
+      `${e.entity}::${e.relation}` === dupKey && e.value.slice(0, 50) === prefix
+    );
+    if (isDup) { skipped++; continue; }
+
+    const id = `f-${sessionId.slice(0, 8)}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const tags = JSON.stringify(Array.isArray(f.tags) ? f.tags.slice(0, 3) : []);
+    try {
+      insert.run(id, f.entity, f.relation, f.value.slice(0, 300),
+        f.confidence || 'medium', sessionId, project === '*' ? '*' : project, tags);
+      saved++;
+    } catch { skipped++; }
+  }
+
+  return { saved, skipped };
+}
+
+/**
+ * Search facts by keyword (FTS5 + LIKE fallback).
+ *
+ * @param {string} query          - Search keywords
+ * @param {object} [opts]
+ * @param {number} [opts.limit=5] - Max results
+ * @param {string} [opts.project] - Filter by project (also always includes '*')
+ * @returns {Array<{ id, entity, relation, value, confidence, project, tags, created_at }>}
+ */
+function searchFacts(query, { limit = 5, project = null } = {}) {
+  if (!query || !query.trim()) return [];
+  const db = getDb();
+
+  const sanitized = query.trim().split(/\s+/)
+    .map(t => '"' + t.replace(/"/g, '') + '"').join(' ');
+
+  // FTS5 path
+  try {
+    let sql, params;
+    if (project) {
+      sql = `
+        SELECT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.tags, f.created_at, rank
+        FROM facts_fts fts JOIN facts f ON f.rowid = fts.rowid
+        WHERE facts_fts MATCH ? AND (f.project = ? OR f.project = '*') AND f.superseded_by IS NULL
+        ORDER BY rank LIMIT ?
+      `;
+      params = [sanitized, project, limit];
+    } else {
+      sql = `
+        SELECT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.tags, f.created_at, rank
+        FROM facts_fts fts JOIN facts f ON f.rowid = fts.rowid
+        WHERE facts_fts MATCH ? AND f.superseded_by IS NULL
+        ORDER BY rank LIMIT ?
+      `;
+      params = [sanitized, limit];
+    }
+    const ftsResults = db.prepare(sql).all(...params);
+    if (ftsResults.length > 0) return ftsResults;
+  } catch { /* FTS error, fall through */ }
+
+  // LIKE fallback
+  const like = '%' + query.trim() + '%';
+  const likeSql = project
+    ? `SELECT id, entity, relation, value, confidence, project, tags, created_at
+       FROM facts WHERE (entity LIKE ? OR value LIKE ? OR tags LIKE ?)
+       AND (project = ? OR project = '*') AND superseded_by IS NULL
+       ORDER BY created_at DESC LIMIT ?`
+    : `SELECT id, entity, relation, value, confidence, project, tags, created_at
+       FROM facts WHERE (entity LIKE ? OR value LIKE ? OR tags LIKE ?)
+       AND superseded_by IS NULL
+       ORDER BY created_at DESC LIMIT ?`;
+  return project
+    ? db.prepare(likeSql).all(like, like, like, project, limit)
+    : db.prepare(likeSql).all(like, like, like, limit);
 }
 
 /**
@@ -220,4 +383,4 @@ function close() {
   if (_db) { _db.close(); _db = null; }
 }
 
-module.exports = { saveSession, searchSessions, recentSessions, getSession, stats, close, DB_PATH };
+module.exports = { saveSession, saveFacts, searchFacts, searchSessions, recentSessions, getSession, stats, close, DB_PATH };
