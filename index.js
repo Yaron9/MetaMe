@@ -146,14 +146,12 @@ ensureHookInstalled();
 // This prevents dream tasks (require_idle: true) from firing during live Claude sessions.
 try {
   const localActiveFile = path.join(METAME_DIR, 'local_active');
+  // Ensure file exists (open with 'a' is a no-op if it already exists)
+  fs.closeSync(fs.openSync(localActiveFile, 'a'));
+  // Update mtime so daemon idle detection sees fresh activity
   const now = new Date();
   fs.utimesSync(localActiveFile, now, now);
-} catch {
-  try {
-    // File may not exist yet — create it
-    fs.closeSync(fs.openSync(path.join(METAME_DIR, 'local_active'), 'a'));
-  } catch { /* non-fatal */ }
-}
+} catch { /* non-fatal */ }
 
 // ---------------------------------------------------------
 // 1.6c ENSURE PROJECT-LEVEL MCP CONFIG
