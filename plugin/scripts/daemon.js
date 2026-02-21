@@ -3987,14 +3987,17 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
       }
     }
 
-    // 2. Dynamic Fact Injection (RAG) for EVERY query based on user prompt
-    // Uses QMD hybrid search if available, falls back to FTS5
-    const searchFn = memory.searchFactsAsync || memory.searchFacts;
-    const facts = await Promise.resolve(searchFn(prompt, { limit: 3, project: projectKey || undefined }));
-    if (facts.length > 0) {
-      const factItems = facts.map(f => `- [${f.relation}] ${f.value}`).join('\n');
-      memoryHint += `\n\n<!-- FACTS:START -->\n[Relevant knowledge and user preferences retrieved for this query. Follow these constraints implicitly:\n${factItems}]\n<!-- FACTS:END -->`;
-      log('INFO', `[MEMORY] Injected ${facts.length} facts based on prompt`);
+    // 2. Dynamic Fact Injection (RAG) — first message only
+    // Facts stay in Claude's context for the rest of the session; no need to repeat.
+    // Uses QMD hybrid search if available, falls back to FTS5.
+    if (!session.started) {
+      const searchFn = memory.searchFactsAsync || memory.searchFacts;
+      const facts = await Promise.resolve(searchFn(prompt, { limit: 5, project: projectKey || undefined }));
+      if (facts.length > 0) {
+        const factItems = facts.map(f => `- [${f.relation}] ${f.value}`).join('\n');
+        memoryHint += `\n\n<!-- FACTS:START -->\n[Relevant knowledge and user preferences retrieved for this query. Follow these constraints implicitly:\n${factItems}]\n<!-- FACTS:END -->`;
+        log('INFO', `[MEMORY] Injected ${facts.length} facts based on prompt`);
+      }
     }
 
     memory.close();
