@@ -15,6 +15,12 @@
        2. **Surgical Update:** `!metame set-trait key value` (For overwriting specific fields, e.g., `!metame set-trait status.focus "API Design"`).
    *   **RULE:** Only use these tools when the User **EXPLICITLY** instructs you.
    *   **REMINDER:** If the User expresses a strong persistent preference, you may gently ask *at the end of the task*: "Should I save this preference to your MetaMe profile?"
+
+**3. MEMORY SYSTEM (Three-Layer Recall):**
+   * **Long-term Facts** → injected as `<!-- FACTS:START -->` blocks. Follow implicitly, never repeat to user.
+   * **Session Summary** → injected as `[上次对话摘要，供参考]` when resuming after 2h+ gap. Use for continuity, do NOT quote back to user.
+   * **Background Pipeline:** Sleep mode triggers memory consolidation automatically. Memory improves over time without user action.
+   * **Search:** `node ~/.metame/memory-search.js "<keyword>"` to recall facts manually.
 ---
 <!-- METAME:END -->
 ---

@@ -18,6 +18,7 @@ const os = require('os');
 const { callHaiku, buildDistillEnv } = require('./providers');
 
 const HOME = os.homedir();
+const LOCK_FILE = path.join(HOME, '.metame', 'memory-extract.lock');
 
 // Atomic fact extraction prompt (local copy — distill.js no longer exports this)
 const FACT_EXTRACTION_PROMPT = `你是精准的知识提取引擎。从以下会话骨架中提取「值得长期记住的原子事实」。
@@ -149,6 +150,33 @@ async function extractFacts(skeleton, sessionSummary, distillEnv) {
  * Returns { sessionsProcessed, factsSaved, factsSkipped }
  */
 async function run() {
+  // Atomic lock — prevent concurrent extraction (O_EXCL guarantees no race)
+  let lockFd;
+  try {
+    lockFd = fs.openSync(LOCK_FILE, 'wx');
+    fs.writeSync(lockFd, process.pid.toString());
+    fs.closeSync(lockFd);
+  } catch (e) {
+    if (e.code === 'EEXIST') {
+      try {
+        const lockAge = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
+        if (lockAge < 300000) { // 5 min timeout for extraction
+          console.log('[memory-extract] Already running, skipping.');
+          return { sessionsProcessed: 0, factsSaved: 0, factsSkipped: 0 };
+        }
+        fs.unlinkSync(LOCK_FILE);
+        lockFd = fs.openSync(LOCK_FILE, 'wx');
+        fs.writeSync(lockFd, process.pid.toString());
+        fs.closeSync(lockFd);
+      } catch {
+        console.log('[memory-extract] Already running, skipping.');
+        return { sessionsProcessed: 0, factsSaved: 0, factsSkipped: 0 };
+      }
+    } else {
+      throw e;
+    }
+  }
+
   let sessionAnalytics;
   try {
     sessionAnalytics = require('./session-analytics');
@@ -165,58 +193,62 @@ async function run() {
     return { sessionsProcessed: 0, factsSaved: 0, factsSkipped: 0 };
   }
 
-  let distillEnv = {};
-  try { distillEnv = buildDistillEnv(); } catch { }
+  try {
+    let distillEnv = {};
+    try { distillEnv = buildDistillEnv(); } catch { }
 
-  const sessions = sessionAnalytics.findAllUnextractedSessions(8);
-  if (sessions.length === 0) {
-    console.log('[memory-extract] No unanalyzed sessions found.');
-    memory.close();
-    return { sessionsProcessed: 0, factsSaved: 0, factsSkipped: 0 };
-  }
-
-  let totalSaved = 0;
-  let totalSkipped = 0;
-  let processed = 0;
-
-  for (const session of sessions) {
-    try {
-      const skeleton = sessionAnalytics.extractSkeleton(session.path);
-
-      // Skip trivial sessions
-      if (skeleton.message_count < 2 && skeleton.duration_min < 1) {
-        sessionAnalytics.markFactsExtracted(skeleton.session_id);
-        continue;
-      }
-
-      const { facts, session_name } = await extractFacts(skeleton, null, distillEnv);
-
-      if (facts.length > 0) {
-        const { saved, skipped } = memory.saveFacts(
-          skeleton.session_id,
-          skeleton.project || 'unknown',
-          facts
-        );
-        totalSaved += saved;
-        totalSkipped += skipped;
-        console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)}: ${saved} facts saved, ${skipped} skipped`);
-      } else {
-        console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)} (${session_name}): no facts extracted`);
-      }
-
-      sessionAnalytics.markFactsExtracted(skeleton.session_id);
-
-      // P2-A: persist session name + tags to session_tags.json
-      saveSessionTag(skeleton.session_id, session_name, facts);
-
-      processed++;
-    } catch (e) {
-      console.log(`[memory-extract] Session error: ${e.message}`);
+    const sessions = sessionAnalytics.findAllUnextractedSessions(8);
+    if (sessions.length === 0) {
+      console.log('[memory-extract] No unanalyzed sessions found.');
+      memory.close();
+      return { sessionsProcessed: 0, factsSaved: 0, factsSkipped: 0 };
     }
-  }
 
-  memory.close();
-  return { sessionsProcessed: processed, factsSaved: totalSaved, factsSkipped: totalSkipped };
+    let totalSaved = 0;
+    let totalSkipped = 0;
+    let processed = 0;
+
+    for (const session of sessions) {
+      try {
+        const skeleton = sessionAnalytics.extractSkeleton(session.path);
+
+        // Skip trivial sessions
+        if (skeleton.message_count < 2 && skeleton.duration_min < 1) {
+          sessionAnalytics.markFactsExtracted(skeleton.session_id);
+          continue;
+        }
+
+        const { facts, session_name } = await extractFacts(skeleton, null, distillEnv);
+
+        if (facts.length > 0) {
+          const { saved, skipped } = memory.saveFacts(
+            skeleton.session_id,
+            skeleton.project || 'unknown',
+            facts
+          );
+          totalSaved += saved;
+          totalSkipped += skipped;
+          console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)}: ${saved} facts saved, ${skipped} skipped`);
+        } else {
+          console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)} (${session_name}): no facts extracted`);
+        }
+
+        sessionAnalytics.markFactsExtracted(skeleton.session_id);
+
+        // P2-A: persist session name + tags to session_tags.json
+        saveSessionTag(skeleton.session_id, session_name, facts);
+
+        processed++;
+      } catch (e) {
+        console.log(`[memory-extract] Session error: ${e.message}`);
+      }
+    }
+
+    memory.close();
+    return { sessionsProcessed: processed, factsSaved: totalSaved, factsSkipped: totalSkipped };
+  } finally {
+    try { fs.unlinkSync(LOCK_FILE); } catch { }
+  }
 }
 
 if (require.main === module) {
