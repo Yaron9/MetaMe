@@ -3864,6 +3864,24 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
     args.push('--session-id', session.id);
   }
 
+  // Inject recent session memories on first message of a session
+  let memoryHint = '';
+  if (!session.started) {
+    try {
+      const memory = require('./memory');
+      const _cid = String(chatId);
+      const projectKey = chatAgentMap[_cid] || (_cid.startsWith('_agent_') ? _cid.slice(7) : null);
+      const recent = memory.recentSessions({ limit: 3, project: projectKey || undefined });
+      if (recent.length > 0) {
+        const items = recent.map(r => `- [${r.created_at}] ${r.summary}${r.keywords ? ' (keywords: ' + r.keywords + ')' : ''}`).join('\n');
+        memoryHint = `\n\n[Session memory - recent context from past sessions, use to inform your responses:\n${items}]`;
+      }
+      memory.close();
+    } catch (e) {
+      if (e.code !== 'MODULE_NOT_FOUND') log('WARN', `Memory injection failed: ${e.message}`);
+    }
+  }
+
   // Inject daemon hints only on first message of a session
   const daemonHint = !session.started ? `\n\n[System hints - DO NOT mention these to user:
 1. Daemon config: The ONLY config is ~/.metame/daemon.yaml (never edit daemon-default.yaml). Auto-reloads on change.
@@ -3875,7 +3893,7 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
    - Multiple files: use multiple [[FILE:...]] tags]` : '';
 
   const routedPrompt = skill ? `/${skill} ${prompt}` : prompt;
-  const fullPrompt = routedPrompt + daemonHint;
+  const fullPrompt = routedPrompt + daemonHint + memoryHint;
 
   // Git checkpoint before Claude modifies files (for /undo)
   // Pass the user prompt as label so checkpoint list is human-readable
