@@ -307,11 +307,71 @@ function findAllUnanalyzedSessions(limit = 30) {
 }
 
 /**
- * Mark a session as analyzed.
+ * Mark a session as analyzed (cognitive distill / pattern detection).
  */
 function markAnalyzed(sessionId) {
   const state = loadState();
   state.analyzed[sessionId] = Date.now();
+  saveState(state);
+}
+
+/**
+ * Find all sessions not yet processed by memory-extract (facts extraction).
+ * Uses a separate `facts_analyzed` key so distill and memory-extract don't interfere.
+ */
+function findAllUnextractedSessions(limit = 30) {
+  const state = loadState();
+  const factsAnalyzed = state.facts_analyzed || {};
+  const results = [];
+
+  try {
+    const projectDirs = fs.readdirSync(PROJECTS_ROOT);
+    for (const dir of projectDirs) {
+      const fullDir = path.join(PROJECTS_ROOT, dir);
+      let stat;
+      try { stat = fs.statSync(fullDir); } catch { continue; }
+      if (!stat.isDirectory()) continue;
+
+      let files;
+      try { files = fs.readdirSync(fullDir); } catch { continue; }
+
+      for (const file of files) {
+        if (!file.endsWith('.jsonl')) continue;
+        const sessionId = file.replace('.jsonl', '');
+        if (factsAnalyzed[sessionId]) continue;
+
+        const fullPath = path.join(fullDir, file);
+        let fstat;
+        try { fstat = fs.statSync(fullPath); } catch { continue; }
+
+        if (fstat.size > MAX_FILE_SIZE || fstat.size < MIN_FILE_SIZE) continue;
+
+        results.push({ path: fullPath, session_id: sessionId, mtime: fstat.mtimeMs });
+      }
+    }
+  } catch {
+    return [];
+  }
+
+  results.sort((a, b) => b.mtime - a.mtime);
+  return results.slice(0, limit);
+}
+
+/**
+ * Mark a session as facts-extracted (used by memory-extract, independent of markAnalyzed).
+ */
+function markFactsExtracted(sessionId) {
+  const state = loadState();
+  if (!state.facts_analyzed) state.facts_analyzed = {};
+  state.facts_analyzed[sessionId] = Date.now();
+  // Cap facts_analyzed same as analyzed
+  const keys = Object.keys(state.facts_analyzed);
+  if (keys.length > MAX_STATE_ENTRIES) {
+    const sorted = keys.sort((a, b) => state.facts_analyzed[a] - state.facts_analyzed[b]);
+    for (const k of sorted.slice(0, keys.length - MAX_STATE_ENTRIES)) {
+      delete state.facts_analyzed[k];
+    }
+  }
   saveState(state);
 }
 
@@ -410,11 +470,13 @@ function summarizeSession(skeleton, jsonlPath) {
 module.exports = {
   findLatestUnanalyzedSession,
   findAllUnanalyzedSessions,
+  findAllUnextractedSessions,
   extractSkeleton,
   formatForPrompt,
   formatGoalContext,
   summarizeSession,
   markAnalyzed,
+  markFactsExtracted,
 };
 
 // Direct execution for testing
