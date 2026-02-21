@@ -3988,7 +3988,9 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
     }
 
     // 2. Dynamic Fact Injection (RAG) for EVERY query based on user prompt
-    const facts = memory.searchFacts(prompt, { limit: 3, project: projectKey || undefined });
+    // Uses QMD hybrid search if available, falls back to FTS5
+    const searchFn = memory.searchFactsAsync || memory.searchFacts;
+    const facts = await Promise.resolve(searchFn(prompt, { limit: 3, project: projectKey || undefined }));
     if (facts.length > 0) {
       const factItems = facts.map(f => `- [${f.relation}] ${f.value}`).join('\n');
       memoryHint += `\n\n<!-- FACTS:START -->\n[Relevant knowledge and user preferences retrieved for this query. Follow these constraints implicitly:\n${factItems}]\n<!-- FACTS:END -->`;
@@ -4395,6 +4397,18 @@ async function main() {
   } catch (e) {
     log('WARN', `Memory DB pre-init failed (non-fatal, will retry on first use): ${e.message}`);
   }
+
+  // Start QMD semantic search daemon if available (optional, non-fatal)
+  try {
+    const qmd = require('./qmd-client');
+    if (qmd.isAvailable()) {
+      qmd.ensureCollection();
+      qmd.startDaemon().then(running => {
+        if (running) log('INFO', '[QMD] Semantic search daemon started (localhost:8181)');
+        else log('INFO', '[QMD] Available but daemon not started — will use CLI fallback');
+      }).catch(() => {});
+    }
+  } catch { /* qmd-client not available, skip */ }
   // Hourly heartbeat so daemon.log stays fresh even when idle (visible aliveness check)
   setInterval(() => {
     log('INFO', `Daemon heartbeat — uptime: ${Math.round(process.uptime() / 60)}m, active sessions: ${activeProcesses.size}`);
@@ -4562,6 +4576,8 @@ async function main() {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (telegramBridge) telegramBridge.stop();
     if (feishuBridge) feishuBridge.stop();
+    // Stop QMD semantic search daemon if it was started
+    try { require('./qmd-client').stopDaemon(); } catch { /* ignore */ }
     // Kill all tracked claude process groups before exiting (covers sub-agents too)
     for (const [cid, proc] of activeProcesses) {
       try { process.kill(-proc.child.pid, 'SIGKILL'); } catch { try { proc.child.kill('SIGKILL'); } catch { } }
