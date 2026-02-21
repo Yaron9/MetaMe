@@ -548,16 +548,16 @@ function setDispatchHandler(fn) { _handleCommand = fn; }
 function createNullBot(onOutput) {
   const noop = async () => ({ message_id: '_virtual' });
   return {
-    sendMessage:   async (chatId, text) => { if (onOutput) onOutput(text); return { message_id: '_virtual' }; },
-    sendMarkdown:  async (chatId, text) => { if (onOutput) onOutput(text); return { message_id: '_virtual' }; },
-    sendCard:      async (chatId, card) => { if (onOutput) onOutput(typeof card === 'object' ? (card.body || card.title || JSON.stringify(card)) : card); return { message_id: '_virtual' }; },
-    sendRawCard:   async (chatId, header) => { if (onOutput) onOutput(header); return { message_id: '_virtual' }; },
-    sendButtons:   async (chatId, text) => { if (onOutput) onOutput(text); return { message_id: '_virtual' }; },
-    sendTyping:    async () => {},
-    editMessage:   async () => {},
-    deleteMessage: async () => {},
-    sendFile:      noop,
-    downloadFile:  noop,
+    sendMessage: async (chatId, text) => { if (onOutput) onOutput(text); return { message_id: '_virtual' }; },
+    sendMarkdown: async (chatId, text) => { if (onOutput) onOutput(text); return { message_id: '_virtual' }; },
+    sendCard: async (chatId, card) => { if (onOutput) onOutput(typeof card === 'object' ? (card.body || card.title || JSON.stringify(card)) : card); return { message_id: '_virtual' }; },
+    sendRawCard: async (chatId, header) => { if (onOutput) onOutput(header); return { message_id: '_virtual' }; },
+    sendButtons: async (chatId, text) => { if (onOutput) onOutput(text); return { message_id: '_virtual' }; },
+    sendTyping: async () => { },
+    editMessage: async () => { },
+    deleteMessage: async () => { },
+    sendFile: noop,
+    downloadFile: noop,
   };
 }
 
@@ -569,26 +569,26 @@ function createStreamForwardBot(realBot, chatId) {
   // Track edit-broken state independently so dispatch failures don't poison realBot's flag
   let _editBroken = false;
   return {
-    sendMessage:   async (_, text) => {
+    sendMessage: async (_, text) => {
       log('INFO', `[StreamBot→${chatId.slice(-8)}] msg: ${String(text).slice(0, 80)}`);
       return realBot.sendMessage(chatId, text);
     },
-    sendMarkdown:  async (_, text) => {
+    sendMarkdown: async (_, text) => {
       log('INFO', `[StreamBot→${chatId.slice(-8)}] md: ${String(text).slice(0, 80)}`);
       return realBot.sendMarkdown(chatId, text);
     },
-    sendCard:      async (_, card) => {
+    sendCard: async (_, card) => {
       const title = typeof card === 'object' ? (card.title || card.body || '').slice(0, 60) : String(card).slice(0, 60);
       log('INFO', `[StreamBot→${chatId.slice(-8)}] card: ${title}`);
       return realBot.sendCard(chatId, card);
     },
-    sendRawCard:   async (_, header, elements) => {
+    sendRawCard: async (_, header, elements) => {
       log('INFO', `[StreamBot→${chatId.slice(-8)}] rawcard: ${String(header).slice(0, 60)}`);
       return realBot.sendRawCard(chatId, header, elements);
     },
-    sendButtons:   async (_, text, buttons) => realBot.sendButtons(chatId, text, buttons),
-    sendTyping:    async () => realBot.sendTyping(chatId),
-    editMessage:   async (_, msgId, text) => {
+    sendButtons: async (_, text, buttons) => realBot.sendButtons(chatId, text, buttons),
+    sendTyping: async () => realBot.sendTyping(chatId),
+    editMessage: async (_, msgId, text) => {
       if (_editBroken) return false;
       log('INFO', `[StreamBot→${chatId.slice(-8)}] edit ${String(msgId).slice(-8)}: ${String(text).slice(0, 60)}`);
       try {
@@ -602,8 +602,8 @@ function createStreamForwardBot(realBot, chatId) {
       }
     },
     deleteMessage: async (_, msgId) => realBot.deleteMessage(chatId, msgId),
-    sendFile:      async (_, filePath, caption) => realBot.sendFile(chatId, filePath, caption),
-    downloadFile:  async (...args) => realBot.downloadFile(...args),
+    sendFile: async (_, filePath, caption) => realBot.sendFile(chatId, filePath, caption),
+    downloadFile: async (...args) => realBot.downloadFile(...args),
   };
 }
 
@@ -1685,10 +1685,12 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       const elements = [
         { tag: 'div', text: { tag: 'lark_md', content: body } },
         { tag: 'hr' },
-        { tag: 'action', actions: [
-          { tag: 'button', text: { tag: 'plain_text', content: '▶️ Switch to this session' }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } },
-          { tag: 'button', text: { tag: 'plain_text', content: '⬅️ Back to list' }, type: 'default', value: { cmd: '/sessions' } },
-        ] },
+        {
+          tag: 'action', actions: [
+            { tag: 'button', text: { tag: 'plain_text', content: '▶️ Switch to this session' }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } },
+            { tag: 'button', text: { tag: 'plain_text', content: '⬅️ Back to list' }, type: 'default', value: { cmd: '/sessions' } },
+          ]
+        },
       ];
       await bot.sendRawCard(chatId, '📋 Session Detail', elements);
     } else if (bot.sendButtons) {
@@ -3967,24 +3969,35 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
     args.push('--session-id', session.id);
   }
 
-  // Inject recent session memories on first message of a session
+  // Memory & Knowledge Injection (RAG)
   let memoryHint = '';
-  if (!session.started) {
-    try {
-      const memory = require('./memory');
-      const _cid = String(chatId);
-      const _cfg = loadConfig();
-      const _agentMap = { ...(_cfg.telegram ? _cfg.telegram.chat_agent_map : {}), ...(_cfg.feishu ? _cfg.feishu.chat_agent_map : {}) };
-      const projectKey = _agentMap[_cid] || (_cid.startsWith('_agent_') ? _cid.slice(7) : null);
+  try {
+    const memory = require('./memory');
+    const _cid = String(chatId);
+    const _cfg = loadConfig();
+    const _agentMap = { ...(_cfg.telegram ? _cfg.telegram.chat_agent_map : {}), ...(_cfg.feishu ? _cfg.feishu.chat_agent_map : {}) };
+    const projectKey = _agentMap[_cid] || (_cid.startsWith('_agent_') ? _cid.slice(7) : null);
+
+    // 1. Inject recent session memories ONLY on first message of a session
+    if (!session.started) {
       const recent = memory.recentSessions({ limit: 3, project: projectKey || undefined });
       if (recent.length > 0) {
         const items = recent.map(r => `- [${r.created_at}] ${r.summary}${r.keywords ? ' (keywords: ' + r.keywords + ')' : ''}`).join('\n');
-        memoryHint = `\n\n<!-- MEMORY:START -->\n[Session memory - recent context from past sessions, use to inform your responses:\n${items}]\n<!-- MEMORY:END -->`;
+        memoryHint += `\n\n<!-- MEMORY:START -->\n[Session memory - recent context from past sessions, use to inform your responses:\n${items}]\n<!-- MEMORY:END -->`;
       }
-      memory.close();
-    } catch (e) {
-      if (e.code !== 'MODULE_NOT_FOUND') log('WARN', `Memory injection failed: ${e.message}`);
     }
+
+    // 2. Dynamic Fact Injection (RAG) for EVERY query based on user prompt
+    const facts = memory.searchFacts(prompt, { limit: 3, project: projectKey || undefined });
+    if (facts.length > 0) {
+      const factItems = facts.map(f => `- [${f.relation}] ${f.value}`).join('\n');
+      memoryHint += `\n\n<!-- FACTS:START -->\n[Relevant knowledge and user preferences retrieved for this query. Follow these constraints implicitly:\n${factItems}]\n<!-- FACTS:END -->`;
+      log('INFO', `[MEMORY] Injected ${facts.length} facts based on prompt`);
+    }
+
+    memory.close();
+  } catch (e) {
+    if (e.code !== 'MODULE_NOT_FOUND') log('WARN', `Memory injection failed: ${e.message}`);
   }
 
   // Inject daemon hints only on first message of a session
@@ -4523,7 +4536,7 @@ async function main() {
   });
   // Hook: after every Claude task completes, check if restart is pending
   const _origDelete = activeProcesses.delete.bind(activeProcesses);
-  activeProcesses.delete = function(key) {
+  activeProcesses.delete = function (key) {
     const result = _origDelete(key);
     if (_pendingRestart && activeProcesses.size === 0) {
       log('INFO', 'All tasks completed — executing deferred restart...');
