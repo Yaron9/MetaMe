@@ -3988,14 +3988,21 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
     }
 
     let replyMsg;
-    if (activeProject && bot.sendCard) {
-      replyMsg = await bot.sendCard(chatId, {
-        title: `${activeProject.icon || '🤖'} ${activeProject.name || ''}`,
-        body: cleanOutput,
-        color: activeProject.color || 'blue',
-      });
-    } else {
-      replyMsg = await bot.sendMarkdown(chatId, cleanOutput);
+    try {
+      if (activeProject && bot.sendCard) {
+        replyMsg = await bot.sendCard(chatId, {
+          title: `${activeProject.icon || '🤖'} ${activeProject.name || ''}`,
+          body: cleanOutput,
+          color: activeProject.color || 'blue',
+        });
+      } else {
+        replyMsg = await bot.sendMarkdown(chatId, cleanOutput);
+      }
+    } catch (sendErr) {
+      log('WARN', `sendCard/sendMarkdown failed (${sendErr.message}), falling back to sendMessage`);
+      try { replyMsg = await bot.sendMessage(chatId, cleanOutput); } catch (e2) {
+        log('ERROR', `sendMessage fallback also failed: ${e2.message}`);
+      }
     }
     if (replyMsg && replyMsg.message_id && session) trackMsgSession(replyMsg.message_id, session);
 
