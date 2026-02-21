@@ -978,6 +978,9 @@ function startHeartbeat(config, notifyFn) {
       log('INFO', '[DAEMON] Entering Sleep Mode');
       // Generate summaries for sessions idle 2-24h
       spawnSessionSummaries();
+    } else if (!idle && _inSleepMode) {
+      _inSleepMode = false;
+      log('INFO', '[DAEMON] Exiting Sleep Mode — local activity detected');
     }
 
     // ② Task heartbeat (burns tokens on schedule)
