@@ -31,7 +31,37 @@ projects:
   #       allowedTools: [Read, Write, WebSearch]
 
 heartbeat:
-  tasks: []
+  tasks:
+    # 认知蒸馏：有偏好信号才触发，4小时冷却，仅在用户闲置时执行
+    - name: cognitive-distill
+      type: script
+      command: node ~/.metame/distill.js
+      interval: 4h
+      precondition: "test -s ~/.metame/raw_signals.jsonl"
+      require_idle: true
+      notify: false
+      enabled: true
+
+    # 记忆提取：扫描未分析 session，提取长期事实和会话标签，2小时冷却
+    - name: memory-extract
+      type: script
+      command: node ~/.metame/memory-extract.js
+      interval: 2h
+      timeout: 600
+      require_idle: true
+      notify: false
+      enabled: true
+
+    # 技能演化：有技能信号才触发，6小时冷却，仅在用户闲置时执行
+    - name: skill-evolve
+      type: script
+      command: node ~/.metame/skill-evolution.js
+      interval: 6h
+      precondition: "test -s ~/.metame/skill_signals.jsonl"
+      require_idle: true
+      notify: false
+      enabled: true
+
     # Legacy flat tasks (no project isolation). New tasks should go under projects: above.
     # Examples — uncomment or add your own:
     #
