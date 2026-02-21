@@ -1453,6 +1453,28 @@ if (!isKnownUser) {
   );
 }
 
+// RAG: inject relevant facts based on current project (desktop-side equivalent of daemon RAG)
+try {
+  const memory = require(path.join(__dirname, 'scripts', 'memory.js'));
+  // Derive project key from git repo name or cwd basename
+  let projectQuery = path.basename(process.cwd());
+  try {
+    const { execSync } = require('child_process');
+    const remote = execSync('git remote get-url origin 2>/dev/null || true', { encoding: 'utf8', stdio: 'pipe' }).trim();
+    if (remote) projectQuery = path.basename(remote, '.git');
+  } catch { /* not a git repo, use dirname */ }
+
+  const facts = memory.searchFacts(projectQuery, { limit: 5 });
+  if (facts.length > 0) {
+    const factBlock = facts.map(f => `- [${f.relation}] ${f.value}`).join('\n');
+    launchArgs.push(
+      '--append-system-prompt',
+      `<!-- FACTS:START -->\n[Relevant knowledge for this project. Follow implicitly:\n${factBlock}]\n<!-- FACTS:END -->`
+    );
+  }
+  memory.close();
+} catch { /* memory not available, non-fatal */ }
+
 // Spawn the official claude tool with our marker + provider env
 const child = spawn('claude', launchArgs, {
   stdio: 'inherit',
