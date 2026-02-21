@@ -750,25 +750,6 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
  * Spawn memory-extract.js as a detached background process.
  * Called on sleep mode entry to consolidate session facts.
  */
-function spawnMemoryConsolidation() {
-  const scriptPath = path.join(__dirname, 'memory-extract.js');
-  if (!fs.existsSync(scriptPath)) {
-    log('WARN', '[DAEMON] memory-extract.js not found, skipping consolidation');
-    return;
-  }
-  try {
-    const child = spawn(process.execPath, [scriptPath], {
-      detached: true,
-      stdio: 'ignore',
-      env: { ...process.env },
-    });
-    child.unref();
-    log('INFO', '[DAEMON] Memory consolidation spawned (background)');
-  } catch (e) {
-    log('WARN', `[DAEMON] Failed to spawn memory consolidation: ${e.message}`);
-  }
-}
-
 /**
  * Spawn session-summarize.js for sessions that have been idle 2-24 hours.
  * Called on sleep mode entry. Skips sessions that already have a fresh summary.
@@ -994,15 +975,7 @@ function startHeartbeat(config, notifyFn) {
     const idle = isUserIdle();
     if (idle && !_inSleepMode) {
       _inSleepMode = true;
-      log('INFO', '[DAEMON] Entering Sleep Mode — running dream tasks');
-      // Trigger memory consolidation at most once every 4 hours
-      const sleepState = loadState();
-      const lastConsolidate = sleepState.last_memory_consolidate || 0;
-      if (Date.now() - lastConsolidate > 4 * 60 * 60 * 1000) {
-        sleepState.last_memory_consolidate = Date.now();
-        saveState(sleepState);
-        spawnMemoryConsolidation();
-      }
+      log('INFO', '[DAEMON] Entering Sleep Mode');
       // Generate summaries for sessions idle 2-24h
       spawnSessionSummaries();
     }
