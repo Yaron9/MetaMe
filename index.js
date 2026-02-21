@@ -209,9 +209,13 @@ function spawnDistillBackground() {
   }
 
   // Spawn as detached background process — won't block Claude launch
+  // Remove CLAUDECODE env var so distill.js can call `claude -p` without nested-session rejection
+  const distillEnvClean = { ...process.env };
+  delete distillEnvClean.CLAUDECODE;
   const bg = spawn('node', [distillPath], {
     detached: true,
-    stdio: 'ignore'
+    stdio: 'ignore',
+    env: distillEnvClean,
   });
   bg.unref();
 }
