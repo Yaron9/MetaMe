@@ -160,8 +160,10 @@ npm publish --otp=<6位验证码>
 当用户希望你把消息/任务转发给另一个 agent 时，用 Bash 工具调用：
 
 ```bash
-~/.metame/bin/dispatch_to <project_key> "要传达的内容"
+~/.metame/bin/dispatch_to [--new] <project_key> "要传达的内容"
 ```
+
+`--new`：强制新建会话，用于用户说"新开会话处理"时。默认复用已有会话。
 
 可用 agents（project_key → 昵称）：
 - `personal` → 个人助理、小美
