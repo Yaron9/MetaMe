@@ -26,6 +26,38 @@ function callClaude(input, args, env, timeout) {
   });
 }
 
+// Atomic fact extraction prompt (used after main distill)
+const FACT_EXTRACTION_PROMPT = `你是精准的知识提取引擎。从以下会话骨架中提取「值得长期记住的原子事实」。
+
+提取类型（必须是以下之一）：
+- tech_decision（技术决策：为什么选A不选B）
+- bug_lesson（Bug根因：什么设计/假设导致了问题）
+- arch_convention（架构约定：系统组件的行为边界）
+- config_fact（配置事实：某个值的真实含义，尤其反直觉的）
+- user_pref（用户明确表达的偏好/红线）
+
+绝对不提取：
+- 过程性描述（"用户问了X"、"我们讨论了Y"）
+- 临时状态（"当前正在..."、"这次会话..."）
+- 未经验证的猜测（"可能是因为..."、"也许..."）
+- 显而易见的常识
+
+输出 JSON 数组，每个元素：
+{"entity":"主体(点号层级如MetaMe.daemon.askClaude)","relation":"类型","value":"脱离上下文可独立理解的一句话","confidence":"high或medium","tags":["最多3个标签"]}
+
+规则：
+- 宁缺毋滥：0条比10条废话好
+- value必须包含足够上下文，不能写"这个问题"、"上面说的"
+- value长度20-200字
+- entity用英文点号路径，value可用中文
+- medium confidence必须有非空tags
+- 没有值得提取的事实时返回 []
+
+只输出JSON数组，不要解释。
+
+会话骨架：
+{{SKELETON}}`.trim();
+
 const HOME = os.homedir();
 const BUFFER_FILE = path.join(HOME, '.metame', 'raw_signals.jsonl');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
@@ -916,6 +948,60 @@ If no clear patterns found: respond with exactly NO_PATTERNS`;
   }
 }
 
+/**
+ * Extract atomic facts from a distilled session.
+ * Non-fatal: any error is logged and ignored.
+ */
+async function extractFacts(skeleton, sessionSummary, project) {
+  const skeletonText = JSON.stringify({ skeleton, sessionSummary }, null, 2).slice(0, 3000);
+  const prompt = FACT_EXTRACTION_PROMPT.replace('{{SKELETON}}', skeletonText);
+
+  let raw;
+  try {
+    // Use existing callClaude with short timeout
+    raw = await Promise.race([
+      callClaude(
+        prompt,
+        ['-p', '--model', 'haiku', '--no-session-persistence'],
+        { ...process.env, ...distillEnv },
+        18000,
+      ),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('extractFacts timeout')), 20000)),
+    ]);
+  } catch (e) {
+    console.log(`[facts] extraction skipped: ${e.message}`);
+    return [];
+  }
+
+  // Parse JSON response
+  let facts = [];
+  try {
+    const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    facts = JSON.parse(cleaned);
+    if (!Array.isArray(facts)) facts = [];
+  } catch {
+    console.log('[facts] JSON parse failed, skipping');
+    return [];
+  }
+
+  // Quality filter
+  const VAGUE_PATTERNS = [
+    /^用户(问|提|说|提到)/, /^我们(讨论|分析|查看)/,
+    /这个问题/, /上面(提到|说的|的)/, /可能是因为/,
+    /也许|或许|大概/, /当前正在|目前在/, /这次会话/,
+  ];
+  const ALLOWED_FLAT = new Set(['王总', 'system', 'user']);
+
+  return facts.filter(f => {
+    if (!f.entity || !f.relation || !f.value) return false;
+    if (f.value.length < 20 || f.value.length > 300) return false;
+    if (VAGUE_PATTERNS.some(re => re.test(f.value))) return false;
+    if (!f.entity.includes('.') && !ALLOWED_FLAT.has(f.entity)) return false;
+    if (f.confidence === 'medium' && (!f.tags || f.tags.length === 0)) return false;
+    return true;
+  });
+}
+
 // Export for use in index.js
 module.exports = { distill, writeSessionLog, bootstrapSessionLog, detectPatterns };
 
@@ -955,6 +1041,25 @@ if (require.main === module) {
           mood: (result.behavior && result.behavior.emotional_response) || '',
           tokenCost: 0,
         });
+        // Extract and save atomic facts (non-fatal)
+        try {
+          const facts = await extractFacts(
+            result.skeleton,
+            result.sessionSummary,
+            result.skeleton.project || 'unknown'
+          );
+          if (facts.length > 0) {
+            const { saved, skipped } = memory.saveFacts(
+              result.skeleton.session_id,
+              result.skeleton.project || 'unknown',
+              facts
+            );
+            console.log(`🧠 Facts: ${saved} saved, ${skipped} skipped`);
+          }
+        } catch (fe) {
+          console.log(`[facts] save error: ${fe.message}`);
+        }
+
         memory.close();
         console.log(`💾 Memory: saved session ${result.skeleton.session_id.slice(0, 8)}`);
       } catch (e) {
