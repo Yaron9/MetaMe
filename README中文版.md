@@ -310,6 +310,8 @@ feishu:
 | `/model` | 切换模型（sonnet/opus/haiku） |
 | `/bind <名称>` | 将群注册为专属 Agent |
 | `/sh <命令>` | 原始 shell——绕过 Claude |
+| `/memory` | 记忆统计：事实数量、已标签 session 数、DB 大小 |
+| `/memory <关键词>` | 按关键词搜索长期事实 |
 | `/doctor` | 交互式诊断 |
 
 ## 工作原理
