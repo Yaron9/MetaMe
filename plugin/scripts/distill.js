@@ -935,6 +935,35 @@ if (require.main === module) {
     if (result.behavior) {
       writeSessionLog(result.behavior, result.signalCount || 0, result.skeleton || null, result.sessionSummary || null);
     }
+
+    // Persist session summary to SQLite memory (for cross-session recall)
+    if (result.skeleton && (result.behavior || result.sessionSummary)) {
+      try {
+        const memory = require('./memory');
+        const topics = (result.behavior && result.behavior.topics) || [];
+        const friction = (result.behavior && result.behavior.friction) || [];
+        const pivots = (result.sessionSummary && result.sessionSummary.pivots) || [];
+        const keywords = [...new Set([...topics, ...friction, ...pivots])].join(', ');
+        const summary = result.sessionSummary
+          ? `${result.sessionSummary.intent || 'unknown'} → ${result.sessionSummary.outcome || 'unknown'}${pivots.length ? ' | pivots: ' + pivots.join(', ') : ''}`
+          : `Session: ${(result.behavior && result.behavior.session_outcome) || 'unknown'}`;
+        memory.saveSession({
+          sessionId: result.skeleton.session_id,
+          project: result.skeleton.project || 'unknown',
+          summary,
+          keywords,
+          mood: (result.behavior && result.behavior.emotional_response) || '',
+          tokenCost: 0,
+        });
+        memory.close();
+        console.log(`💾 Memory: saved session ${result.skeleton.session_id.slice(0, 8)}`);
+      } catch (e) {
+        // Non-fatal: memory is optional (node:sqlite may not be available)
+        if (e.code !== 'MODULE_NOT_FOUND') {
+          console.log(`⚠️ Memory save skipped: ${e.message}`);
+        }
+      }
+    }
     // Run pattern detection (only triggers every 5th distill)
     if (!bootstrapped) await detectPatterns();
 
