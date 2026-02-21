@@ -120,7 +120,7 @@ async function run() {
   let distillEnv = {};
   try { distillEnv = buildDistillEnv(); } catch { }
 
-  const sessions = sessionAnalytics.findAllUnanalyzedSessions(20);
+  const sessions = sessionAnalytics.findAllUnextractedSessions(20);
   if (sessions.length === 0) {
     console.log('[memory-extract] No unanalyzed sessions found.');
     memory.close();
@@ -137,7 +137,7 @@ async function run() {
 
       // Skip trivial sessions
       if (skeleton.message_count < 2 && skeleton.duration_min < 1) {
-        sessionAnalytics.markAnalyzed(skeleton.session_id);
+        sessionAnalytics.markFactsExtracted(skeleton.session_id);
         continue;
       }
 
@@ -156,7 +156,7 @@ async function run() {
         console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)}: no facts extracted`);
       }
 
-      sessionAnalytics.markAnalyzed(skeleton.session_id);
+      sessionAnalytics.markFactsExtracted(skeleton.session_id);
       processed++;
     } catch (e) {
       console.log(`[memory-extract] Session error: ${e.message}`);
