@@ -1710,14 +1710,8 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     if (!query) {
       // Stats view
       try {
-        let factCount = '?';
-        try {
-          const Database = require('better-sqlite3');
-          const _db = new Database(memMod.DB_PATH, { readonly: true });
-          factCount = (_db.prepare('SELECT COUNT(*) as c FROM facts WHERE superseded_by IS NULL').get() || {}).c || 0;
-          _db.close();
-        } catch {}
         const s = memMod.stats();
+        const factCount = s.facts ?? '?';
         const tagFile = path.join(HOME, '.metame', 'session_tags.json');
         let tagCount = 0;
         try { tagCount = Object.keys(JSON.parse(fs.readFileSync(tagFile, 'utf8'))).length; } catch {}
@@ -1767,9 +1761,10 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     if (bot.sendButtons) {
       await bot.sendRawCard(chatId, '📋 Recent Sessions', buildSessionCardElements(allSessions));
     } else {
+      const _tags1 = loadSessionTags();
       let msg = '📋 Recent sessions:\n\n';
       allSessions.forEach((s, i) => {
-        msg += sessionRichLabel(s, i + 1) + '\n';
+        msg += sessionRichLabel(s, i + 1, _tags1) + '\n';
       });
       await bot.sendMessage(chatId, msg);
     }
@@ -1865,9 +1860,10 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
         });
         await bot.sendButtons(chatId, headerTitle, buttons);
       } else {
+        const _tags2 = loadSessionTags();
         let msg = `${title}\n\n`;
         recentSessions.forEach((s, i) => {
-          msg += sessionRichLabel(s, i + 1) + '\n';
+          msg += sessionRichLabel(s, i + 1, _tags2) + '\n';
         });
         await bot.sendMessage(chatId, msg);
       }
