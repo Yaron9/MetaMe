@@ -155,6 +155,24 @@ npm publish --otp=<6位验证码>
 >
 > 它们共存互不干扰。排查问题时**只操作本项目的进程**，看到 `metame-desktop` / `opencode-cli` 相关进程一律跳过。
 
+## Agent Dispatch 能力
+
+当用户希望你把消息/任务转发给另一个 agent 时，用 Bash 工具调用：
+
+```bash
+~/.metame/bin/dispatch_to <project_key> "要传达的内容"
+```
+
+可用 agents（project_key → 昵称）：
+- `personal` → 个人助理、小美
+- `digital_me` → 3D、小D、自媒体
+- `metame` → 贾维斯、老贾、Jarvis
+- `desktop` → 老马、马经理
+
+**什么时候调用**：用户说"告诉老马..."、"让3D..."、"通知贾维斯..."等，你判断是转发意图就直接调用，不需要用户输入特定格式。
+
+调用后告知用户已转发，无需等待对方回复。
+
 ## ⚠️ 已踩过的坑（必看，防止重蹈覆辙）
 
 ### 坑1: askClaude 函数参数缺失导致 ReferenceError 被静默吞掉（2026-02-20）
