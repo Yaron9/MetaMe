@@ -615,6 +615,7 @@ function dispatchTask(targetProject, message, config, replyFn) {
     priority: message.priority || 'normal',
     payload: message.payload || {},
     callback: message.callback || false,
+    new_session: !!message.new_session,
     chain: [...chain, message.from || 'unknown'],
     created_at: new Date().toISOString(),
   };
