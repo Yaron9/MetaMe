@@ -28,6 +28,8 @@ const FACT_EXTRACTION_PROMPT = `你是精准的知识提取引擎。从以下会
 - arch_convention（架构约定：系统组件的行为边界）
 - config_fact（配置事实：某个值的真实含义，尤其反直觉的）
 - user_pref（用户明确表达的偏好/红线）
+- workflow_rule（工作流戒律：如“不要在某情况下做某事”的反常识流）
+- project_milestone（项目里程碑：主要架构重构、版本发布等跨会话级成果）
 
 绝对不提取：
 - 过程性描述（"用户问了X"、"我们讨论了Y"）
@@ -120,7 +122,7 @@ async function run() {
   let distillEnv = {};
   try { distillEnv = buildDistillEnv(); } catch { }
 
-  const sessions = sessionAnalytics.findAllUnextractedSessions(20);
+  const sessions = sessionAnalytics.findAllUnextractedSessions(8);
   if (sessions.length === 0) {
     console.log('[memory-extract] No unanalyzed sessions found.');
     memory.close();
