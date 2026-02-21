@@ -1714,7 +1714,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
         const factCount = s.facts ?? '?';
         const tagFile = path.join(HOME, '.metame', 'session_tags.json');
         let tagCount = 0;
-        try { tagCount = Object.keys(JSON.parse(fs.readFileSync(tagFile, 'utf8'))).length; } catch {}
+        try { tagCount = Object.keys(JSON.parse(fs.readFileSync(tagFile, 'utf8'))).length; } catch { }
         const lines = [
           `🧠 *Memory Stats*`,
           `━━━━━━━━━━━━━━━━`,
@@ -3603,13 +3603,26 @@ let lastInteractionTime = Date.now(); // updated on every incoming message
 let _inSleepMode = false;             // tracks current sleep state for log transitions
 
 const IDLE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
+const LOCAL_ACTIVE_FILE = path.join(METAME_DIR, 'local_active');
 
 /**
  * Returns true when user has been inactive for >30min AND no sessions are running.
+ * Checks BOTH mobile adapter activity (Telegram/Feishu) AND the local_active heartbeat
+ * file (updated by Claude Code / index.js on each session start).
  * Dream tasks (require_idle: true) only execute in this state.
  */
 function isUserIdle() {
-  return (Date.now() - lastInteractionTime > IDLE_THRESHOLD_MS) && activeProcesses.size === 0;
+  // Check mobile adapter activity (Telegram/Feishu)
+  if (Date.now() - lastInteractionTime <= IDLE_THRESHOLD_MS) return false;
+  // Check local desktop activity via ~/.metame/local_active mtime
+  try {
+    if (fs.existsSync(LOCAL_ACTIVE_FILE)) {
+      const mtime = fs.statSync(LOCAL_ACTIVE_FILE).mtimeMs;
+      if (Date.now() - mtime < IDLE_THRESHOLD_MS) return false;
+    }
+  } catch { /* ignore — treat as idle if file unreadable */ }
+  // Only idle if no active Claude sub-processes either
+  return activeProcesses.size === 0;
 }
 
 // Fix3: persist child PIDs so next daemon startup can kill orphans
@@ -4590,7 +4603,7 @@ async function main() {
       qmd.startDaemon().then(running => {
         if (running) log('INFO', '[QMD] Semantic search daemon started (localhost:8181)');
         else log('INFO', '[QMD] Available but daemon not started — will use CLI fallback');
-      }).catch(() => {});
+      }).catch(() => { });
     }
   } catch { /* qmd-client not available, skip */ }
   // Hourly heartbeat so daemon.log stays fresh even when idle (visible aliveness check)
