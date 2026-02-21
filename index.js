@@ -327,6 +327,12 @@ const PROTOCOL_NORMAL = `${METAME_START}
        2. **Surgical Update:** \`!metame set-trait key value\` (For overwriting specific fields, e.g., \`!metame set-trait status.focus "API Design"\`).
    *   **RULE:** Only use these tools when the User **EXPLICITLY** instructs you.
    *   **REMINDER:** If the User expresses a strong persistent preference, you may gently ask *at the end of the task*: "Should I save this preference to your MetaMe profile?"
+
+**3. MEMORY SYSTEM (Three-Layer Recall):**
+   * **Long-term Facts** → injected as \`<!-- FACTS:START -->\` blocks. Follow implicitly, never repeat to user.
+   * **Session Summary** → injected as \`[上次对话摘要，供参考]\` when resuming after 2h+ gap. Use for continuity, do NOT quote back to user.
+   * **Background Pipeline:** Sleep mode triggers memory consolidation automatically. Memory improves over time without user action.
+   * **Search:** \`node ~/.metame/memory-search.js "<keyword>"\` to recall facts manually.
 ---
 `;
 
@@ -579,6 +585,24 @@ fs.writeFileSync(PROJECT_FILE, newContent, 'utf8');
 
 console.log("🔮 MetaMe: Link Established.");
 console.log("🧬 Protocol: Dynamic Handshake Active");
+
+// Memory system status — show live stats without blocking launch
+try {
+  const tagsFile = path.join(METAME_DIR, 'session_tags.json');
+  const tagCount = fs.existsSync(tagsFile)
+    ? Object.keys(JSON.parse(fs.readFileSync(tagsFile, 'utf8'))).length
+    : 0;
+  let factCount = 0;
+  try {
+    const memMod = require(path.join(METAME_DIR, 'memory.js'));
+    const stats = memMod.stats();
+    factCount = (stats && (stats.facts || stats.count)) || 0;
+    memMod.close();
+  } catch { /* memory.js not available or DB not ready */ }
+  if (factCount > 0 || tagCount > 0) {
+    console.log(`🧠 Memory: ${factCount} facts · ${tagCount} sessions tagged`);
+  }
+} catch { /* non-fatal */ }
 
 // ---------------------------------------------------------
 // 5. LAUNCH CLAUDE (OR HOT RELOAD)
