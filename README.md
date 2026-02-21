@@ -303,6 +303,8 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 | `/model` | Switch model (sonnet/opus/haiku) |
 | `/bind <name>` | Register group as dedicated agent |
 | `/sh <cmd>` | Raw shell — bypasses Claude |
+| `/memory` | Memory stats: fact count, session tags, DB size |
+| `/memory <keyword>` | Search long-term facts by keyword |
 | `/doctor` | Interactive diagnostics |
 
 ## How It Works
