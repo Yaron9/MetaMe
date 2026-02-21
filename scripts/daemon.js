@@ -3922,8 +3922,7 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
    - Do NOT read or summarize the file content (wastes tokens)
    - Add at END of response: [[FILE:/absolute/path/to/file]]
    - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
-   - Multiple files: use multiple [[FILE:...]] tags
-3. Formatting: NEVER use markdown tables (| col1 | col2 |) — they render as broken plaintext on mobile. Use bullet lists or numbered lists instead for comparisons/structured data.]` : '';
+   - Multiple files: use multiple [[FILE:...]] tags]` : '';
 
   const routedPrompt = skill ? `/${skill} ${prompt}` : prompt;
   const fullPrompt = routedPrompt + daemonHint + memoryHint;
