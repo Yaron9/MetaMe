@@ -34,6 +34,29 @@ function withTimeout(promise, ms = 10000) {
   ]);
 }
 
+// Max chars per lark_md element (Feishu limit ~4000)
+const MAX_CHUNK = 3800;
+
+/**
+ * Convert standard markdown to lark_md and split into chunks.
+ * Shared by sendMarkdown and sendCard.
+ */
+function toMdChunks(text) {
+  const content = text
+    .replace(/^(#{1,3})\s+(.+)$/gm, '**$2**')      // headers → bold
+    .replace(/^---+$/gm, '─────────────────────');  // hr → unicode line
+  if (content.length <= MAX_CHUNK) return [content];
+  const paragraphs = content.split(/\n\n/);
+  const chunks = [];
+  let buf = '';
+  for (const p of paragraphs) {
+    if (buf.length + p.length + 2 > MAX_CHUNK && buf) { chunks.push(buf); buf = p; }
+    else { buf = buf ? buf + '\n\n' + p : p; }
+  }
+  if (buf) chunks.push(buf);
+  return chunks;
+}
+
 function createBot(config) {
   const { app_id, app_secret } = config;
   if (!app_id || !app_secret) throw new Error('app_id and app_secret are required');
@@ -43,6 +66,17 @@ function createBot(config) {
     appId: app_id,
     appSecret: app_secret,
   });
+
+  // Private: send an interactive card JSON; returns { message_id } or null.
+  // All card functions funnel through here to avoid repeating the SDK call.
+  async function _sendInteractive(chatId, card) {
+    const res = await withTimeout(client.im.message.create({
+      params: { receive_id_type: 'chat_id' },
+      data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
+    }));
+    const msgId = res?.data?.message_id;
+    return msgId ? { message_id: msgId } : null;
+  }
 
   return {
     /**
@@ -84,119 +118,22 @@ function createBot(config) {
      * Send markdown as Feishu interactive card (lark_md renders bold, lists, code, links)
      */
     async sendMarkdown(chatId, markdown) {
-      // Convert standard markdown → lark_md compatible format
-      let content = markdown
-        .replace(/^(#{1,3})\s+(.+)$/gm, '**$2**')   // headers → bold
-        .replace(/^---+$/gm, '─────────────────────');  // hr → unicode line
-
-      // Split into chunks if too long (element limit ~4000 chars)
-      const MAX_CHUNK = 3800;
-      const chunks = [];
-      if (content.length <= MAX_CHUNK) {
-        chunks.push(content);
-      } else {
-        const paragraphs = content.split(/\n\n/);
-        let buf = '';
-        for (const p of paragraphs) {
-          if (buf.length + p.length + 2 > MAX_CHUNK && buf) {
-            chunks.push(buf);
-            buf = p;
-          } else {
-            buf = buf ? buf + '\n\n' + p : p;
-          }
-        }
-        if (buf) chunks.push(buf);
-      }
-
-      // V2 schema: markdown element with normal text size
-      const elements = chunks.map(c => ({
-        tag: 'markdown',
-        content: c,
-        text_size: 'x-large',
-      }));
-
-      const card = {
-        schema: '2.0',
-        body: { elements },
-      };
-
-      const res = await withTimeout(client.im.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chatId,
-          msg_type: 'interactive',
-          content: JSON.stringify(card),
-        },
-      }));
-      const msgId = res?.data?.message_id;
-      return msgId ? { message_id: msgId } : null;
+      const elements = toMdChunks(markdown).map(c => ({ tag: 'markdown', content: c }));
+      return _sendInteractive(chatId, { schema: '2.0', body: { elements } });
     },
 
     /**
-     * Send a colored interactive card (for project-tagged notifications)
+     * Send a colored interactive card with optional markdown body (V2 schema)
      * @param {string} chatId
-     * @param {string} title - card header text
-     * @param {string} body - card body (lark markdown)
-     * @param {string} color - header color: blue|orange|green|red|grey|purple|turquoise
+     * @param {object} opts
+     * @param {string} opts.title - card header text
+     * @param {string} [opts.body] - card body (standard markdown)
+     * @param {string} [opts.color='blue'] - header color: blue|orange|green|red|grey|purple|turquoise
      */
     async sendCard(chatId, { title, body, color = 'blue' }) {
-      // Use card schema V2 for better text sizing
-      if (!body) {
-        const card = {
-          schema: '2.0',
-          header: { title: { tag: 'plain_text', content: title }, template: color },
-          body: { elements: [] },
-        };
-        const res = await withTimeout(client.im.message.create({
-          params: { receive_id_type: 'chat_id' },
-          data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
-        }));
-        const msgId = res?.data?.message_id;
-        return msgId ? { message_id: msgId } : null;
-      }
-
-      // Convert standard markdown → lark_md
-      let content = body
-        .replace(/^(#{1,3})\s+(.+)$/gm, '**$2**')
-        .replace(/^---+$/gm, '─────────────────────');
-
-      // Split into chunks (lark_md element limit ~4000 chars)
-      const MAX_CHUNK = 3800;
-      const chunks = [];
-      if (content.length <= MAX_CHUNK) {
-        chunks.push(content);
-      } else {
-        const paragraphs = content.split(/\n\n/);
-        let buf = '';
-        for (const p of paragraphs) {
-          if (buf.length + p.length + 2 > MAX_CHUNK && buf) {
-            chunks.push(buf);
-            buf = p;
-          } else {
-            buf = buf ? buf + '\n\n' + p : p;
-          }
-        }
-        if (buf) chunks.push(buf);
-      }
-
-      // V2: use markdown element with text_size for readable font
-      const elements = chunks.map(c => ({
-        tag: 'markdown',
-        content: c,
-        text_size: 'x-large',
-      }));
-
-      const card = {
-        schema: '2.0',
-        header: { title: { tag: 'plain_text', content: title }, template: color },
-        body: { elements },
-      };
-      const res = await withTimeout(client.im.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
-      }));
-      const msgId = res?.data?.message_id;
-      return msgId ? { message_id: msgId } : null;
+      const header = { title: { tag: 'plain_text', content: title }, template: color };
+      const elements = body ? toMdChunks(body).map(c => ({ tag: 'markdown', content: c })) : [];
+      return _sendInteractive(chatId, { schema: '2.0', header, body: { elements } });
     },
 
     /**
@@ -214,26 +151,24 @@ function createBot(config) {
     async sendTyping(_chatId) {},
 
     /**
-     * Send interactive card with action buttons
+     * Send interactive card with action buttons (V1 schema — required for card.action.trigger)
      * @param {string} chatId
-     * @param {string} title - card header
+     * @param {string} title - card header (first line) + optional body (remaining lines)
      * @param {Array<Array<{text: string, callback_data: string}>>} buttons - rows of buttons
      */
     async sendButtons(chatId, title, buttons) {
-      // Feishu cards: each action element holds up to 3 buttons.
-      // For a vertical list, put each button in its own action element.
+      // Each row becomes one action element; a row can hold up to 3 buttons side-by-side.
       const buttonElements = buttons.map(row => ({
         tag: 'action',
-        actions: [{
+        actions: row.map(b => ({
           tag: 'button',
-          text: { tag: 'plain_text', content: row[0].text },
+          text: { tag: 'plain_text', content: b.text },
           type: 'default',
-          value: { cmd: row[0].callback_data },
-        }],
+          value: { cmd: b.callback_data },
+        })),
       }));
 
-      // Split title into header (first line) + body (rest as markdown in card body)
-      // Feishu card header is single-line plain text — multi-line content gets truncated
+      // Feishu card header is single-line — split multi-line title into header + body
       const lines = title.split('\n');
       const headerText = lines[0].slice(0, 60);
       const bodyText = lines.slice(1).join('\n').trim();
@@ -245,47 +180,25 @@ function createBot(config) {
       }
       elements.push(...buttonElements);
 
-      const card = {
+      return _sendInteractive(chatId, {
         config: { wide_screen_mode: true },
-        header: {
-          title: { tag: 'plain_text', content: headerText },
-          template: 'blue',
-        },
+        header: { title: { tag: 'plain_text', content: headerText }, template: 'blue' },
         elements,
-      };
-      await withTimeout(client.im.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chatId,
-          msg_type: 'interactive',
-          content: JSON.stringify(card),
-        },
-      }));
+      });
     },
 
     /**
-     * Send a rich interactive card with pre-built elements (no title splitting).
+     * Send a rich interactive card with pre-built elements (V1 schema — required for card.action.trigger)
      * @param {string} chatId
      * @param {string} headerText - single-line card header
-     * @param {Array} elements - Feishu card elements array
+     * @param {Array} elements - Feishu V1 card elements array
      */
-    async sendCard(chatId, headerText, elements) {
-      const card = {
+    async sendRawCard(chatId, headerText, elements) {
+      return _sendInteractive(chatId, {
         config: { wide_screen_mode: true },
-        header: {
-          title: { tag: 'plain_text', content: headerText },
-          template: 'blue',
-        },
+        header: { title: { tag: 'plain_text', content: headerText }, template: 'blue' },
         elements,
-      };
-      await withTimeout(client.im.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chatId,
-          msg_type: 'interactive',
-          content: JSON.stringify(card),
-        },
-      }));
+      });
     },
 
     /**
