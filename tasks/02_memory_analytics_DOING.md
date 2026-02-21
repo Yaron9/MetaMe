@@ -228,18 +228,56 @@ P3-B → P3-C ──────────────────────
 
 | 优先级 | 任务 | 依赖 | 核心改动量 | 预期收益 |
 |--------|------|------|----------|---------|
-| **P0** | sleep → memory-extract | 无 | +15行 daemon.js | 记忆质量保障 |
-| **P1** | Unix Socket IPC | 无 | +50行 daemon.js，改 dispatch_to | Agent延迟 60s→0 |
-| **P2-A** | session tags | P0 | memory-extract.js 扩展 | 路由前提 |
-| **P2-B** | session 摘要缓存 | P0 | daemon_state 扩展 | 对话连贯性 |
+| **P0** ✅ | sleep → memory-extract | 无 | +15行 daemon.js | 记忆质量保障 |
+| **P1** ✅ | Unix Socket IPC | 无 | +50行 daemon.js，改 dispatch_to | Agent延迟 60s→0 |
+| **P2-A** ✅ | session tags | P0 | memory-extract.js 扩展 | 路由前提 |
+| **P2-B** ✅ | session 摘要缓存 | P0 | daemon_state 扩展 | 对话连贯性 |
 | ~~P3-A~~ | ~~路由算法移植~~ | — | ~~自动切换，废弃~~ | — |
 | ~~P3-B~~ | ~~路由集成 daemon~~ | — | ~~自动切换，废弃~~ | — |
 | ~~P3-C~~ | ~~学习反馈~~ | — | ~~自动切换，废弃~~ | — |
-| **P3↓** | Session 检索推荐 | P2-A | 推荐卡片，用户授权切换 | 找回历史上下文 |
+| **P3↓** ⏳ | Session 检索推荐 | P2-A | 推荐卡片，用户授权切换 | 找回历史上下文 |
 
 ---
 
-## 6. 明确废弃的方案
+## 6. 架构备忘：待评估技术债
+
+### T1 — Profile 注入无痕化（低优先级，多 Agent 并行时再做）
+
+**背景（2026-02-22 Gemini 评审 + Jarvis 补充）**
+
+当前 `index.js` 将 ~180 行 `PROTOCOL_NORMAL` 写入工程目录 `CLAUDE.md` 头部。
+已知副作用：Task subagent 会读到这段内容，造成"打工仔 Agent 看到一堆主人格指令"的认知干扰。
+
+**Gemini 建议**：切换到 `--append-system-prompt`，让注入不落文件、事后无痕。
+
+**Jarvis 补充的关键盲点**：`--append-system-prompt` 只在 `metame` 命令启动时生效；Task subagent 不继承该参数，只读 CLAUDE.md。直接切换会导致 subagent 完全看不到用户画像，认知连续性断掉。
+
+**正确方向（分层注入）**：
+
+| 层 | 内容 | 目标 | 方式 |
+|----|------|------|------|
+| `~/.claude_profile.yaml` | 用户身份+偏好 | 所有会话含 subagent | 全局 CLAUDE.md 引用（现状） |
+| 项目 CLAUDE.md | 项目规范+架构约定 | 该目录所有 Claude | 文件，用户维护 |
+| MetaMe 协议 PROTOCOL_NORMAL | 进化机制+行为指令 | 只需主会话 | 改用 `--append-system-prompt` |
+
+**触发条件**：当 P3↓ Session 推荐卡片上线，subagent 上下文干净度变成刚需时，做这个重构才值得。
+
+**当前状态**：记录为技术债，不急于实施。
+
+---
+
+### T2 — Agent 定义与 CLAUDE.md 隔离（已决策，无需修改）
+
+**结论（2026-02-22）**：MetaMe 的"环境投影派"架构设计已足够，不需要向 openclaw 的多文件方向演进。
+
+- openclaw 的 `soul.md / identification.md / skills/` 属于"实体派"，适合多人团队维护、有强命名空间需求的场景
+- MetaMe 用 **CWD 即上下文** 实现 Agent 隔离：不同 Agent 绑定不同工作目录，自然读各自的 CLAUDE.md；`~/.claude_profile.yaml` 提供统一用户身份
+- 一个 CLAUDE.md + 中枢 profile，两层已覆盖 openclaw 四五个文件的职责，且无同步负担
+- **结论**：无需修改现有设计，记录为已决策。
+
+---
+
+## 7. 明确废弃的方案
 
 | 原计划 | 废弃原因 |
 |--------|---------|
