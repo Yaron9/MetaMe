@@ -35,12 +35,15 @@ function loadState() {
  * Save analytics state.
  */
 function saveState(state) {
-  // Cap entries
-  const keys = Object.keys(state.analyzed);
-  if (keys.length > MAX_STATE_ENTRIES) {
-    const sorted = keys.sort((a, b) => (state.analyzed[a] || 0) - (state.analyzed[b] || 0));
-    const toRemove = sorted.slice(0, keys.length - MAX_STATE_ENTRIES);
-    for (const k of toRemove) delete state.analyzed[k];
+  // Cap entries for both tracking keys
+  for (const key of ['analyzed', 'facts_analyzed']) {
+    if (!state[key]) continue;
+    const keys = Object.keys(state[key]);
+    if (keys.length > MAX_STATE_ENTRIES) {
+      const sorted = keys.sort((a, b) => (state[key][a] || 0) - (state[key][b] || 0));
+      const toRemove = sorted.slice(0, keys.length - MAX_STATE_ENTRIES);
+      for (const k of toRemove) delete state[key][k];
+    }
   }
   const dir = path.dirname(STATE_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -364,15 +367,7 @@ function markFactsExtracted(sessionId) {
   const state = loadState();
   if (!state.facts_analyzed) state.facts_analyzed = {};
   state.facts_analyzed[sessionId] = Date.now();
-  // Cap facts_analyzed same as analyzed
-  const keys = Object.keys(state.facts_analyzed);
-  if (keys.length > MAX_STATE_ENTRIES) {
-    const sorted = keys.sort((a, b) => state.facts_analyzed[a] - state.facts_analyzed[b]);
-    for (const k of sorted.slice(0, keys.length - MAX_STATE_ENTRIES)) {
-      delete state.facts_analyzed[k];
-    }
-  }
-  saveState(state);
+  saveState(state); // saveState() caps both analyzed and facts_analyzed
 }
 
 /**
