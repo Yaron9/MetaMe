@@ -108,11 +108,10 @@ function createBot(config) {
         if (buf) chunks.push(buf);
       }
 
-      // V2 schema: markdown element with normal text size
+      // V2 schema: markdown element
       const elements = chunks.map(c => ({
         tag: 'markdown',
         content: c,
-        text_size: 'x-large',
       }));
 
       const card = {
@@ -179,11 +178,10 @@ function createBot(config) {
         if (buf) chunks.push(buf);
       }
 
-      // V2: use markdown element with text_size for readable font
+      // V2: use markdown element
       const elements = chunks.map(c => ({
         tag: 'markdown',
         content: c,
-        text_size: 'x-large',
       }));
 
       const card = {
@@ -269,7 +267,7 @@ function createBot(config) {
      * @param {string} headerText - single-line card header
      * @param {Array} elements - Feishu card elements array
      */
-    async sendCard(chatId, headerText, elements) {
+    async sendRawCard(chatId, headerText, elements) {
       const card = {
         config: { wide_screen_mode: true },
         header: {
