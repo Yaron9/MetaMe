@@ -133,7 +133,7 @@ async function distill() {
     // Goal context section (~11 tokens when present)
     let goalContext = '';
     if (sessionAnalytics) {
-      try { goalContext = sessionAnalytics.formatGoalContext(BRAIN_FILE); } catch {}
+      try { goalContext = sessionAnalytics.formatGoalContext(BRAIN_FILE); } catch { }
     }
     const goalSection = goalContext ? `\n${goalContext}\n` : '';
 
@@ -155,8 +155,7 @@ RULES:
 2. IGNORE task-specific messages. Only extract what persists across ALL sessions.
 3. Only output fields from WRITABLE FIELDS. Any other key will be rejected.
 4. For enum fields, use one of the listed values.
-5. Episodic exceptions: context.anti_patterns (max 5, cross-project lessons only), context.milestones (max 3).
-6. Strong directives (以后一律/always/never/from now on) → _confidence: high. Otherwise: normal.
+5. Strong directives (以后一律/always/never/from now on) → _confidence: high. Otherwise: normal.
 7. Add _confidence and _source blocks mapping field keys to confidence level and triggering quote.
 8. NEVER extract agent identity or role definitions. Messages like "你是贾维斯/你的角色是.../you are Jarvis" define the AGENT, not the USER. The profile is about the USER's cognition only.
 
@@ -186,7 +185,7 @@ Do NOT repeat existing unchanged values.`;
       result = await callHaiku(distillPrompt, distillEnv, 60000);
     } catch (err) {
       // Don't cleanup buffer on API failure — retry next launch
-      try { fs.unlinkSync(LOCK_FILE); } catch {}
+      try { fs.unlinkSync(LOCK_FILE); } catch { }
       const isTimeout = err.killed || (err.signal === 'SIGTERM');
       if (isTimeout) {
         return { updated: false, behavior: null, summary: 'Skipped — API too slow. Will retry next launch.' };
@@ -237,15 +236,12 @@ Do NOT repeat existing unchanged values.`;
       if (Object.keys(filtered).length === 0 && behavior) {
         cleanup();
         if (skeleton && sessionAnalytics) {
-          try { sessionAnalytics.markAnalyzed(skeleton.session_id); } catch {}
+          try { sessionAnalytics.markAnalyzed(skeleton.session_id); } catch { }
         }
         return { updated: false, behavior, skeleton, signalCount: signals.length, summary: `Analyzed ${signals.length} messages — behavior logged, no profile changes.` };
       }
 
       const profile = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
-
-      // Auto-expire anti_patterns older than 60 days
-      expireAntiPatterns(profile);
 
       // Read raw content to find locked lines and comments
       const rawProfile = fs.readFileSync(BRAIN_FILE, 'utf8');
@@ -304,7 +300,7 @@ Do NOT repeat existing unchanged values.`;
 
       // Mark session as analyzed after successful distill
       if (skeleton && sessionAnalytics) {
-        try { sessionAnalytics.markAnalyzed(skeleton.session_id); } catch {}
+        try { sessionAnalytics.markAnalyzed(skeleton.session_id); } catch { }
       }
 
       cleanup();
@@ -436,18 +432,8 @@ function strategicMerge(profile, updates, lockedKeys, pendingTraits, confidenceM
       }
 
       case 'T4':
-        // Stamp added date on anti_pattern entries for auto-expiry
-        if (key === 'context.anti_patterns' && Array.isArray(value)) {
-          const today = new Date().toISOString().slice(0, 10);
-          const existing = getNested(result, key) || [];
-          const existingTexts = new Set(existing.map(e => typeof e === 'string' ? e : e.text));
-          const stamped = value
-            .filter(v => !existingTexts.has(typeof v === 'string' ? v : v.text))
-            .map(v => typeof v === 'string' ? { text: v, added: today } : v);
-          setNested(result, key, [...existing, ...stamped].slice(-5));
-        } else {
-          setNested(result, key, value);
-        }
+        setNested(result, key, value);
+
         // Auto-set focus_since when focus changes
         if (key === 'context.focus') {
           setNested(result, 'context.focus_since', new Date().toISOString().slice(0, 10));
@@ -553,30 +539,14 @@ function truncateArrays(obj) {
   }
 }
 
-/**
- * Auto-expire anti_patterns older than 60 days.
- * Each entry is stored as { text: "...", added: "2026-01-15" } internally.
- * If legacy string entries exist, they are kept (no added date = never expire).
- */
-function expireAntiPatterns(profile) {
-  if (!profile.context || !Array.isArray(profile.context.anti_patterns)) return;
-  const now = Date.now();
-  const SIXTY_DAYS = 60 * 24 * 60 * 60 * 1000;
-  profile.context.anti_patterns = profile.context.anti_patterns.filter(entry => {
-    if (typeof entry === 'string') return true; // legacy, keep
-    if (entry.added) {
-      return (now - new Date(entry.added).getTime()) < SIXTY_DAYS;
-    }
-    return true;
-  });
-}
+
 
 /**
  * Clean up: remove buffer and lock
  */
 function cleanup() {
-  try { fs.unlinkSync(BUFFER_FILE); } catch {}
-  try { fs.unlinkSync(LOCK_FILE); } catch {}
+  try { fs.unlinkSync(BUFFER_FILE); } catch { }
+  try { fs.unlinkSync(LOCK_FILE); } catch { }
 }
 
 // ---------------------------------------------------------
@@ -812,7 +782,7 @@ async function detectPatterns(forceRun) {
   // Read declared goals for pattern context
   let declaredGoals = '';
   if (sessionAnalytics) {
-    try { declaredGoals = sessionAnalytics.formatGoalContext(BRAIN_FILE); } catch {}
+    try { declaredGoals = sessionAnalytics.formatGoalContext(BRAIN_FILE); } catch { }
   }
   const goalLine = declaredGoals ? `\nUSER'S ${declaredGoals}\n` : '';
 
