@@ -548,6 +548,7 @@ function createNullBot(onOutput) {
     sendMessage:   async (chatId, text) => { if (onOutput) onOutput(text); return { message_id: '_virtual' }; },
     sendMarkdown:  async (chatId, text) => { if (onOutput) onOutput(text); return { message_id: '_virtual' }; },
     sendCard:      async (chatId, card) => { if (onOutput) onOutput(typeof card === 'object' ? (card.body || card.title || JSON.stringify(card)) : card); return { message_id: '_virtual' }; },
+    sendRawCard:   async (chatId, header) => { if (onOutput) onOutput(header); return { message_id: '_virtual' }; },
     sendButtons:   async (chatId, text) => { if (onOutput) onOutput(text); return { message_id: '_virtual' }; },
     sendTyping:    async () => {},
     editMessage:   async () => {},
@@ -675,6 +676,15 @@ function dispatchTask(targetProject, message, config, replyFn) {
   // Permission inheritance: if daemon runs with dangerously_skip_permissions, dispatched agents
   // inherit the same level — they need Write access for implementation tasks.
   // Otherwise fall back to readOnly (safe default for untrusted daemon configs).
+  // When forceNew=true, clear any cached session for this virtual chatId so
+  // attachOrCreateSession in handleCommand actually creates a fresh Claude session.
+  if (forceNew) {
+    const st = loadState();
+    if (st.sessions && st.sessions[dispatchChatId]) {
+      delete st.sessions[dispatchChatId];
+      saveState(st);
+    }
+  }
   const dispatchReadOnly = !(config.daemon && config.daemon.dangerously_skip_permissions);
   _handleCommand(nullBot, dispatchChatId, prompt, config, null, null, dispatchReadOnly).catch(e => {
     log('ERROR', `Dispatch handleCommand failed for ${targetProject}: ${e.message}`);
@@ -1560,7 +1570,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       return;
     }
     if (bot.sendButtons) {
-      await bot.sendCard(chatId, '📋 Recent Sessions', buildSessionCardElements(allSessions));
+      await bot.sendRawCard(chatId, '📋 Recent Sessions', buildSessionCardElements(allSessions));
     } else {
       let msg = '📋 Recent sessions:\n\n';
       allSessions.forEach((s, i) => {
@@ -1618,7 +1628,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
           { tag: 'button', text: { tag: 'plain_text', content: '⬅️ Back to list' }, type: 'default', value: { cmd: '/sessions' } },
         ] },
       ];
-      await bot.sendCard(chatId, '📋 Session Detail', elements);
+      await bot.sendRawCard(chatId, '📋 Session Detail', elements);
     } else if (bot.sendButtons) {
       await bot.sendButtons(chatId, detail, [
         [{ text: '▶️ Switch to this session', callback_data: `/resume ${s.sessionId}` }],
@@ -1644,8 +1654,8 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
         return;
       }
       const headerTitle = curCwd ? `📋 Sessions in ${path.basename(curCwd)}` : '📋 Recent Sessions';
-      if (bot.sendCard) {
-        await bot.sendCard(chatId, headerTitle, buildSessionCardElements(recentSessions));
+      if (bot.sendRawCard) {
+        await bot.sendRawCard(chatId, headerTitle, buildSessionCardElements(recentSessions));
       } else if (bot.sendButtons) {
         const buttons = recentSessions.map(s => {
           return [{ text: sessionLabel(s), callback_data: `/resume ${s.sessionId}` }];
