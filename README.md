@@ -224,19 +224,45 @@ Done. Open Telegram, message your bot.
 
 ## Defining Your Agents
 
-Agents are defined in `~/.metame/daemon.yaml` — local only, never uploaded. Each agent gets its own chat group, working directory, and optional heartbeat tasks.
+Agent configs live in `~/.metame/daemon.yaml` — local only, never uploaded to npm or Git.
+
+### From your phone (recommended)
+
+The easiest way. Open any Telegram/Feishu group and use the `/agent` wizard:
+
+| Command | What it does |
+|---------|-------------|
+| `/agent new` | Step-by-step wizard: pick a directory → name the agent → describe its role. MetaMe writes the role into `CLAUDE.md` automatically. |
+| `/agent bind <name> [dir]` | Quick bind: register this group as a named agent, optionally set working directory. |
+| `/agent list` | Show all configured agents. |
+| `/agent edit` | Update the current agent's role description (rewrites its `CLAUDE.md` section). |
+| `/agent reset` | Remove the current agent's role section. |
+
+Example flow:
+```
+You:     /agent new
+Bot:     Please select a working directory:
+         📁 ~/AGI   📁 ~/projects   📁 ~/Desktop
+You:     ~/AGI/MyProject
+Bot:     What should we name this agent?
+You:     小美
+Bot:     Describe 小美's role and responsibilities:
+You:     Personal assistant. Manages my calendar, drafts messages, and tracks todos.
+Bot:     ✅ Agent「小美」created. CLAUDE.md updated with role definition.
+```
+
+### From config file (for power users)
 
 ```yaml
+# ~/.metame/daemon.yaml
 projects:
-  assistant:                        # project key (used by dispatch_to)
+  assistant:                      # project key — used by dispatch_to
     name: "Personal Assistant"
     icon: "💅"
-    color: "blue"                   # blue|orange|green|red|grey|purple
-    cwd: "~/AGI/MyAssistant"        # Claude's working directory
-    nicknames:
-      - "小美"
-      - "助理"
-    heartbeat_tasks: []             # optional scheduled tasks for this agent
+    color: "blue"
+    cwd: "~/AGI/MyAssistant"
+    nicknames: ["小美", "助理"]
+    heartbeat_tasks: []
 
   coder:
     name: "Backend Engineer"
@@ -248,18 +274,14 @@ projects:
         prompt: "Review yesterday's commits and flag any issues"
         interval: "24h"
         notify: true
-```
 
-Then bind a Telegram/Feishu group to an agent:
-
-```yaml
 feishu:
   chat_agent_map:
-    oc_abc123: assistant      # this group → assistant agent
-    oc_def456: coder          # this group → coder agent
+    oc_abc123: assistant          # this group → assistant agent
+    oc_def456: coder              # this group → coder agent
 ```
 
-Messages sent to each group go to the corresponding agent, running in its `cwd` with its own Claude session. All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all know who you are.
+All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all know who you are. Each runs in its own `cwd` with its own Claude session, in parallel.
 
 **Dispatch between agents** (from Claude or a heartbeat task):
 
