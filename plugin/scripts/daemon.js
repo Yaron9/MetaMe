@@ -636,10 +636,14 @@ function dispatchTask(targetProject, message, config, replyFn) {
     prompt = `[系统提示：此消息由 ${senderIcon} ${senderName}（${senderKey}）转发，不是王总直接发送的。如需回复，可调用 ~/.metame/bin/dispatch_to ${senderKey} "回复内容"。]\n\n${rawPrompt}`;
   }
 
-  log('INFO', `Dispatching ${fullMsg.type} to ${targetProject} via virtual chatId: ${rawPrompt.slice(0, 80)}`);
+  // Prefer target's real Feishu chatId so dispatch reuses the existing session
+  // (--resume, no CLAUDE.md re-read, no token waste). Fall back to _agent_* virtual
+  // chatId only if the target has no Feishu chat configured.
+  const feishuChatMap = (config.feishu && config.feishu.chat_agent_map) || {};
+  const realChatId = Object.entries(feishuChatMap).find(([, v]) => v === targetProject)?.[0];
+  const dispatchChatId = realChatId || `_agent_${targetProject}`;
+  log('INFO', `Dispatching ${fullMsg.type} to ${targetProject} via ${realChatId ? 'existing session' : 'fresh session'}: ${rawPrompt.slice(0, 80)}`);
 
-  // Route via virtual chatId + null bot (zero polling delay)
-  const virtualChatId = `_agent_${targetProject}`;
   const nullBot = createNullBot((output) => {
     const outStr = typeof output === 'object' ? (output.body || JSON.stringify(output)) : String(output);
     log('INFO', `Dispatch output from ${targetProject}: ${outStr.slice(0, 200)}`);
@@ -661,7 +665,7 @@ function dispatchTask(targetProject, message, config, replyFn) {
     }
   });
   // readOnly=true: dispatched agents must not write/edit files on behalf of other agents
-  _handleCommand(nullBot, virtualChatId, prompt, config, null, null, true).catch(e => {
+  _handleCommand(nullBot, dispatchChatId, prompt, config, null, null, true).catch(e => {
     log('ERROR', `Dispatch handleCommand failed for ${targetProject}: ${e.message}`);
   });
 
