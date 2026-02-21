@@ -623,8 +623,20 @@ function dispatchTask(targetProject, message, config, replyFn) {
   if (!fs.existsSync(DISPATCH_DIR)) fs.mkdirSync(DISPATCH_DIR, { recursive: true });
   fs.appendFileSync(DISPATCH_LOG, JSON.stringify({ ...fullMsg, dispatched_at: new Date().toISOString() }) + '\n', 'utf8');
 
-  const prompt = fullMsg.payload.prompt || fullMsg.payload.title || 'No prompt provided';
-  log('INFO', `Dispatching ${fullMsg.type} to ${targetProject} via virtual chatId: ${prompt.slice(0, 80)}`);
+  const rawPrompt = fullMsg.payload.prompt || fullMsg.payload.title || 'No prompt provided';
+
+  // Inject sender identity when dispatched by another agent (not directly from user)
+  const userSources = new Set(['unknown', 'claude_session', '_claude_session', 'user']);
+  const senderKey = fullMsg.from;
+  let prompt = rawPrompt;
+  if (senderKey && !userSources.has(senderKey) && config && config.projects) {
+    const senderProj = config.projects[senderKey];
+    const senderName = senderProj ? (senderProj.name || senderKey) : senderKey;
+    const senderIcon = senderProj ? (senderProj.icon || '🤖') : '🤖';
+    prompt = `[系统提示：此消息由 ${senderIcon} ${senderName}（${senderKey}）转发，不是王总直接发送的。如需回复，可调用 ~/.metame/bin/dispatch_to ${senderKey} "回复内容"。]\n\n${rawPrompt}`;
+  }
+
+  log('INFO', `Dispatching ${fullMsg.type} to ${targetProject} via virtual chatId: ${rawPrompt.slice(0, 80)}`);
 
   // Route via virtual chatId + null bot (zero polling delay)
   const virtualChatId = `_agent_${targetProject}`;
