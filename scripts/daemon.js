@@ -318,11 +318,13 @@ function executeTask(task, config) {
   if (task.type === 'script') {
     log('INFO', `Executing script task: ${task.name} → ${task.command}`);
     try {
+      const scriptEnv = { ...process.env, METAME_ROOT: process.env.METAME_ROOT || '' };
+      delete scriptEnv.CLAUDECODE;
       const output = execSync(task.command, {
         encoding: 'utf8',
-        timeout: 120000,
+        timeout: (task.timeout || 120) * 1000,
         maxBuffer: 1024 * 1024,
-        env: { ...process.env, METAME_ROOT: process.env.METAME_ROOT || '' },
+        env: scriptEnv,
       }).trim();
 
       state.tasks[task.name] = {
@@ -331,7 +333,8 @@ function executeTask(task, config) {
         output_preview: output.slice(0, 200),
       };
       saveState(state);
-      log('INFO', `Script task ${task.name} completed`);
+      if (output) log('INFO', `Script task ${task.name} completed: ${output.slice(0, 300)}`);
+      else log('INFO', `Script task ${task.name} completed`);
       return { success: true, output, tokens: 0 };
     } catch (e) {
       log('ERROR', `Script task ${task.name} failed: ${e.message}`);
@@ -559,13 +562,59 @@ function createNullBot(onOutput) {
 }
 
 /**
+ * Forward bot: routes all calls to a real bot with a fixed chatId.
+ * Used for dispatch tasks so Claude's streaming output appears in the target's Feishu channel.
+ */
+function createStreamForwardBot(realBot, chatId) {
+  // Track edit-broken state independently so dispatch failures don't poison realBot's flag
+  let _editBroken = false;
+  return {
+    sendMessage:   async (_, text) => {
+      log('INFO', `[StreamBot→${chatId.slice(-8)}] msg: ${String(text).slice(0, 80)}`);
+      return realBot.sendMessage(chatId, text);
+    },
+    sendMarkdown:  async (_, text) => {
+      log('INFO', `[StreamBot→${chatId.slice(-8)}] md: ${String(text).slice(0, 80)}`);
+      return realBot.sendMarkdown(chatId, text);
+    },
+    sendCard:      async (_, card) => {
+      const title = typeof card === 'object' ? (card.title || card.body || '').slice(0, 60) : String(card).slice(0, 60);
+      log('INFO', `[StreamBot→${chatId.slice(-8)}] card: ${title}`);
+      return realBot.sendCard(chatId, card);
+    },
+    sendRawCard:   async (_, header, elements) => {
+      log('INFO', `[StreamBot→${chatId.slice(-8)}] rawcard: ${String(header).slice(0, 60)}`);
+      return realBot.sendRawCard(chatId, header, elements);
+    },
+    sendButtons:   async (_, text, buttons) => realBot.sendButtons(chatId, text, buttons),
+    sendTyping:    async () => realBot.sendTyping(chatId),
+    editMessage:   async (_, msgId, text) => {
+      if (_editBroken) return false;
+      log('INFO', `[StreamBot→${chatId.slice(-8)}] edit ${String(msgId).slice(-8)}: ${String(text).slice(0, 60)}`);
+      try {
+        return await realBot.editMessage(chatId, msgId, text);
+      } catch (e) {
+        const code = e?.code || e?.response?.data?.code;
+        if (code === 230001 || code === 230002 || /permission|forbidden/i.test(String(e))) {
+          _editBroken = true;
+        }
+        return false;
+      }
+    },
+    deleteMessage: async (_, msgId) => realBot.deleteMessage(chatId, msgId),
+    sendFile:      async (_, filePath, caption) => realBot.sendFile(chatId, filePath, caption),
+    downloadFile:  async (...args) => realBot.downloadFile(...args),
+  };
+}
+
+/**
  * Dispatch a task/message to another agent via virtual chatId.
  * @param {string} targetProject - project key (e.g. 'digital_me', 'desktop')
  * @param {object} message - { from, type, priority, payload, callback, chain }
  * @param {object} config - current daemon config
  * @returns {{ success: boolean, id?: string, error?: string }}
  */
-function dispatchTask(targetProject, message, config, replyFn) {
+function dispatchTask(targetProject, message, config, replyFn, streamOptions = null) {
   const LIMITS = { max_per_hour_per_target: 20, max_total_per_hour: 60, max_depth: 2 };
 
   // Anti-storm: check chain depth
@@ -652,10 +701,9 @@ function dispatchTask(targetProject, message, config, replyFn) {
   const sessionMode = forceNew ? 'fresh session (forced)' : 'existing virtual session';
   log('INFO', `Dispatching ${fullMsg.type} to ${targetProject} via ${sessionMode}: ${rawPrompt.slice(0, 80)}`);
 
-  const nullBot = createNullBot((output) => {
+  const outputHandler = (output) => {
     const outStr = typeof output === 'object' ? (output.body || JSON.stringify(output)) : String(output);
     log('INFO', `Dispatch output from ${targetProject}: ${outStr.slice(0, 200)}`);
-    // Forward meaningful output back to the requester (skip typing indicators)
     if (replyFn && outStr.trim().length > 2) {
       replyFn(outStr);
     } else if (!replyFn && fullMsg.callback && fullMsg.from && config) {
@@ -671,7 +719,12 @@ function dispatchTask(targetProject, message, config, replyFn) {
         chain: [], // reset chain for callbacks
       }, config);
     }
-  });
+  };
+  // If streamOptions provided, use real bot so output appears in target's Feishu channel.
+  // Otherwise fall back to nullBot which captures output for replyFn.
+  const nullBot = streamOptions?.bot && streamOptions?.chatId
+    ? createStreamForwardBot(streamOptions.bot, streamOptions.chatId)
+    : createNullBot(outputHandler);
   // Permission inheritance: if daemon runs with dangerously_skip_permissions, dispatched agents
   // inherit the same level — they need Write access for implementation tasks.
   // Otherwise fall back to readOnly (safe default for untrusted daemon configs).
@@ -722,50 +775,58 @@ function physiologicalHeartbeat(config) {
             continue;
           }
           log('INFO', `Pending dispatch: ${item.from || '?'} → ${item.target}: ${item.prompt.slice(0, 60)}`);
-          // Build replyFn: use live bot from bridge ref (always fresh, survives reconnects)
+          // Route dispatch work to target's own Feishu channel (streaming + reply shown there)
           let pendingReplyFn = null;
+          let streamOptions = null;
           const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
-          log('INFO', `[Dispatch reply] liveBot=${!!liveBot}, from=${item.from}, target=${item.target}`);
+          log('INFO', `[Dispatch] liveBot=${!!liveBot}, from=${item.from}, target=${item.target}`);
           if (liveBot) {
             const feishuMap = (config.feishu && config.feishu.chat_agent_map) || {};
             const allowedFeishuIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
             const agentChatIds = new Set(Object.keys(feishuMap));
-            const _userSources = new Set(['unknown', 'claude_session', '_claude_session', 'user']);
 
-            // Find the sender's chatId: if from another agent, use their Feishu chat;
-            // if from user/unknown, use the main user chat (first allowed_chat_id NOT in chat_agent_map).
-            let senderChatId = null;
-            if (!_userSources.has(item.from)) {
-              senderChatId = Object.entries(feishuMap).find(([, v]) => v === item.from)?.[0] || null;
-            }
-            if (!senderChatId) {
-              senderChatId = allowedFeishuIds.map(String).find(id => !agentChatIds.has(id)) || null;
-            }
-            log('INFO', `[Dispatch reply] senderChatId=${senderChatId}, allowedIds=${allowedFeishuIds.length}, agentIds=${agentChatIds.size}`);
+            // Find target's own Feishu chatId (primary: route work there)
+            const targetChatId = Object.entries(feishuMap).find(([, v]) => v === item.target)?.[0] || null;
 
-            // Send immediate ack to sender so they know the task was received
-            if (senderChatId) {
-              const targetProj = (config.projects || {})[item.target] || {};
-              const ackText = `📬 已接收，正在转发给 ${targetProj.icon || '🤖'} **${targetProj.name || item.target}**...\n\n> ${item.prompt.slice(0, 100)}${item.prompt.length > 100 ? '...' : ''}`;
-              liveBot.sendMarkdown(senderChatId, ackText).catch(() =>
-                liveBot.sendMessage(senderChatId, ackText.replace(/\*\*/g, '')).catch(e =>
-                  log('WARN', `Dispatch ack to sender failed: ${e.message}`)
+            if (targetChatId) {
+              // Target has a dedicated Feishu channel: stream work output directly there
+              streamOptions = { bot: liveBot, chatId: targetChatId };
+              const ackText = `📬 **新任务**\n\n> ${item.prompt.slice(0, 120)}${item.prompt.length > 120 ? '...' : ''}`;
+              liveBot.sendMarkdown(targetChatId, ackText).catch(() =>
+                liveBot.sendMessage(targetChatId, ackText.replace(/\*\*/g, '')).catch(e =>
+                  log('WARN', `Dispatch ack to target channel failed: ${e.message}`)
                 )
               );
-            }
-
-            // Reply fn: forward agent output back to SENDER (not target's own channel)
-            if (senderChatId) {
-              const targetProj = (config.projects || {})[item.target] || {};
-              pendingReplyFn = (output) => {
-                const text = `${targetProj.icon || '📬'} **${targetProj.name || item.target}** 回复：\n\n${output.slice(0, 2000)}`;
-                liveBot.sendMarkdown(senderChatId, text).catch(e => {
-                  log('WARN', `Dispatch reply to sender (markdown) failed: ${e.message}`);
-                  liveBot.sendMessage(senderChatId, text.replace(/\*\*/g, '')).catch(e2 => {
-                    log('ERROR', `Dispatch reply to sender (text) failed: ${e2.message}`);
+              log('INFO', `[Dispatch] streaming work to target channel ${targetChatId}`);
+            } else {
+              // Fallback: no dedicated channel, send final reply to sender's chat
+              const _userSources = new Set(['unknown', 'claude_session', '_claude_session', 'user']);
+              let senderChatId = null;
+              if (!_userSources.has(item.from)) {
+                senderChatId = Object.entries(feishuMap).find(([, v]) => v === item.from)?.[0] || null;
+              }
+              if (!senderChatId) {
+                senderChatId = allowedFeishuIds.map(String).find(id => !agentChatIds.has(id)) || null;
+              }
+              log('INFO', `[Dispatch] fallback reply to senderChatId=${senderChatId}`);
+              if (senderChatId) {
+                const targetProj = (config.projects || {})[item.target] || {};
+                const ackText = `📬 已接收，转发给 ${targetProj.icon || '🤖'} **${targetProj.name || item.target}**...\n\n> ${item.prompt.slice(0, 100)}${item.prompt.length > 100 ? '...' : ''}`;
+                liveBot.sendMarkdown(senderChatId, ackText).catch(() =>
+                  liveBot.sendMessage(senderChatId, ackText.replace(/\*\*/g, '')).catch(e =>
+                    log('WARN', `Dispatch ack to sender failed: ${e.message}`)
+                  )
+                );
+                pendingReplyFn = (output) => {
+                  const text = `${targetProj.icon || '📬'} **${targetProj.name || item.target}** 回复：\n\n${output.slice(0, 2000)}`;
+                  liveBot.sendMarkdown(senderChatId, text).catch(e => {
+                    log('WARN', `Dispatch reply to sender (markdown) failed: ${e.message}`);
+                    liveBot.sendMessage(senderChatId, text.replace(/\*\*/g, '')).catch(e2 => {
+                      log('ERROR', `Dispatch reply to sender (text) failed: ${e2.message}`);
+                    });
                   });
-                });
-              };
+                };
+              }
             }
           }
           dispatchTask(item.target, {
@@ -774,7 +835,7 @@ function physiologicalHeartbeat(config) {
             payload: { title: item.prompt.slice(0, 60), prompt: item.prompt },
             callback: false,
             new_session: !!item.new_session,
-          }, config, pendingReplyFn);
+          }, config, pendingReplyFn, streamOptions);
         }
       }
     }
@@ -2165,16 +2226,15 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       const projInfo = config.projects[targetKey] || {};
       // Find the target project's own Feishu chat (reverse lookup of chat_agent_map)
       const feishuChatAgentMap = (config.feishu && config.feishu.chat_agent_map) || {};
-      const targetChatId = Object.entries(feishuChatAgentMap).find(([, v]) => v === targetKey)?.[0] || chatId;
-      const replyFn = (output) => {
-        // Send target agent's reply into the target project's own Feishu chat
+      const targetChatId = Object.entries(feishuChatAgentMap).find(([, v]) => v === targetKey)?.[0] || null;
+      // Stream work directly to target's channel if available; otherwise fallback replyFn
+      const dispatchStreamOptions = targetChatId ? { bot, chatId: targetChatId } : null;
+      const replyFn = targetChatId ? null : (output) => {
         const text = `${projInfo.icon || '📬'} **${projInfo.name || targetKey}**\n\n${output.slice(0, 2000)}`;
-        bot.sendMarkdown(targetChatId, text)
-          .then(() => log('INFO', `Dispatch reply sent to ${targetChatId}`))
+        bot.sendMarkdown(chatId, text)
           .catch(e => {
             log('WARN', `Dispatch sendMarkdown failed: ${e.message}, trying sendMessage`);
-            bot.sendMessage(targetChatId, text)
-              .catch(e2 => log('ERROR', `Dispatch reply failed: ${e2.message}`));
+            bot.sendMessage(chatId, text).catch(e2 => log('ERROR', `Dispatch reply failed: ${e2.message}`));
           });
       };
 
@@ -2184,7 +2244,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
         priority: 'normal',
         payload: { title: prompt.slice(0, 60), prompt },
         callback: false,
-      }, config, replyFn);
+      }, config, replyFn, dispatchStreamOptions);
 
       if (result.success) {
         await bot.sendMessage(chatId, `✅ 已派发给 ${projInfo.name || targetName}，执行中…`);
