@@ -54,16 +54,32 @@ async function distill() {
     return { updated: false, behavior: null, summary: 'No signals to process.' };
   }
 
-  // 2. Prevent concurrent distillation
-  if (fs.existsSync(LOCK_FILE)) {
-    const lockAge = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
-    if (lockAge < 120000) { // 2 min timeout
-      return { updated: false, behavior: null, summary: 'Distillation already in progress.' };
+  // 2. Prevent concurrent distillation (atomic lock via O_EXCL)
+  let lockFd;
+  try {
+    lockFd = fs.openSync(LOCK_FILE, 'wx');
+    fs.writeSync(lockFd, process.pid.toString());
+    fs.closeSync(lockFd);
+  } catch (e) {
+    if (e.code === 'EEXIST') {
+      // Another process holds the lock — check if stale
+      try {
+        const lockAge = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
+        if (lockAge < 120000) {
+          return { updated: false, behavior: null, summary: 'Distillation already in progress.' };
+        }
+        fs.unlinkSync(LOCK_FILE);
+        // Retry once after removing stale lock
+        lockFd = fs.openSync(LOCK_FILE, 'wx');
+        fs.writeSync(lockFd, process.pid.toString());
+        fs.closeSync(lockFd);
+      } catch {
+        return { updated: false, behavior: null, summary: 'Distillation already in progress.' };
+      }
+    } else {
+      throw e;
     }
-    // Stale lock, remove it
-    fs.unlinkSync(LOCK_FILE);
   }
-  fs.writeFileSync(LOCK_FILE, process.pid.toString());
 
   try {
     // 3. Parse signals (preserve confidence from signal-capture)
