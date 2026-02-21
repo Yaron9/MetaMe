@@ -26,6 +26,18 @@ npm install -g metame-cli && metame
 
 ---
 
+> ### 🚀 v2.0 — Layered Memory Architecture
+>
+> MetaMe now has a **three-layer memory system** that works completely in the background:
+> - **Long-term facts** extracted from every session, recalled semantically on demand
+> - **Session summary cache** — when you resume after a 2h+ gap, MetaMe injects what you were last working on
+> - **Automatic session tagging** — every conversation is indexed by topic, enabling future session routing
+> - **Unix Socket IPC** — dispatch latency dropped from ~60s to <100ms
+>
+> Zero configuration. It just works.
+
+---
+
 ## What It Does
 
 ### 1. Knows You Across Every Project
@@ -37,7 +49,8 @@ A cognitive profile (`~/.claude_profile.yaml`) follows you everywhere — not ju
 ```
 $ metame
 🧠 MetaMe: Distilling 7 moments in background...
-Ready, Neo. What are we building?
+🧠 Memory: 42 facts · 87 sessions tagged
+Link Established. What are we building?
 ```
 
 ### 2. Full Claude Code From Your Phone
@@ -53,7 +66,33 @@ Claude:       ✏️ Edit: api/login.ts
 
 Start on your laptop, continue on the train. `/stop` to interrupt, `/undo` to rollback, `/sh ls` for raw shell access when everything else breaks.
 
-### 3. Runs Autonomously
+### 3. Layered Memory That Works While You Sleep
+
+MetaMe's memory system runs automatically in the background — no prompts, no manual saves.
+
+**Layer 1 — Long-term Facts**
+When you go idle, MetaMe runs memory consolidation: extracts key decisions, patterns, and knowledge from your sessions into a persistent facts store. These are semantically recalled on every session start.
+
+**Layer 2 — Session Continuity**
+Resuming a conversation after 2+ hours? MetaMe injects a brief summary of what you were working on last time — so you pick up where you left off without re-explaining context.
+
+**Layer 3 — Session Index**
+Every session gets tagged with topics and intent. This powers future session routing: when you reference "that thing we worked on last week", MetaMe knows where to look.
+
+```
+[Background, while you sleep]
+idle 30min → memory consolidation triggered
+  → session_tags.json updated (topics indexed)
+  → facts extracted → ~/.metame/memory.db
+  → session summary cached → daemon_state.json
+
+[Next morning, when you resume]
+"continue from yesterday" →
+  [上次对话摘要] Auth refactor, decided on JWT with
+  refresh token rotation. Token expiry set to 15min.
+```
+
+### 4. Runs Autonomously
 
 Schedule tasks that run on your machine and push results to your phone:
 
@@ -81,7 +120,7 @@ Chain skills into workflows — research, write, publish — fully automated:
           prompt: "Publish it"
 ```
 
-### 4. Skills That Evolve Themselves
+### 5. Skills That Evolve Themselves
 
 MetaMe has a living skill ecosystem. Skills aren't static configs — they grow.
 
@@ -92,12 +131,10 @@ MetaMe has a living skill ecosystem. Skills aren't static configs — they grow.
 
 ```
 Task fails → skill-scout finds a skill → installs → retries → succeeds
-                                                          ↓
-                                          skill-evolution-manager
-                                          updates skill with lessons learned
+                                                      ↓
+                                      skill-evolution-manager
+                                      updates skill with lessons learned
 ```
-
-This is the difference between a tool library and an organism. OpenClaw has a skill marketplace; MetaMe has skills that **learn from their own failures**.
 
 ---
 
@@ -143,6 +180,7 @@ Done. Open Telegram, message your bot.
 | Capability | What It Does |
 |-----------|-------------|
 | **Cognitive Profile** | Learns how you think across sessions. Schema-enforced, 800-token budget, auto-distilled via Haiku. Lock any value with `# [LOCKED]`. |
+| **Layered Memory** | Three-tier memory: long-term facts (semantic recall), session summaries (continuity bridge), session index (topic tags). All automatic. |
 | **Mobile Bridge** | Full Claude Code via Telegram/Feishu. Stateful sessions, file transfer both ways, real-time streaming status. |
 | **Skill Evolution** | Self-healing skill system. Auto-discovers missing skills, learns from browser recordings, evolves after every task. Skills get smarter over time. |
 | **Heartbeat Tasks** | Scheduled Claude runs with cron-like intervals. Preconditions, workflows, push notifications. |
@@ -170,23 +208,32 @@ Done. Open Telegram, message your bot.
 ## How It Works
 
 ```
-┌─────────────┐     Telegram/Feishu      ┌──────────────────────┐
-│  Your Phone  │ ◄──────────────────────► │   MetaMe Daemon      │
-└─────────────┘                           │   (your Mac, 24/7)   │
-                                          │                      │
-                                          │   ┌──────────────┐   │
-                                          │   │ Claude Code   │   │
-                                          │   │ (same engine) │   │
-                                          │   └──────────────┘   │
-                                          │                      │
-                                          │   ~/.claude_profile  │
-                                          │   (cognitive layer)  │
-                                          └──────────────────────┘
+┌─────────────┐     Telegram/Feishu      ┌──────────────────────────────┐
+│  Your Phone  │ ◄──────────────────────► │   MetaMe Daemon              │
+└─────────────┘                           │   (your Mac, 24/7)           │
+                                          │                              │
+                                          │   ┌──────────────┐           │
+                                          │   │ Claude Code   │           │
+                                          │   │ (same engine) │           │
+                                          │   └──────────────┘           │
+                                          │                              │
+                                          │   ~/.claude_profile          │
+                                          │   (cognitive layer)          │
+                                          │                              │
+                                          │   ~/.metame/memory.db        │
+                                          │   session_tags.json          │
+                                          │   (memory layer)  ← NEW      │
+                                          └──────────────────────────────┘
+                                                       ↑
+                                          sleep mode → memory consolidation
+                                                       (background, automatic)
 ```
 
 - **Profile** (`~/.claude_profile.yaml`): Your cognitive fingerprint. Injected into every Claude session via `CLAUDE.md`.
-- **Daemon** (`scripts/daemon.js`): Background process handling Telegram/Feishu messages, heartbeat tasks, and file watching.
+- **Daemon** (`scripts/daemon.js`): Background process handling Telegram/Feishu messages, heartbeat tasks, Unix socket dispatch, and sleep-mode memory triggers.
 - **Distillation** (`scripts/distill.js`): On each launch, silently analyzes your recent messages and updates your profile.
+- **Memory Extract** (`scripts/memory-extract.js`): Triggered on sleep mode. Extracts long-term facts and session topic tags from completed conversations.
+- **Session Summarize** (`scripts/session-summarize.js`): Generates a 2-4 sentence summary for idle sessions. Injected as context when resuming after a 2h+ gap.
 
 ## Security
 
@@ -198,7 +245,13 @@ Done. Open Telegram, message your bot.
 
 ## Performance
 
-The entire cognitive layer costs ~800 tokens per session (0.4% of a 200k context window). Background distillation uses Haiku at minimal cost. Mobile commands like `/stop`, `/list`, `/undo` consume zero tokens.
+| Metric | Value |
+|--------|-------|
+| Cognitive profile injection | ~800 tokens/session (0.4% of 200k context) |
+| Dispatch latency (Unix socket) | <100ms |
+| Memory consolidation | ~1 min/session, Haiku cost, background |
+| Session summary generation | ~3s, Haiku, triggered on idle |
+| Mobile commands (`/stop`, `/list`, `/undo`) | 0 tokens |
 
 ## Plugin (Lightweight)
 
