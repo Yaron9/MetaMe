@@ -359,13 +359,17 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 
 > Both memory consolidation and session summarization run in the background via Haiku (`--model haiku`). Input is capped by code: skeleton text ≤ 3,000 chars, summary output ≤ 500 chars. Neither runs per-message — memory consolidation triggers on sleep mode (30-min idle), summaries trigger once per idle session.
 
-## Plugin (Lightweight)
+## Plugin
 
-Don't need mobile access? Install as a Claude Code plugin — profile injection + slash commands only:
+Same features as the npm CLI — install directly into Claude Code without npm:
 
 ```bash
 claude plugin install github:Yaron9/MetaMe/plugin
 ```
+
+Includes everything: cognitive profile injection, daemon (Telegram/Feishu), heartbeat tasks, layered memory, all mobile commands, slash commands (`/metame:evolve`, `/metame:daemon`, `/metame:refresh`, etc.).
+
+Use the plugin if you prefer not to install a global npm package. Use the npm CLI (`metame-cli`) if you want the `metame` command and first-run interview.
 
 ## License
 
