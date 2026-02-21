@@ -566,7 +566,7 @@ function createNullBot(onOutput) {
  * @returns {{ success: boolean, id?: string, error?: string }}
  */
 function dispatchTask(targetProject, message, config, replyFn) {
-  const LIMITS = { max_per_hour_per_target: 5, max_total_per_hour: 20, max_depth: 2 };
+  const LIMITS = { max_per_hour_per_target: 20, max_total_per_hour: 60, max_depth: 2 };
 
   // Anti-storm: check chain depth
   const chain = message.chain || [];
@@ -645,12 +645,11 @@ function dispatchTask(targetProject, message, config, replyFn) {
 
   // Prefer target's real Feishu chatId so dispatch reuses the existing session
   // (--resume, no CLAUDE.md re-read, no token waste). Fall back to _agent_* virtual
-  // chatId only if: target has no Feishu chat configured, OR caller requested new_session.
-  const feishuChatMap = (config.feishu && config.feishu.chat_agent_map) || {};
-  const realChatId = Object.entries(feishuChatMap).find(([, v]) => v === targetProject)?.[0];
+  // All dispatches use _agent_* virtual chatId to ensure a clean session with
+  // the correct project context. Real Feishu chatIds are only for direct user messages.
   const forceNew = !!fullMsg.new_session;
-  const dispatchChatId = (!forceNew && realChatId) ? realChatId : `_agent_${targetProject}`;
-  const sessionMode = forceNew ? 'fresh session (forced)' : realChatId ? 'existing session' : 'fresh session';
+  const dispatchChatId = `_agent_${targetProject}`;
+  const sessionMode = forceNew ? 'fresh session (forced)' : 'existing virtual session';
   log('INFO', `Dispatching ${fullMsg.type} to ${targetProject} via ${sessionMode}: ${rawPrompt.slice(0, 80)}`);
 
   const nullBot = createNullBot((output) => {
@@ -3793,7 +3792,9 @@ function lazyDistill() {
   saveState(st);
   const lines = content.split('\n').filter(l => l.trim()).length;
   log('INFO', `Distilling ${lines} signal(s) in background...`);
-  const bg = spawn('node', [distillPath], { detached: true, stdio: 'ignore' });
+  const bgEnv = { ...process.env };
+  delete bgEnv.CLAUDECODE; // allow claude CLI calls from within distill subprocess
+  const bg = spawn('node', [distillPath], { detached: true, stdio: 'ignore', env: bgEnv });
   bg.unref();
 }
 
