@@ -368,15 +368,17 @@ feishu:
 
 ## 插件版
 
-与 npm CLI 功能完全一致——无需 npm，直接装进 Claude Code：
+无需 npm，直接装进 Claude Code：
 
 ```bash
 claude plugin install github:Yaron9/MetaMe/plugin
 ```
 
-包含全部功能：认知画像注入、daemon（Telegram/飞书）、心跳任务、分层记忆、全部手机端命令、斜杠命令（`/metame:evolve`、`/metame:daemon`、`/metame:refresh` 等）。
+包含：认知画像注入、daemon（Telegram/飞书）、心跳任务、分层记忆、全部手机端命令、斜杠命令（`/metame:evolve`、`/metame:daemon`、`/metame:refresh` 等）。
 
-不想装全局 npm 包，用插件版。想要 `metame` 命令和首次采访，用 npm CLI（`metame-cli`）。
+**与 npm CLI 的关键差异：** 插件版 daemon 在 Claude Code 打开时启动、关闭时停止，**不会** 24/7 常驻后台。如需手机随时发消息（Claude Code 关闭时也能收到），需用 npm CLI + `metame daemon install-launchd`。
+
+不想装全局 npm 包且只需要 Claude Code 打开时的手机访问，用插件版。需要 24/7 常驻、`metame` 命令和首次采访，用 npm CLI（`metame-cli`）。
 
 ## 许可证
 
