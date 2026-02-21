@@ -909,12 +909,25 @@ function startHeartbeat(config, notifyFn) {
     // ① Physiological heartbeat (zero token, pure awareness)
     physiologicalHeartbeat(config);
 
+    // Sleep mode detection — log transitions once
+    const idle = isUserIdle();
+    if (idle && !_inSleepMode) {
+      _inSleepMode = true;
+      log('INFO', '[DAEMON] Entering Sleep Mode — running dream tasks');
+    }
+
     // ② Task heartbeat (burns tokens on schedule)
     const currentTime = Date.now();
     for (const task of enabledTasks) {
       if (currentTime >= (nextRun[task.name] || 0)) {
         const intervalSec = parseInterval(task.interval);
         nextRun[task.name] = currentTime + intervalSec * 1000;
+
+        // Dream tasks: only run when user is idle
+        if (task.require_idle && !isUserIdle()) {
+          log('INFO', `[DAEMON] Deferring dream task "${task.name}" — user active`);
+          continue;
+        }
 
         if (runningTasks.has(task.name)) {
           log('WARN', `Task ${task.name} still running — skipping this interval`);
@@ -3443,6 +3456,20 @@ const CONTENT_EXTENSIONS = new Set([
 // Active Claude processes per chat (for /stop)
 const activeProcesses = new Map(); // chatId -> { child, aborted }
 
+// Activity tracking for idle/sleep detection
+let lastInteractionTime = Date.now(); // updated on every incoming message
+let _inSleepMode = false;             // tracks current sleep state for log transitions
+
+const IDLE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
+
+/**
+ * Returns true when user has been inactive for >30min AND no sessions are running.
+ * Dream tasks (require_idle: true) only execute in this state.
+ */
+function isUserIdle() {
+  return (Date.now() - lastInteractionTime > IDLE_THRESHOLD_MS) && activeProcesses.size === 0;
+}
+
 // Fix3: persist child PIDs so next daemon startup can kill orphans
 const ACTIVE_PIDS_FILE = path.join(HOME, '.metame', 'active_claude_pids.json');
 function saveActivePids() {
@@ -3839,26 +3866,6 @@ function trackMsgSession(messageId, session) {
   saveState(st);
 }
 
-function lazyDistill() {
-  const now = Date.now();
-  const st = loadState();
-  const lastDistillTime = st.last_distill_time || 0;
-  if (now - lastDistillTime < 4 * 60 * 60 * 1000) return; // 4h cooldown
-  const distillPath = path.join(HOME, '.metame', 'distill.js');
-  const signalsPath = path.join(HOME, '.metame', 'raw_signals.jsonl');
-  if (!fs.existsSync(distillPath)) return;
-  if (!fs.existsSync(signalsPath)) return;
-  const content = fs.readFileSync(signalsPath, 'utf8').trim();
-  if (!content) return;
-  st.last_distill_time = now;
-  saveState(st);
-  const lines = content.split('\n').filter(l => l.trim()).length;
-  log('INFO', `Distilling ${lines} signal(s) in background...`);
-  const bgEnv = { ...process.env };
-  delete bgEnv.CLAUDECODE; // allow claude CLI calls from within distill subprocess
-  const bg = spawn('node', [distillPath], { detached: true, stdio: 'ignore', env: bgEnv });
-  bg.unref();
-}
 
 /**
  * Shared ask logic — full Claude Code session (stateful, with tools)
@@ -3866,8 +3873,12 @@ function lazyDistill() {
  */
 async function askClaude(bot, chatId, prompt, config, readOnly = false) {
   log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
-  // Trigger background distill on first message / every 4h
-  try { lazyDistill(); } catch { /* non-fatal */ }
+  // Track interaction time for idle/sleep detection
+  lastInteractionTime = Date.now();
+  if (_inSleepMode) {
+    _inSleepMode = false;
+    log('INFO', '[DAEMON] Exiting Sleep Mode — user active');
+  }
   // Send a single status message, updated in-place, deleted on completion
   let statusMsgId = null;
   try {
