@@ -770,6 +770,36 @@ function spawnMemoryConsolidation() {
 }
 
 /**
+ * Spawn session-summarize.js for sessions that have been idle 2-24 hours.
+ * Called on sleep mode entry. Skips sessions that already have a fresh summary.
+ */
+function spawnSessionSummaries() {
+  const scriptPath = path.join(__dirname, 'session-summarize.js');
+  if (!fs.existsSync(scriptPath)) return;
+  const state = loadState();
+  const now = Date.now();
+  const TWO_HOURS = 2 * 60 * 60 * 1000;
+  const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
+  for (const [cid, sess] of Object.entries(state.sessions || {})) {
+    if (!sess.id || !sess.started) continue;
+    const lastActive = sess.last_active || 0;
+    const idleMs = now - lastActive;
+    if (idleMs < TWO_HOURS || idleMs > SEVEN_DAYS) continue;
+    // Skip if summary is already newer than last activity
+    if ((sess.last_summary_at || 0) > lastActive) continue;
+    try {
+      const child = spawn(process.execPath, [scriptPath, cid, sess.id], {
+        detached: true, stdio: 'ignore',
+      });
+      child.unref();
+      log('INFO', `[DAEMON] Session summary spawned for ${cid} (idle ${Math.round(idleMs / 3600000)}h)`);
+    } catch (e) {
+      log('WARN', `[DAEMON] Failed to spawn session summary: ${e.message}`);
+    }
+  }
+}
+
+/**
  * Physiological heartbeat: zero-token awareness check.
  * Runs every tick unconditionally.
  */
@@ -973,6 +1003,8 @@ function startHeartbeat(config, notifyFn) {
         saveState(sleepState);
         spawnMemoryConsolidation();
       }
+      // Generate summaries for sessions idle 2-24h
+      spawnSessionSummaries();
     }
 
     // ② Task heartbeat (burns tokens on schedule)
@@ -3934,6 +3966,14 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
   log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
   // Track interaction time for idle/sleep detection
   lastInteractionTime = Date.now();
+  // Track per-session last_active for summary generation (P2-B)
+  try {
+    const _st = loadState();
+    if (_st.sessions && _st.sessions[chatId]) {
+      _st.sessions[chatId].last_active = Date.now();
+      saveState(_st);
+    }
+  } catch { /* non-critical */ }
   if (_inSleepMode) {
     _inSleepMode = false;
     log('INFO', '[DAEMON] Exiting Sleep Mode — user active');
@@ -4086,7 +4126,27 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
    - Multiple files: use multiple [[FILE:...]] tags]` : '';
 
   const routedPrompt = skill ? `/${skill} ${prompt}` : prompt;
-  const fullPrompt = routedPrompt + daemonHint + memoryHint;
+
+  // P2-B: inject session summary when resuming after a 2h+ gap
+  let summaryHint = '';
+  if (session.started) {
+    try {
+      const _stSum = loadState();
+      const _sess = _stSum.sessions && _stSum.sessions[chatId];
+      if (_sess && _sess.last_summary && _sess.last_summary_at) {
+        const _idleMs = Date.now() - (_sess.last_active || 0);
+        const _summaryAgeH = (Date.now() - _sess.last_summary_at) / 3600000;
+        if (_idleMs > 2 * 60 * 60 * 1000 && _summaryAgeH < 168) {
+          summaryHint = `
+
+[上次对话摘要，供参考]: ${_sess.last_summary}`;
+          log('INFO', `[DAEMON] Injected session summary for ${chatId} (idle ${Math.round(_idleMs / 3600000)}h)`);
+        }
+      }
+    } catch { /* non-critical */ }
+  }
+
+  const fullPrompt = routedPrompt + daemonHint + summaryHint + memoryHint;
 
   // Git checkpoint before Claude modifies files (for /undo)
   // Pass the user prompt as label so checkpoint list is human-readable
