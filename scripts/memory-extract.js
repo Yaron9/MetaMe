@@ -37,8 +37,13 @@ const FACT_EXTRACTION_PROMPT = `你是精准的知识提取引擎。从以下会
 - 未经验证的猜测（"可能是因为..."、"也许..."）
 - 显而易见的常识
 
-输出 JSON 数组，每个元素：
-{"entity":"主体(点号层级如MetaMe.daemon.askClaude)","relation":"类型","value":"脱离上下文可独立理解的一句话","confidence":"high或medium","tags":["最多3个标签"]}
+输出 JSON 对象，包含会话名称和提取的事实：
+{
+  "session_name": "用3-5个词极其精简地概括这起会话的主题（例如：优化微信登录架构、排查Redis连接泄漏、配置Nginx反向代理）",
+  "facts": [
+    {"entity":"主体(点号层级如MetaMe.daemon.askClaude)","relation":"类型","value":"脱离上下文可独立理解的一句话","confidence":"high或medium","tags":["最多3个标签"]}
+  ]
+}
 
 规则：
 - 宁缺毋滥：0条比10条废话好
@@ -46,12 +51,49 @@ const FACT_EXTRACTION_PROMPT = `你是精准的知识提取引擎。从以下会
 - value长度20-200字
 - entity用英文点号路径，value可用中文
 - medium confidence必须有非空tags
-- 没有值得提取的事实时返回 []
+- 没有值得提取的事实时 facts 返回 []
 
-只输出JSON数组，不要解释。
+只输出JSON对象，不要解释。
 
 会话骨架：
 {{SKELETON}}`.trim();
+
+const SESSION_TAGS_FILE = path.join(os.homedir(), '.metame', 'session_tags.json');
+
+/**
+ * Persist session name and derived tags to ~/.metame/session_tags.json.
+ * Merges into existing file — never overwrites existing entries.
+ */
+function saveSessionTag(sessionId, sessionName, facts) {
+  // Derive tags from facts' tags arrays (deduplicated, max 8)
+  const tagSet = new Set();
+  for (const f of facts) {
+    if (Array.isArray(f.tags)) f.tags.forEach(t => tagSet.add(t));
+  }
+  const tags = [...tagSet].slice(0, 8);
+
+  let existing = {};
+  try {
+    if (fs.existsSync(SESSION_TAGS_FILE)) {
+      existing = JSON.parse(fs.readFileSync(SESSION_TAGS_FILE, 'utf8'));
+    }
+  } catch { existing = {}; }
+
+  // Only update if not already present (never overwrite)
+  if (!existing[sessionId]) {
+    existing[sessionId] = {
+      name: sessionName,
+      tags,
+      extracted_at: new Date().toISOString(),
+    };
+    try {
+      fs.mkdirSync(path.dirname(SESSION_TAGS_FILE), { recursive: true });
+      fs.writeFileSync(SESSION_TAGS_FILE, JSON.stringify(existing, null, 2), 'utf8');
+    } catch (e) {
+      console.log(`[memory-extract] Failed to save session tag: ${e.message}`);
+    }
+  }
+}
 
 const VAGUE_PATTERNS = [
   /^用户(问|提|说|提到)/, /^我们(讨论|分析|查看)/,
@@ -79,16 +121,18 @@ async function extractFacts(skeleton, sessionSummary, distillEnv) {
     return [];
   }
 
-  let facts = [];
+  let parsed;
   try {
     const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    facts = JSON.parse(cleaned);
-    if (!Array.isArray(facts)) facts = [];
+    parsed = JSON.parse(cleaned);
   } catch {
-    return [];
+    return { facts: [], session_name: "未命名会话" };
   }
 
-  return facts.filter(f => {
+  let facts = Array.isArray(parsed.facts) ? parsed.facts : [];
+  const session_name = parsed.session_name || "未命名会话";
+
+  const filteredFacts = facts.filter(f => {
     if (!f.entity || !f.relation || !f.value) return false;
     if (f.value.length < 20 || f.value.length > 300) return false;
     if (VAGUE_PATTERNS.some(re => re.test(f.value))) return false;
@@ -96,6 +140,8 @@ async function extractFacts(skeleton, sessionSummary, distillEnv) {
     if (f.confidence === 'medium' && (!f.tags || f.tags.length === 0)) return false;
     return true;
   });
+
+  return { facts: filteredFacts, session_name };
 }
 
 /**
@@ -143,7 +189,7 @@ async function run() {
         continue;
       }
 
-      const facts = await extractFacts(skeleton, null, distillEnv);
+      const { facts, session_name } = await extractFacts(skeleton, null, distillEnv);
 
       if (facts.length > 0) {
         const { saved, skipped } = memory.saveFacts(
@@ -155,10 +201,14 @@ async function run() {
         totalSkipped += skipped;
         console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)}: ${saved} facts saved, ${skipped} skipped`);
       } else {
-        console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)}: no facts extracted`);
+        console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)} (${session_name}): no facts extracted`);
       }
 
       sessionAnalytics.markFactsExtracted(skeleton.session_id);
+
+      // P2-A: persist session name + tags to session_tags.json
+      saveSessionTag(skeleton.session_id, session_name, facts);
+
       processed++;
     } catch (e) {
       console.log(`[memory-extract] Session error: ${e.message}`);
