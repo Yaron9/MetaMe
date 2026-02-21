@@ -670,8 +670,11 @@ function dispatchTask(targetProject, message, config, replyFn) {
       }, config);
     }
   });
-  // readOnly=true: dispatched agents must not write/edit files on behalf of other agents
-  _handleCommand(nullBot, dispatchChatId, prompt, config, null, null, true).catch(e => {
+  // Permission inheritance: if daemon runs with dangerously_skip_permissions, dispatched agents
+  // inherit the same level — they need Write access for implementation tasks.
+  // Otherwise fall back to readOnly (safe default for untrusted daemon configs).
+  const dispatchReadOnly = !(config.daemon && config.daemon.dangerously_skip_permissions);
+  _handleCommand(nullBot, dispatchChatId, prompt, config, null, null, dispatchReadOnly).catch(e => {
     log('ERROR', `Dispatch handleCommand failed for ${targetProject}: ${e.message}`);
   });
 
