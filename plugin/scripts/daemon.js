@@ -1790,7 +1790,11 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
     const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
     const ago = formatRelativeTime(new Date(timeMs).toISOString());
-    const title = s.customTitle || '';
+    const sessionTags = loadSessionTags();
+    const tagEntry = sessionTags[s.sessionId] || {};
+    const tagName = tagEntry.name || '';
+    const tags = (tagEntry.tags || []).slice(0, 5);
+    const title = s.customTitle || tagName || '';
     const summary = s.summary || '';
     const firstMsg = (s.firstPrompt || '').replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '');
     const msgs = s.messageCount || '?';
@@ -1798,6 +1802,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     let detail = `📋 Session Detail\n`;
     detail += `━━━━━━━━━━━━━━━━━━━━\n`;
     if (title) detail += `📝 Title: ${title}\n`;
+    if (tags.length) detail += `🏷 Tags: ${tags.map(t => '#' + t).join(' ')}\n`;
     if (summary) detail += `💡 Summary: ${summary}\n`;
     detail += `📁 Project: ${projName}\n`;
     detail += `📂 Path: ${proj}\n`;
@@ -1810,6 +1815,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       // Build rich detail as markdown body + buttons
       let body = '';
       if (title) body += `**📝 ${title}**\n`;
+      if (tags.length) body += `${tags.map(t => `\`${t}\``).join(' ')}\n`;
       if (summary) body += `💡 ${summary}\n`;
       body += `📁 ${projName} · 📂 ${proj}\n`;
       body += `💬 ${msgs} messages · 🕐 ${ago}\n`;
@@ -3251,6 +3257,13 @@ function listRecentSessions(limit, cwd) {
   return all.slice(0, limit || 10);
 }
 
+/** Load session_tags.json — returns {} if missing or malformed */
+function loadSessionTags() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(HOME, '.metame', 'session_tags.json'), 'utf8'));
+  } catch { return {}; }
+}
+
 /**
  * Get the actual file mtime of a session's .jsonl file (most accurate)
  */
@@ -3299,7 +3312,7 @@ function sessionLabel(s) {
 /**
  * Get the display title for a session using fallback chain: name → summary → firstPrompt
  */
-function sessionDisplayTitle(s, maxLen) {
+function sessionDisplayTitle(s, maxLen, sessionTags) {
   maxLen = maxLen || 50;
   // Newlines → space; strip null bytes, surrogates, replacement char, other non-printable control chars
   const sanitize = (t) => t
@@ -3308,6 +3321,9 @@ function sessionDisplayTitle(s, maxLen) {
     .replace(/\s+/g, ' ')
     .trim();
   if (s.customTitle) return sanitize(s.customTitle).slice(0, maxLen);
+  // P2-A: use Haiku-generated session name from session_tags.json
+  const tagEntry = sessionTags && sessionTags[s.sessionId];
+  if (tagEntry && tagEntry.name) return sanitize(tagEntry.name).slice(0, maxLen);
   if (s.summary) return sanitize(s.summary).slice(0, maxLen);
   if (s.firstPrompt) {
     const clean = s.firstPrompt
@@ -3326,17 +3342,20 @@ function sessionDisplayTitle(s, maxLen) {
  * Format a session entry into a rich text block for non-button contexts (Feishu text).
  * Shows: name, title/summary, project, time, and /resume shortcut.
  */
-function sessionRichLabel(s, index) {
-  const title = sessionDisplayTitle(s, 50);
+function sessionRichLabel(s, index, sessionTags) {
+  sessionTags = sessionTags || loadSessionTags();
+  const title = sessionDisplayTitle(s, 50, sessionTags);
   const proj = s.projectPath ? path.basename(s.projectPath) : '~';
   const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
   const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
   const ago = formatRelativeTime(new Date(timeMs).toISOString());
   const shortId = s.sessionId.slice(0, 8);
+  const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 3);
 
   let line = `${index}. `;
   if (title) line += `${title}${title.length >= 50 ? '..' : ''}`;
   else line += `(unnamed)`;
+  if (tags.length) line += `  ${tags.map(t => `#${t}`).join(' ')}`;
   line += `\n   📁${proj} · ${ago}`;
   line += `\n   /resume ${shortId}`;
   return line;
@@ -3346,16 +3365,19 @@ function sessionRichLabel(s, index) {
  * Build Feishu card elements for a list of sessions (used by /sessions and /resume)
  */
 function buildSessionCardElements(sessions) {
+  const sessionTags = loadSessionTags();
   const elements = [];
   sessions.forEach((s, i) => {
     if (i > 0) elements.push({ tag: 'hr' });
-    const title = sessionDisplayTitle(s, 60);
+    const title = sessionDisplayTitle(s, 60, sessionTags);
     const proj = s.projectPath ? path.basename(s.projectPath) : '~';
     const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
     const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
     const ago = formatRelativeTime(new Date(timeMs).toISOString());
     const shortId = s.sessionId.slice(0, 6);
+    const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 4);
     let desc = `**${i + 1}. ${title || '(unnamed)'}**\n📁${proj} · ${ago}`;
+    if (tags.length) desc += `\n${tags.map(t => `\`${t}\``).join(' ')}`;
     elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
     elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Switch #${shortId}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
   });
