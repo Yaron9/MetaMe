@@ -223,7 +223,7 @@ metame daemon install-launchd   # 开机自启 + 崩溃重启
 | **手机桥接** | 通过 Telegram/飞书完整使用 Claude Code。有状态会话、双向文件互传、实时工具调用状态。 |
 | **技能进化** | 自愈技能系统。自动发现缺失技能、从浏览器录制中学习、每次任务后进化。技能越用越聪明。 |
 | **心跳系统** | 三层可编程神经系统。Layer 0 内核永远在线（零配置）。Layer 1 系统自进化内置（蒸馏+记忆+技能）。Layer 2 自定义定时任务，支持 `require_idle`、`precondition`、`notify`、工作流。 |
-| **多 Agent** | 多项目独立群聊，`/bind` 一键配置，真正并行执行。 |
+| **多 Agent** | 多项目独立群聊，`/agent bind` 一键配置，真正并行执行。 |
 | **浏览器自动化** | 内置 Playwright MCP，开箱即用。配合 Skill 实现发布、填表、抓取等自动化。 |
 | **模型中继** | 兼容任何 Anthropic API 中继。GPT-4、DeepSeek、Gemini 随意切换，零文件污染。 |
 | **元认知** | 检测行为模式（决策风格、舒适区、目标偏离），注入镜像观察。零额外 API 成本。 |
@@ -308,7 +308,7 @@ feishu:
 | `/undo` | 回退并恢复文件 |
 | `/list` | 浏览和下载项目文件 |
 | `/model` | 切换模型（sonnet/opus/haiku） |
-| `/bind <名称>` | 将群注册为专属 Agent |
+| `/agent bind <名称> [目录]` | 将群注册为专属 Agent |
 | `/sh <命令>` | 原始 shell——绕过 Claude |
 | `/memory` | 记忆统计：事实数量、已标签 session 数、DB 大小 |
 | `/memory <关键词>` | 按关键词搜索长期事实 |
