@@ -27,6 +27,7 @@ const LOG_FILE = path.join(METAME_DIR, 'daemon.log');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const DISPATCH_DIR = path.join(METAME_DIR, 'dispatch');
 const DISPATCH_LOG = path.join(DISPATCH_DIR, 'dispatch-log.jsonl');
+const SOCK_PATH = path.join(METAME_DIR, 'daemon.sock');
 
 // Skill evolution module (hot path + cold path)
 let skillEvolution = null;
@@ -746,9 +747,125 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
 }
 
 /**
+ * Spawn memory-extract.js as a detached background process.
+ * Called on sleep mode entry to consolidate session facts.
+ */
+function spawnMemoryConsolidation() {
+  const scriptPath = path.join(__dirname, 'memory-extract.js');
+  if (!fs.existsSync(scriptPath)) {
+    log('WARN', '[DAEMON] memory-extract.js not found, skipping consolidation');
+    return;
+  }
+  try {
+    const child = spawn(process.execPath, [scriptPath], {
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env },
+    });
+    child.unref();
+    log('INFO', '[DAEMON] Memory consolidation spawned (background)');
+  } catch (e) {
+    log('WARN', `[DAEMON] Failed to spawn memory consolidation: ${e.message}`);
+  }
+}
+
+/**
  * Physiological heartbeat: zero-token awareness check.
  * Runs every tick unconditionally.
  */
+/**
+ * Handle a single dispatch message (from socket or pending.jsonl fallback).
+ */
+function handleDispatchItem(item, config) {
+  if (!item.target || !item.prompt) return;
+  if (!(config && config.projects && config.projects[item.target])) {
+    log('WARN', `dispatch: unknown target "${item.target}"`);
+    return;
+  }
+  log('INFO', `Dispatch: ${item.from || '?'} → ${item.target}: ${item.prompt.slice(0, 60)}`);
+  let pendingReplyFn = null;
+  let streamOptions = null;
+  const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
+  if (liveBot) {
+    const feishuMap = (config.feishu && config.feishu.chat_agent_map) || {};
+    const allowedFeishuIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
+    const agentChatIds = new Set(Object.keys(feishuMap));
+    const targetChatId = Object.entries(feishuMap).find(([, v]) => v === item.target)?.[0] || null;
+    if (targetChatId) {
+      streamOptions = { bot: liveBot, chatId: targetChatId };
+      const ackText = `📬 **新任务**\n\n> ${item.prompt.slice(0, 120)}${item.prompt.length > 120 ? '...' : ''}`;
+      liveBot.sendMarkdown(targetChatId, ackText).catch(() =>
+        liveBot.sendMessage(targetChatId, ackText.replace(/\*\*/g, '')).catch(e =>
+          log('WARN', `Dispatch ack failed: ${e.message}`)
+        )
+      );
+    } else {
+      const _userSources = new Set(['unknown', 'claude_session', '_claude_session', 'user']);
+      let senderChatId = null;
+      if (!_userSources.has(item.from)) {
+        senderChatId = Object.entries(feishuMap).find(([, v]) => v === item.from)?.[0] || null;
+      }
+      if (!senderChatId) {
+        senderChatId = allowedFeishuIds.map(String).find(id => !agentChatIds.has(id)) || null;
+      }
+      if (senderChatId) {
+        const targetProj = (config.projects || {})[item.target] || {};
+        const ackText = `📬 已接收，转发给 ${targetProj.icon || '🤖'} **${targetProj.name || item.target}**...\n\n> ${item.prompt.slice(0, 100)}${item.prompt.length > 100 ? '...' : ''}`;
+        liveBot.sendMarkdown(senderChatId, ackText).catch(() =>
+          liveBot.sendMessage(senderChatId, ackText.replace(/\*\*/g, '')).catch(e =>
+            log('WARN', `Dispatch ack to sender failed: ${e.message}`)
+          )
+        );
+        pendingReplyFn = (output) => {
+          const text = `${targetProj.icon || '📬'} **${targetProj.name || item.target}** 回复：\n\n${output.slice(0, 2000)}`;
+          liveBot.sendMarkdown(senderChatId, text).catch(e => {
+            log('WARN', `Dispatch reply (markdown) failed: ${e.message}`);
+            liveBot.sendMessage(senderChatId, text.replace(/\*\*/g, '')).catch(e2 =>
+              log('ERROR', `Dispatch reply (text) failed: ${e2.message}`)
+            );
+          });
+        };
+      }
+    }
+  }
+  dispatchTask(item.target, {
+    from: item.from || 'claude_session',
+    type: 'task', priority: 'normal',
+    payload: { title: item.prompt.slice(0, 60), prompt: item.prompt },
+    callback: false,
+    new_session: !!item.new_session,
+  }, config, pendingReplyFn, streamOptions);
+}
+
+/**
+ * Start Unix Domain Socket server for low-latency dispatch.
+ */
+function startDispatchSocket(config) {
+  const net = require('net');
+  try { fs.unlinkSync(SOCK_PATH); } catch { /* ok */ }
+  const server = net.createServer((conn) => {
+    let buf = '';
+    conn.on('data', d => { buf += d; });
+    conn.on('end', () => {
+      try {
+        const item = JSON.parse(buf);
+        handleDispatchItem(item, config);
+        conn.write(JSON.stringify({ ok: true }) + '\n');
+      } catch (e) {
+        try { conn.write(JSON.stringify({ ok: false, error: e.message }) + '\n'); } catch { /* ignore */ }
+      }
+    });
+    conn.on('error', () => { /* ignore client disconnect */ });
+  });
+  server.on('error', (e) => {
+    log('WARN', `[DAEMON] Dispatch socket error: ${e.message} — file polling still active`);
+  });
+  server.listen(SOCK_PATH, () => {
+    log('INFO', `[DAEMON] Dispatch socket ready: ${SOCK_PATH}`);
+  });
+  return server;
+}
+
 function physiologicalHeartbeat(config) {
   // 1. Update last_alive timestamp
   const state = loadState();
@@ -769,73 +886,7 @@ function physiologicalHeartbeat(config) {
         const items = content.split('\n').filter(Boolean)
           .map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
         for (const item of items) {
-          if (!item.target || !item.prompt) continue;
-          if (!(config && config.projects && config.projects[item.target])) {
-            log('WARN', `pending dispatch: unknown target "${item.target}"`);
-            continue;
-          }
-          log('INFO', `Pending dispatch: ${item.from || '?'} → ${item.target}: ${item.prompt.slice(0, 60)}`);
-          // Route dispatch work to target's own Feishu channel (streaming + reply shown there)
-          let pendingReplyFn = null;
-          let streamOptions = null;
-          const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
-          log('INFO', `[Dispatch] liveBot=${!!liveBot}, from=${item.from}, target=${item.target}`);
-          if (liveBot) {
-            const feishuMap = (config.feishu && config.feishu.chat_agent_map) || {};
-            const allowedFeishuIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
-            const agentChatIds = new Set(Object.keys(feishuMap));
-
-            // Find target's own Feishu chatId (primary: route work there)
-            const targetChatId = Object.entries(feishuMap).find(([, v]) => v === item.target)?.[0] || null;
-
-            if (targetChatId) {
-              // Target has a dedicated Feishu channel: stream work output directly there
-              streamOptions = { bot: liveBot, chatId: targetChatId };
-              const ackText = `📬 **新任务**\n\n> ${item.prompt.slice(0, 120)}${item.prompt.length > 120 ? '...' : ''}`;
-              liveBot.sendMarkdown(targetChatId, ackText).catch(() =>
-                liveBot.sendMessage(targetChatId, ackText.replace(/\*\*/g, '')).catch(e =>
-                  log('WARN', `Dispatch ack to target channel failed: ${e.message}`)
-                )
-              );
-              log('INFO', `[Dispatch] streaming work to target channel ${targetChatId}`);
-            } else {
-              // Fallback: no dedicated channel, send final reply to sender's chat
-              const _userSources = new Set(['unknown', 'claude_session', '_claude_session', 'user']);
-              let senderChatId = null;
-              if (!_userSources.has(item.from)) {
-                senderChatId = Object.entries(feishuMap).find(([, v]) => v === item.from)?.[0] || null;
-              }
-              if (!senderChatId) {
-                senderChatId = allowedFeishuIds.map(String).find(id => !agentChatIds.has(id)) || null;
-              }
-              log('INFO', `[Dispatch] fallback reply to senderChatId=${senderChatId}`);
-              if (senderChatId) {
-                const targetProj = (config.projects || {})[item.target] || {};
-                const ackText = `📬 已接收，转发给 ${targetProj.icon || '🤖'} **${targetProj.name || item.target}**...\n\n> ${item.prompt.slice(0, 100)}${item.prompt.length > 100 ? '...' : ''}`;
-                liveBot.sendMarkdown(senderChatId, ackText).catch(() =>
-                  liveBot.sendMessage(senderChatId, ackText.replace(/\*\*/g, '')).catch(e =>
-                    log('WARN', `Dispatch ack to sender failed: ${e.message}`)
-                  )
-                );
-                pendingReplyFn = (output) => {
-                  const text = `${targetProj.icon || '📬'} **${targetProj.name || item.target}** 回复：\n\n${output.slice(0, 2000)}`;
-                  liveBot.sendMarkdown(senderChatId, text).catch(e => {
-                    log('WARN', `Dispatch reply to sender (markdown) failed: ${e.message}`);
-                    liveBot.sendMessage(senderChatId, text.replace(/\*\*/g, '')).catch(e2 => {
-                      log('ERROR', `Dispatch reply to sender (text) failed: ${e2.message}`);
-                    });
-                  });
-                };
-              }
-            }
-          }
-          dispatchTask(item.target, {
-            from: item.from || 'claude_session',
-            type: 'task', priority: 'normal',
-            payload: { title: item.prompt.slice(0, 60), prompt: item.prompt },
-            callback: false,
-            new_session: !!item.new_session,
-          }, config, pendingReplyFn, streamOptions);
+          handleDispatchItem(item, config);
         }
       }
     }
@@ -914,6 +965,14 @@ function startHeartbeat(config, notifyFn) {
     if (idle && !_inSleepMode) {
       _inSleepMode = true;
       log('INFO', '[DAEMON] Entering Sleep Mode — running dream tasks');
+      // Trigger memory consolidation at most once every 4 hours
+      const sleepState = loadState();
+      const lastConsolidate = sleepState.last_memory_consolidate || 0;
+      if (Date.now() - lastConsolidate > 4 * 60 * 60 * 1000) {
+        sleepState.last_memory_consolidate = Date.now();
+        saveState(sleepState);
+        spawnMemoryConsolidation();
+      }
     }
 
     // ② Task heartbeat (burns tokens on schedule)
@@ -4502,6 +4561,9 @@ async function main() {
     }
   };
 
+  // Start dispatch socket server (low-latency IPC, fallback: file polling still works)
+  const dispatchSocket = startDispatchSocket(config);
+
   // Start heartbeat scheduler
   let heartbeatTimer = startHeartbeat(config, notifyFn);
 
@@ -4588,6 +4650,8 @@ async function main() {
     fs.unwatchFile(CONFIG_FILE);
     fs.unwatchFile(DAEMON_SCRIPT);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (dispatchSocket) try { dispatchSocket.close(); } catch { }
+    try { fs.unlinkSync(SOCK_PATH); } catch { }
     if (telegramBridge) telegramBridge.stop();
     if (feishuBridge) feishuBridge.stop();
     // Stop QMD semantic search daemon if it was started
