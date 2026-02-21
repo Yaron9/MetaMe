@@ -1701,6 +1701,62 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     return;
   }
 
+  // /memory [keyword] — show memory stats or search facts
+  if (text === '/memory' || text.startsWith('/memory ')) {
+    const query = text.startsWith('/memory ') ? text.slice(8).trim() : '';
+    let memMod;
+    try { memMod = require('./memory'); } catch { await bot.sendMessage(chatId, '❌ Memory module not available'); return; }
+
+    if (!query) {
+      // Stats view
+      try {
+        let factCount = '?';
+        try {
+          const Database = require('better-sqlite3');
+          const _db = new Database(memMod.DB_PATH, { readonly: true });
+          factCount = (_db.prepare('SELECT COUNT(*) as c FROM facts WHERE superseded_by IS NULL').get() || {}).c || 0;
+          _db.close();
+        } catch {}
+        const s = memMod.stats();
+        const tagFile = path.join(HOME, '.metame', 'session_tags.json');
+        let tagCount = 0;
+        try { tagCount = Object.keys(JSON.parse(fs.readFileSync(tagFile, 'utf8'))).length; } catch {}
+        const lines = [
+          `🧠 *Memory Stats*`,
+          `━━━━━━━━━━━━━━━━`,
+          `📌 Facts: ${factCount}`,
+          `🏷 Sessions tagged: ${tagCount}`,
+          `🗃 Sessions in DB: ${s.count}`,
+          `💾 DB size: ${s.dbSizeKB} KB`,
+          s.newestDate ? `🕐 Last updated: ${new Date(s.newestDate).toLocaleDateString()}` : '',
+          ``,
+          `搜索: /memory <关键词>`,
+        ].filter(l => l !== undefined && !(l === '' && false));
+        await bot.sendMessage(chatId, lines.join('\n'));
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ Memory stats error: ${e.message}`);
+      }
+    } else {
+      // Search facts
+      try {
+        const results = await memMod.searchFactsAsync(query, { limit: 5 });
+        if (!results || results.length === 0) {
+          await bot.sendMessage(chatId, `🔍 No facts found for「${query}」`);
+          return;
+        }
+        let msg = `🔍 *Facts: "${query}"* (${results.length})\n━━━━━━━━━━━━━━━━\n`;
+        for (const r of results) {
+          const tag = r.confidence === 'high' ? '🟢' : '🟡';
+          msg += `${tag} *${r.entity}*\n${r.value}\n\n`;
+        }
+        await bot.sendMessage(chatId, msg.trim());
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ Search error: ${e.message}`);
+      }
+    }
+    return;
+  }
+
   // /sessions — compact list, tap to see details, then tap to switch
   if (text === '/sessions') {
     const allSessions = listRecentSessions(15);
@@ -2962,6 +3018,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       '/quit — 结束会话，重新加载 MCP/配置',
       '',
       `⚙️ /model [${currentModel}] /provider [${currentProvider}] /status /tasks /run /budget /reload`,
+      `🧠 /memory — 记忆统计 · /memory <关键词> — 搜索事实`,
       `🔧 /doctor /fix /reset /sh <cmd> /nosleep [${caffeinateProcess ? 'ON' : 'OFF'}]`,
       '',
       '直接打字即可对话 💬',
