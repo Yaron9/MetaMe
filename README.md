@@ -249,9 +249,11 @@ Done. Open Telegram, message your bot.
 |--------|-------|
 | Cognitive profile injection | ~800 tokens/session (0.4% of 200k context) |
 | Dispatch latency (Unix socket) | <100ms |
-| Memory consolidation | ~1 min/session, Haiku cost, background |
-| Session summary generation | ~3s, Haiku, triggered on idle |
+| Memory consolidation (per session) | ~1,500–2,000 tokens input + ~50–300 tokens output (Haiku) |
+| Session summary (per session) | ~400–900 tokens input + ≤250 tokens output (Haiku) |
 | Mobile commands (`/stop`, `/list`, `/undo`) | 0 tokens |
+
+> Both memory consolidation and session summarization run in the background via Haiku (`--model haiku`). Input is capped by code: skeleton text ≤ 3,000 chars, summary output ≤ 500 chars. Neither runs per-message — memory consolidation triggers on sleep mode (30-min idle), summaries trigger once per idle session.
 
 ## Plugin (Lightweight)
 
