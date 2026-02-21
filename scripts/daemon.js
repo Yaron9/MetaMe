@@ -3320,21 +3320,24 @@ function sessionDisplayTitle(s, maxLen, sessionTags) {
     .replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F\uFFFD\uD800-\uDFFF]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+  // Priority: user name > our P2-A name > user's first message > Claude native summary
+  // firstPrompt is authentic user content; s.summary is Claude's auto-generated index field (unreliable)
   if (s.customTitle) return sanitize(s.customTitle).slice(0, maxLen);
-  // P2-A: use Haiku-generated session name from session_tags.json
+  // P2-A: use Haiku-generated session name (only if memory-extract has processed this session)
   const tagEntry = sessionTags && sessionTags[s.sessionId];
   if (tagEntry && tagEntry.name) return sanitize(tagEntry.name).slice(0, maxLen);
-  if (s.summary) return sanitize(s.summary).slice(0, maxLen);
+  // Not yet processed by P2-A: show the user's actual first message
   if (s.firstPrompt) {
     const clean = s.firstPrompt
       .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
       .replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '')
       .replace(/\[System hints[\s\S]*/i, '');
-    // Take first non-empty line after stripping noise
     const firstLine = clean.split('\n').map(l => l.trim()).find(l => l.length > 2) || '';
     const sanitized = sanitize(firstLine);
     if (sanitized && sanitized.length > 2) return sanitized.slice(0, maxLen);
   }
+  // Last resort: Claude's native auto-summary from sessions-index.json
+  if (s.summary) return sanitize(s.summary).slice(0, maxLen);
   return '';
 }
 
