@@ -536,7 +536,7 @@ function executeWorkflow(task, config) {
 
 // Late-bound reference to handleCommand (defined later in file)
 let _handleCommand = null;
-let _dispatchBotRef = null; // Set when Feishu bridge connects; used by heartbeat drain
+let _dispatchBridgeRef = null; // Store bridge (not bot) so .bot is always the live object after reconnects
 function setDispatchHandler(fn) { _handleCommand = fn; }
 
 /**
@@ -660,7 +660,8 @@ function dispatchTask(targetProject, message, config, replyFn) {
       }, config);
     }
   });
-  _handleCommand(nullBot, virtualChatId, prompt, config).catch(e => {
+  // readOnly=true: dispatched agents must not write/edit files on behalf of other agents
+  _handleCommand(nullBot, virtualChatId, prompt, config, null, null, true).catch(e => {
     log('ERROR', `Dispatch handleCommand failed for ${targetProject}: ${e.message}`);
   });
 
@@ -680,12 +681,14 @@ function physiologicalHeartbeat(config) {
 
   // 2. Drain pending.jsonl — dispatch requests written by Claude sessions via dispatch_to CLI
   const PENDING = path.join(DISPATCH_DIR, 'pending.jsonl');
+  const PENDING_TMP = PENDING + '.processing';
   try {
     if (fs.existsSync(PENDING)) {
-      const content = fs.readFileSync(PENDING, 'utf8').trim();
+      // Atomic: rename before reading so new writes during processing go to a fresh file
+      fs.renameSync(PENDING, PENDING_TMP);
+      const content = fs.readFileSync(PENDING_TMP, 'utf8').trim();
+      fs.unlinkSync(PENDING_TMP);
       if (content) {
-        // Atomic clear before processing
-        fs.writeFileSync(PENDING, '', 'utf8');
         const items = content.split('\n').filter(Boolean)
           .map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
         for (const item of items) {
@@ -695,17 +698,22 @@ function physiologicalHeartbeat(config) {
             continue;
           }
           log('INFO', `Pending dispatch: ${item.from || '?'} → ${item.target}: ${item.prompt.slice(0, 60)}`);
-          // Build replyFn: send output to target project's Feishu chat (if bot available)
+          // Build replyFn: use live bot from bridge ref (always fresh, survives reconnects)
           let pendingReplyFn = null;
-          if (_dispatchBotRef) {
+          const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
+          if (liveBot) {
             const feishuMap = (config.feishu && config.feishu.chat_agent_map) || {};
             const targetChatId = Object.entries(feishuMap).find(([, v]) => v === item.target)?.[0];
             if (targetChatId) {
               const proj = (config.projects || {})[item.target] || {};
               pendingReplyFn = (output) => {
                 const text = `${proj.icon || '📬'} **${proj.name || item.target}**\n\n${output.slice(0, 2000)}`;
-                _dispatchBotRef.sendMarkdown(targetChatId, text)
-                  .catch(() => _dispatchBotRef.sendMessage(targetChatId, text).catch(() => {}));
+                liveBot.sendMarkdown(targetChatId, text).catch(e => {
+                  log('WARN', `Dispatch reply to ${item.target} (markdown) failed: ${e.message}`);
+                  liveBot.sendMessage(targetChatId, text).catch(e2 => {
+                    log('ERROR', `Dispatch reply to ${item.target} (text) failed: ${e2.message}`);
+                  });
+                });
               };
             }
           }
@@ -4375,7 +4383,7 @@ async function main() {
   // Start bridges (both can run simultaneously)
   telegramBridge = await startTelegramBridge(config, executeTaskByName);
   feishuBridge = await startFeishuBridge(config, executeTaskByName);
-  if (feishuBridge && feishuBridge.bot) _dispatchBotRef = feishuBridge.bot;
+  if (feishuBridge) _dispatchBridgeRef = feishuBridge; // store bridge, not bot, so .bot stays live after reconnects
 
   // Notify once on startup (single message, no duplicates)
   await sleep(1500); // Let polling settle
