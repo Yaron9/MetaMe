@@ -202,6 +202,7 @@ function saveFacts(sessionId, project, facts) {
 
   let saved = 0;
   let skipped = 0;
+  const savedFacts = [];
 
   for (const f of facts) {
     // Basic validation
@@ -221,15 +222,66 @@ function saveFacts(sessionId, project, facts) {
     try {
       insert.run(id, f.entity, f.relation, f.value.slice(0, 300),
         f.confidence || 'medium', sessionId, project === '*' ? '*' : project, tags);
+      savedFacts.push({ id, entity: f.entity, relation: f.relation, value: f.value,
+        project: project === '*' ? '*' : project, tags: f.tags || [], created_at: new Date().toISOString() });
       saved++;
     } catch { skipped++; }
+  }
+
+  // Async sync to QMD (non-blocking, non-fatal)
+  if (savedFacts.length > 0) {
+    let qmdClient = null;
+    try { qmdClient = require('./qmd-client'); } catch { /* qmd-client not available */ }
+    if (qmdClient) qmdClient.upsertFacts(savedFacts);
   }
 
   return { saved, skipped };
 }
 
 /**
- * Search facts by keyword (FTS5 + LIKE fallback).
+ * Search facts: QMD hybrid search (if available) → FTS5 → LIKE fallback.
+ *
+ * @param {string} query          - Search keywords / natural language
+ * @param {object} [opts]
+ * @param {number} [opts.limit=5] - Max results
+ * @param {string} [opts.project] - Filter by project (also always includes '*')
+ * @returns {Promise<Array>|Array} Fact objects
+ */
+async function searchFactsAsync(query, { limit = 5, project = null } = {}) {
+  // Try QMD hybrid search first
+  let qmdClient = null;
+  try { qmdClient = require('./qmd-client'); } catch { /* not available */ }
+
+  if (qmdClient && qmdClient.isAvailable()) {
+    try {
+      const ids = await qmdClient.search(query, limit * 2); // fetch extra for project filter
+      if (ids && ids.length > 0) {
+        const db = getDb();
+        const placeholders = ids.map(() => '?').join(',');
+        let rows = db.prepare(
+          `SELECT id, entity, relation, value, confidence, project, tags, created_at
+           FROM facts WHERE id IN (${placeholders}) AND superseded_by IS NULL`
+        ).all(...ids);
+
+        // Apply project filter
+        if (project) {
+          rows = rows.filter(r => r.project === project || r.project === '*');
+        }
+
+        // Preserve QMD ranking order
+        const idOrder = new Map(ids.map((id, i) => [id, i]));
+        rows.sort((a, b) => (idOrder.get(a.id) ?? 999) - (idOrder.get(b.id) ?? 999));
+
+        if (rows.length > 0) return rows.slice(0, limit);
+      }
+    } catch { /* QMD failed, fall through to FTS5 */ }
+  }
+
+  return searchFacts(query, { limit, project });
+}
+
+/**
+ * Search facts by keyword (FTS5 + LIKE fallback). Synchronous.
  *
  * @param {string} query          - Search keywords
  * @param {object} [opts]
@@ -383,4 +435,4 @@ function close() {
   if (_db) { _db.close(); _db = null; }
 }
 
-module.exports = { saveSession, saveFacts, searchFacts, searchSessions, recentSessions, getSession, stats, close, DB_PATH };
+module.exports = { saveSession, saveFacts, searchFacts, searchFactsAsync, searchSessions, recentSessions, getSession, stats, close, DB_PATH };
