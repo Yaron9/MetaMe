@@ -216,7 +216,7 @@ Done. Open Telegram, message your bot.
 | **Mobile Bridge** | Full Claude Code via Telegram/Feishu. Stateful sessions, file transfer both ways, real-time streaming status. |
 | **Skill Evolution** | Self-healing skill system. Auto-discovers missing skills, learns from browser recordings, evolves after every task. Skills get smarter over time. |
 | **Heartbeat System** | Three-layer programmable nervous system. Layer 0 kernel always-on (zero config). Layer 1 system evolution built-in (distill + memory + skills). Layer 2 your custom scheduled tasks with `require_idle`, `precondition`, `notify`, workflows. |
-| **Multi-Agent** | Multiple projects with dedicated chat groups. `/bind` for one-tap setup. True parallel execution. |
+| **Multi-Agent** | Multiple projects with dedicated chat groups. `/agent bind` for one-tap setup. True parallel execution. |
 | **Browser Automation** | Built-in Playwright MCP. Browser control out of the box for every user. |
 | **Provider Relay** | Route through any Anthropic-compatible API. Use GPT-4, DeepSeek, Gemini — zero config file mutation. |
 | **Metacognition** | Detects behavioral patterns (decision style, comfort zones, goal drift) and injects mirror observations. Zero extra API cost. |
@@ -301,7 +301,7 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 | `/undo` | Rollback with file restoration |
 | `/list` | Browse & download project files |
 | `/model` | Switch model (sonnet/opus/haiku) |
-| `/bind <name>` | Register group as dedicated agent |
+| `/agent bind <name> [dir]` | Register group as dedicated agent |
 | `/sh <cmd>` | Raw shell — bypasses Claude |
 | `/memory` | Memory stats: fact count, session tags, DB size |
 | `/memory <keyword>` | Search long-term facts by keyword |
