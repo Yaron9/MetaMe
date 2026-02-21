@@ -209,6 +209,37 @@ function listFormatted() {
 }
 
 // ---------------------------------------------------------
+// Claude subprocess helper (shared by distill.js + skill-evolution.js)
+// ---------------------------------------------------------
+/**
+ * Call `claude -p --model haiku` as a subprocess with extra env vars.
+ * Deletes CLAUDECODE from env to prevent recursive session detection.
+ */
+function callHaiku(input, extraEnv, timeout) {
+  const { execFile } = require('child_process');
+  const env = { ...process.env, ...extraEnv };
+  delete env.CLAUDECODE;
+  return new Promise((resolve, reject) => {
+    const proc = execFile(
+      'claude',
+      ['-p', '--model', 'haiku', '--no-session-persistence'],
+      { env, timeout, maxBuffer: 10 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) {
+          const detail = (stderr || stdout || '').trim().split('\n')[0];
+          err.message = detail || err.message;
+          err.stdout = stdout;
+          err.stderr = stderr;
+          reject(err);
+        } else resolve(stdout.trim());
+      },
+    );
+    proc.stdin.write(input);
+    proc.stdin.end();
+  });
+}
+
+// ---------------------------------------------------------
 // EXPORTS
 // ---------------------------------------------------------
 module.exports = {
@@ -226,5 +257,6 @@ module.exports = {
   removeProvider,
   setRole,
   listFormatted,
+  callHaiku,
   PROVIDERS_FILE,
 };

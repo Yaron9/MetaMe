@@ -299,16 +299,7 @@ function checkHotEvolution(signal) {
  * Every N runs, triggers self-evaluation to optimize the policy.
  * Returns { updates, missing_skills } or null if nothing to process.
  */
-function callClaude(input, distillEnv, timeout) {
-  const { execFile } = require('child_process');
-  return new Promise((resolve, reject) => {
-    const proc = execFile('claude', ['-p', '--model', 'haiku', '--no-session-persistence'],
-      { env: { ...process.env, ...distillEnv }, timeout, maxBuffer: 10 * 1024 * 1024 },
-      (err, stdout) => { if (err) reject(err); else resolve(stdout.trim()); });
-    proc.stdin.write(input);
-    proc.stdin.end();
-  });
-}
+const { callHaiku, buildDistillEnv } = require('./providers');
 
 async function distillSkills() {
   let yaml;
@@ -368,12 +359,9 @@ async function distillSkills() {
 
   try {
     let distillEnv = {};
-    try {
-      const { buildDistillEnv } = require('./providers');
-      distillEnv = buildDistillEnv();
-    } catch {}
+    try { distillEnv = buildDistillEnv(); } catch {}
 
-    const result = await callClaude(prompt, distillEnv, 90000);
+    const result = await callHaiku(prompt, distillEnv, 90000);
 
     if (result.includes('NO_EVOLUTION')) {
       clearSignals();
@@ -528,7 +516,7 @@ RULES:
 - Be conservative: only change what the data clearly supports
 - prompt_template changes should be surgical, not full rewrites`;
 
-    const result = await callClaude(evalPrompt, distillEnv, 30000);
+    const result = await callHaiku(evalPrompt, distillEnv, 30000);
 
     if (result.includes('NO_CHANGE')) {
       console.log('🧬 Policy self-eval: no changes needed.');
@@ -790,3 +778,18 @@ module.exports = {
   smartStitch,
   listInstalledSkills,
 };
+
+if (require.main === module) {
+  distillSkills()
+    .then(r => {
+      if (r && r.updates && r.updates.length) {
+        console.log(`Skill evolution: ${r.updates.length} update(s) applied`);
+      } else {
+        console.log('Skill evolution: no updates');
+      }
+    })
+    .catch(e => {
+      console.error('Skill evolution error:', e.message);
+      process.exit(1);
+    });
+}

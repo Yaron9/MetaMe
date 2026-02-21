@@ -56,6 +56,14 @@ heartbeat:
     #   precondition: "test -s ~/.metame/raw_signals.jsonl"
     #   notify: false
     #
+    # Skill evolution cold path (independent of cognitive distill):
+    # - name: "skill-evolve"
+    #   type: "script"
+    #   command: "node ~/.metame/skill-evolution.js"
+    #   interval: "6h"
+    #   precondition: "test -s ~/.metame/skill_signals.jsonl"
+    #   notify: false
+    #
     # precondition: shell command, empty output → skip (zero tokens)
     # type: "script" → runs command directly instead of claude -p
 
