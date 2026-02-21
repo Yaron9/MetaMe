@@ -286,6 +286,8 @@ metame daemon install-launchd   # 开机自启 + 崩溃重启
 
 | 指标 | 数值 |
 |------|------|
+| Daemon 内存占用（闲置） | ~100 MB RSS — Node.js 进程基线，无额外增长 |
+| Daemon CPU（心跳间隙闲置） | ~0% — 事件循环休眠状态 |
 | 认知画像注入 | ~800 token/会话（200k 上下文的 0.4%） |
 | Dispatch 延迟（Unix Socket） | <100ms |
 | 记忆巩固（每会话） | ~1,500–2,000 token 输入 + ~50–300 token 输出（Haiku） |
