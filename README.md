@@ -361,15 +361,17 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 
 ## Plugin
 
-Same features as the npm CLI — install directly into Claude Code without npm:
+Install directly into Claude Code without npm:
 
 ```bash
 claude plugin install github:Yaron9/MetaMe/plugin
 ```
 
-Includes everything: cognitive profile injection, daemon (Telegram/Feishu), heartbeat tasks, layered memory, all mobile commands, slash commands (`/metame:evolve`, `/metame:daemon`, `/metame:refresh`, etc.).
+Includes: cognitive profile injection, daemon (Telegram/Feishu), heartbeat tasks, layered memory, all mobile commands, slash commands (`/metame:evolve`, `/metame:daemon`, `/metame:refresh`, etc.).
 
-Use the plugin if you prefer not to install a global npm package. Use the npm CLI (`metame-cli`) if you want the `metame` command and first-run interview.
+**One key difference from the npm CLI:** the plugin daemon starts when you open Claude Code and stops when you close it. It does not run 24/7 in the background. For always-on mobile access (receiving messages while Claude Code is closed), use the npm CLI with `metame daemon install-launchd`.
+
+Use the plugin if you prefer not to install a global npm package and only need mobile access while Claude Code is open. Use the npm CLI (`metame-cli`) for 24/7 daemon, the `metame` command, and first-run interview.
 
 ## License
 
