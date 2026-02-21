@@ -536,6 +536,7 @@ function executeWorkflow(task, config) {
 
 // Late-bound reference to handleCommand (defined later in file)
 let _handleCommand = null;
+let _dispatchBotRef = null; // Set when Feishu bridge connects; used by heartbeat drain
 function setDispatchHandler(fn) { _handleCommand = fn; }
 
 /**
@@ -546,7 +547,7 @@ function createNullBot(onOutput) {
   return {
     sendMessage:   async (chatId, text) => { if (onOutput) onOutput(text); return { message_id: '_virtual' }; },
     sendMarkdown:  async (chatId, text) => { if (onOutput) onOutput(text); return { message_id: '_virtual' }; },
-    sendCard:      async (chatId, card) => { if (onOutput) onOutput(typeof card === 'object' ? JSON.stringify(card) : card); return { message_id: '_virtual' }; },
+    sendCard:      async (chatId, card) => { if (onOutput) onOutput(typeof card === 'object' ? (card.body || card.title || JSON.stringify(card)) : card); return { message_id: '_virtual' }; },
     sendButtons:   async (chatId, text) => { if (onOutput) onOutput(text); return { message_id: '_virtual' }; },
     sendTyping:    async () => {},
     editMessage:   async () => {},
@@ -563,7 +564,7 @@ function createNullBot(onOutput) {
  * @param {object} config - current daemon config
  * @returns {{ success: boolean, id?: string, error?: string }}
  */
-function dispatchTask(targetProject, message, config) {
+function dispatchTask(targetProject, message, config, replyFn) {
   const LIMITS = { max_per_hour_per_target: 5, max_total_per_hour: 20, max_depth: 2 };
 
   // Anti-storm: check chain depth
@@ -628,8 +629,12 @@ function dispatchTask(targetProject, message, config) {
   // Route via virtual chatId + null bot (zero polling delay)
   const virtualChatId = `_agent_${targetProject}`;
   const nullBot = createNullBot((output) => {
-    log('INFO', `Dispatch output from ${targetProject}: ${String(output).slice(0, 200)}`);
-    if (fullMsg.callback && fullMsg.from && config) {
+    const outStr = typeof output === 'object' ? (output.body || JSON.stringify(output)) : String(output);
+    log('INFO', `Dispatch output from ${targetProject}: ${outStr.slice(0, 200)}`);
+    // Forward meaningful output back to the requester (skip typing indicators)
+    if (replyFn && outStr.trim().length > 2) {
+      replyFn(outStr);
+    } else if (!replyFn && fullMsg.callback && fullMsg.from && config) {
       dispatchTask(fullMsg.from, {
         from: targetProject,
         type: 'callback',
@@ -637,7 +642,7 @@ function dispatchTask(targetProject, message, config) {
         payload: {
           title: `任务完成: ${fullMsg.payload.title || fullMsg.id}`,
           original_id: fullMsg.id,
-          output: String(output).slice(0, 500),
+          output: outStr.slice(0, 500),
         },
         chain: [], // reset chain for callbacks
       }, config);
@@ -654,12 +659,56 @@ function dispatchTask(targetProject, message, config) {
  * Physiological heartbeat: zero-token awareness check.
  * Runs every tick unconditionally.
  */
-function physiologicalHeartbeat() {
+function physiologicalHeartbeat(config) {
   // 1. Update last_alive timestamp
   const state = loadState();
   state.last_alive = new Date().toISOString();
   state.memory_mb = Math.round(process.memoryUsage().rss / 1024 / 1024);
   saveState(state);
+
+  // 2. Drain pending.jsonl — dispatch requests written by Claude sessions via dispatch_to CLI
+  const PENDING = path.join(DISPATCH_DIR, 'pending.jsonl');
+  try {
+    if (fs.existsSync(PENDING)) {
+      const content = fs.readFileSync(PENDING, 'utf8').trim();
+      if (content) {
+        // Atomic clear before processing
+        fs.writeFileSync(PENDING, '', 'utf8');
+        const items = content.split('\n').filter(Boolean)
+          .map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+        for (const item of items) {
+          if (!item.target || !item.prompt) continue;
+          if (!(config && config.projects && config.projects[item.target])) {
+            log('WARN', `pending dispatch: unknown target "${item.target}"`);
+            continue;
+          }
+          log('INFO', `Pending dispatch: ${item.from || '?'} → ${item.target}: ${item.prompt.slice(0, 60)}`);
+          // Build replyFn: send output to target project's Feishu chat (if bot available)
+          let pendingReplyFn = null;
+          if (_dispatchBotRef) {
+            const feishuMap = (config.feishu && config.feishu.chat_agent_map) || {};
+            const targetChatId = Object.entries(feishuMap).find(([, v]) => v === item.target)?.[0];
+            if (targetChatId) {
+              const proj = (config.projects || {})[item.target] || {};
+              pendingReplyFn = (output) => {
+                const text = `${proj.icon || '📬'} **${proj.name || item.target}**\n\n${output.slice(0, 2000)}`;
+                _dispatchBotRef.sendMarkdown(targetChatId, text)
+                  .catch(() => _dispatchBotRef.sendMessage(targetChatId, text).catch(() => {}));
+              };
+            }
+          }
+          dispatchTask(item.target, {
+            from: item.from || 'claude_session',
+            type: 'task', priority: 'normal',
+            payload: { title: item.prompt.slice(0, 60), prompt: item.prompt },
+            callback: false,
+          }, config, pendingReplyFn);
+        }
+      }
+    }
+  } catch (e) {
+    log('WARN', `Pending dispatch drain failed: ${e.message}`);
+  }
 
   // 2. Rotate dispatch-log if > 512KB (keep 7 days)
   try {
@@ -725,7 +774,7 @@ function startHeartbeat(config, notifyFn) {
 
   const timer = setInterval(() => {
     // ① Physiological heartbeat (zero token, pure awareness)
-    physiologicalHeartbeat();
+    physiologicalHeartbeat(config);
 
     // ② Task heartbeat (burns tokens on schedule)
     const currentTime = Date.now();
@@ -992,13 +1041,18 @@ async function sendFileButtons(bot, chatId, files) {
  */
 function attachOrCreateSession(chatId, projCwd, name) {
   const state = loadState();
-  const recent = listRecentSessions(1, projCwd);
-  if (recent.length > 0 && recent[0].sessionId) {
-    state.sessions[chatId] = { id: recent[0].sessionId, cwd: projCwd, started: true };
-  } else {
-    const newSess = createSession(chatId, projCwd, name || '');
-    state.sessions[chatId] = { id: newSess.id, cwd: projCwd, started: false };
+  // Virtual agent chatIds (_agent_*) always get a fresh one-shot session.
+  // They must not resume real sessions, to avoid concurrency conflicts.
+  if (!String(chatId).startsWith('_agent_')) {
+    const recent = listRecentSessions(1, projCwd);
+    if (recent.length > 0 && recent[0].sessionId) {
+      state.sessions[chatId] = { id: recent[0].sessionId, cwd: projCwd, started: true };
+      saveState(state);
+      return;
+    }
   }
+  const newSess = createSession(chatId, projCwd, name || '');
+  state.sessions[chatId] = { id: newSess.id, cwd: projCwd, started: false };
   saveState(state);
 }
 
@@ -2036,16 +2090,32 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       const chatAgentMap = (config.feishu && config.feishu.chat_agent_map) || {};
       const senderKey = chatAgentMap[chatId] || 'user';
 
+      const projInfo = config.projects[targetKey] || {};
+      // Find the target project's own Feishu chat (reverse lookup of chat_agent_map)
+      const feishuChatAgentMap = (config.feishu && config.feishu.chat_agent_map) || {};
+      const targetChatId = Object.entries(feishuChatAgentMap).find(([, v]) => v === targetKey)?.[0] || chatId;
+      const replyFn = (output) => {
+        // Send target agent's reply into the target project's own Feishu chat
+        const text = `${projInfo.icon || '📬'} **${projInfo.name || targetKey}**\n\n${output.slice(0, 2000)}`;
+        bot.sendMarkdown(targetChatId, text)
+          .then(() => log('INFO', `Dispatch reply sent to ${targetChatId}`))
+          .catch(e => {
+            log('WARN', `Dispatch sendMarkdown failed: ${e.message}, trying sendMessage`);
+            bot.sendMessage(targetChatId, text)
+              .catch(e2 => log('ERROR', `Dispatch reply failed: ${e2.message}`));
+          });
+      };
+
       const result = dispatchTask(targetKey, {
         from: senderKey,
         type: 'task',
         priority: 'normal',
         payload: { title: prompt.slice(0, 60), prompt },
-        callback: true,
-      }, config);
+        callback: false,
+      }, config, replyFn);
 
       if (result.success) {
-        await bot.sendMessage(chatId, `✅ 已派发给 ${targetName} (id: ${result.id.slice(0, 12)})\n正在异步执行中…`);
+        await bot.sendMessage(chatId, `✅ 已派发给 ${projInfo.name || targetName}，执行中…`);
       } else {
         await bot.sendMessage(chatId, `❌ 派发失败: ${result.error}`);
       }
@@ -4279,6 +4349,7 @@ async function main() {
   // Start bridges (both can run simultaneously)
   telegramBridge = await startTelegramBridge(config, executeTaskByName);
   feishuBridge = await startFeishuBridge(config, executeTaskByName);
+  if (feishuBridge && feishuBridge.bot) _dispatchBotRef = feishuBridge.bot;
 
   // Notify once on startup (single message, no duplicates)
   await sleep(1500); // Let polling settle
