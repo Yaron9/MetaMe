@@ -566,7 +566,7 @@ function createNullBot(onOutput) {
  * @returns {{ success: boolean, id?: string, error?: string }}
  */
 function dispatchTask(targetProject, message, config, replyFn) {
-  const LIMITS = { max_per_hour_per_target: 5, max_total_per_hour: 20, max_depth: 2 };
+  const LIMITS = { max_per_hour_per_target: 20, max_total_per_hour: 60, max_depth: 2 };
 
   // Anti-storm: check chain depth
   const chain = message.chain || [];
