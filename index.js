@@ -140,7 +140,23 @@ function ensureHookInstalled() {
 ensureHookInstalled();
 
 // ---------------------------------------------------------
-// 1.6b ENSURE PROJECT-LEVEL MCP CONFIG
+// 1.6b LOCAL ACTIVITY HEARTBEAT
+// ---------------------------------------------------------
+// Touch ~/.metame/local_active so the daemon knows the user is active on desktop.
+// This prevents dream tasks (require_idle: true) from firing during live Claude sessions.
+try {
+  const localActiveFile = path.join(METAME_DIR, 'local_active');
+  const now = new Date();
+  fs.utimesSync(localActiveFile, now, now);
+} catch {
+  try {
+    // File may not exist yet — create it
+    fs.closeSync(fs.openSync(path.join(METAME_DIR, 'local_active'), 'a'));
+  } catch { /* non-fatal */ }
+}
+
+// ---------------------------------------------------------
+// 1.6c ENSURE PROJECT-LEVEL MCP CONFIG
 // ---------------------------------------------------------
 // MCP servers are registered per-project via .mcp.json (not user-scope ~/.claude.json)
 // so they only load when working in projects that need them.
