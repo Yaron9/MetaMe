@@ -638,7 +638,9 @@ function dispatchTask(targetProject, message, config, replyFn) {
   }
 
   // Inject ack-first instruction for all dispatched tasks
-  prompt = `[行为要求：收到此任务后，请先用 dispatch_to 回复一条消息说明「收到，计划：xxx」，再开始执行。]\n\n${prompt}`;
+  // Note: do NOT require dispatch_to (Bash) here — dispatched tasks run readOnly=true, Bash is blocked.
+  // Daemon sends the ack autonomously; Claude should just state its plan in the reply text.
+  prompt = `[行为要求：回复开头用1-2句「计划：xxx」说明执行方案，再开始执行。不要调用 dispatch_to，daemon 会自动转发你的回复。]\n\n${prompt}`;
 
   // Prefer target's real Feishu chatId so dispatch reuses the existing session
   // (--resume, no CLAUDE.md re-read, no token waste). Fall back to _agent_* virtual
@@ -716,15 +718,40 @@ function physiologicalHeartbeat(config) {
           const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
           if (liveBot) {
             const feishuMap = (config.feishu && config.feishu.chat_agent_map) || {};
-            const targetChatId = Object.entries(feishuMap).find(([, v]) => v === item.target)?.[0];
-            if (targetChatId) {
-              const proj = (config.projects || {})[item.target] || {};
+            const allowedFeishuIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
+            const agentChatIds = new Set(Object.keys(feishuMap));
+            const _userSources = new Set(['unknown', 'claude_session', '_claude_session', 'user']);
+
+            // Find the sender's chatId: if from another agent, use their Feishu chat;
+            // if from user/unknown, use the main user chat (first allowed_chat_id NOT in chat_agent_map).
+            let senderChatId = null;
+            if (!_userSources.has(item.from)) {
+              senderChatId = Object.entries(feishuMap).find(([, v]) => v === item.from)?.[0] || null;
+            }
+            if (!senderChatId) {
+              senderChatId = allowedFeishuIds.map(String).find(id => !agentChatIds.has(id)) || null;
+            }
+
+            // Send immediate ack to sender so they know the task was received
+            if (senderChatId) {
+              const targetProj = (config.projects || {})[item.target] || {};
+              const ackText = `📬 已接收，正在转发给 ${targetProj.icon || '🤖'} **${targetProj.name || item.target}**...\n\n> ${item.prompt.slice(0, 100)}${item.prompt.length > 100 ? '...' : ''}`;
+              liveBot.sendMarkdown(senderChatId, ackText).catch(() =>
+                liveBot.sendMessage(senderChatId, ackText.replace(/\*\*/g, '')).catch(e =>
+                  log('WARN', `Dispatch ack to sender failed: ${e.message}`)
+                )
+              );
+            }
+
+            // Reply fn: forward agent output back to SENDER (not target's own channel)
+            if (senderChatId) {
+              const targetProj = (config.projects || {})[item.target] || {};
               pendingReplyFn = (output) => {
-                const text = `${proj.icon || '📬'} **${proj.name || item.target}**\n\n${output.slice(0, 2000)}`;
-                liveBot.sendMarkdown(targetChatId, text).catch(e => {
-                  log('WARN', `Dispatch reply to ${item.target} (markdown) failed: ${e.message}`);
-                  liveBot.sendMessage(targetChatId, text).catch(e2 => {
-                    log('ERROR', `Dispatch reply to ${item.target} (text) failed: ${e2.message}`);
+                const text = `${targetProj.icon || '📬'} **${targetProj.name || item.target}** 回复：\n\n${output.slice(0, 2000)}`;
+                liveBot.sendMarkdown(senderChatId, text).catch(e => {
+                  log('WARN', `Dispatch reply to sender (markdown) failed: ${e.message}`);
+                  liveBot.sendMessage(senderChatId, text.replace(/\*\*/g, '')).catch(e2 => {
+                    log('ERROR', `Dispatch reply to sender (text) failed: ${e2.message}`);
                   });
                 });
               };
@@ -4269,6 +4296,17 @@ async function main() {
 
   log('INFO', `MetaMe daemon started (PID: ${process.pid})`);
   killOrphanPids(); // Fix3: kill any claude processes left by previous daemon
+
+  // Pre-initialize memory DB at startup so the file exists before any agent session needs it.
+  // This prevents Claude Code from showing a "new file" permission dialog mid-task on the desktop.
+  try {
+    const memMod = require('./memory');
+    memMod.stats(); // triggers DB + schema creation
+    memMod.close();
+    log('INFO', `Memory DB ready: ${memMod.DB_PATH}`);
+  } catch (e) {
+    log('WARN', `Memory DB pre-init failed (non-fatal, will retry on first use): ${e.message}`);
+  }
   // Hourly heartbeat so daemon.log stays fresh even when idle (visible aliveness check)
   setInterval(() => {
     log('INFO', `Daemon heartbeat — uptime: ${Math.round(process.uptime() / 60)}m, active sessions: ${activeProcesses.size}`);
