@@ -726,6 +726,7 @@ function physiologicalHeartbeat(config) {
           // Build replyFn: use live bot from bridge ref (always fresh, survives reconnects)
           let pendingReplyFn = null;
           const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
+          log('INFO', `[Dispatch reply] liveBot=${!!liveBot}, from=${item.from}, target=${item.target}`);
           if (liveBot) {
             const feishuMap = (config.feishu && config.feishu.chat_agent_map) || {};
             const allowedFeishuIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
@@ -741,6 +742,7 @@ function physiologicalHeartbeat(config) {
             if (!senderChatId) {
               senderChatId = allowedFeishuIds.map(String).find(id => !agentChatIds.has(id)) || null;
             }
+            log('INFO', `[Dispatch reply] senderChatId=${senderChatId}, allowedIds=${allowedFeishuIds.length}, agentIds=${agentChatIds.size}`);
 
             // Send immediate ack to sender so they know the task was received
             if (senderChatId) {
