@@ -28,8 +28,9 @@ const FACT_EXTRACTION_PROMPT = `你是精准的知识提取引擎。从以下会
 - bug_lesson（Bug根因：什么设计/假设导致了问题）
 - arch_convention（架构约定：系统组件的行为边界）
 - config_fact（配置事实：某个值的真实含义，尤其反直觉的）
+- config_change（配置变更：用户选择/确认了某个具体配置值，如”字体选了x-large”、”间隔改为2h”）
 - user_pref（用户明确表达的偏好/红线）
-- workflow_rule（工作流戒律：如“不要在某情况下做某事”的反常识流）
+- workflow_rule（工作流戒律：如”不要在某情况下做某事”的反常识流）
 - project_milestone（项目里程碑：主要架构重构、版本发布等跨会话级成果）
 
 绝对不提取：
