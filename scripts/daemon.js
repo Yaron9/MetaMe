@@ -4623,7 +4623,7 @@ async function startFeishuBridge(config, executeTaskByName) {
         log('INFO', `Feishu: read-only message from non-operator ${senderId} in ${chatId}: ${(text || '').slice(0, 50)}`);
         // Block slash commands for non-operators
         if (text && text.startsWith('/')) {
-          await bot.sendMessage(chatId, '⚠️ 该操作需要授权，请联系管理员。');
+          await (bot.sendMarkdown ? bot.sendMarkdown(chatId, '⚠️ 该操作需要授权，请联系管理员。') : bot.sendMessage(chatId, '⚠️ 该操作需要授权，请联系管理员。'));
           return;
         }
         // Allow read-only chat (query/answer only, no write/edit/execute)
