@@ -118,7 +118,7 @@ function createBot(config) {
      * Send markdown as Feishu interactive card (lark_md renders bold, lists, code, links)
      */
     async sendMarkdown(chatId, markdown) {
-      const elements = toMdChunks(markdown).map(c => ({ tag: 'markdown', content: c }));
+      const elements = toMdChunks(markdown).map(c => ({ tag: 'markdown', content: c, text_size: 'x-large' }));
       return _sendInteractive(chatId, { schema: '2.0', body: { elements } });
     },
 
