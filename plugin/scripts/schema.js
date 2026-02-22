@@ -44,13 +44,10 @@ const SCHEMA = {
   'cognition.info_processing.entry_point': { tier: 'T3', type: 'enum', values: ['big_picture', 'details', 'examples'] },
   'cognition.info_processing.preferred_format': { tier: 'T3', type: 'enum', values: ['structured', 'narrative', 'visual_metaphor'] },
   'cognition.abstraction.default_level': { tier: 'T3', type: 'enum', values: ['strategic', 'architectural', 'implementation', 'operational'] },
-  'cognition.abstraction.range': { tier: 'T3', type: 'enum', values: ['narrow', 'wide'] },
   'cognition.cognitive_load.chunk_size': { tier: 'T3', type: 'enum', values: ['small', 'medium', 'large'] },
-  'cognition.cognitive_load.preferred_response_length': { tier: 'T3', type: 'enum', values: ['concise', 'moderate', 'comprehensive'] },
-  'cognition.motivation.primary_driver': { tier: 'T3', type: 'enum', values: ['autonomy', 'competence', 'meaning', 'social_proof'] },
-  'cognition.motivation.energy_source': { tier: 'T3', type: 'enum', values: ['creation', 'optimization', 'problem_solving', 'teaching'] },
-  'cognition.metacognition.self_awareness': { tier: 'T3', type: 'enum', values: ['high', 'medium', 'low'] },
+  'cognition.motivation.driver': { tier: 'T3', type: 'enum', values: ['autonomy', 'competence', 'meaning', 'creation', 'optimization'] },
   'cognition.metacognition.receptive_to_challenge': { tier: 'T3', type: 'enum', values: ['yes', 'sometimes', 'no'] },
+  'cognition.metacognition.error_response': { tier: 'T3', type: 'enum', values: ['quick_pivot', 'root_cause_first', 'seek_help', 'retry_same'] },
 
   // === T4: Context ===
   'context.focus': { tier: 'T4', type: 'string', maxChars: 80 },

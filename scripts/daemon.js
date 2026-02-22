@@ -4716,7 +4716,7 @@ async function main() {
     heartbeatTimer = startHeartbeat(config, notifyFn);
     const { general, project } = getAllTasks(config);
     const totalCount = general.length + project.length;
-    log('INFO', `Config reloaded: ${totalCount} tasks (${projectCount} in projects)`);
+    log('INFO', `Config reloaded: ${totalCount} tasks (${project.length} in projects)`);
     return { success: true, tasks: totalCount };
   }
   // Expose reloadConfig to handleCommand via closure
