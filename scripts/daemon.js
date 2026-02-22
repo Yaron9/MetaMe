@@ -2749,12 +2749,32 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       }
       const lines = fs.readFileSync(sessionFile, 'utf8').split('\n').filter(l => l.trim());
 
-      // Collect user messages with line indices
+      // Helper: extract real user text (skip tool_result entries and system annotations)
+      const extractUserText = (obj) => {
+        try {
+          const content = obj.message?.content;
+          if (typeof content === 'string') return content.trim();
+          if (Array.isArray(content)) {
+            // Skip entries that are purely tool results
+            if (content.every(c => c.type === 'tool_result')) return '';
+            // Find first text item that isn't a system annotation (exact patterns only)
+            const SYSTEM_ANNOTATION = /^\[(Image source|Pasted|Attachment|File):/;
+            const item = content.find(c => c.type === 'text' && c.text && !SYSTEM_ANNOTATION.test(c.text));
+            return item?.text?.trim() || '';
+          }
+        } catch { }
+        return '';
+      };
+
+      // Collect only real human-written user messages (skip tool results / annotations)
       const userMsgs = [];
       for (let i = 0; i < lines.length; i++) {
         try {
           const obj = JSON.parse(lines[i]);
-          if (obj.type === 'user') userMsgs.push({ idx: i, obj });
+          if (obj.type === 'user' && obj.message?.role === 'user') {
+            const text = extractUserText(obj);
+            if (text) userMsgs.push({ idx: i, obj, text });
+          }
         } catch { }
       }
       if (userMsgs.length === 0) {
@@ -2762,21 +2782,11 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
         return;
       }
 
-      // Helper: extract text from user message object
-      const extractText = (obj) => {
-        try {
-          const content = obj.message?.content;
-          if (typeof content === 'string') return content;
-          if (Array.isArray(content)) return content.find(c => c.type === 'text')?.text || '';
-        } catch { }
-        return '';
-      };
-
-      // Show last 6 (most recent first)
-      const recent = userMsgs.slice(-6).reverse();
+      // Show last 10 (most recent first)
+      const recent = userMsgs.slice(-10).reverse();
       if (bot.sendButtons) {
-        const buttons = recent.map(({ idx, obj }) => {
-          const msgText = extractText(obj).replace(/\n/g, ' ').slice(0, 28) || `消息 #${idx}`;
+        const buttons = recent.map(({ idx, text, obj }) => {
+          const msgText = text.replace(/\n/g, ' ').slice(0, 28);
           let timeLabel = '';
           if (obj.timestamp) {
             const d = new Date(obj.timestamp);
@@ -2787,8 +2797,8 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
         await bot.sendButtons(chatId, `↩️ 回退到哪条消息之前？(共 ${userMsgs.length} 轮)`, buttons);
       } else {
         let msg = '回退到哪条消息之前？回复 /undo_to <序号>\n\n';
-        recent.forEach(({ idx, obj }) => {
-          msg += `[${idx}] ${extractText(obj).slice(0, 40)}\n`;
+        recent.forEach(({ idx, text }) => {
+          msg += `[${idx}] ${text.slice(0, 40)}\n`;
         });
         await bot.sendMessage(chatId, msg);
       }
@@ -2844,20 +2854,15 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
         if (obj.timestamp) targetTs = new Date(obj.timestamp).getTime() || 0;
       } catch { }
 
-      // Truncate JSONL at idx (keep lines before it)
-      const kept2 = lines2.slice(0, idx);
-      fs.writeFileSync(sessionFile2, kept2.length ? kept2.join('\n') + '\n' : '', 'utf8');
-      _sessionFileCache.delete(session2.id);
-      const removed2 = lines2.length - kept2.length;
-
-      // Git reset to nearest checkpoint at or before the target message (best-effort)
+      // Git reset first (before JSONL truncation) so failure leaves state consistent
       let gitMsg2 = '';
       const cwd2 = session2.cwd;
       if (cwd2) {
         let isGitRepo2 = false;
         try { execSync('git rev-parse --is-inside-work-tree', { cwd: cwd2, stdio: 'ignore', timeout: 3000 }); isGitRepo2 = true; } catch { }
         if (isGitRepo2) {
-          const checkpoints2 = listCheckpoints(cwd2);
+          // Exclude safety checkpoints from matching to avoid confusion
+          const checkpoints2 = listCheckpoints(cwd2).filter(cp => !cp.message.includes('[metame-safety]'));
           const cpMatch = targetTs
             ? checkpoints2.find(cp => { const t = new Date(cpExtractTimestamp(cp.message) || 0).getTime(); return t > 0 && t <= targetTs; })
             : checkpoints2[0];
@@ -2865,6 +2870,8 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
             let diffFiles2 = '';
             try { diffFiles2 = execSync(`git diff --name-only HEAD ${cpMatch.hash}`, { cwd: cwd2, encoding: 'utf8', timeout: 5000 }).trim(); } catch { }
             if (diffFiles2) {
+              // Save current state with distinct prefix (excluded from normal /undo list)
+              gitCheckpoint(cwd2, `[metame-safety] before rollback to: ${targetMsg.slice(0, 40)}`);
               execSync(`git reset --hard ${cpMatch.hash}`, { cwd: cwd2, stdio: 'ignore', timeout: 10000 });
               gitMsg2 = `\n📁 ${diffFiles2.split('\n').length} 个文件已恢复`;
               cleanupCheckpoints(cwd2);
@@ -2872,6 +2879,12 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
           }
         }
       }
+
+      // Truncate JSONL after git reset succeeds
+      const kept2 = lines2.slice(0, idx);
+      fs.writeFileSync(sessionFile2, kept2.length ? kept2.join('\n') + '\n' : '', 'utf8');
+      _sessionFileCache.delete(session2.id);
+      const removed2 = lines2.length - kept2.length;
 
       const preview = targetMsg.replace(/\n/g, ' ').slice(0, 30) || `行 ${idx}`;
       log('INFO', `/undo_to ${idx} for ${chatId}: removed=${removed2} lines${gitMsg2 ? ', ' + gitMsg2.trim() : ''}`);
@@ -3109,7 +3122,8 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       '/cd <path> — 切换工作目录',
       '/session — 查看当前会话',
       '/stop — 中断当前任务 (ESC)',
-      '/undo — 回退上一轮操作 (ESC×2)',
+      '/undo — 选择历史消息，点击回退到该条之前',
+      '/undo <hash> — 回退到指定 git checkpoint',
       '/quit — 结束会话，重新加载 MCP/配置',
       '',
       `⚙️ /model [${currentModel}] /provider [${currentProvider}] /status /tasks /run /budget /reload`,

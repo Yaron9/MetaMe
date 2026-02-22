@@ -305,7 +305,8 @@ feishu:
 | `/new` | 新建会话（项目选择器） |
 | `/resume` | 从会话列表选择 |
 | `/stop` | 中断当前任务（ESC） |
-| `/undo` | 回退并恢复文件 |
+| `/undo` | 展示历史消息列表，点击按钮回退到该条消息之前（上下文 + 代码同步回滚） |
+| `/undo <hash>` | 回退到指定 git checkpoint |
 | `/list` | 浏览和下载项目文件 |
 | `/model` | 切换模型（sonnet/opus/haiku） |
 | `/agent bind <名称> [目录]` | 将群注册为专属 Agent |

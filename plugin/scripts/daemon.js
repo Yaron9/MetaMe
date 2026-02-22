@@ -1552,6 +1552,7 @@ async function doBindAgent(bot, chatId, agentName, agentCwd) {
 }
 
 async function handleCommand(bot, chatId, text, config, executeTaskByName, senderId = null, readOnly = false) {
+  if (text && !text.startsWith('/chatid') && !text.startsWith('/myid')) log('INFO', `CMD [${String(chatId).slice(-8)}]: ${text.slice(0, 80)}`);
   const state = loadState();
 
   // --- /chatid: reply with current chatId ---
@@ -2698,7 +2699,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     }
 
     const session = getSession(chatId);
-    if (!session || !session.id || !session.cwd) {
+    if (!session || !session.id) {
       await bot.sendMessage(chatId, 'No active session to undo.');
       return;
     }
@@ -2706,107 +2707,190 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     const cwd = session.cwd;
     const arg = text.slice(5).trim();
 
-    // Git-based undo: list checkpoints or reset to one
-    // First check if cwd is even a git repo
-    let isGitRepo = false;
-    try { execSync('git rev-parse --is-inside-work-tree', { cwd, stdio: 'ignore', timeout: 3000 }); isGitRepo = true; } catch { }
-    const checkpoints = isGitRepo ? listCheckpoints(cwd) : [];
-    if (!isGitRepo) {
-      await bot.sendMessage(chatId, `⚠️ 当前项目不在 git 仓库中，无法使用 /undo\n📁 ${cwd}\n\n切换到 git 项目后重试（/agent bind 或 /cd 切换目录）`);
-      return;
-    }
-    if (checkpoints.length === 0) {
-      await bot.sendMessage(chatId, `⚠️ 还没有回退点\n📁 ${path.basename(cwd)}\n\nCheckpoint 在 Claude 修改文件前自动创建，先让 Claude 做点改动再试`);
-      return;
-    }
-
-    if (!arg) {
-      // /undo (no arg) — show recent checkpoints to pick from
-      const recent = checkpoints.slice(0, 6); // newest first (already sorted)
-      if (bot.sendButtons) {
-        const buttons = recent.map((cp) => {
-          const label = cpDisplayLabel(cp.message);
-          return [{ text: `⏪ ${label}`, callback_data: `/undo ${cp.hash.slice(0, 10)}` }];
-        });
-        await bot.sendButtons(chatId, `📌 ${checkpoints.length} 个回退点 (git checkpoint):`, buttons);
-      } else {
-        let msg = '回退到哪个点？回复 /undo <hash>\n\n';
-        recent.forEach(cp => {
-          msg += `${cp.hash.slice(0, 8)} ${cpDisplayLabel(cp.message)}\n`;
-        });
-        await bot.sendMessage(chatId, msg);
+    // /undo <hash> — git reset to specific checkpoint (advanced usage)
+    if (arg) {
+      if (!cwd) {
+        await bot.sendMessage(chatId, '❌ 当前 session 无工作目录，无法执行 git undo');
+        return;
       }
-      return;
-    }
-
-    // /undo <hash> — execute git reset
-    try {
-      // Verify the hash exists and is a checkpoint
+      let isGitRepo = false;
+      try { execSync('git rev-parse --is-inside-work-tree', { cwd, stdio: 'ignore', timeout: 3000 }); isGitRepo = true; } catch { }
+      const checkpoints = isGitRepo ? listCheckpoints(cwd) : [];
       const match = checkpoints.find(cp => cp.hash.startsWith(arg));
       if (!match) {
         await bot.sendMessage(chatId, `❌ 未找到 checkpoint: ${arg}`);
         return;
       }
-
-      // Get list of files that will change
-      let diffFiles = '';
       try {
-        diffFiles = execSync(`git diff --name-only HEAD ${match.hash}`, { cwd, encoding: 'utf8', timeout: 5000 }).trim();
-      } catch { /* ignore */ }
+        let diffFiles = '';
+        try { diffFiles = execSync(`git diff --name-only HEAD ${match.hash}`, { cwd, encoding: 'utf8', timeout: 5000 }).trim(); } catch { }
+        execSync(`git reset --hard ${match.hash}`, { cwd, stdio: 'ignore', timeout: 10000 });
+        // Truncate context to checkpoint time (covers multi-turn rollback)
+        truncateSessionToCheckpoint(session.id, match.message);
+        const fileList = diffFiles ? diffFiles.split('\n').map(f => path.basename(f)).join(', ') : '';
+        const fileCount = diffFiles ? diffFiles.split('\n').length : 0;
+        let msg = `⏪ 已回退到 ${cpDisplayLabel(match.message)}`;
+        if (fileCount > 0) msg += `\n📁 ${fileCount} 个文件恢复: ${fileList}`;
+        log('INFO', `/undo <hash> executed for ${chatId}: reset to ${match.hash.slice(0, 8)}, files=${fileCount}`);
+        await bot.sendMessage(chatId, msg);
+        cleanupCheckpoints(cwd);
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ Undo failed: ${e.message}`);
+      }
+      return;
+    }
 
-      // Reset working tree to checkpoint
-      execSync(`git reset --hard ${match.hash}`, { cwd, stdio: 'ignore', timeout: 10000 });
+    // /undo (no arg) — show recent user messages as buttons to pick rollback point
+    try {
+      const sessionFile = findSessionFile(session.id);
+      if (!sessionFile) {
+        await bot.sendMessage(chatId, '⚠️ 找不到 session 文件，无法列出历史消息');
+        return;
+      }
+      const lines = fs.readFileSync(sessionFile, 'utf8').split('\n').filter(l => l.trim());
 
-      // Also truncate JSONL session history (best-effort, non-fatal)
+      // Helper: extract real user text (skip tool_result entries and system annotations)
+      const extractUserText = (obj) => {
+        try {
+          const content = obj.message?.content;
+          if (typeof content === 'string') return content.trim();
+          if (Array.isArray(content)) {
+            // Skip entries that are purely tool results
+            if (content.every(c => c.type === 'tool_result')) return '';
+            // Find first text item that isn't a system annotation (exact patterns only)
+            const SYSTEM_ANNOTATION = /^\[(Image source|Pasted|Attachment|File):/;
+            const item = content.find(c => c.type === 'text' && c.text && !SYSTEM_ANNOTATION.test(c.text));
+            return item?.text?.trim() || '';
+          }
+        } catch { }
+        return '';
+      };
+
+      // Collect only real human-written user messages (skip tool results / annotations)
+      const userMsgs = [];
+      for (let i = 0; i < lines.length; i++) {
+        try {
+          const obj = JSON.parse(lines[i]);
+          if (obj.type === 'user' && obj.message?.role === 'user') {
+            const text = extractUserText(obj);
+            if (text) userMsgs.push({ idx: i, obj, text });
+          }
+        } catch { }
+      }
+      if (userMsgs.length === 0) {
+        await bot.sendMessage(chatId, '⚠️ 没有可回退的历史消息');
+        return;
+      }
+
+      // Show last 10 (most recent first)
+      const recent = userMsgs.slice(-10).reverse();
+      if (bot.sendButtons) {
+        const buttons = recent.map(({ idx, text, obj }) => {
+          const msgText = text.replace(/\n/g, ' ').slice(0, 28);
+          let timeLabel = '';
+          if (obj.timestamp) {
+            const d = new Date(obj.timestamp);
+            if (!isNaN(d)) timeLabel = ` (${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')})`;
+          }
+          return [{ text: `⏪ ${msgText}${timeLabel}`, callback_data: `/undo_to ${idx}` }];
+        });
+        await bot.sendButtons(chatId, `↩️ 回退到哪条消息之前？(共 ${userMsgs.length} 轮)`, buttons);
+      } else {
+        let msg = '回退到哪条消息之前？回复 /undo_to <序号>\n\n';
+        recent.forEach(({ idx, text }) => {
+          msg += `[${idx}] ${text.slice(0, 40)}\n`;
+        });
+        await bot.sendMessage(chatId, msg);
+      }
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ Undo failed: ${e.message}`);
+    }
+    return;
+  }
+
+  // /undo_to <lineIdx> — restore session to before the message at given JSONL line index
+  if (text.startsWith('/undo_to ')) {
+    const idx = parseInt(text.slice(9).trim(), 10);
+    if (isNaN(idx) || idx < 0) {
+      await bot.sendMessage(chatId, '❌ 无效的回退序号');
+      return;
+    }
+
+    // Kill any running task
+    if (messageQueue.has(chatId)) {
+      const q = messageQueue.get(chatId);
+      if (q.timer) clearTimeout(q.timer);
+      messageQueue.delete(chatId);
+    }
+    const proc2 = activeProcesses.get(chatId);
+    if (proc2 && proc2.child) {
+      proc2.aborted = true;
+      try { process.kill(-proc2.child.pid, 'SIGINT'); } catch { proc2.child.kill('SIGINT'); }
+    }
+
+    const session2 = getSession(chatId);
+    if (!session2 || !session2.id) {
+      await bot.sendMessage(chatId, 'No active session.');
+      return;
+    }
+
+    try {
+      const sessionFile2 = findSessionFile(session2.id);
+      if (!sessionFile2) { await bot.sendMessage(chatId, '❌ 找不到 session 文件'); return; }
+
+      const lines2 = fs.readFileSync(sessionFile2, 'utf8').split('\n').filter(l => l.trim());
+      if (idx >= lines2.length) {
+        await bot.sendMessage(chatId, '❌ 序号超出范围，session 已变化，请重新 /undo');
+        return;
+      }
+
+      // Get target message text + timestamp for display and git matching
+      let targetMsg = '', targetTs = 0;
       try {
-        const sessionFile = findSessionFile(session.id);
-        if (sessionFile) {
-          const fileContent = fs.readFileSync(sessionFile, 'utf8');
-          const lines = fileContent.split('\n').filter(l => l.trim());
-          // Find the last user message that was sent BEFORE this checkpoint
-          // Use the checkpoint timestamp from the commit message
-          const cpTs = cpExtractTimestamp(match.message);
-          const cpTime = new Date(cpTs).getTime();
-          if (cpTime) {
-            // Find the first user message AFTER checkpoint time → truncate before it
-            let cutIdx = -1;
-            for (let i = lines.length - 1; i >= 0; i--) {
-              try {
-                const obj = JSON.parse(lines[i]);
-                if (obj.type === 'user' && obj.timestamp) {
-                  const msgTime = new Date(obj.timestamp).getTime();
-                  if (msgTime && msgTime >= cpTime) {
-                    cutIdx = i;
-                  } else {
-                    break; // Found a message before checkpoint, stop
-                  }
-                }
-              } catch { }
-            }
-            if (cutIdx > 0) {
-              const kept = lines.slice(0, cutIdx);
-              fs.writeFileSync(sessionFile, kept.join('\n') + '\n', 'utf8');
-              log('INFO', `Truncated session at line ${cutIdx} (${lines.length - cutIdx} lines removed)`);
+        const obj = JSON.parse(lines2[idx]);
+        const content = obj.message?.content;
+        if (typeof content === 'string') targetMsg = content;
+        else if (Array.isArray(content)) targetMsg = content.find(c => c.type === 'text')?.text || '';
+        if (obj.timestamp) targetTs = new Date(obj.timestamp).getTime() || 0;
+      } catch { }
+
+      // Git reset first (before JSONL truncation) so failure leaves state consistent
+      let gitMsg2 = '';
+      const cwd2 = session2.cwd;
+      if (cwd2) {
+        let isGitRepo2 = false;
+        try { execSync('git rev-parse --is-inside-work-tree', { cwd: cwd2, stdio: 'ignore', timeout: 3000 }); isGitRepo2 = true; } catch { }
+        if (isGitRepo2) {
+          // Exclude safety checkpoints from matching to avoid confusion
+          const checkpoints2 = listCheckpoints(cwd2).filter(cp => !cp.message.includes('[metame-safety]'));
+          const cpMatch = targetTs
+            ? checkpoints2.find(cp => { const t = new Date(cpExtractTimestamp(cp.message) || 0).getTime(); return t > 0 && t <= targetTs; })
+            : checkpoints2[0];
+          if (cpMatch) {
+            let diffFiles2 = '';
+            try { diffFiles2 = execSync(`git diff --name-only HEAD ${cpMatch.hash}`, { cwd: cwd2, encoding: 'utf8', timeout: 5000 }).trim(); } catch { }
+            if (diffFiles2) {
+              // Save current state with distinct prefix (excluded from normal /undo list)
+              gitCheckpoint(cwd2, `[metame-safety] before rollback to: ${targetMsg.slice(0, 40)}`);
+              execSync(`git reset --hard ${cpMatch.hash}`, { cwd: cwd2, stdio: 'ignore', timeout: 10000 });
+              gitMsg2 = `\n📁 ${diffFiles2.split('\n').length} 个文件已恢复`;
+              cleanupCheckpoints(cwd2);
             }
           }
         }
-      } catch (truncErr) {
-        log('WARN', `Session truncation failed (non-fatal): ${truncErr.message}`);
       }
 
-      const fileList = diffFiles ? diffFiles.split('\n').map(f => path.basename(f)).join(', ') : '';
-      const fileCount = diffFiles ? diffFiles.split('\n').length : 0;
-      const label = cpDisplayLabel(match.message);
-      let msg = `⏪ 已回退\n📝 ${label}\n🔀 git reset --hard ${match.hash.slice(0, 8)}`;
-      if (fileCount > 0) {
-        msg += `\n📁 ${fileCount} 个文件恢复: ${fileList}`;
-      }
-      await bot.sendMessage(chatId, msg);
+      // Truncate JSONL after git reset succeeds
+      const kept2 = lines2.slice(0, idx);
+      fs.writeFileSync(sessionFile2, kept2.length ? kept2.join('\n') + '\n' : '', 'utf8');
+      _sessionFileCache.delete(session2.id);
+      const removed2 = lines2.length - kept2.length;
 
-      // Cleanup old checkpoints in background
-      cleanupCheckpoints(cwd);
+      const preview = targetMsg.replace(/\n/g, ' ').slice(0, 30) || `行 ${idx}`;
+      log('INFO', `/undo_to ${idx} for ${chatId}: removed=${removed2} lines${gitMsg2 ? ', ' + gitMsg2.trim() : ''}`);
+      await bot.sendMessage(chatId, `⏪ 已回退到「${preview}」之前\n🧠 上下文回滚 ${removed2} 行${gitMsg2}`);
     } catch (e) {
-      await bot.sendMessage(chatId, `❌ Undo failed: ${e.message}`);
+      await bot.sendMessage(chatId, `❌ 回退失败: ${e.message}`);
     }
     return;
   }
@@ -3038,7 +3122,8 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       '/cd <path> — 切换工作目录',
       '/session — 查看当前会话',
       '/stop — 中断当前任务 (ESC)',
-      '/undo — 回退上一轮操作 (ESC×2)',
+      '/undo — 选择历史消息，点击回退到该条之前',
+      '/undo <hash> — 回退到指定 git checkpoint',
       '/quit — 结束会话，重新加载 MCP/配置',
       '',
       `⚙️ /model [${currentModel}] /provider [${currentProvider}] /status /tasks /run /budget /reload`,
@@ -3137,6 +3222,80 @@ function findSessionFile(sessionId) {
   } catch { /* ignore */ }
   _sessionFileCache.set(sessionId, { path: null, ts: Date.now() });
   return null;
+}
+
+/**
+ * Truncate the last conversation turn (user message + assistant response) from a session JSONL.
+ * Finds the last {type:"user"} entry and removes it plus everything after.
+ * Returns the number of lines removed, or 0 if nothing was truncated.
+ */
+function truncateSessionLastTurn(sessionId) {
+  try {
+    const sessionFile = findSessionFile(sessionId);
+    if (!sessionFile) return 0;
+    const fileContent = fs.readFileSync(sessionFile, 'utf8');
+    const lines = fileContent.split('\n').filter(l => l.trim());
+    // Find the last user-type entry (walk backwards)
+    let cutIdx = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const obj = JSON.parse(lines[i]);
+        if (obj.type === 'user') { cutIdx = i; break; }
+      } catch { /* skip malformed lines */ }
+    }
+    if (cutIdx <= 0) return 0; // nothing to cut (keep at least line 0)
+    const kept = lines.slice(0, cutIdx);
+    fs.writeFileSync(sessionFile, kept.join('\n') + '\n', 'utf8');
+    // Invalidate cache so next findSessionFile call re-reads fresh
+    _sessionFileCache.delete(sessionId);
+    const removed = lines.length - kept.length;
+    log('INFO', `truncateSessionLastTurn: removed ${removed} lines from ${path.basename(sessionFile)}`);
+    return removed;
+  } catch (e) {
+    log('WARN', `truncateSessionLastTurn failed: ${e.message}`);
+    return 0;
+  }
+}
+
+/**
+ * Truncate session JSONL to the point before a given checkpoint (timestamp-based).
+ * Used for /undo <hash> to handle multi-turn rollback correctly.
+ * Falls back to truncateSessionLastTurn if timestamp parsing fails.
+ */
+function truncateSessionToCheckpoint(sessionId, checkpointMessage) {
+  try {
+    const cpTs = cpExtractTimestamp(checkpointMessage);
+    const cpTime = cpTs ? new Date(cpTs).getTime() : 0;
+    if (!cpTime) return truncateSessionLastTurn(sessionId);
+
+    const sessionFile = findSessionFile(sessionId);
+    if (!sessionFile) return 0;
+    const fileContent = fs.readFileSync(sessionFile, 'utf8');
+    const lines = fileContent.split('\n').filter(l => l.trim());
+
+    // Find the first user message at or after checkpoint time → cut there
+    let cutIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      try {
+        const obj = JSON.parse(lines[i]);
+        if (obj.type === 'user' && obj.timestamp) {
+          const msgTime = new Date(obj.timestamp).getTime();
+          if (msgTime && msgTime >= cpTime) { cutIdx = i; break; }
+        }
+      } catch { /* skip malformed lines */ }
+    }
+    if (cutIdx <= 0) return truncateSessionLastTurn(sessionId); // fallback
+
+    const kept = lines.slice(0, cutIdx);
+    fs.writeFileSync(sessionFile, kept.join('\n') + '\n', 'utf8');
+    _sessionFileCache.delete(sessionId);
+    const removed = lines.length - kept.length;
+    log('INFO', `truncateSessionToCheckpoint: removed ${removed} lines from ${path.basename(sessionFile)}`);
+    return removed;
+  } catch (e) {
+    log('WARN', `truncateSessionToCheckpoint failed: ${e.message}`);
+    return truncateSessionLastTurn(sessionId); // fallback
+  }
 }
 
 /**
