@@ -29,6 +29,19 @@ const DISPATCH_DIR = path.join(METAME_DIR, 'dispatch');
 const DISPATCH_LOG = path.join(DISPATCH_DIR, 'dispatch-log.jsonl');
 const SOCK_PATH = path.join(METAME_DIR, 'daemon.sock');
 
+// Resolve claude binary path (daemon may not inherit user's full PATH)
+const CLAUDE_BIN = (() => {
+  const candidates = [
+    path.join(HOME, '.local', 'bin', 'claude'),           // npm global (Linux/Mac)
+    path.join(HOME, '.npm-global', 'bin', 'claude'),       // custom npm prefix
+    '/usr/local/bin/claude',
+    '/opt/homebrew/bin/claude',
+  ];
+  try { return execSync('which claude 2>/dev/null', { encoding: 'utf8' }).trim(); } catch {}
+  for (const p of candidates) { if (fs.existsSync(p)) return p; }
+  return 'claude'; // fallback: hope it's in PATH
+})();
+
 // Skill evolution module (hot path + cold path)
 let skillEvolution = null;
 try { skillEvolution = require('./skill-evolution'); } catch { /* graceful fallback */ }
@@ -395,7 +408,7 @@ function executeTask(task, config) {
   const asyncEnv = { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined };
 
   return new Promise((resolve) => {
-    const child = spawn('claude', asyncArgs, {
+    const child = spawn(CLAUDE_BIN, asyncArgs, {
       cwd: cwd || undefined,
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true, // own process group — kills sub-agents on timeout too
@@ -1129,7 +1142,7 @@ async function startTelegramBridge(config, executeTaskByName) {
           const isBindCmd = trimmedText && (trimmedText.startsWith('/bind') || trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
           if (!allowedIds.includes(chatId) && !isBindCmd) {
             log('WARN', `Rejected message from unauthorized chat: ${chatId}`);
-            bot.sendMessage(chatId, `⚠️ This chat (ID: ${chatId}) is not authorized.\n\nTo get started, send:\n/agent bind personal ~/\n\nThis will register this chat and bind it to your home directory.`).catch(() => {});
+            bot.sendMessage(chatId, `⚠️ This chat is not authorized.\n\nCopy and send this command to register:\n\n/agent bind personal`).catch(() => {});
             continue;
           }
 
@@ -3709,7 +3722,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
  */
 function spawnClaudeAsync(args, input, cwd, timeoutMs = 300000) {
   return new Promise((resolve) => {
-    const child = spawn('claude', args, {
+    const child = spawn(CLAUDE_BIN, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, ...getActiveProviderEnv(), CLAUDECODE: undefined },
@@ -4005,7 +4018,7 @@ function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, ch
     // Add stream-json output format (requires --verbose)
     const streamArgs = [...args, '--output-format', 'stream-json', '--verbose'];
 
-    const child = spawn('claude', streamArgs, {
+    const child = spawn(CLAUDE_BIN, streamArgs, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true, // Create new process group so killing -pid kills all sub-agents too
@@ -4613,7 +4626,7 @@ async function startFeishuBridge(config, executeTaskByName) {
       const isBindCmd = trimmedText && (trimmedText.startsWith('/bind') || trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
       if (!allowedIds.includes(chatId) && !isBindCmd) {
         log('WARN', `Feishu: rejected message from ${chatId}`);
-        (bot.sendMarkdown ? bot.sendMarkdown(chatId, `⚠️ **此会话未授权**\n\n会话 ID: \`${chatId}\`\n\n发送以下命令注册：\n\`/agent bind personal ~/\`\n\n这会将此会话绑定到你的主目录。`) : bot.sendMessage(chatId, `⚠️ 此会话 (ID: ${chatId}) 未授权。\n\n发送以下命令注册：\n/agent bind personal ~/\n\n这会将此会话绑定到你的主目录。`)).catch(() => {});
+        (bot.sendMarkdown ? bot.sendMarkdown(chatId, `⚠️ **此会话未授权**\n\n复制下方命令发送即可注册：\n\`\`\`\n/agent bind personal\n\`\`\``) : bot.sendMessage(chatId, `⚠️ 此会话未授权。\n\n复制下方命令发送即可注册：\n/agent bind personal`)).catch(() => {});
         return;
       }
 
