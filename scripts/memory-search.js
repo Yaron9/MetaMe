@@ -3,12 +3,14 @@
  * memory-search.js — Cross-session memory recall CLI
  *
  * Usage:
- *   node memory-search.js "<query>"           # search both sessions and facts
- *   node memory-search.js --facts "<query>"   # search facts only
- *   node memory-search.js --sessions "<query>" # search sessions only
- *   node memory-search.js --recent            # show recent sessions
+ *   node memory-search.js "<query>"                # hybrid search (QMD + FTS5)
+ *   node memory-search.js "<q1>" "<q2>" "<q3>"     # multi-keyword parallel search
+ *   node memory-search.js --facts "<query>"         # search facts only
+ *   node memory-search.js --sessions "<query>"      # search sessions only
+ *   node memory-search.js --recent                  # show recent sessions
  *
- * Called by Claude via Bash tool when it needs to recall past knowledge.
+ * Multi-keyword: results are deduplicated by fact ID, best rank wins.
+ * Async: uses QMD hybrid search (BM25 + vector) when available, falls back to FTS5.
  */
 
 'use strict';
@@ -16,7 +18,6 @@
 const path = require('path');
 const os = require('os');
 
-// Support both local dev and installed (~/.metame/) paths
 const memoryPath = [
   path.join(os.homedir(), '.metame', 'memory.js'),
   path.join(__dirname, 'memory.js'),
@@ -31,69 +32,97 @@ const memory = require(memoryPath);
 
 const args = process.argv.slice(2);
 const mode = args[0] && args[0].startsWith('--') ? args[0] : null;
-const query = mode ? args[1] : args[0];
+const queries = mode ? args.slice(1) : args;
 
-try {
-  if (mode === '--recent') {
-    const rows = memory.recentSessions({ limit: 5 });
-    console.log(JSON.stringify(rows.map(r => ({
-      type: 'session',
-      project: r.project,
-      date: r.created_at,
-      summary: r.summary,
-    })), null, 2));
-
-  } else if (mode === '--facts') {
-    if (!query) { console.log('[]'); process.exit(0); }
-    const facts = memory.searchFacts(query, { limit: 5 });
-    console.log(JSON.stringify(facts.map(f => ({
-      type: 'fact',
-      entity: f.entity,
-      relation: f.relation,
-      value: f.value,
-      confidence: f.confidence,
-      date: f.created_at,
-    })), null, 2));
-
-  } else if (mode === '--sessions') {
-    if (!query) { console.log('[]'); process.exit(0); }
-    const sessions = memory.searchSessions(query, { limit: 5 });
-    console.log(JSON.stringify(sessions.map(s => ({
-      type: 'session',
-      project: s.project,
-      date: s.created_at,
-      summary: s.summary,
-    })), null, 2));
-
-  } else {
-    // Default: search both facts and sessions
-    if (!query) { console.log('[]'); process.exit(0); }
-    const facts = (typeof memory.searchFacts === 'function')
-      ? memory.searchFacts(query, { limit: 3 })
-      : [];
-    const sessions = memory.searchSessions(query, { limit: 3 });
-
-    const results = [
-      ...facts.map(f => ({
-        type: 'fact',
-        entity: f.entity,
-        relation: f.relation,
-        value: f.value,
-        confidence: f.confidence,
-        date: f.created_at,
-      })),
-      ...sessions.map(s => ({
+async function main() {
+  try {
+    if (mode === '--recent') {
+      const rows = memory.recentSessions({ limit: 5 });
+      console.log(JSON.stringify(rows.map(r => ({
         type: 'session',
-        project: s.project,
-        date: s.created_at,
-        summary: s.summary,
-      })),
-    ];
+        project: r.project,
+        date: r.created_at,
+        summary: r.summary,
+      })), null, 2));
+      return;
+    }
 
-    console.log(JSON.stringify(results, null, 2));
+    if (!queries.length || !queries[0]) {
+      console.log('[]');
+      return;
+    }
+
+    const useAsync = typeof memory.searchFactsAsync === 'function';
+
+    if (mode === '--facts') {
+      const results = await searchMulti(queries, { searchFn: q => useAsync ? memory.searchFactsAsync(q, { limit: 5 }) : memory.searchFacts(q, { limit: 5 }), type: 'fact' });
+      console.log(JSON.stringify(results, null, 2));
+      return;
+    }
+
+    if (mode === '--sessions') {
+      const results = await searchMulti(queries, { searchFn: q => Promise.resolve(memory.searchSessions(q, { limit: 5 })), type: 'session' });
+      console.log(JSON.stringify(results, null, 2));
+      return;
+    }
+
+    // Default: search both facts and sessions, all queries in parallel
+    const factResults = await searchMulti(queries, {
+      searchFn: q => useAsync ? memory.searchFactsAsync(q, { limit: 5 }) : Promise.resolve(memory.searchFacts(q, { limit: 5 })),
+      type: 'fact',
+      limit: 5,
+    });
+
+    const sessionResults = await searchMulti(queries, {
+      searchFn: q => Promise.resolve(memory.searchSessions(q, { limit: 3 })),
+      type: 'session',
+      limit: 3,
+    });
+
+    console.log(JSON.stringify([...factResults, ...sessionResults], null, 2));
+
+  } catch (e) {
+    console.log('[]');
+  } finally {
+    try { memory.close(); } catch {}
   }
-} catch (e) {
-  console.log('[]');
-} finally {
-  try { memory.close(); } catch {}
 }
+
+/**
+ * Run multiple queries in parallel, deduplicate and format results.
+ */
+async function searchMulti(queries, { searchFn, type, limit = 5 }) {
+  const allResults = await Promise.all(queries.map(q => searchFn(q).catch(() => [])));
+
+  // Deduplicate by id (facts) or created_at+project (sessions)
+  const seen = new Set();
+  const merged = [];
+
+  for (const batch of allResults) {
+    for (const item of (batch || [])) {
+      const key = type === 'fact'
+        ? `f:${item.id || item.entity + item.value}`
+        : `s:${item.created_at}:${item.project}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        merged.push(type === 'fact' ? {
+          type: 'fact',
+          entity: item.entity,
+          relation: item.relation,
+          value: item.value,
+          confidence: item.confidence,
+          date: item.created_at,
+        } : {
+          type: 'session',
+          project: item.project,
+          date: item.created_at,
+          summary: item.summary,
+        });
+      }
+    }
+  }
+
+  return merged.slice(0, limit);
+}
+
+main();
