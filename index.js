@@ -419,6 +419,23 @@ After writing the profile, ask: *"Want to set up mobile access so you can reach 
 
 - If **Skip:** Say "No problem. You can run \`metame daemon init\` anytime to set this up later." Then begin normal work.
 
+**After setup, teach the user about Agent Dispatch:**
+
+Tell the user: *"You now have multiple AI agents that can collaborate. Here's how to send messages between them:"*
+
+- **From mobile (Telegram/Feishu):** Each chat group is bound to a specific agent (project). To send a message to another agent, use:
+  \`/dispatch <project_key> <message>\`
+  Example: \`/dispatch desktop 帮我检查一下桌面端的日志\`
+
+- **From Claude Code terminal:** Use the dispatch command:
+  \`~/.metame/bin/dispatch_to <project_key> "message"\`
+
+- **Natural language shortcut:** Just say "告诉小美…" or "让老马…" — the AI will automatically route the message to the right agent.
+
+- **Available agents** are configured in \`~/.metame/daemon.yaml\` under \`projects:\`. Each project maps to an agent with its own working directory and Claude session.
+
+- **To add a new agent:** Send \`/bind <project_key> <working_directory>\` from any chat. This creates a new project and binds it to that chat.
+
 **4. EVOLUTION MECHANISM (Manual Sync):**
    *   **PHILOSOPHY:** You respect the User's flow. You do NOT interrupt.
    *   **TOOLS:**
