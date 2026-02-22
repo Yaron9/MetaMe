@@ -405,6 +405,7 @@ After writing the profile, ask: *"Want to set up mobile access so you can reach 
 
 - If **Feishu:**
   1. Guide through: open.feishu.cn/app → create app → get App ID + Secret → enable bot → add event subscription (long connection mode) → add permissions (im:message, im:message.p2p_msg:readonly, im:message.group_at_msg:readonly, im:message:send_as_bot, im:resource) → publish.
+     **⚠️ 重要：** 在「事件订阅」页面，必须开启「接收消息 im.message.receive_v1」事件。然后在该事件的配置中，勾选「获取群组中所有消息」（否则 bot 在群聊中只能收到 @它 的消息，无法接收普通群消息）。
   2. Ask user to paste App ID and App Secret.
   3. Write \`app_id\` and \`app_secret\` into \`~/.metame/daemon.yaml\` under \`feishu:\` section, set \`enabled: true\`.
   4. Tell user: "Now open Feishu and send any message to your new bot, then tell me you're done."
