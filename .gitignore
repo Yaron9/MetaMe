@@ -17,3 +17,7 @@ ROADMAP_PHASE_B.md
 docs/
 tasks/
 upload/
+
+# Generated test files (run_test.js auto-generates from daemon.js)
+test_daemon.js
+scripts/test_daemon.js
