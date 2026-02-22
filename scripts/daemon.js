@@ -1552,6 +1552,7 @@ async function doBindAgent(bot, chatId, agentName, agentCwd) {
 }
 
 async function handleCommand(bot, chatId, text, config, executeTaskByName, senderId = null, readOnly = false) {
+  if (text && !text.startsWith('/chatid') && !text.startsWith('/myid')) log('INFO', `CMD [${String(chatId).slice(-8)}]: ${text.slice(0, 80)}`);
   const state = loadState();
 
   // --- /chatid: reply with current chatId ---
@@ -2730,6 +2731,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
         const fileCount = diffFiles ? diffFiles.split('\n').length : 0;
         let msg = `⏪ 已回退到 ${cpDisplayLabel(match.message)}`;
         if (fileCount > 0) msg += `\n📁 ${fileCount} 个文件恢复: ${fileList}`;
+        log('INFO', `/undo <hash> executed for ${chatId}: reset to ${match.hash.slice(0, 8)}, files=${fileCount}`);
         await bot.sendMessage(chatId, msg);
         cleanupCheckpoints(cwd);
       } catch (e) {
@@ -2738,36 +2740,144 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       return;
     }
 
-    // /undo (no arg) — ESC×2: undo last turn, reset code if checkpoint exists
+    // /undo (no arg) — show recent user messages as buttons to pick rollback point
     try {
-      // 1. Truncate last conversation turn from JSONL (reliable, no timestamp dependency)
-      const linesRemoved = truncateSessionLastTurn(session.id);
+      const sessionFile = findSessionFile(session.id);
+      if (!sessionFile) {
+        await bot.sendMessage(chatId, '⚠️ 找不到 session 文件，无法列出历史消息');
+        return;
+      }
+      const lines = fs.readFileSync(sessionFile, 'utf8').split('\n').filter(l => l.trim());
 
-      // 2. Git reset to latest checkpoint if one exists (best-effort)
-      let gitMsg = '';
-      if (cwd) {
-        let isGitRepo = false;
-        try { execSync('git rev-parse --is-inside-work-tree', { cwd, stdio: 'ignore', timeout: 3000 }); isGitRepo = true; } catch { }
-        if (isGitRepo) {
-          const checkpoints = listCheckpoints(cwd);
-          if (checkpoints.length > 0) {
-            const latest = checkpoints[0];
-            let diffFiles = '';
-            try { diffFiles = execSync(`git diff --name-only HEAD ${latest.hash}`, { cwd, encoding: 'utf8', timeout: 5000 }).trim(); } catch { }
-            if (diffFiles) {
-              execSync(`git reset --hard ${latest.hash}`, { cwd, stdio: 'ignore', timeout: 10000 });
-              const fileCount = diffFiles.split('\n').length;
-              gitMsg = `\n📁 ${fileCount} 个文件已恢复`;
-              cleanupCheckpoints(cwd);
+      // Collect user messages with line indices
+      const userMsgs = [];
+      for (let i = 0; i < lines.length; i++) {
+        try {
+          const obj = JSON.parse(lines[i]);
+          if (obj.type === 'user') userMsgs.push({ idx: i, obj });
+        } catch { }
+      }
+      if (userMsgs.length === 0) {
+        await bot.sendMessage(chatId, '⚠️ 没有可回退的历史消息');
+        return;
+      }
+
+      // Helper: extract text from user message object
+      const extractText = (obj) => {
+        try {
+          const content = obj.message?.content;
+          if (typeof content === 'string') return content;
+          if (Array.isArray(content)) return content.find(c => c.type === 'text')?.text || '';
+        } catch { }
+        return '';
+      };
+
+      // Show last 6 (most recent first)
+      const recent = userMsgs.slice(-6).reverse();
+      if (bot.sendButtons) {
+        const buttons = recent.map(({ idx, obj }) => {
+          const msgText = extractText(obj).replace(/\n/g, ' ').slice(0, 28) || `消息 #${idx}`;
+          let timeLabel = '';
+          if (obj.timestamp) {
+            const d = new Date(obj.timestamp);
+            if (!isNaN(d)) timeLabel = ` (${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')})`;
+          }
+          return [{ text: `⏪ ${msgText}${timeLabel}`, callback_data: `/undo_to ${idx}` }];
+        });
+        await bot.sendButtons(chatId, `↩️ 回退到哪条消息之前？(共 ${userMsgs.length} 轮)`, buttons);
+      } else {
+        let msg = '回退到哪条消息之前？回复 /undo_to <序号>\n\n';
+        recent.forEach(({ idx, obj }) => {
+          msg += `[${idx}] ${extractText(obj).slice(0, 40)}\n`;
+        });
+        await bot.sendMessage(chatId, msg);
+      }
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ Undo failed: ${e.message}`);
+    }
+    return;
+  }
+
+  // /undo_to <lineIdx> — restore session to before the message at given JSONL line index
+  if (text.startsWith('/undo_to ')) {
+    const idx = parseInt(text.slice(9).trim(), 10);
+    if (isNaN(idx) || idx < 0) {
+      await bot.sendMessage(chatId, '❌ 无效的回退序号');
+      return;
+    }
+
+    // Kill any running task
+    if (messageQueue.has(chatId)) {
+      const q = messageQueue.get(chatId);
+      if (q.timer) clearTimeout(q.timer);
+      messageQueue.delete(chatId);
+    }
+    const proc2 = activeProcesses.get(chatId);
+    if (proc2 && proc2.child) {
+      proc2.aborted = true;
+      try { process.kill(-proc2.child.pid, 'SIGINT'); } catch { proc2.child.kill('SIGINT'); }
+    }
+
+    const session2 = getSession(chatId);
+    if (!session2 || !session2.id) {
+      await bot.sendMessage(chatId, 'No active session.');
+      return;
+    }
+
+    try {
+      const sessionFile2 = findSessionFile(session2.id);
+      if (!sessionFile2) { await bot.sendMessage(chatId, '❌ 找不到 session 文件'); return; }
+
+      const lines2 = fs.readFileSync(sessionFile2, 'utf8').split('\n').filter(l => l.trim());
+      if (idx >= lines2.length) {
+        await bot.sendMessage(chatId, '❌ 序号超出范围，session 已变化，请重新 /undo');
+        return;
+      }
+
+      // Get target message text + timestamp for display and git matching
+      let targetMsg = '', targetTs = 0;
+      try {
+        const obj = JSON.parse(lines2[idx]);
+        const content = obj.message?.content;
+        if (typeof content === 'string') targetMsg = content;
+        else if (Array.isArray(content)) targetMsg = content.find(c => c.type === 'text')?.text || '';
+        if (obj.timestamp) targetTs = new Date(obj.timestamp).getTime() || 0;
+      } catch { }
+
+      // Truncate JSONL at idx (keep lines before it)
+      const kept2 = lines2.slice(0, idx);
+      fs.writeFileSync(sessionFile2, kept2.length ? kept2.join('\n') + '\n' : '', 'utf8');
+      _sessionFileCache.delete(session2.id);
+      const removed2 = lines2.length - kept2.length;
+
+      // Git reset to nearest checkpoint at or before the target message (best-effort)
+      let gitMsg2 = '';
+      const cwd2 = session2.cwd;
+      if (cwd2) {
+        let isGitRepo2 = false;
+        try { execSync('git rev-parse --is-inside-work-tree', { cwd: cwd2, stdio: 'ignore', timeout: 3000 }); isGitRepo2 = true; } catch { }
+        if (isGitRepo2) {
+          const checkpoints2 = listCheckpoints(cwd2);
+          const cpMatch = targetTs
+            ? checkpoints2.find(cp => { const t = new Date(cpExtractTimestamp(cp.message) || 0).getTime(); return t > 0 && t <= targetTs; })
+            : checkpoints2[0];
+          if (cpMatch) {
+            let diffFiles2 = '';
+            try { diffFiles2 = execSync(`git diff --name-only HEAD ${cpMatch.hash}`, { cwd: cwd2, encoding: 'utf8', timeout: 5000 }).trim(); } catch { }
+            if (diffFiles2) {
+              execSync(`git reset --hard ${cpMatch.hash}`, { cwd: cwd2, stdio: 'ignore', timeout: 10000 });
+              gitMsg2 = `\n📁 ${diffFiles2.split('\n').length} 个文件已恢复`;
+              cleanupCheckpoints(cwd2);
             }
           }
         }
       }
 
-      const ctxMsg = linesRemoved > 0 ? `上下文已回滚 (${linesRemoved} 行)` : '已是首轮，上下文无法继续回滚';
-      await bot.sendMessage(chatId, `⏪ 已撤回上一轮对话\n🧠 ${ctxMsg}${gitMsg}`);
+      const preview = targetMsg.replace(/\n/g, ' ').slice(0, 30) || `行 ${idx}`;
+      log('INFO', `/undo_to ${idx} for ${chatId}: removed=${removed2} lines${gitMsg2 ? ', ' + gitMsg2.trim() : ''}`);
+      await bot.sendMessage(chatId, `⏪ 已回退到「${preview}」之前\n🧠 上下文回滚 ${removed2} 行${gitMsg2}`);
     } catch (e) {
-      await bot.sendMessage(chatId, `❌ Undo failed: ${e.message}`);
+      await bot.sendMessage(chatId, `❌ 回退失败: ${e.message}`);
     }
     return;
   }
