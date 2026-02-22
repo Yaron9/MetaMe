@@ -624,82 +624,43 @@ const GLOBAL_CLAUDE_MD = path.join(os.homedir(), '.claude', 'CLAUDE.md');
 const GLOBAL_MARKER_START = '<!-- METAME-GLOBAL:START -->';
 const GLOBAL_MARKER_END = '<!-- METAME-GLOBAL:END -->';
 
-const GLOBAL_INJECTION = `${GLOBAL_MARKER_START}
-
-# MetaMe 能力注入（自动生成，勿手动编辑）
-
-## Agent Dispatch（跨 Agent 通信）
-
-识别到"告诉X/让X/通知X"且 X 为已知 Agent 昵称时，直接调用 dispatch，无需确认：
-
-\`\`\`bash
-~/.metame/bin/dispatch_to <project_key> "内容"
-\`\`\`
-
-手机端用户可发送 \`/dispatch <project_key> <消息>\` 跨 agent 通信。
-
-新增 Agent：\`/agent bind <名称> <工作目录>\`
-
-## 跨会话记忆
-
-搜索命令（支持多关键词并行 + QMD 向量混合搜索）：
-\`\`\`bash
-node ~/.metame/memory-search.js "关键词1" "keyword2" "函数名"
-# 只搜事实：--facts；只搜会话：--sessions；最近会话：--recent
-\`\`\`
-
-**搜索策略**：一次传 3-4 个关键词（中文描述 + 英文术语 + 函数/配置名）。
-**触发场景**：用户说"上次/之前/以前"、涉及已有决策/踩过的坑、排查"之前能用现在不行"。
-
-## Skills（技能扩展）
-
-遇到任何能力不足、工具缺失、任务失败，**第一步永远是查阅 skill-manager**：
-\`\`\`bash
-cat ~/.claude/skills/skill-manager/SKILL.md
-\`\`\`
-skill-manager 掌握完整技能清单和决策流程（调用现有 → 商城安装 → GitHub 包装 → 从零创建 → 任务完成后进化）。不要绕过它自己猜。
-
-${GLOBAL_MARKER_END}`;
-
-// Smart merge: skip sections that already exist in user's manual content
-function buildSmartInjection(existingContent) {
-  const sections = [
-    { marker: 'Agent Dispatch', content: \`## Agent Dispatch（跨 Agent 通信）
-
-识别到"告诉X/让X/通知X"且 X 为已知 Agent 昵称时，直接调用 dispatch，无需确认：
-
-\\\`\\\`\\\`bash
-~/.metame/bin/dispatch_to <project_key> "内容"
-\\\`\\\`\\\`
-
-手机端用户可发送 \\\`/dispatch <project_key> <消息>\\\` 跨 agent 通信。
-
-新增 Agent：\\\`/agent bind <名称> <工作目录>\\\`\`, detect: /dispatch_to|Agent Dispatch/i },
-    { marker: '跨会话记忆', content: \`## 跨会话记忆
-
-搜索命令（支持多关键词并行 + QMD 向量混合搜索）：
-\\\`\\\`\\\`bash
-node ~/.metame/memory-search.js "关键词1" "keyword2" "函数名"
-# 只搜事实：--facts；只搜会话：--sessions；最近会话：--recent
-\\\`\\\`\\\`
-
-**搜索策略**：一次传 3-4 个关键词（中文描述 + 英文术语 + 函数/配置名）。
-**触发场景**：用户说"上次/之前/以前"、涉及已有决策/踩过的坑、排查"之前能用现在不行"。\`, detect: /memory-search\.js|跨会话记忆/i },
-    { marker: 'Skills', content: \`## Skills（技能扩展）
-
-遇到任何能力不足、工具缺失、任务失败，**第一步永远是查阅 skill-manager**：
-\\\`\\\`\\\`bash
-cat ~/.claude/skills/skill-manager/SKILL.md
-\\\`\\\`\\\`
-skill-manager 掌握完整技能清单和决策流程（调用现有 → 商城安装 → GitHub 包装 → 从零创建 → 任务完成后进化）。不要绕过它自己猜。\`, detect: /skill-manager|Skills.*技能/i },
-  ];
-
-  const needed = sections.filter(s => !s.detect.test(existingContent));
-  if (needed.length === 0) return null; // All already present
-
-  return GLOBAL_MARKER_START + '\\n\\n# MetaMe 能力注入（自动生成，勿手动编辑）\\n\\n' +
-    needed.map(s => s.content).join('\\n\\n') + '\\n\\n' + GLOBAL_MARKER_END;
-}
+// Sections to inject (each only injected if not already present in user's manual content)
+const GLOBAL_SECTIONS = [
+  { detect: /dispatch_to|Agent Dispatch/i, text: [
+    '## Agent Dispatch（跨 Agent 通信）',
+    '',
+    '识别到"告诉X/让X/通知X"且 X 为已知 Agent 昵称时，直接调用 dispatch，无需确认：',
+    '',
+    '```bash',
+    '~/.metame/bin/dispatch_to <project_key> "内容"',
+    '```',
+    '',
+    '手机端用户可发送 `/dispatch <project_key> <消息>` 跨 agent 通信。',
+    '',
+    '新增 Agent：`/agent bind <名称> <工作目录>`',
+  ]},
+  { detect: /memory-search\.js|跨会话记忆/i, text: [
+    '## 跨会话记忆',
+    '',
+    '搜索命令（支持多关键词并行 + QMD 向量混合搜索）：',
+    '```bash',
+    'node ~/.metame/memory-search.js "关键词1" "keyword2" "函数名"',
+    '# 只搜事实：--facts；只搜会话：--sessions；最近会话：--recent',
+    '```',
+    '',
+    '**搜索策略**：一次传 3-4 个关键词（中文描述 + 英文术语 + 函数/配置名）。',
+    '**触发场景**：用户说"上次/之前/以前"、涉及已有决策/踩过的坑、排查"之前能用现在不行"。',
+  ]},
+  { detect: /skill-manager|Skills.*技能/i, text: [
+    '## Skills（技能扩展）',
+    '',
+    '遇到任何能力不足、工具缺失、任务失败，**第一步永远是查阅 skill-manager**：',
+    '```bash',
+    'cat ~/.claude/skills/skill-manager/SKILL.md',
+    '```',
+    'skill-manager 掌握完整技能清单和决策流程（调用现有 → 商城安装 → GitHub 包装 → 从零创建 → 任务完成后进化）。不要绕过它自己猜。',
+  ]},
+];
 
 try {
   const globalDir = path.join(os.homedir(), '.claude');
@@ -716,9 +677,19 @@ try {
     ), '');
   }
 
-  // Append injection at the end
-  const finalGlobal = globalContent.trimEnd() + '\n\n' + GLOBAL_INJECTION + '\n';
-  fs.writeFileSync(GLOBAL_CLAUDE_MD, finalGlobal, 'utf8');
+  // Only inject sections not already present in user's manual content
+  const contentOutsideMarkers = globalContent;
+  const needed = GLOBAL_SECTIONS.filter(s => !s.detect.test(contentOutsideMarkers));
+
+  if (needed.length > 0) {
+    const injection = GLOBAL_MARKER_START + '\n\n# MetaMe 能力注入（自动生成，勿手动编辑）\n\n' +
+      needed.map(s => s.text.join('\n')).join('\n\n') + '\n\n' + GLOBAL_MARKER_END;
+    const finalGlobal = globalContent.trimEnd() + '\n\n' + injection + '\n';
+    fs.writeFileSync(GLOBAL_CLAUDE_MD, finalGlobal, 'utf8');
+  } else {
+    // All sections already present, just clean up stale marker block
+    fs.writeFileSync(GLOBAL_CLAUDE_MD, globalContent.trimEnd() + '\n', 'utf8');
+  }
 } catch (e) {
   // Non-fatal: global CLAUDE.md injection is best-effort
   console.error(`⚠️ Failed to inject global CLAUDE.md: ${e.message}`);
