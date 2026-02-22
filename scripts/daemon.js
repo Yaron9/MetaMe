@@ -1129,6 +1129,7 @@ async function startTelegramBridge(config, executeTaskByName) {
           const isBindCmd = trimmedText && (trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
           if (!allowedIds.includes(chatId) && !isBindCmd) {
             log('WARN', `Rejected message from unauthorized chat: ${chatId}`);
+            bot.sendMessage(chatId, `⚠️ This chat (ID: ${chatId}) is not authorized.\n\nTo get started, send:\n/bind personal\n\nThis will register this chat and bind it to your personal project.`).catch(() => {});
             continue;
           }
 
@@ -4607,6 +4608,7 @@ async function startFeishuBridge(config, executeTaskByName) {
       const isBindCmd = trimmedText && (trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
       if (!allowedIds.includes(chatId) && !isBindCmd) {
         log('WARN', `Feishu: rejected message from ${chatId}`);
+        bot.sendMessage(chatId, `⚠️ 此会话 (ID: ${chatId}) 未授权。\n\n发送以下命令注册：\n/bind personal\n\n这会将此会话绑定到你的个人项目。`).catch(() => {});
         return;
       }
 
