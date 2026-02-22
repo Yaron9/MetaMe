@@ -182,10 +182,10 @@ V1 必须用于 `card.action.trigger` 回调（按钮点击）。V2 支持更丰
 **根因**：`handleCommand` 调 `askClaude` 漏传参数 → ReferenceError → 被 `.catch(() => {})` 吞掉。
 **教训**：核心函数新增参数时，必须同时更新所有调用处。adapter 的 `.catch(() => {})` 会静默吞异常。
 
-### 坑2: 飞书卡片 text_size 导致 400 错误
-**症状**：卡片发送失败回退为纯文本，日志报 `status code 400`。
-**根因**：V2 header 的 `text_size` 值必须是飞书合法枚举，`x-large` 等非标值会被 API 拒绝。
-**教训**：飞书 API 对卡片 JSON 做严格校验，不确定的属性值先查文档或 Card Builder 验证。
+### 坑2: 飞书卡片 V2 header text_size 合法值只有两个
+**症状**：卡片发送失败回退为纯文本，日志报 `status code 400`，错误码 230099，`header text_size invalid`。
+**根因**：V2 header title 的 `text_size` **只有 `heading` 和 `normal` 两个合法值**，其余全部 400（包括 x-large、heading-0、heading-1、display、large 等）。`text_size` 必须放在 `header.title` 对象内，不是 `header` 层。
+**教训**：`heading` 是 V2 header 允许的最大字号，无法再大。遇到字段报错先写测试脚本穷举合法值，不要凭猜测反复改代码。
 
 ### 坑3: daemon 不重启 — 非 daemon.js 文件变化不触发
 **症状**：改了 feishu-adapter.js 并 sync 到 ~/.metame/，`/reload` 后不生效。
