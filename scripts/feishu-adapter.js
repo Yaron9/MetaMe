@@ -131,8 +131,8 @@ function createBot(config) {
      * @param {string} [opts.color='blue'] - header color: blue|orange|green|red|grey|purple|turquoise
      */
     async sendCard(chatId, { title, body, color = 'blue' }) {
-      const header = { title: { tag: 'plain_text', content: title, text_size: 'heading' }, template: color };
-      const elements = body ? toMdChunks(body).map(c => ({ tag: 'markdown', content: c })) : [];
+      const header = { title: { tag: 'plain_text', content: title }, template: color };
+      const elements = body ? toMdChunks(body).map(c => ({ tag: 'markdown', content: c, text_size: 'x-large' })) : [];
       return _sendInteractive(chatId, { schema: '2.0', header, body: { elements } });
     },
 
