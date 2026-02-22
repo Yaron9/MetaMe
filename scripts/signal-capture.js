@@ -29,6 +29,10 @@ const IMPLICIT_EN = /I (prefer|like|hate|usually|tend to|always)/i;
 const CORRECTION_ZH = /不是.*我(要|想|说)的|我说的不是|你理解错了|不对.*应该/;
 const CORRECTION_EN = /(no,? I meant|that's not what I|you misunderstood|wrong.+should be)/i;
 
+// Metacognitive signals → normal confidence (self-reflection, strategy shifts)
+const META_ZH = /我(发现|意识到|觉得|反思|总结|复盘)|想错了|换个(思路|方向|方案)|回头(想想|看看)|之前的(方案|思路|方向).*(不行|不对|有问题)|我的(问题|毛病|习惯)是|下次(应该|要|得)/;
+const META_EN = /(I realize|looking back|on reflection|my (mistake|problem|habit) is|let me rethink|wrong approach|next time I should)/i;
+
 // Read JSON from stdin
 let input = '';
 process.stdin.setEncoding('utf8');
@@ -38,7 +42,11 @@ process.stdin.on('end', () => {
     const data = JSON.parse(input);
     const prompt = (data.prompt || '').trim();
 
+    // === LAYER 0: Metacognitive bypass — always capture self-reflection ===
+    const isMeta = META_ZH.test(prompt) || META_EN.test(prompt);
+
     // === LAYER 1: Hard filters (definitely not preferences) ===
+    // Metacognitive signals bypass all hard filters — they reveal how user thinks
 
     // Skip empty or very short messages
     // Chinese chars carry more info per char, so use weighted length
@@ -48,43 +56,43 @@ process.stdin.on('end', () => {
     }
 
     // Skip messages that are purely code or file paths
-    if (/^(```|\/[\w/]+\.\w+$)/.test(prompt)) {
+    if (!isMeta && /^(```|\/[\w/]+\.\w+$)/.test(prompt)) {
       process.exit(0);
     }
 
     // Skip common non-preference commands
-    if (/^(\/\w+|!metame|git |npm |pnpm |yarn |brew |sudo |cd |ls |cat |mkdir )/.test(prompt)) {
+    if (!isMeta && /^(\/\w+|!metame|git |npm |pnpm |yarn |brew |sudo |cd |ls |cat |mkdir )/.test(prompt)) {
       process.exit(0);
     }
 
     // Skip pure task instructions (fix/add/delete/refactor/debug/deploy/test/run/build)
-    if (/^(帮我|请你|麻烦)?\s*(fix|add|delete|remove|refactor|debug|deploy|test|run|build|create|update|implement|write|generate|make)/i.test(prompt)) {
+    if (!isMeta && /^(帮我|请你|麻烦)?\s*(fix|add|delete|remove|refactor|debug|deploy|test|run|build|create|update|implement|write|generate|make)/i.test(prompt)) {
       process.exit(0);
     }
-    if (/^(帮我|请你|麻烦)?\s*(修|加|删|重构|调试|部署|测试|运行|构建|创建|更新|实现|写|生成|做)/.test(prompt)) {
+    if (!isMeta && /^(帮我|请你|麻烦)?\s*(修|加|删|重构|调试|部署|测试|运行|构建|创建|更新|实现|写|生成|做)/.test(prompt)) {
       process.exit(0);
     }
 
     // Skip agent identity definitions (these belong in project CLAUDE.md, not user profile)
-    if (/^(你是|你叫|你的(角色|身份|职责|任务)|你负责|你现在是|from now on you are|you are now|your role is)/i.test(prompt)) {
+    if (!isMeta && /^(你是|你叫|你的(角色|身份|职责|任务)|你负责|你现在是|from now on you are|you are now|your role is)/i.test(prompt)) {
       process.exit(0);
     }
 
     // Skip pasted error logs / stack traces
-    if (/^(Error|TypeError|SyntaxError|ReferenceError|at\s+\w+|Traceback|FATAL|WARN|ERR!)/i.test(prompt)) {
+    if (!isMeta && /^(Error|TypeError|SyntaxError|ReferenceError|at\s+\w+|Traceback|FATAL|WARN|ERR!)/i.test(prompt)) {
       process.exit(0);
     }
-    if (prompt.split('\n').length > 10) {
+    if (!isMeta && prompt.split('\n').length > 10) {
       // Multi-line pastes are usually code or logs, not preferences
       process.exit(0);
     }
 
     // Skip pure questions with no preference signal
-    if (/^(what|how|why|where|when|which|can you|could you|is there|are there|does|do you)\s/i.test(prompt) &&
+    if (!isMeta && /^(what|how|why|where|when|which|can you|could you|is there|are there|does|do you)\s/i.test(prompt) &&
         !/prefer|like|hate|always|never|style|习惯|偏好|喜欢|讨厌/.test(prompt)) {
       process.exit(0);
     }
-    if (/^(什么|怎么|为什么|哪|能不能|可以|是不是)\s/.test(prompt) &&
+    if (!isMeta && /^(什么|怎么|为什么|哪|能不能|可以|是不是)\s/.test(prompt) &&
         !/偏好|喜欢|讨厌|习惯|以后|一律|总是|永远|记住/.test(prompt)) {
       process.exit(0);
     }
@@ -93,12 +101,14 @@ process.stdin.on('end', () => {
     const isStrong = STRONG_SIGNAL_ZH.test(prompt) || STRONG_SIGNAL_EN.test(prompt);
     const isCorrection = CORRECTION_ZH.test(prompt) || CORRECTION_EN.test(prompt);
     const confidence = (isStrong || isCorrection) ? 'high' : 'normal';
+    const signalType = isMeta ? 'metacognitive' : isCorrection ? 'correction' : isStrong ? 'directive' : 'implicit';
 
     // Append to buffer
     const entry = {
       ts: new Date().toISOString(),
       prompt: prompt,
       confidence: confidence,
+      type: signalType,
       session: data.session_id || null,
       cwd: data.cwd || null
     };
