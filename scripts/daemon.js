@@ -4613,7 +4613,7 @@ async function startFeishuBridge(config, executeTaskByName) {
       const isBindCmd = trimmedText && (trimmedText.startsWith('/bind') || trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
       if (!allowedIds.includes(chatId) && !isBindCmd) {
         log('WARN', `Feishu: rejected message from ${chatId}`);
-        bot.sendMessage(chatId, `⚠️ 此会话 (ID: ${chatId}) 未授权。\n\n发送以下命令注册：\n/bind personal ~/\n\n这会将此会话绑定到你的主目录。`).catch(() => {});
+        (bot.sendMarkdown ? bot.sendMarkdown(chatId, `⚠️ **此会话未授权**\n\n会话 ID: \`${chatId}\`\n\n发送以下命令注册：\n\`/bind personal ~/\`\n\n这会将此会话绑定到你的主目录。`) : bot.sendMessage(chatId, `⚠️ 此会话 (ID: ${chatId}) 未授权。\n\n发送以下命令注册：\n/bind personal ~/\n\n这会将此会话绑定到你的主目录。`)).catch(() => {});
         return;
       }
 
