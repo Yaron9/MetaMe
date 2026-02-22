@@ -127,18 +127,24 @@ async function distill() {
     }
 
     // 5. Build distillation prompt (compact + session-aware)
-    const userMessages = signals
-      .map((s, i) => `${i + 1}. "${s}"`)
-      .join('\n');
+    // Input budget: keep total prompt under INPUT_TOKEN_BUDGET to control cost/latency.
+    // Priority: system prompt + profile + writable keys (must keep) > user messages > session context
+    const INPUT_TOKEN_BUDGET = 4000; // ~12K chars mixed zh/en
 
     const writableKeys = getWritableKeysForPrompt();
 
-    // Session context section (only when skeleton exists, ~60 tokens)
+    // Reserve budget for fixed parts (system prompt template ~600 tokens, profile, writable keys)
+    const fixedOverhead = 600; // system prompt template + rules
+    const profileTokens = estimateTokens(currentProfile);
+    const keysTokens = estimateTokens(writableKeys);
+    const reservedTokens = fixedOverhead + profileTokens + keysTokens;
+    const availableForContent = Math.max(INPUT_TOKEN_BUDGET - reservedTokens, 200);
+
+    // Build session context (lower priority — truncate first)
     let sessionSection = sessionContext
       ? `\nSESSION CONTEXT (what actually happened in the latest coding session):\n${sessionContext}\n`
       : '';
 
-    // Add summary for long sessions (~30 tokens when present)
     if (sessionSummary) {
       const pivotText = sessionSummary.pivots.length > 0
         ? `\nPivots: ${sessionSummary.pivots.join('; ')}`
@@ -146,12 +152,35 @@ async function distill() {
       sessionSection += `Summary: ${sessionSummary.intent} → ${sessionSummary.outcome}${pivotText}\n`;
     }
 
-    // Goal context section (~11 tokens when present)
     let goalContext = '';
     if (sessionAnalytics) {
       try { goalContext = sessionAnalytics.formatGoalContext(BRAIN_FILE); } catch { }
     }
-    const goalSection = goalContext ? `\n${goalContext}\n` : '';
+    let goalSection = goalContext ? `\n${goalContext}\n` : '';
+
+    // Allocate remaining budget: user messages get priority over session context
+    const sessionTokens = estimateTokens(sessionSection + goalSection);
+    let budgetForMessages = availableForContent - sessionTokens;
+
+    // If not enough room, drop session context first, then trim messages
+    if (budgetForMessages < 100) {
+      sessionSection = '';
+      goalSection = '';
+      budgetForMessages = availableForContent;
+    }
+
+    // Truncate user messages to fit budget (keep most recent, they're more relevant)
+    let truncatedSignals = signals;
+    let userMessages = signals.map((s, i) => `${i + 1}. "${s}"`).join('\n');
+    if (estimateTokens(userMessages) > budgetForMessages) {
+      // Drop oldest messages until we fit
+      while (truncatedSignals.length > 1 && estimateTokens(
+        truncatedSignals.map((s, i) => `${i + 1}. "${s}"`).join('\n')
+      ) > budgetForMessages) {
+        truncatedSignals = truncatedSignals.slice(1);
+      }
+      userMessages = truncatedSignals.map((s, i) => `${i + 1}. "${s}"`).join('\n');
+    }
 
     const distillPrompt = `You are a MetaMe cognitive profile distiller. Extract COGNITIVE TRAITS and PREFERENCES — how the user thinks, decides, and communicates. NOT a memory system. Do NOT store facts.
 
