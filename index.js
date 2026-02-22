@@ -717,6 +717,38 @@ try {
 } catch { /* non-fatal */ }
 
 // ---------------------------------------------------------
+// 4.9 AUTO-UPDATE CHECK (non-blocking)
+// ---------------------------------------------------------
+const CURRENT_VERSION = require('./package.json').version;
+
+// Fire-and-forget: check npm for newer version and auto-update
+(async () => {
+  try {
+    const https = require('https');
+    const latest = await new Promise((resolve, reject) => {
+      https.get('https://registry.npmjs.org/metame-cli/latest', { timeout: 5000 }, res => {
+        let data = '';
+        res.on('data', c => data += c);
+        res.on('end', () => {
+          try { resolve(JSON.parse(data).version); } catch { reject(); }
+        });
+      }).on('error', reject).on('timeout', function() { this.destroy(); reject(); });
+    });
+
+    if (latest && latest !== CURRENT_VERSION) {
+      console.log(`📦 MetaMe ${latest} 可用（当前 ${CURRENT_VERSION}），正在自动更新...`);
+      const { execSync } = require('child_process');
+      try {
+        execSync('npm update -g metame-cli', { stdio: 'pipe', timeout: 30000 });
+        console.log(`✅ 已更新到 ${latest}，下次启动生效。`);
+      } catch (e) {
+        console.log(`⚠️ 自动更新失败，请手动执行: npm update -g metame-cli`);
+      }
+    }
+  } catch { /* network unavailable, skip silently */ }
+})();
+
+// ---------------------------------------------------------
 // 5. LAUNCH CLAUDE (OR HOT RELOAD)
 // ---------------------------------------------------------
 
