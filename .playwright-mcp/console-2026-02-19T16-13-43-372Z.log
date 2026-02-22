@@ -1,2 +1,0 @@
-[     698ms] [ERROR] Failed to load resource: the server responded with a status of 401 () @ https://internal-api-security.feishu.cn/lark/scs/compliance/ping:0
-[    1278ms] [WARNING] <meta name="apple-mobile-web-app-capable" content="yes"> is deprecated. Please include <meta name="mobile-web-app-capable" content="yes"> @ https://accounts.feishu.cn/accounts/page/login?app_id=7&no_trap=1&redirect_uri=https%3A%2F%2Fopen.feishu.cn%2Fapp%2Fcli_a90a073b2ba1dbb4%2Fpermission%2Fmanage:0
