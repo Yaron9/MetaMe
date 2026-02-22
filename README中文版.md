@@ -212,7 +212,7 @@ metame daemon install-launchd   # 开机自启 + 崩溃重启
 
 完事。打开 Telegram，给你的 bot 发消息。
 
-> **第一条消息？** 新会话还没加白名单，bot 会自动回复引导——发 `/bind personal ~/` 即可一步完成注册。
+> **第一条消息？** 新会话还没加白名单，bot 会自动回复引导——发 `/agent bind personal ~/` 即可一步完成注册。
 
 ---
 
@@ -350,7 +350,7 @@ feishu:
 ## 安全
 
 - 所有数据留在你的电脑。不上云，无遥测。
-- `allowed_chat_ids` 白名单——未授权用户收到 `/bind` 引导提示，而非静默忽略。
+- `allowed_chat_ids` 白名单——未授权用户收到 `/agent bind` 引导提示，而非静默忽略。
 - `operator_ids` 共享群权限——非 operator 只读模式。
 - `~/.metame/` 目录权限 700。
 - Bot token 仅存本地，不外传。
