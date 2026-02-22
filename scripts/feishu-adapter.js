@@ -131,7 +131,7 @@ function createBot(config) {
      * @param {string} [opts.color='blue'] - header color: blue|orange|green|red|grey|purple|turquoise
      */
     async sendCard(chatId, { title, body, color = 'blue' }) {
-      const header = { title: { tag: 'plain_text', content: title }, text_size: 'heading', template: color };
+      const header = { title: { tag: 'plain_text', content: title }, template: color };
       const elements = body ? toMdChunks(body).map(c => ({ tag: 'markdown', content: c })) : [];
       return _sendInteractive(chatId, { schema: '2.0', header, body: { elements } });
     },
@@ -182,7 +182,7 @@ function createBot(config) {
 
       return _sendInteractive(chatId, {
         config: { wide_screen_mode: true },
-        header: { title: { tag: 'plain_text', content: headerText }, text_size: 'heading', template: 'blue' },
+        header: { title: { tag: 'plain_text', content: headerText }, template: 'blue' },
         elements,
       });
     },
@@ -196,7 +196,7 @@ function createBot(config) {
     async sendRawCard(chatId, headerText, elements) {
       return _sendInteractive(chatId, {
         config: { wide_screen_mode: true },
-        header: { title: { tag: 'plain_text', content: headerText }, text_size: 'heading', template: 'blue' },
+        header: { title: { tag: 'plain_text', content: headerText }, template: 'blue' },
         elements,
       });
     },
