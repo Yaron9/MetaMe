@@ -6,3 +6,9 @@ qmd/
 # Other projects should gitignore their CLAUDE.md
 .claude_profile.yaml
 ROADMAP_PHASE_B.md
+
+# Playwright browser profile (runtime data, never commit)
+~/.metame/browser-profile/
+
+# Playwright MCP console logs
+.playwright-mcp/
