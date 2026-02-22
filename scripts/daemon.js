@@ -924,19 +924,41 @@ function physiologicalHeartbeat(config) {
 }
 
 // ---------------------------------------------------------
+// HEARTBEAT TASK HELPERS (single source of truth)
+// ---------------------------------------------------------
+
+/**
+ * Collect all heartbeat tasks from config (general + per-project).
+ * Each project task gets _project metadata attached.
+ * Returns { general: [...], project: [...], all: [...] }
+ */
+function getAllTasks(cfg) {
+  const general = (cfg.heartbeat && cfg.heartbeat.tasks) || [];
+  const project = [];
+  const generalNames = new Set(general.map(t => t.name));
+  for (const [key, proj] of Object.entries(cfg.projects || {})) {
+    for (const t of (proj.heartbeat_tasks || [])) {
+      if (generalNames.has(t.name)) log('WARN', `Duplicate task name "${t.name}" in project "${key}" and general heartbeat`);
+      project.push({ ...t, _project: { key, name: proj.name || key, color: proj.color || 'blue', icon: proj.icon || '🤖' } });
+    }
+  }
+  return { general, project, all: [...general, ...project] };
+}
+
+/**
+ * Find a task by name across all groups.
+ */
+function findTask(cfg, name) {
+  const { general, project } = getAllTasks(cfg);
+  const found = general.find(t => t.name === name) || project.find(t => t.name === name);
+  return found || null;
+}
+
+// ---------------------------------------------------------
 // HEARTBEAT SCHEDULER
 // ---------------------------------------------------------
 function startHeartbeat(config, notifyFn) {
-  const legacyTasks = (config.heartbeat && config.heartbeat.tasks) || [];
-  const projectTasks = [];
-  const legacyNames = new Set(legacyTasks.map(t => t.name));
-  for (const [key, proj] of Object.entries(config.projects || {})) {
-    for (const t of (proj.heartbeat_tasks || [])) {
-      if (legacyNames.has(t.name)) log('WARN', `Duplicate task name "${t.name}" in project "${key}" and legacy heartbeat — will run twice`);
-      projectTasks.push({ ...t, _project: { key, name: proj.name || key, color: proj.color || 'blue', icon: proj.icon || '🤖' } });
-    }
-  }
-  const tasks = [...legacyTasks, ...projectTasks];
+  const { all: tasks } = getAllTasks(config);
 
   const enabledTasks = tasks.filter(t => t.enabled !== false);
   const checkIntervalSec = (config.daemon && config.daemon.heartbeat_check_interval) || 60;
@@ -2272,22 +2294,25 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
   }
 
   if (text === '/tasks') {
+    const { general, project } = getAllTasks(config);
     let msg = '';
-    // Legacy flat tasks
-    const legacyTasks = (config.heartbeat && config.heartbeat.tasks) || [];
-    if (legacyTasks.length > 0) {
+    if (general.length > 0) {
       msg += '📋 General:\n';
-      for (const t of legacyTasks) {
+      for (const t of general) {
         const ts = state.tasks[t.name] || {};
         msg += `${t.enabled !== false ? '✅' : '⏸'} ${t.name} (${t.interval}) ${ts.status || 'never_run'}\n`;
       }
     }
-    // Project tasks grouped
-    for (const [, proj] of Object.entries(config.projects || {})) {
-      const pTasks = proj.heartbeat_tasks || [];
-      if (pTasks.length === 0) continue;
-      msg += `\n${proj.icon || '🤖'} ${proj.name || proj}:\n`;
-      for (const t of pTasks) {
+    // Project tasks grouped by _project
+    const byProject = new Map();
+    for (const t of project) {
+      const pk = t._project.key;
+      if (!byProject.has(pk)) byProject.set(pk, { proj: t._project, tasks: [] });
+      byProject.get(pk).tasks.push(t);
+    }
+    for (const [, { proj, tasks }] of byProject) {
+      msg += `\n${proj.icon} ${proj.name}:\n`;
+      for (const t of tasks) {
         const ts = state.tasks[t.name] || {};
         msg += `${t.enabled !== false ? '✅' : '⏸'} ${t.name} (${t.interval}) ${ts.status || 'never_run'}\n`;
       }
@@ -2406,13 +2431,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       return;
     }
     const taskName = text.slice(5).trim();
-    const allRunTasks = [...(config.heartbeat && config.heartbeat.tasks || [])];
-    for (const [key, proj] of Object.entries(config.projects || {})) {
-      for (const t of (proj.heartbeat_tasks || [])) {
-        allRunTasks.push({ ...t, _project: { key, name: proj.name || key, color: proj.color || 'blue', icon: proj.icon || '🤖' } });
-      }
-    }
-    const task = allRunTasks.find(t => t.name === taskName);
+    const task = findTask(config, taskName);
     if (!task) { await bot.sendMessage(chatId, `❌ Task "${taskName}" not found`); return; }
 
     // Script tasks: quick, run inline
@@ -4616,14 +4635,7 @@ async function main() {
 
   // Task executor lookup (always reads fresh config)
   function executeTaskByName(name) {
-    const legacy = (config.heartbeat && config.heartbeat.tasks) || [];
-    let task = legacy.find(t => t.name === name);
-    if (!task) {
-      for (const [key, proj] of Object.entries(config.projects || {})) {
-        const found = (proj.heartbeat_tasks || []).find(t => t.name === name);
-        if (found) { task = { ...found, _project: { key, name: proj.name || key, color: proj.color || 'blue', icon: proj.icon || '🤖' } }; break; }
-      }
-    }
+    const task = findTask(config, name);
     if (!task) return { success: false, error: `Task "${name}" not found` };
     return executeTask(task, config);
   }
@@ -4702,9 +4714,8 @@ async function main() {
     refreshLogMaxSize(config);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     heartbeatTimer = startHeartbeat(config, notifyFn);
-    const legacyCount = (config.heartbeat && config.heartbeat.tasks || []).length;
-    const projectCount = Object.values(config.projects || {}).reduce((n, p) => n + (p.heartbeat_tasks || []).length, 0);
-    const totalCount = legacyCount + projectCount;
+    const { general, project } = getAllTasks(config);
+    const totalCount = general.length + project.length;
     log('INFO', `Config reloaded: ${totalCount} tasks (${projectCount} in projects)`);
     return { success: true, tasks: totalCount };
   }
@@ -4813,11 +4824,11 @@ if (process.argv.includes('--run')) {
     process.exit(1);
   }
   const config = loadConfig();
-  const tasks = (config.heartbeat && config.heartbeat.tasks) || [];
-  const task = tasks.find(t => t.name === taskName);
+  const task = findTask(config, taskName);
   if (!task) {
+    const { all } = getAllTasks(config);
     console.error(`Task "${taskName}" not found in daemon.yaml`);
-    console.error(`Available: ${tasks.map(t => t.name).join(', ') || '(none)'}`);
+    console.error(`Available: ${all.map(t => t.name).join(', ') || '(none)'}`);
     process.exit(1);
   }
   const result = executeTask(task, config);
