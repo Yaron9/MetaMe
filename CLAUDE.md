@@ -182,10 +182,10 @@ V1 必须用于 `card.action.trigger` 回调（按钮点击）。V2 支持更丰
 **根因**：`handleCommand` 调 `askClaude` 漏传参数 → ReferenceError → 被 `.catch(() => {})` 吞掉。
 **教训**：核心函数新增参数时，必须同时更新所有调用处。adapter 的 `.catch(() => {})` 会静默吞异常。
 
-### 坑2: 飞书卡片 V2 header text_size 合法值只有两个
-**症状**：卡片发送失败回退为纯文本，日志报 `status code 400`，错误码 230099，`header text_size invalid`。
-**根因**：V2 header title 的 `text_size` **只有 `heading` 和 `normal` 两个合法值**，其余全部 400（包括 x-large、heading-0、heading-1、display、large 等）。`text_size` 必须放在 `header.title` 对象内，不是 `header` 层。
-**教训**：`heading` 是 V2 header 允许的最大字号，无法再大。遇到字段报错先写测试脚本穷举合法值，不要凭猜测反复改代码。
+### 坑2: 飞书卡片 V2 text_size 放错位置
+**症状**：`text_size` 放在 header 上 → 400 报错；放在 body plain_text 上 → 无效果，字体仍然小。
+**根因**：V2 header **不支持** `text_size` 字段（放上去直接 400）。`text_size` 只在 **body 的 markdown 元素**上生效，plain_text 上无效。正确写法：`{ tag: 'markdown', content: c, text_size: 'x-large' }`。
+**教训**：text_size 属于 body markdown 元素，不属于 header 也不属于 plain_text。查历史代码比猜测更高效。
 
 ### 坑3: daemon 不重启 — 非 daemon.js 文件变化不触发
 **症状**：改了 feishu-adapter.js 并 sync 到 ~/.metame/，`/reload` 后不生效。
