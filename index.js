@@ -434,7 +434,7 @@ Tell the user: *"You now have multiple AI agents that can collaborate. Here's ho
 
 - **Available agents** are configured in \`~/.metame/daemon.yaml\` under \`projects:\`. Each project maps to an agent with its own working directory and Claude session.
 
-- **To add a new agent:** Send \`/bind <project_key> <working_directory>\` from any chat. This creates a new project and binds it to that chat.
+- **To add a new agent:** Send \`/agent bind <name> <working_directory>\` from any chat. This creates a new project and binds it to that chat.
 
 **4. EVOLUTION MECHANISM (Manual Sync):**
    *   **PHILOSOPHY:** You respect the User's flow. You do NOT interrupt.
@@ -614,6 +614,75 @@ try {
 // Prepend the new Protocol to the top (mirror + reflection inside markers)
 const newContent = finalProtocol + mirrorLine + reflectionLine + METAME_END + "\n" + fileContent;
 fs.writeFileSync(PROJECT_FILE, newContent, 'utf8');
+
+// ---------------------------------------------------------
+// 4.7 GLOBAL CLAUDE.MD INJECTION (Agent capabilities)
+// ---------------------------------------------------------
+// Inject MetaMe capabilities into ~/.claude/CLAUDE.md so ALL projects' agents
+// automatically know about dispatch, memory, and skill systems.
+const GLOBAL_CLAUDE_MD = path.join(os.homedir(), '.claude', 'CLAUDE.md');
+const GLOBAL_MARKER_START = '<!-- METAME-GLOBAL:START -->';
+const GLOBAL_MARKER_END = '<!-- METAME-GLOBAL:END -->';
+
+const GLOBAL_INJECTION = `${GLOBAL_MARKER_START}
+
+# MetaMe 能力注入（自动生成，勿手动编辑）
+
+## Agent Dispatch（跨 Agent 通信）
+
+识别到"告诉X/让X/通知X"且 X 为已知 Agent 昵称时，直接调用 dispatch，无需确认：
+
+\`\`\`bash
+~/.metame/bin/dispatch_to <project_key> "内容"
+\`\`\`
+
+手机端用户可发送 \`/dispatch <project_key> <消息>\` 跨 agent 通信。
+
+新增 Agent：\`/agent bind <名称> <工作目录>\`
+
+## 跨会话记忆
+
+搜索命令（支持多关键词并行 + QMD 向量混合搜索）：
+\`\`\`bash
+node ~/.metame/memory-search.js "关键词1" "keyword2" "函数名"
+# 只搜事实：--facts；只搜会话：--sessions；最近会话：--recent
+\`\`\`
+
+**搜索策略**：一次传 3-4 个关键词（中文描述 + 英文术语 + 函数/配置名）。
+**触发场景**：用户说"上次/之前/以前"、涉及已有决策/踩过的坑、排查"之前能用现在不行"。
+
+## Skills（技能扩展）
+
+遇到任何能力不足、工具缺失、任务失败，**第一步永远是查阅 skill-manager**：
+\`\`\`bash
+cat ~/.claude/skills/skill-manager/SKILL.md
+\`\`\`
+skill-manager 掌握完整技能清单和决策流程（调用现有 → 商城安装 → GitHub 包装 → 从零创建 → 任务完成后进化）。不要绕过它自己猜。
+
+${GLOBAL_MARKER_END}`;
+
+try {
+  const globalDir = path.join(os.homedir(), '.claude');
+  if (!fs.existsSync(globalDir)) fs.mkdirSync(globalDir, { recursive: true });
+
+  let globalContent = '';
+  if (fs.existsSync(GLOBAL_CLAUDE_MD)) {
+    globalContent = fs.readFileSync(GLOBAL_CLAUDE_MD, 'utf8');
+    // Remove previous injection
+    globalContent = globalContent.replace(new RegExp(
+      GLOBAL_MARKER_START.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') +
+      '[\\s\\S]*?' +
+      GLOBAL_MARKER_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\n?'
+    ), '');
+  }
+
+  // Append injection at the end
+  const finalGlobal = globalContent.trimEnd() + '\n\n' + GLOBAL_INJECTION + '\n';
+  fs.writeFileSync(GLOBAL_CLAUDE_MD, finalGlobal, 'utf8');
+} catch (e) {
+  // Non-fatal: global CLAUDE.md injection is best-effort
+  console.error(`⚠️ Failed to inject global CLAUDE.md: ${e.message}`);
+}
 
 console.log("🔮 MetaMe: Link Established.");
 console.log("🧬 Protocol: Dynamic Handshake Active");
