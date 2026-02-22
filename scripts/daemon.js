@@ -1129,7 +1129,7 @@ async function startTelegramBridge(config, executeTaskByName) {
           const isBindCmd = trimmedText && (trimmedText.startsWith('/bind') || trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
           if (!allowedIds.includes(chatId) && !isBindCmd) {
             log('WARN', `Rejected message from unauthorized chat: ${chatId}`);
-            bot.sendMessage(chatId, `⚠️ This chat is not authorized.\n\nCopy and send this command to register:\n\n/agent bind personal ~/`).catch(() => {});
+            bot.sendMessage(chatId, `⚠️ This chat is not authorized.\n\nCopy and send this command to register:\n\n/agent bind personal`).catch(() => {});
             continue;
           }
 
@@ -4613,7 +4613,7 @@ async function startFeishuBridge(config, executeTaskByName) {
       const isBindCmd = trimmedText && (trimmedText.startsWith('/bind') || trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
       if (!allowedIds.includes(chatId) && !isBindCmd) {
         log('WARN', `Feishu: rejected message from ${chatId}`);
-        (bot.sendMarkdown ? bot.sendMarkdown(chatId, `⚠️ **此会话未授权**\n\n复制下方命令发送即可注册：\n\`\`\`\n/agent bind personal ~/\n\`\`\``) : bot.sendMessage(chatId, `⚠️ 此会话未授权。\n\n复制下方命令发送即可注册：\n/agent bind personal ~/`)).catch(() => {});
+        (bot.sendMarkdown ? bot.sendMarkdown(chatId, `⚠️ **此会话未授权**\n\n复制下方命令发送即可注册：\n\`\`\`\n/agent bind personal\n\`\`\``) : bot.sendMessage(chatId, `⚠️ 此会话未授权。\n\n复制下方命令发送即可注册：\n/agent bind personal`)).catch(() => {});
         return;
       }
 
