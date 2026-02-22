@@ -82,14 +82,14 @@ async function distill() {
   }
 
   try {
-    // 3. Parse signals (preserve confidence from signal-capture)
+    // 3. Parse signals (preserve confidence + type from signal-capture)
     const signals = [];
     let highConfidenceCount = 0;
     for (const line of lines) {
       try {
         const entry = JSON.parse(line);
         if (entry.prompt) {
-          signals.push(entry.prompt);
+          signals.push({ text: entry.prompt, type: entry.type || 'implicit' });
           if (entry.confidence === 'high') highConfidenceCount++;
         }
       } catch {
@@ -169,17 +169,23 @@ async function distill() {
       budgetForMessages = availableForContent;
     }
 
+    // Format signals: tag metacognitive signals so Haiku treats them differently
+    const formatSignal = (s, i) => {
+      const tag = s.type === 'metacognitive' ? ' [META]' : '';
+      return `${i + 1}. "${s.text}"${tag}`;
+    };
+
     // Truncate user messages to fit budget (keep most recent, they're more relevant)
     let truncatedSignals = signals;
-    let userMessages = signals.map((s, i) => `${i + 1}. "${s}"`).join('\n');
+    let userMessages = signals.map(formatSignal).join('\n');
     if (estimateTokens(userMessages) > budgetForMessages) {
       // Drop oldest messages until we fit
       while (truncatedSignals.length > 1 && estimateTokens(
-        truncatedSignals.map((s, i) => `${i + 1}. "${s}"`).join('\n')
+        truncatedSignals.map(formatSignal).join('\n')
       ) > budgetForMessages) {
         truncatedSignals = truncatedSignals.slice(1);
       }
-      userMessages = truncatedSignals.map((s, i) => `${i + 1}. "${s}"`).join('\n');
+      userMessages = truncatedSignals.map(formatSignal).join('\n');
     }
 
     const distillPrompt = `You are a MetaMe cognitive profile distiller. Extract COGNITIVE TRAITS and PREFERENCES — how the user thinks, decides, and communicates. NOT a memory system. Do NOT store facts.
@@ -201,6 +207,7 @@ RULES:
 3. Only output fields from WRITABLE FIELDS. Any other key will be rejected.
 4. For enum fields, use one of the listed values.
 5. Strong directives (以后一律/always/never/from now on) → _confidence: high. Otherwise: normal.
+6. Messages tagged [META] are metacognitive signals (self-reflection, strategy shifts, error awareness). These are HIGH VALUE for cognition fields — extract decision_style, self_awareness, and behavioral patterns from them.
 7. Add _confidence and _source blocks mapping field keys to confidence level and triggering quote.
 8. NEVER extract agent identity or role definitions. Messages like "你是贾维斯/你的角色是.../you are Jarvis" define the AGENT, not the USER. The profile is about the USER's cognition only.
 
