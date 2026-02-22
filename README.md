@@ -298,7 +298,8 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 | `/new` | Start new session (project picker) |
 | `/resume` | Pick from session list |
 | `/stop` | Interrupt current task (ESC) |
-| `/undo` | Rollback with file restoration |
+| `/undo` | Show recent messages as buttons — tap to roll back context + code to before that message |
+| `/undo <hash>` | Roll back to a specific git checkpoint |
 | `/list` | Browse & download project files |
 | `/model` | Switch model (sonnet/opus/haiku) |
 | `/agent bind <name> [dir]` | Register group as dedicated agent |
