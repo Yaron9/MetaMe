@@ -1126,9 +1126,10 @@ async function startTelegramBridge(config, executeTaskByName) {
           // Exception: /bind and /agent bind/new are allowed from any chat so users can self-register new groups
           const allowedIds = (loadConfig().telegram && loadConfig().telegram.allowed_chat_ids) || [];
           const trimmedText = msg.text && msg.text.trim();
-          const isBindCmd = trimmedText && (trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
+          const isBindCmd = trimmedText && (trimmedText.startsWith('/bind') || trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
           if (!allowedIds.includes(chatId) && !isBindCmd) {
             log('WARN', `Rejected message from unauthorized chat: ${chatId}`);
+            bot.sendMessage(chatId, `⚠️ This chat (ID: ${chatId}) is not authorized.\n\nTo get started, send:\n/bind personal ~/\n\nThis will register this chat and bind it to your home directory.`).catch(() => {});
             continue;
           }
 
@@ -1995,6 +1996,11 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       }
       return;
     }
+  }
+
+  // /bind <name> [cwd] → alias for /agent bind <name> [cwd]
+  if (text === '/bind' || text.startsWith('/bind ')) {
+    text = '/agent bind' + text.slice(5);
   }
 
   if (text === '/agent' || text.startsWith('/agent ')) {
@@ -4604,9 +4610,10 @@ async function startFeishuBridge(config, executeTaskByName) {
       const liveCfg = loadConfig();
       const allowedIds = (liveCfg.feishu && liveCfg.feishu.allowed_chat_ids) || [];
       const trimmedText = text && text.trim();
-      const isBindCmd = trimmedText && (trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
+      const isBindCmd = trimmedText && (trimmedText.startsWith('/bind') || trimmedText.startsWith('/agent bind') || trimmedText.startsWith('/agent new'));
       if (!allowedIds.includes(chatId) && !isBindCmd) {
         log('WARN', `Feishu: rejected message from ${chatId}`);
+        bot.sendMessage(chatId, `⚠️ 此会话 (ID: ${chatId}) 未授权。\n\n发送以下命令注册：\n/bind personal ~/\n\n这会将此会话绑定到你的主目录。`).catch(() => {});
         return;
       }
 

@@ -205,6 +205,8 @@ metame daemon install-launchd   # Auto-start on boot + crash recovery
 
 Done. Open Telegram, message your bot.
 
+> **First message?** New chats aren't whitelisted yet. The bot will reply with a one-step setup command — just send `/bind personal ~/` and you're in.
+
 ---
 
 ## Core Capabilities
@@ -341,7 +343,7 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 ## Security
 
 - All data stays on your machine. No cloud, no telemetry.
-- `allowed_chat_ids` whitelist — unauthorized users are silently ignored.
+- `allowed_chat_ids` whitelist — unauthorized users get a one-step `/bind` guide instead of silent rejection.
 - `operator_ids` for shared groups — non-operators get read-only mode.
 - `~/.metame/` directory is mode 700.
 - Bot tokens stored locally, never transmitted.
