@@ -1,0 +1,6 @@
+[    1109ms] [ERROR] Failed to load resource: the server responded with a status of 401 () @ https://internal-api-lark-api.feishu.cn/accounts/web/user?app_id=12&_t=1771734430168:0
+[    1110ms] [ERROR] [UNID BIZ] getAuthInfoV2 failed! Error: /accounts/web/user Request failed with status code 401
+    at https://lf-package-cn.feishucdn.com/obj/feishu-static/lark/open/doc/frontend/js/vendors-fcd1ddc3-dd8a1ab0.js:2:155051
+    at async Object.init (https://lf-package-cn.feishucdn.com/obj/feishu-static/lark/open/doc/frontend/js/base-9dfe58fa.js:2:375875) @ https://lf-package-cn.feishucdn.com/obj/feishu-static/lark/open/doc/frontend/js/base-9dfe58fa.js:1
+[    1660ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_CLOSED @ https://stats.g.doubleclick.net/g/collect?v=2&tid=G-VPYRHN104D&cid=1925884286.1771517539&gtm=45je62i1v882522221z8831223697za20gzb831223697zd831223697&aip=1&dma=0&gcd=13l3l3l3l1l1&npa=0&frm=0&tag_exp=103116026~103200004~104527907~104528500~104684208~104684211~115938466~115938468~117455676~117455678:0
+[    2299ms] [ERROR] Failed to load resource: the server responded with a status of 401 () @ https://internal-api-lark-api.feishu.cn/im/gateway/:0

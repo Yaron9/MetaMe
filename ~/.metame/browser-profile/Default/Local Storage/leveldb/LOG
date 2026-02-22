@@ -1,3 +1,8 @@
-2026/02/20-00:14:30.639 bb2fc8 Reusing MANIFEST /Users/yaron/AGI/MetaMe/~/.metame/browser-profile/Default/Local Storage/leveldb/MANIFEST-000001
-2026/02/20-00:14:30.640 bb2fc8 Recovering log #3
-2026/02/20-00:14:30.640 bb2fc8 Reusing old log /Users/yaron/AGI/MetaMe/~/.metame/browser-profile/Default/Local Storage/leveldb/000003.log 
+2026/02/22-12:27:08.908 193bb3 Reusing MANIFEST /Users/yaron/AGI/MetaMe/~/.metame/browser-profile/Default/Local Storage/leveldb/MANIFEST-000001
+2026/02/22-12:27:08.911 193bb3 Recovering log #3
+2026/02/22-12:27:08.911 193bb3 Level-0 table #3: started
+2026/02/22-12:27:08.916 193bb3 Level-0 table #3: 25954 bytes OK
+2026/02/22-12:27:08.919 193bb3 Delete type=0 #3
+2026/02/22-12:28:08.247 193bb3 Level-0 table #6: started
+2026/02/22-12:28:08.253 193bb3 Level-0 table #6: 346206 bytes OK
+2026/02/22-12:28:08.258 193bb3 Delete type=0 #4
