@@ -100,9 +100,12 @@ function createBot(config) {
     async editMessage(chatId, messageId, text) {
       if (this._editBroken) return false;
       try {
+        // Feishu patch API only works on card (interactive) messages
+        // Update card content with markdown element
+        const card = { schema: '2.0', body: { elements: [{ tag: 'markdown', content: text }] } };
         await withTimeout(client.im.message.patch({
           path: { message_id: messageId },
-          data: { content: JSON.stringify({ text }) },
+          data: { content: JSON.stringify(card) },
         }));
         return true;
       } catch (e) {

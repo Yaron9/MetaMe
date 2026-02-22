@@ -4245,7 +4245,7 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
   // Send a single status message, updated in-place, deleted on completion
   let statusMsgId = null;
   try {
-    const msg = await bot.sendMessage(chatId, '🤔');
+    const msg = await (bot.sendMarkdown ? bot.sendMarkdown(chatId, '🤔') : bot.sendMessage(chatId, '🤔'));
     if (msg && msg.message_id) statusMsgId = msg.message_id;
   } catch (e) {
     log('ERROR', `Failed to send ack to ${chatId}: ${e.message}`);
