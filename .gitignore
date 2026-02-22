@@ -12,3 +12,8 @@ ROADMAP_PHASE_B.md
 
 # Playwright MCP console logs
 .playwright-mcp/
+
+# Local working dirs
+docs/
+tasks/
+upload/
