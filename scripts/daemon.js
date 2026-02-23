@@ -2638,35 +2638,6 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     return;
   }
 
-  // /npm login [token] — set npm auth via access token (mobile-friendly)
-  if (text === '/npm login' || text === '/npm-login' || text.startsWith('/npm login ') || text.startsWith('/npm-login ')) {
-    const token = text.replace(/^\/npm[ -]login\s*/, '').trim();
-    if (!token) {
-      await bot.sendMessage(chatId, '🔐 npm 登录（手机操作）\n\n' +
-        '1. 打开 https://www.npmjs.com/settings/tokens\n' +
-        '2. 点 Generate New Token → Classic Token\n' +
-        '3. 选 Publish，点 Generate\n' +
-        '4. 复制 token，发送：\n\n/npm login npm_xxxxxxxx');
-      return;
-    }
-    try {
-      const npmrc = path.join(HOME, '.npmrc');
-      let content = '';
-      try { content = fs.readFileSync(npmrc, 'utf8'); } catch {}
-      if (content.includes('//registry.npmjs.org/:_authToken=')) {
-        content = content.replace(/\/\/registry\.npmjs\.org\/:_authToken=.*/g, `//registry.npmjs.org/:_authToken=${token}`);
-      } else {
-        content = content.trimEnd() + `\n//registry.npmjs.org/:_authToken=${token}\n`;
-      }
-      fs.writeFileSync(npmrc, content, { mode: 0o600 });
-      const whoami = execSync('npm whoami 2>&1', { encoding: 'utf8', timeout: 10000 }).trim();
-      await bot.sendMessage(chatId, `✅ npm 已登录: ${whoami}`);
-    } catch (e) {
-      await bot.sendMessage(chatId, `❌ 登录失败，请检查 token 是否正确\n${(e.stdout || e.stderr || e.message || '').slice(0, 300)}`);
-    }
-    return;
-  }
-
   // /publish <otp> — npm publish with OTP (zero latency, no Claude)
   if (text.startsWith('/publish ')) {
     const otp = text.slice(9).trim();
