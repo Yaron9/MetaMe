@@ -172,40 +172,26 @@ Task fails → skill-scout finds a skill → installs → retries → succeeds
 
 ## Quick Start
 
-### Install
-
 ```bash
-# One-line install (includes Node.js + Claude Code if missing)
-curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
-
-# Or if you already have Claude Code
-npm install -g metame-cli
+npm install -g metame-cli && metame
 ```
 
-### First Run
+**3 minutes to full setup:**
 
-```bash
-metame
-```
+| Step | Command | What happens |
+|------|---------|-------------|
+| 1. Install & profile | `metame` | First run: cognitive interview → builds `~/.claude_profile.yaml` |
+| 2. Connect phone | Follow the setup wizard | Bot token + app credentials → `~/.metame/daemon.yaml` |
+| 3. Start daemon | `metame start` | Background daemon launches, bot goes online |
+| 4. Auto-start | `metame daemon install-launchd` | Survives reboot + crash recovery |
 
-On first launch, MetaMe runs a brief cognitive interview to build your profile. After that, it's automatic.
+**Create your first Agent:**
 
-### Enable Mobile Access
+1. Create a group chat in Telegram/Feishu, add your bot
+2. Send `/agent bind <name>` in the group (e.g. `/agent bind personal`)
+3. Pick a working directory from the buttons → done
 
-```bash
-metame daemon init    # Creates config with setup guide
-metame start          # Launches background daemon
-```
-
-Edit `~/.metame/daemon.yaml` with your Telegram bot token or Feishu app credentials, then:
-
-```bash
-metame daemon install-launchd   # Auto-start on boot + crash recovery
-```
-
-Done. Open Telegram, message your bot.
-
-> **First message?** New chats aren't whitelisted yet. The bot will reply with a one-step setup command — just send `/agent bind personal ~/` and you're in.
+> Want more Agents? Repeat: new group → add bot → `/agent bind <name>`. Each group = independent AI workspace.
 
 ---
 

@@ -174,45 +174,26 @@ MetaMe 的技能不是静态配置——它们会生长。
 
 ## 快速开始
 
-### 安装
-
 ```bash
-# 一键安装（自动装 Node.js + Claude Code）
-curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
-
-# 已有 Claude Code 的话
-npm install -g metame-cli
+npm install -g metame-cli && metame
 ```
 
-Windows（PowerShell）：
-```powershell
-irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
-```
+**3 分钟完成全部设置：**
 
-### 首次运行
+| 步骤 | 命令 | 说明 |
+|------|------|------|
+| 1. 安装 & 画像 | `metame` | 首次运行：认知访谈 → 生成 `~/.claude_profile.yaml` |
+| 2. 连接手机 | 跟随设置向导 | 填入 Bot Token / 飞书凭证 → `~/.metame/daemon.yaml` |
+| 3. 启动 daemon | `metame start` | 后台 daemon 启动，bot 上线 |
+| 4. 开机自启 | `metame daemon install-launchd` | 重启不丢、崩溃自恢复 |
 
-```bash
-metame
-```
+**建立你的第一个 Agent：**
 
-第一次启动会做一个简短的认知访谈来构建你的画像，之后全自动。
+1. 在 Telegram/飞书创建一个群聊，把 bot 拉进去
+2. 在群里发 `/agent bind <名称>`（如 `/agent bind personal`）
+3. 点按钮选工作目录 → 完成
 
-### 开启手机控制
-
-```bash
-metame daemon init    # 生成配置文件 + 设置指引
-metame start          # 启动后台 daemon
-```
-
-在 `~/.metame/daemon.yaml` 填入 Telegram Bot Token 或飞书应用凭证，然后：
-
-```bash
-metame daemon install-launchd   # 开机自启 + 崩溃重启
-```
-
-完事。打开 Telegram，给你的 bot 发消息。
-
-> **第一条消息？** 新会话还没加白名单，bot 会自动回复引导——发 `/agent bind personal ~/` 即可一步完成注册。
+> 想要更多 Agent？重复以上流程即可：新建群 → 加 bot → `/agent bind <名称>`。每个群 = 独立 AI 工作区。
 
 ---
 
