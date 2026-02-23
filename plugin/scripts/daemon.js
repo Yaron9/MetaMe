@@ -84,6 +84,12 @@ const { createExecCommandHandler } = require('./daemon-exec-commands');
 const { createOpsCommandHandler } = require('./daemon-ops-commands');
 const { createAgentCommandHandler } = require('./daemon-agent-commands');
 const { createSessionCommandHandler } = require('./daemon-session-commands');
+const { createSessionStore } = require('./daemon-session-store');
+const { createCheckpointUtils } = require('./daemon-checkpoints');
+const { createBridgeStarter } = require('./daemon-bridges');
+const { createFileBrowser } = require('./daemon-file-browser');
+const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lifecycle');
+const { createNotifier } = require('./daemon-notify');
 if (!yaml) {
   console.error('Cannot find js-yaml module. Ensure metame-cli is installed.');
   process.exit(1);
@@ -137,6 +143,14 @@ function log(level, msg) {
     process.stdout.write(line);
   }
 }
+
+const {
+  cpExtractTimestamp,
+  cpDisplayLabel,
+  gitCheckpoint,
+  listCheckpoints,
+  cleanupCheckpoints,
+} = createCheckpointUtils({ execSync, path, log });
 
 // ---------------------------------------------------------
 // CONFIG & STATE
@@ -1096,148 +1110,6 @@ function startHeartbeat(config, notifyFn) {
   return timer;
 }
 
-// ---------------------------------------------------------
-// TELEGRAM BOT BRIDGE
-// ---------------------------------------------------------
-async function startTelegramBridge(config, executeTaskByName) {
-  if (!config.telegram || !config.telegram.enabled) return null;
-  if (!config.telegram.bot_token) {
-    log('WARN', 'Telegram enabled but no bot_token configured');
-    return null;
-  }
-
-  const { createBot } = require(path.join(__dirname, 'telegram-adapter.js'));
-  const bot = createBot(config.telegram.bot_token);
-  // allowedIds read dynamically per-message to support hot-reload of daemon.yaml
-
-  // Verify bot
-  try {
-    const me = await bot.getMe();
-    log('INFO', `Telegram bot connected: @${me.username}`);
-  } catch (e) {
-    log('ERROR', `Telegram bot auth failed: ${e.message}`);
-    return null;
-  }
-
-  let offset = 0;
-  let running = true;
-  const abortController = new AbortController();
-
-  const pollLoop = async () => {
-    while (running) {
-      try {
-        const updates = await bot.getUpdates(offset, 30, abortController.signal);
-        for (const update of updates) {
-          offset = update.update_id + 1;
-
-          // Handle inline keyboard button presses
-          if (update.callback_query) {
-            const cb = update.callback_query;
-            const chatId = cb.message && cb.message.chat.id;
-            bot.answerCallback(cb.id).catch(() => { });
-            if (chatId && cb.data) {
-              const allowedIds = (loadConfig().telegram && loadConfig().telegram.allowed_chat_ids) || [];
-              if (!allowedIds.includes(chatId)) continue;
-              // Fire-and-forget: don't block poll loop (enables message queue)
-              handleCommand(bot, chatId, cb.data, config, executeTaskByName).catch(e => {
-                log('ERROR', `Telegram callback handler error: ${e.message}`);
-              });
-            }
-            continue;
-          }
-
-          if (!update.message) continue;
-
-          const msg = update.message;
-          const chatId = msg.chat.id;
-
-          // Security: check whitelist (empty = deny all) — read live config to support hot-reload
-          // Exception: /agent bind/new and bind flow callbacks are allowed from any chat for self-registration
-          const allowedIds = (loadConfig().telegram && loadConfig().telegram.allowed_chat_ids) || [];
-          const trimmedText = msg.text && msg.text.trim();
-          const isBindCmd = trimmedText && (
-            trimmedText.startsWith('/agent bind')
-            || trimmedText.startsWith('/agent new')
-            || trimmedText.startsWith('/agent-bind-dir')
-            || trimmedText.startsWith('/browse bind')
-          );
-          if (!allowedIds.includes(chatId) && !isBindCmd) {
-            log('WARN', `Rejected message from unauthorized chat: ${chatId}`);
-            bot.sendMessage(chatId, `⚠️ This chat is not authorized.\n\nCopy and send this command to register:\n\n/agent bind personal`).catch(() => {});
-            continue;
-          }
-
-          // Voice/audio without text → hint user
-          if ((msg.voice || msg.audio) && !msg.text) {
-            await bot.sendMessage(chatId, '🎤 Use Telegram voice-to-text (long press → Transcribe), then send as text.');
-            continue;
-          }
-
-          // File/document message → download and pass to Claude
-          if (msg.document || msg.photo) {
-            const fileId = msg.document ? msg.document.file_id : msg.photo[msg.photo.length - 1].file_id;
-            const fileName = msg.document ? msg.document.file_name : `photo_${Date.now()}.jpg`;
-            const caption = msg.caption || '';
-
-            // Save to project's upload/ folder
-            const session = getSession(chatId);
-            const cwd = session?.cwd || HOME;
-            const uploadDir = path.join(cwd, 'upload');
-            if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-            const destPath = path.join(uploadDir, fileName);
-
-            try {
-              await bot.downloadFile(fileId, destPath);
-              await bot.sendMessage(chatId, `📥 Saved: ${fileName}`);
-
-              // Build prompt - don't ask Claude to read large files automatically
-              const prompt = caption
-                ? `User uploaded a file to the project: ${destPath}\nUser says: "${caption}"`
-                : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
-
-              // Fire-and-forget: don't block poll loop (enables message queue)
-              handleCommand(bot, chatId, prompt, config, executeTaskByName).catch(e => {
-                log('ERROR', `Telegram file handler error: ${e.message}`);
-              });
-            } catch (err) {
-              log('ERROR', `File download failed: ${err.message}`);
-              await bot.sendMessage(chatId, `❌ Download failed: ${err.message}`);
-            }
-            continue;
-          }
-
-          // Text message (commands or natural language)
-          if (msg.text) {
-            // Fire-and-forget: don't block poll loop (enables message queue)
-            handleCommand(bot, chatId, msg.text.trim(), config, executeTaskByName).catch(e => {
-              log('ERROR', `Telegram handler error: ${e.message}`);
-            });
-          }
-        }
-      } catch (e) {
-        if (e.message === 'aborted') break; // clean stop requested, exit loop
-        log('ERROR', `Telegram poll error: ${e.message}`);
-        // Wait before retry
-        await sleep(5000);
-      }
-    }
-  };
-
-  const startPoll = () => {
-    pollLoop().catch(e => {
-      if (e.message === 'aborted') return; // clean stop, no need to restart
-      log('ERROR', `pollLoop crashed: ${e.message} — restarting in 5s`);
-      if (running) setTimeout(startPoll, 5000);
-    });
-  };
-  startPoll();
-
-  return {
-    stop() { running = false; abortController.abort(); }, // cancel in-flight request immediately
-    bot,
-  };
-}
-
 // ── Timing constants ─────────────────────────────────────────────────────────
 const CLAUDE_COOLDOWN_MS = 10000; // 10s between Claude calls per chat
 const STATUS_THROTTLE_MS = 3000;  // Min 3s between streaming status updates
@@ -1261,13 +1133,21 @@ function checkCooldown(chatId) {
 
 // Path shortener — imported from ./utils
 const { shortenPath, expandPath } = createPathMap();
-
-/**
- * Normalize a directory path: expand shortcuts and resolve ~
- */
-function normalizeCwd(p) {
-  return expandPath(p).replace(/^~/, HOME);
-}
+const {
+  normalizeCwd,
+  isContentFile,
+  getCachedFile,
+  sendFileButtons,
+  sendDirPicker,
+  sendBrowse,
+  sendDirListing,
+} = createFileBrowser({
+  fs,
+  path,
+  HOME,
+  shortenPath,
+  expandPath,
+});
 
 /**
  * Parse [[FILE:...]] markers from Claude output.
@@ -1293,20 +1173,6 @@ function mergeFileCollections(markedFiles, sourceFiles) {
 }
 
 /**
- * Send file download buttons for a set of file paths.
- */
-async function sendFileButtons(bot, chatId, files) {
-  if (!bot.sendButtons || files.size === 0) return;
-  const validFiles = [...files].filter(f => fs.existsSync(f));
-  if (validFiles.length === 0) return;
-  const buttons = validFiles.map(filePath => {
-    const shortId = cacheFile(filePath);
-    return [{ text: `📎 ${path.basename(filePath)}`, callback_data: `/file ${shortId}` }];
-  });
-  await bot.sendButtons(chatId, '📂 文件:', buttons);
-}
-
-/**
  * Attach chatId to the most recent session in projCwd, or create a new one.
  */
 function attachOrCreateSession(chatId, projCwd, name) {
@@ -1324,170 +1190,6 @@ function attachOrCreateSession(chatId, projCwd, name) {
   const newSess = createSession(chatId, projCwd, name || '');
   state.sessions[chatId] = { id: newSess.id, cwd: projCwd, started: false };
   saveState(state);
-}
-
-/**
- * Send directory picker: recent projects + Browse button
- * @param {string} mode - 'new' or 'cd' (determines callback command)
- */
-async function sendDirPicker(bot, chatId, mode, title) {
-  // Always open the file browser starting from HOME — Finder-style navigation
-  await sendBrowse(bot, chatId, mode, HOME, title);
-}
-
-/**
- * Send directory browser: Finder-style navigation
- * - Clicking a subdir ALWAYS navigates into it (never immediate select)
- * - "✓ 选择此目录" button at top confirms the current dir
- * - Shows up to 12 subdirs per page with pagination
- */
-async function sendBrowse(bot, chatId, mode, dirPath, title, page = 0) {
-  const cmd = mode === 'new' ? '/new' : mode === 'bind' ? '/agent-bind-dir' : mode === 'agent-new' ? '/agent-dir' : '/cd';
-  const PAGE_SIZE = 10;
-  try {
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-    const subdirs = entries
-      .filter(e => e.isDirectory() && !e.name.startsWith('.'))
-      .map(e => e.name)
-      .sort();
-
-    const totalPages = Math.ceil(subdirs.length / PAGE_SIZE);
-    const pageSubdirs = subdirs.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-    const parent = path.dirname(dirPath);
-    const displayPath = dirPath.replace(HOME, '~');
-
-    if (bot.sendButtons) {
-      const buttons = [];
-      // ✓ Confirm current dir
-      buttons.push([{ text: `✓ 选择「${displayPath}」`, callback_data: `${cmd} ${shortenPath(dirPath)}` }]);
-      // Subdirectories — click = navigate in
-      for (const name of pageSubdirs) {
-        const full = path.join(dirPath, name);
-        buttons.push([{ text: `📁 ${name}`, callback_data: `/browse ${mode} ${shortenPath(full)}` }]);
-      }
-      // Pagination
-      const nav = [];
-      if (page > 0) nav.push({ text: '← 上页', callback_data: `/browse ${mode} ${shortenPath(dirPath)} ${page - 1}` });
-      if (page < totalPages - 1) nav.push({ text: '下页 →', callback_data: `/browse ${mode} ${shortenPath(dirPath)} ${page + 1}` });
-      if (nav.length) buttons.push(nav);
-      // Parent dir
-      if (parent !== dirPath) {
-        buttons.push([{ text: '⬆ 上级目录', callback_data: `/browse ${mode} ${shortenPath(parent)}` }]);
-      }
-      const header = title ? `${title}\n📂 ${displayPath}` : `📂 ${displayPath}`;
-      await bot.sendButtons(chatId, header, buttons);
-    } else {
-      let msg = `📂 ${displayPath}\n\n`;
-      pageSubdirs.forEach((name, i) => {
-        msg += `${page * PAGE_SIZE + i + 1}. ${name}/\n   /browse ${mode} ${path.join(dirPath, name)}\n`;
-      });
-      msg += `\n✓ 选择此目录: ${cmd} ${dirPath}`;
-      if (parent !== dirPath) msg += `\n⬆ 上级: /browse ${mode} ${parent}`;
-      await bot.sendMessage(chatId, msg);
-    }
-  } catch (e) {
-    await bot.sendMessage(chatId, `无法读取目录: ${dirPath}`);
-  }
-}
-
-const DIR_LIST_TYPE_EMOJI = {
-  '.md': '📄', '.txt': '📄', '.pdf': '📕',
-  '.js': '⚙️', '.ts': '⚙️', '.py': '🐍', '.json': '📋', '.yaml': '📋', '.yml': '📋',
-  '.png': '🖼️', '.jpg': '🖼️', '.jpeg': '🖼️', '.gif': '🖼️', '.svg': '🖼️', '.webp': '🖼️',
-  '.wav': '🎵', '.mp3': '🎵', '.m4a': '🎵', '.flac': '🎵',
-  '.mp4': '🎬', '.mov': '🎬',
-  '.csv': '📊', '.xlsx': '📊',
-  '.html': '🌐', '.css': '🎨',
-  '.sh': '💻', '.bash': '💻',
-};
-
-/**
- * List directory contents with file info + download buttons + folder nav buttons.
- * Zero token cost — pure daemon fs operation.
- */
-async function sendDirListing(bot, chatId, baseDir, arg) {
-  let targetDir = baseDir;
-  let globFilter = null;
-
-  if (arg) {
-    if (arg.includes('*')) {
-      globFilter = arg;
-    } else {
-      const sub = path.resolve(baseDir, arg);
-      if (fs.existsSync(sub) && fs.statSync(sub).isDirectory()) {
-        targetDir = sub;
-      } else {
-        await bot.sendMessage(chatId, `❌ Not found: ${arg}`);
-        return;
-      }
-    }
-  }
-
-  try {
-    let entries = fs.readdirSync(targetDir, { withFileTypes: true });
-    if (globFilter) {
-      const pattern = globFilter.replace(/\./g, '\\.').replace(/\*/g, '.*');
-      const re = new RegExp('^' + pattern + '$', 'i');
-      entries = entries.filter(e => re.test(e.name));
-    }
-    entries.sort((a, b) => {
-      if (a.isDirectory() && !b.isDirectory()) return -1;
-      if (!a.isDirectory() && b.isDirectory()) return 1;
-      return a.name.localeCompare(b.name);
-    });
-    entries = entries.filter(e => !e.name.startsWith('.'));
-
-    if (entries.length === 0) {
-      await bot.sendMessage(chatId, `📁 ${path.basename(targetDir)}/\n(empty)`);
-      return;
-    }
-
-    const allButtons = [];
-    const MAX_BUTTONS = 20;
-
-    for (const entry of entries.slice(0, MAX_BUTTONS)) {
-      const fullPath = path.join(targetDir, entry.name);
-      if (entry.isDirectory()) {
-        // Use absolute path directly for folders (survives daemon restart)
-        // Fall back to shortenPath only if path is too long for callback_data (64 byte limit)
-        const cbPath = fullPath.length <= 58 ? fullPath : shortenPath(fullPath);
-        allButtons.push([{ text: `📂 ${entry.name}/`, callback_data: `/list ${cbPath}` }]);
-      } else {
-        const ext = path.extname(entry.name).toLowerCase();
-        const emoji = DIR_LIST_TYPE_EMOJI[ext] || '📎';
-        let size = '';
-        try {
-          const stat = fs.statSync(fullPath);
-          const bytes = stat.size;
-          if (bytes < 1024) size = ` ${bytes}B`;
-          else if (bytes < 1048576) size = ` ${(bytes / 1024).toFixed(0)}KB`;
-          else size = ` ${(bytes / 1048576).toFixed(1)}MB`;
-        } catch { /* ignore */ }
-        if (isContentFile(fullPath)) {
-          const shortId = cacheFile(fullPath);
-          allButtons.push([{ text: `${emoji} ${entry.name}${size}`, callback_data: `/file ${shortId}` }]);
-        } else {
-          // Non-downloadable files shown as info-only buttons (no action)
-          allButtons.push([{ text: `${emoji} ${entry.name}${size}`, callback_data: 'noop' }]);
-        }
-      }
-    }
-
-    const header = `📁 ${path.basename(targetDir)}/` + (entries.length > MAX_BUTTONS ? ` (${MAX_BUTTONS}/${entries.length})` : '');
-    if (allButtons.length > 0 && bot.sendButtons) {
-      await bot.sendButtons(chatId, header, allButtons);
-    } else {
-      // Fallback for adapters without button support
-      const lines = [header];
-      for (const entry of entries.slice(0, MAX_BUTTONS)) {
-        const isDir = entry.isDirectory();
-        lines.push(isDir ? `  📂 ${entry.name}/` : `  📎 ${entry.name}`);
-      }
-      await bot.sendMessage(chatId, lines.join('\n'));
-    }
-  } catch (e) {
-    await bot.sendMessage(chatId, `❌ ${e.message}`);
-  }
 }
 
 /**
@@ -1753,476 +1455,32 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
 // ---------------------------------------------------------
 // SESSION MANAGEMENT (persistent Claude Code conversations)
 // ---------------------------------------------------------
-const crypto = require('crypto');
-const CLAUDE_PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
-
-/**
- * Find a session's .jsonl file by scanning Claude's native projects directory.
- * This avoids guessing the directory naming convention — we just search for the file.
- * Results cached for 30s to avoid repeated directory scans in loops.
- */
-const _sessionFileCache = new Map(); // sessionId -> { path, ts }
-function findSessionFile(sessionId) {
-  if (!sessionId || !fs.existsSync(CLAUDE_PROJECTS_DIR)) return null;
-  const cached = _sessionFileCache.get(sessionId);
-  if (cached && Date.now() - cached.ts < 30000) return cached.path;
-  const target = sessionId + '.jsonl';
-  try {
-    for (const proj of fs.readdirSync(CLAUDE_PROJECTS_DIR)) {
-      const candidate = path.join(CLAUDE_PROJECTS_DIR, proj, target);
-      if (fs.existsSync(candidate)) {
-        _sessionFileCache.set(sessionId, { path: candidate, ts: Date.now() });
-        return candidate;
-      }
-    }
-  } catch { /* ignore */ }
-  _sessionFileCache.set(sessionId, { path: null, ts: Date.now() });
-  return null;
-}
-
-function clearSessionFileCache(sessionId) {
-  if (!sessionId) return;
-  _sessionFileCache.delete(sessionId);
-}
-
-/**
- * Truncate the last conversation turn (user message + assistant response) from a session JSONL.
- * Finds the last {type:"user"} entry and removes it plus everything after.
- * Returns the number of lines removed, or 0 if nothing was truncated.
- */
-function truncateSessionLastTurn(sessionId) {
-  try {
-    const sessionFile = findSessionFile(sessionId);
-    if (!sessionFile) return 0;
-    const fileContent = fs.readFileSync(sessionFile, 'utf8');
-    const lines = fileContent.split('\n').filter(l => l.trim());
-    // Find the last user-type entry (walk backwards)
-    let cutIdx = -1;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const obj = JSON.parse(lines[i]);
-        if (obj.type === 'user') { cutIdx = i; break; }
-      } catch { /* skip malformed lines */ }
-    }
-    if (cutIdx <= 0) return 0; // nothing to cut (keep at least line 0)
-    const kept = lines.slice(0, cutIdx);
-    fs.writeFileSync(sessionFile, kept.join('\n') + '\n', 'utf8');
-    // Invalidate cache so next findSessionFile call re-reads fresh
-    _sessionFileCache.delete(sessionId);
-    const removed = lines.length - kept.length;
-    log('INFO', `truncateSessionLastTurn: removed ${removed} lines from ${path.basename(sessionFile)}`);
-    return removed;
-  } catch (e) {
-    log('WARN', `truncateSessionLastTurn failed: ${e.message}`);
-    return 0;
-  }
-}
-
-/**
- * Truncate session JSONL to the point before a given checkpoint (timestamp-based).
- * Used for /undo <hash> to handle multi-turn rollback correctly.
- * Falls back to truncateSessionLastTurn if timestamp parsing fails.
- */
-function truncateSessionToCheckpoint(sessionId, checkpointMessage) {
-  try {
-    const cpTs = cpExtractTimestamp(checkpointMessage);
-    const cpTime = cpTs ? new Date(cpTs).getTime() : 0;
-    if (!cpTime) return truncateSessionLastTurn(sessionId);
-
-    const sessionFile = findSessionFile(sessionId);
-    if (!sessionFile) return 0;
-    const fileContent = fs.readFileSync(sessionFile, 'utf8');
-    const lines = fileContent.split('\n').filter(l => l.trim());
-
-    // Find the first user message at or after checkpoint time → cut there
-    let cutIdx = -1;
-    for (let i = 0; i < lines.length; i++) {
-      try {
-        const obj = JSON.parse(lines[i]);
-        if (obj.type === 'user' && obj.timestamp) {
-          const msgTime = new Date(obj.timestamp).getTime();
-          if (msgTime && msgTime >= cpTime) { cutIdx = i; break; }
-        }
-      } catch { /* skip malformed lines */ }
-    }
-    if (cutIdx <= 0) return truncateSessionLastTurn(sessionId); // fallback
-
-    const kept = lines.slice(0, cutIdx);
-    fs.writeFileSync(sessionFile, kept.join('\n') + '\n', 'utf8');
-    _sessionFileCache.delete(sessionId);
-    const removed = lines.length - kept.length;
-    log('INFO', `truncateSessionToCheckpoint: removed ${removed} lines from ${path.basename(sessionFile)}`);
-    return removed;
-  } catch (e) {
-    log('WARN', `truncateSessionToCheckpoint failed: ${e.message}`);
-    return truncateSessionLastTurn(sessionId); // fallback
-  }
-}
-
-/**
- * Scan all project session indexes, return most recent N sessions.
- * Results cached for 10 seconds to avoid repeated directory scans.
- */
-let _sessionCache = null;
-let _sessionCacheTime = 0;
-const SESSION_CACHE_TTL = 10000; // 10s
-
-function invalidateSessionCache() { _sessionCache = null; }
-
-function _scanAllSessions() {
-  if (_sessionCache && (Date.now() - _sessionCacheTime < SESSION_CACHE_TTL)) return _sessionCache;
-  try {
-    if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) { _sessionCache = []; _sessionCacheTime = Date.now(); return []; }
-    const projects = fs.readdirSync(CLAUDE_PROJECTS_DIR);
-
-    const sessionMap = new Map();
-    const projPathCache = new Map();
-
-    for (const proj of projects) {
-      const projDir = path.join(CLAUDE_PROJECTS_DIR, proj);
-
-      const indexFile = path.join(projDir, 'sessions-index.json');
-      try {
-        if (fs.existsSync(indexFile)) {
-          const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
-          if (data.entries && data.entries.length > 0) {
-            const realPath = data.entries[0].projectPath;
-            if (realPath) projPathCache.set(proj, realPath);
-            for (const entry of data.entries) {
-              if (entry.messageCount >= 1) sessionMap.set(entry.sessionId, entry);
-            }
-          }
-        }
-      } catch { /* skip */ }
-
-      try {
-        const files = fs.readdirSync(projDir).filter(f => f.endsWith('.jsonl'));
-        for (const file of files) {
-          const sessionId = file.replace('.jsonl', '');
-          const filePath = path.join(projDir, file);
-          const stat = fs.statSync(filePath);
-          const fileMtime = stat.mtimeMs;
-          const existing = sessionMap.get(sessionId);
-          if (!existing || fileMtime > (existing.fileMtime || 0)) {
-            const projectPath = projPathCache.get(proj) || proj.slice(1).replace(/-/g, '/');
-            sessionMap.set(sessionId, {
-              sessionId, projectPath, fileMtime,
-              modified: new Date(fileMtime).toISOString(),
-              messageCount: 1,
-              ...(existing || {}),
-              fileMtime,
-            });
-          }
-        }
-      } catch { /* skip */ }
-    }
-
-    const all = Array.from(sessionMap.values());
-    all.sort((a, b) => {
-      const aTime = a.fileMtime || new Date(a.modified).getTime();
-      const bTime = b.fileMtime || new Date(b.modified).getTime();
-      return bTime - aTime;
-    });
-
-    // Enrich top N sessions that lack firstPrompt/customTitle by reading jsonl heads
-    const ENRICH_LIMIT = 20;
-    for (let i = 0; i < Math.min(all.length, ENRICH_LIMIT); i++) {
-      const s = all[i];
-      if (s.firstPrompt && s.customTitle) continue;
-      try {
-        const sessionFile = findSessionFile(s.sessionId);
-        if (!sessionFile) continue;
-        // Read first 8KB for firstPrompt, and last 4KB for customTitle
-        const fd = fs.openSync(sessionFile, 'r');
-        const headBuf = Buffer.alloc(8192);
-        const headBytes = fs.readSync(fd, headBuf, 0, 8192, 0);
-        const headStr = headBuf.toString('utf8', 0, headBytes);
-        // Extract firstPrompt from first real user message (skip system-generated)
-        if (!s.firstPrompt) {
-          for (const line of headStr.split('\n')) {
-            if (!line) continue;
-            try {
-              const d = JSON.parse(line);
-              if (d.type === 'user' && d.message && d.userType === 'external') {
-                const content = d.message.content;
-                let raw = '';
-                if (typeof content === 'string') raw = content;
-                else if (Array.isArray(content)) {
-                  const txt = content.find(c => c.type === 'text');
-                  if (txt) raw = txt.text;
-                }
-                // Strip [System hints ...] suffix and <system-reminder> blocks
-                raw = raw.replace(/\n?\[System hints[\s\S]*/i, '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
-                if (raw && raw.length > 2) { s.firstPrompt = raw.slice(0, 120); break; }
-              }
-            } catch { /* skip line */ }
-          }
-        }
-        // Read tail for customTitle (written by /name command)
-        if (!s.customTitle) {
-          const stat = fs.fstatSync(fd);
-          const tailSize = Math.min(4096, stat.size);
-          const tailBuf = Buffer.alloc(tailSize);
-          fs.readSync(fd, tailBuf, 0, tailSize, stat.size - tailSize);
-          const tailStr = tailBuf.toString('utf8');
-          const tailLines = tailStr.split('\n').reverse();
-          for (const line of tailLines) {
-            if (!line) continue;
-            try {
-              const d = JSON.parse(line);
-              if (d.type === 'custom-title' && d.customTitle) { s.customTitle = d.customTitle; break; }
-            } catch { /* skip */ }
-          }
-        }
-        fs.closeSync(fd);
-      } catch { /* non-fatal */ }
-    }
-
-    _sessionCache = all;
-    _sessionCacheTime = Date.now();
-    return all;
-  } catch {
-    return [];
-  }
-}
-
-function listRecentSessions(limit, cwd) {
-  let all = _scanAllSessions();
-  if (cwd) {
-    const matched = all.filter(s => s.projectPath === cwd);
-    if (matched.length > 0) all = matched;
-  }
-  return all.slice(0, limit || 10);
-}
-
-/** Load session_tags.json — returns {} if missing or malformed */
-function loadSessionTags() {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(HOME, '.metame', 'session_tags.json'), 'utf8'));
-  } catch { return {}; }
-}
-
-/**
- * Get the actual file mtime of a session's .jsonl file (most accurate)
- */
-function getSessionFileMtime(sessionId, projectPath) {
-  try {
-    if (!sessionId) return null;
-    const sessionFile = findSessionFile(sessionId);
-    if (sessionFile) {
-      return fs.statSync(sessionFile).mtimeMs;
-    }
-  } catch { /* ignore */ }
-  return null;
-}
-
-// formatRelativeTime — imported from ./utils
-
-/**
- * Format a session entry into a short, readable label for buttons
- * Enhanced: shows relative time, project, name/summary, and first message preview
- */
-function sessionLabel(s) {
-  // Use Claude's native customTitle (unified with /rename on desktop)
-  const name = s.customTitle;
-
-  const proj = s.projectPath ? path.basename(s.projectPath) : '';
-  // Use real file mtime for accuracy, fall back to index data
-  const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
-  const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
-  const ago = formatRelativeTime(new Date(timeMs).toISOString());
-  const shortId = s.sessionId.slice(0, 4);
-
-  if (name) {
-    return `${ago} [${name}] ${proj} #${shortId}`;
-  }
-
-  // Use summary, or fall back to firstPrompt preview
-  let title = (s.summary || '').slice(0, 20);
-  if (!title && s.firstPrompt) {
-    title = s.firstPrompt.slice(0, 20);
-    if (s.firstPrompt.length > 20) title += '..';
-  }
-
-  return `${ago} ${proj ? proj + ': ' : ''}${title || ''} #${shortId}`;
-}
-
-/**
- * Get the display title for a session using fallback chain: name → summary → firstPrompt
- */
-function sessionDisplayTitle(s, maxLen, sessionTags) {
-  maxLen = maxLen || 50;
-  // Newlines → space; strip null bytes, surrogates, replacement char, other non-printable control chars
-  const sanitize = (t) => t
-    .replace(/\r?\n/g, ' ')
-    .replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F\uFFFD\uD800-\uDFFF]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  // Priority: user name > our P2-A name > user's first message > Claude native summary
-  // firstPrompt is authentic user content; s.summary is Claude's auto-generated index field (unreliable)
-  if (s.customTitle) return sanitize(s.customTitle).slice(0, maxLen);
-  // P2-A: use Haiku-generated session name (only if memory-extract has processed this session)
-  const tagEntry = sessionTags && sessionTags[s.sessionId];
-  if (tagEntry && tagEntry.name) return sanitize(tagEntry.name).slice(0, maxLen);
-  // Not yet processed by P2-A: show the user's actual first message
-  if (s.firstPrompt) {
-    const clean = s.firstPrompt
-      .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-      .replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '')
-      .replace(/\[System hints[\s\S]*/i, '');
-    const firstLine = clean.split('\n').map(l => l.trim()).find(l => l.length > 2) || '';
-    const sanitized = sanitize(firstLine);
-    if (sanitized && sanitized.length > 2) return sanitized.slice(0, maxLen);
-  }
-  // Last resort: Claude's native auto-summary from sessions-index.json
-  if (s.summary) return sanitize(s.summary).slice(0, maxLen);
-  return '';
-}
-
-/**
- * Format a session entry into a rich text block for non-button contexts (Feishu text).
- * Shows: name, title/summary, project, time, and /resume shortcut.
- */
-function sessionRichLabel(s, index, sessionTags) {
-  sessionTags = sessionTags || loadSessionTags();
-  const title = sessionDisplayTitle(s, 50, sessionTags);
-  const proj = s.projectPath ? path.basename(s.projectPath) : '~';
-  const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
-  const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
-  const ago = formatRelativeTime(new Date(timeMs).toISOString());
-  const shortId = s.sessionId.slice(0, 8);
-  const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 3);
-
-  let line = `${index}. `;
-  if (title) line += `${title}${title.length >= 50 ? '..' : ''}`;
-  else line += `(unnamed)`;
-  if (tags.length) line += `  ${tags.map(t => `#${t}`).join(' ')}`;
-  line += `\n   📁${proj} · ${ago}`;
-  line += `\n   /resume ${shortId}`;
-  return line;
-}
-
-/**
- * Build Feishu card elements for a list of sessions (used by /sessions and /resume)
- */
-function buildSessionCardElements(sessions) {
-  const sessionTags = loadSessionTags();
-  const elements = [];
-  sessions.forEach((s, i) => {
-    if (i > 0) elements.push({ tag: 'hr' });
-    const title = sessionDisplayTitle(s, 60, sessionTags);
-    const proj = s.projectPath ? path.basename(s.projectPath) : '~';
-    const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
-    const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
-    const ago = formatRelativeTime(new Date(timeMs).toISOString());
-    const shortId = s.sessionId.slice(0, 6);
-    const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 4);
-    let desc = `**${i + 1}. ${title || '(unnamed)'}**\n📁${proj} · ${ago}`;
-    if (tags.length) desc += `\n${tags.map(t => `\`${t}\``).join(' ')}`;
-    elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
-    elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Switch #${shortId}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
-  });
-  return elements;
-}
-
-/**
- * Extract unique project directories from session history, sorted by most recent activity.
- * Returns [{path, label}] for button display.
- */
-function listProjectDirs() {
-  try {
-    const all = listRecentSessions(50);
-    const seen = new Map(); // path → latest modified
-    for (const s of all) {
-      if (!s.projectPath || !fs.existsSync(s.projectPath)) continue;
-      const prev = seen.get(s.projectPath);
-      if (!prev || new Date(s.modified) > new Date(prev)) {
-        seen.set(s.projectPath, s.modified);
-      }
-    }
-    // Sort by most recent, take top 6
-    return [...seen.entries()]
-      .sort((a, b) => new Date(b[1]) - new Date(a[1]))
-      .slice(0, 6)
-      .map(([p]) => ({ path: p, label: path.basename(p) }));
-  } catch {
-    return [];
-  }
-}
-
-function getSession(chatId) {
-  const state = loadState();
-  return state.sessions[chatId] || null;
-}
-
-function createSession(chatId, cwd, name) {
-  const state = loadState();
-  const sessionId = crypto.randomUUID();
-  state.sessions[chatId] = {
-    id: sessionId,
-    cwd: cwd || HOME,
-    started: false, // true after first message sent
-  };
-  saveState(state);
-  invalidateSessionCache();
-
-
-  // If name provided, write to Claude's session file (same as /rename on desktop)
-  if (name) {
-    writeSessionName(sessionId, cwd || HOME, name);
-  }
-
-  log('INFO', `New session for ${chatId}: ${sessionId}${name ? ' [' + name + ']' : ''} (cwd: ${state.sessions[chatId].cwd})`);
-  return { ...state.sessions[chatId], id: sessionId };
-}
-
-/**
- * Get session name from Claude's sessions-index.json (unified with /rename)
- */
-function getSessionName(sessionId) {
-  try {
-    if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return '';
-    const projects = fs.readdirSync(CLAUDE_PROJECTS_DIR);
-    for (const proj of projects) {
-      const indexFile = path.join(CLAUDE_PROJECTS_DIR, proj, 'sessions-index.json');
-      if (!fs.existsSync(indexFile)) continue;
-      const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
-      if (data.entries) {
-        const entry = data.entries.find(e => e.sessionId === sessionId);
-        if (entry && entry.customTitle) return entry.customTitle;
-      }
-    }
-  } catch { /* ignore */ }
-  return '';
-}
-
-/**
- * Write session name to Claude's session file (same format as /rename on desktop)
- */
-function writeSessionName(sessionId, cwd, name) {
-  try {
-    const sessionFile = findSessionFile(sessionId);
-    if (!sessionFile) {
-      log('WARN', `writeSessionName: session file not found for ${sessionId.slice(0, 8)}`);
-      return;
-    }
-    const entry = JSON.stringify({ type: 'custom-title', customTitle: name, sessionId }) + '\n';
-    fs.appendFileSync(sessionFile, entry, 'utf8');
-    log('INFO', `Named session ${sessionId.slice(0, 8)}: ${name}`);
-    return true;
-  } catch (e) {
-    log('WARN', `Failed to write session name: ${e.message}`);
-    return false;
-  }
-}
-
-function markSessionStarted(chatId) {
-  const state = loadState();
-  if (state.sessions[chatId]) {
-    state.sessions[chatId].started = true;
-    saveState(state);
-  }
-}
+const {
+  findSessionFile,
+  clearSessionFileCache,
+  truncateSessionToCheckpoint,
+  listRecentSessions,
+  loadSessionTags,
+  getSessionFileMtime,
+  sessionLabel,
+  sessionRichLabel,
+  buildSessionCardElements,
+  listProjectDirs,
+  getSession,
+  createSession,
+  getSessionName,
+  writeSessionName,
+  markSessionStarted,
+} = createSessionStore({
+  fs,
+  path,
+  HOME,
+  loadState,
+  saveState,
+  log,
+  formatRelativeTime,
+  cpExtractTimestamp,
+});
 
 /**
  * Auto-generate a session name using Haiku (async, non-blocking).
@@ -2325,17 +1583,6 @@ const TOOL_EMOJI = {
   NotebookEdit: '📓',
   default: '🔧',
 };
-
-// Content file extensions (user-facing files, not code/config)
-const CONTENT_EXTENSIONS = new Set([
-  '.md', '.txt', '.rtf',                          // Text
-  '.doc', '.docx', '.pdf', '.odt',                // Documents
-  '.wav', '.mp3', '.m4a', '.ogg', '.flac',        // Audio
-  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', // Images
-  '.mp4', '.mov', '.avi', '.webm',                // Video
-  '.csv', '.xlsx', '.xls',                        // Data
-  '.html', '.htm',                                // Web content
-]);
 
 // Active Claude processes per chat (for /stop)
 const activeProcesses = new Map(); // chatId -> { child, aborted }
@@ -2527,139 +1774,6 @@ const { handleOpsCommand } = createOpsCommandHandler({
   getNoSleepProcess: () => caffeinateProcess,
   setNoSleepProcess: (p) => { caffeinateProcess = p || null; },
 });
-
-// ── Git-based checkpoint for /undo ──────────────────────────────────
-const CHECKPOINT_PREFIX = '[metame-checkpoint]';
-const MAX_CHECKPOINTS = 20;
-
-/**
- * Extract ISO timestamp string from a checkpoint commit message.
- * Handles both formats:
- *   old: "[metame-checkpoint] 2026-02-08T10-30-00"
- *   new: "[metame-checkpoint] Before: xxx (2026-02-08T10-30-00)"
- */
-function cpExtractTimestamp(message) {
-  // New format: timestamp in parens at end
-  const parenMatch = message.match(/\((\d{4}-\d{2}-\d{2}T[\d-]{8})\)$/);
-  if (parenMatch) {
-    return parenMatch[1].replace(/-/g, (m, offset) => {
-      if (offset === 4 || offset === 7) return '-';
-      if (offset === 10) return 'T';
-      if (offset === 13 || offset === 16) return ':';
-      return m;
-    });
-  }
-  // Old format: timestamp directly after prefix
-  const raw = message.replace(CHECKPOINT_PREFIX, '').trim();
-  return raw.replace(/-/g, (m, offset) => {
-    if (offset === 4 || offset === 7) return '-';
-    if (offset === 10) return 'T';
-    if (offset === 13 || offset === 16) return ':';
-    return m;
-  });
-}
-
-/**
- * Human-readable display label for a checkpoint (for /undo list buttons).
- * Shows "Before: <label> (HH:MM)" or just the timestamp.
- */
-function cpDisplayLabel(message) {
-  // New format: "[metame-checkpoint] Before: xxx (2026-02-08T10-30-00)"
-  const newMatch = message.match(/Before:\s*(.+?)\s*\((\d{4}-\d{2}-\d{2}T([\d-]{8}))\)$/);
-  if (newMatch) {
-    const label = newMatch[1].slice(0, 30);
-    const time = newMatch[3].replace(/-/g, ':').slice(0, 5); // HH:MM
-    return `${label} (${time})`;
-  }
-  // Old format: just the timestamp
-  return message.replace(CHECKPOINT_PREFIX, '').trim();
-}
-
-/**
- * Create a git checkpoint commit before a Claude turn.
- * Returns the commit hash or null if nothing to commit / not a git repo.
- */
-function gitCheckpoint(cwd, label) {
-  try {
-    // Quick check: is this a git repo?
-    execSync('git rev-parse --is-inside-work-tree', { cwd, stdio: 'ignore' });
-    // Stage all changes (respects .gitignore)
-    execSync('git add -A', { cwd, stdio: 'ignore', timeout: 5000 });
-    // Check if there's anything to commit
-    const status = execSync('git status --porcelain', { cwd, encoding: 'utf8', timeout: 5000 }).trim();
-    if (!status) return null; // Working tree clean, no checkpoint needed
-    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    // Include user prompt as label so /undo list is human-readable
-    const safeLabel = label
-      ? ' Before: ' + label.replace(/["\n\r]/g, ' ').slice(0, 60).trim()
-      : '';
-    const msg = `${CHECKPOINT_PREFIX}${safeLabel} (${ts})`;
-    execSync(`git commit -m "${msg}" --no-verify`, { cwd, stdio: 'ignore', timeout: 10000 });
-    const hash = execSync('git rev-parse HEAD', { cwd, encoding: 'utf8', timeout: 3000 }).trim();
-    log('INFO', `Git checkpoint: ${hash.slice(0, 8)} in ${path.basename(cwd)}${safeLabel}`);
-    return hash;
-  } catch {
-    return null; // Not a git repo or git error — silently skip
-  }
-}
-
-/**
- * List recent checkpoint commits (newest first).
- */
-function listCheckpoints(cwd, limit = 20) {
-  try {
-    const raw = execSync(
-      `git log --fixed-strings --oneline --all --grep="${CHECKPOINT_PREFIX}" -n ${limit} --format="%H %s"`,
-      { cwd, encoding: 'utf8', timeout: 5000 }
-    ).trim();
-    if (!raw) return [];
-    return raw.split('\n').map(line => {
-      const spaceIdx = line.indexOf(' ');
-      return { hash: line.slice(0, spaceIdx), message: line.slice(spaceIdx + 1) };
-    });
-  } catch { return []; }
-}
-
-/**
- * Clean up old checkpoint commits beyond MAX_CHECKPOINTS.
- * Uses interactive rebase alternative: reset + cherry-pick is too complex.
- * Simple approach: just keep them — git gc handles storage. Only delete if > 50.
- */
-function cleanupCheckpoints(cwd) {
-  try {
-    const all = listCheckpoints(cwd, 100);
-    if (all.length <= MAX_CHECKPOINTS) return;
-    // Soft cleanup: for commits older than the 20th, they stay in git history
-    // but we don't actively manage them. Git's gc will handle unreachable objects.
-    // The real concern is clutter in git log — but these only show with --grep.
-    log('INFO', `${all.length} checkpoints in ${path.basename(cwd)}, consider: git rebase -i`);
-  } catch { /* ignore */ }
-}
-
-// File cache for button callbacks (shortId -> fullPath)
-const fileCache = new Map();
-const FILE_CACHE_TTL = 1800000; // 30 minutes
-
-function cacheFile(filePath) {
-  const shortId = Math.random().toString(36).slice(2, 10);
-  fileCache.set(shortId, { path: filePath, expires: Date.now() + FILE_CACHE_TTL });
-  return shortId;
-}
-
-function getCachedFile(shortId) {
-  const entry = fileCache.get(shortId);
-  if (!entry) return null;
-  if (Date.now() > entry.expires) {
-    fileCache.delete(shortId);
-    return null;
-  }
-  return entry.path;
-}
-
-function isContentFile(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  return CONTENT_EXTENSIONS.has(ext);
-}
 
 /**
  * Spawn claude with streaming output (stream-json mode).
@@ -3258,139 +2372,31 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
 setDispatchHandler(handleCommand);
 
 // ---------------------------------------------------------
-// FEISHU BOT BRIDGE
+// BOT BRIDGES
 // ---------------------------------------------------------
-async function startFeishuBridge(config, executeTaskByName) {
-  if (!config.feishu || !config.feishu.enabled) return null;
-  if (!config.feishu.app_id || !config.feishu.app_secret) {
-    log('WARN', 'Feishu enabled but app_id/app_secret missing');
-    return null;
-  }
+const { startTelegramBridge, startFeishuBridge } = createBridgeStarter({
+  fs,
+  path,
+  HOME,
+  log,
+  sleep,
+  loadConfig,
+  loadState,
+  saveState,
+  getSession,
+  handleCommand,
+});
 
-  const { createBot } = require(path.join(__dirname, 'feishu-adapter.js'));
-  const bot = createBot(config.feishu);
-  try {
-    const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo, senderId) => {
-      // Security: check whitelist (empty = deny all) — read live config to support hot-reload
-      // Exception: /agent bind/new and bind flow callbacks are allowed from any chat for self-registration
-      const liveCfg = loadConfig();
-      const allowedIds = (liveCfg.feishu && liveCfg.feishu.allowed_chat_ids) || [];
-      const trimmedText = text && text.trim();
-      const isBindCmd = trimmedText && (
-        trimmedText.startsWith('/agent bind')
-        || trimmedText.startsWith('/agent new')
-        || trimmedText.startsWith('/agent-bind-dir')
-        || trimmedText.startsWith('/browse bind')
-      );
-      if (!allowedIds.includes(chatId) && !isBindCmd) {
-        log('WARN', `Feishu: rejected message from ${chatId}`);
-        (bot.sendMarkdown ? bot.sendMarkdown(chatId, `⚠️ 此会话未授权\n\n复制发送以下命令注册：\n\n/agent bind personal`) : bot.sendMessage(chatId, `⚠️ 此会话未授权\n\n复制发送以下命令注册：\n\n/agent bind personal`)).catch(() => {});
-        return;
-      }
-
-      // Operator check: if operator_ids configured, non-operators get read-only chat mode
-      const operatorIds = (liveCfg.feishu && liveCfg.feishu.operator_ids) || [];
-      if (operatorIds.length > 0 && senderId && !operatorIds.includes(senderId) && !isBindCmd) {
-        log('INFO', `Feishu: read-only message from non-operator ${senderId} in ${chatId}: ${(text || '').slice(0, 50)}`);
-        // Block slash commands for non-operators
-        if (text && text.startsWith('/')) {
-          await (bot.sendMarkdown ? bot.sendMarkdown(chatId, '⚠️ 该操作需要授权，请联系管理员。') : bot.sendMessage(chatId, '⚠️ 该操作需要授权，请联系管理员。'));
-          return;
-        }
-        // Allow read-only chat (query/answer only, no write/edit/execute)
-        if (text) {
-          await handleCommand(bot, chatId, text, config, executeTaskByName, senderId, true);
-        }
-        return;
-      }
-
-      // Handle file message
-      if (fileInfo && fileInfo.fileKey) {
-        log('INFO', `Feishu file from ${chatId}: ${fileInfo.fileName} (key: ${fileInfo.fileKey}, msgId: ${fileInfo.messageId}, type: ${fileInfo.msgType})`);
-        // Save to project's upload/ folder
-        const session = getSession(chatId);
-        const cwd = session?.cwd || HOME;
-        const uploadDir = path.join(cwd, 'upload');
-        if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-        const destPath = path.join(uploadDir, fileInfo.fileName);
-
-        try {
-          await bot.downloadFile(fileInfo.messageId, fileInfo.fileKey, destPath, fileInfo.msgType);
-          await bot.sendMessage(chatId, `📥 Saved: ${fileInfo.fileName}`);
-
-          // Build prompt - don't ask Claude to read large files automatically
-          const prompt = text
-            ? `User uploaded a file to the project: ${destPath}\nUser says: "${text}"`
-            : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
-
-          await handleCommand(bot, chatId, prompt, config, executeTaskByName);
-        } catch (err) {
-          log('ERROR', `Feishu file download failed: ${err.message}`);
-          await bot.sendMessage(chatId, `❌ Download failed: ${err.message}`);
-        }
-        return;
-      }
-
-      // Handle text message
-      if (text) {
-        log('INFO', `Feishu message from ${chatId}: ${text.slice(0, 50)}`);
-        // Reply-based session restoration: if user replied to a bot message,
-        // restore the session that sent that message before processing.
-        const parentId = event?.message?.parent_id;
-        if (parentId) {
-          const st = loadState();
-          const mapped = st.msg_sessions && st.msg_sessions[parentId];
-          if (mapped) {
-            st.sessions[chatId] = { id: mapped.id, cwd: mapped.cwd, started: true };
-            saveState(st);
-            log('INFO', `Session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
-          }
-        }
-        await handleCommand(bot, chatId, text, config, executeTaskByName, senderId);
-      }
-    });
-
-    log('INFO', 'Feishu bot connected (WebSocket long connection)');
-    return { stop: () => receiver.stop(), bot };
-  } catch (e) {
-    log('ERROR', `Feishu bridge failed: ${e.message}`);
-    return null;
-  }
-}
+const { killExistingDaemon, writePid, cleanPid } = createPidManager({
+  fs,
+  execSync,
+  PID_FILE,
+  log,
+});
 
 // ---------------------------------------------------------
 // PID MANAGEMENT
 // ---------------------------------------------------------
-
-// Kill any existing daemon before starting (takeover strategy)
-function killExistingDaemon() {
-  if (!fs.existsSync(PID_FILE)) return;
-  try {
-    const oldPid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
-    if (oldPid && oldPid !== process.pid) {
-      process.kill(oldPid, 'SIGTERM');
-      log('INFO', `Killed existing daemon (PID: ${oldPid})`);
-      // Wait for old process to actually exit (up to 5s)
-      for (let i = 0; i < 10; i++) {
-        try { process.kill(oldPid, 0); } catch { break; } // throws if process gone
-        require('child_process').execSync('sleep 0.5', { stdio: 'ignore' });
-      }
-    }
-  } catch {
-    // Process doesn't exist or already dead
-  }
-  try { fs.unlinkSync(PID_FILE); } catch { }
-}
-
-function writePid() {
-  fs.writeFileSync(PID_FILE, String(process.pid), 'utf8');
-}
-
-function cleanPid() {
-  try {
-    if (fs.existsSync(PID_FILE)) fs.unlinkSync(PID_FILE);
-  } catch { /* ignore */ }
-}
 
 // ---------------------------------------------------------
 // UTILITY
@@ -3481,61 +2487,13 @@ async function main() {
   let telegramBridge = null;
   let feishuBridge = null;
 
-  // Notification function
-  // project: optional { key, name, color, icon } — sends to that project's specific chat only
-  // If no project, sends to ALL allowed_chat_ids (use adminNotifyFn for system-only messages)
-  const notifyFn = async (message, project = null) => {
-    if (feishuBridge && feishuBridge.bot) {
-      // If a project is specified, only notify chats mapped to that project
-      const chatAgentMap = (config.feishu && config.feishu.chat_agent_map) || {};
-      const fsIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
-      let targetIds;
-      if (project) {
-        // Send only to chats belonging to this project
-        targetIds = fsIds.filter(id => chatAgentMap[id] === project.key);
-        // Fallback: if no mapped chat found, send to first chat (admin)
-        if (targetIds.length === 0) targetIds = fsIds.slice(0, 1);
-      } else {
-        targetIds = fsIds;
-      }
-      for (const chatId of targetIds) {
-        try {
-          if (project && feishuBridge.bot.sendCard) {
-            await feishuBridge.bot.sendCard(chatId, {
-              title: `${project.icon} ${project.name}`,
-              body: message,
-              color: project.color,
-            });
-          } else {
-            await feishuBridge.bot.sendMessage(chatId, message);
-          }
-        } catch (e) {
-          log('ERROR', `Feishu notify failed ${chatId}: ${e.message}`);
-        }
-      }
-    }
-    if (telegramBridge && telegramBridge.bot) {
-      const tgIds = (config.telegram && config.telegram.allowed_chat_ids) || [];
-      for (const chatId of tgIds) {
-        try { await telegramBridge.bot.sendMarkdown(chatId, message); } catch (e) {
-          log('ERROR', `Telegram notify failed ${chatId}: ${e.message}`);
-        }
-      }
-    }
-  };
-
-  // Admin-only notify: system messages sent only to the primary (first) chat
-  const adminNotifyFn = async (message) => {
-    if (feishuBridge && feishuBridge.bot) {
-      const fsIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
-      const adminId = fsIds[0];
-      if (adminId) {
-        try { await feishuBridge.bot.sendMessage(adminId, message); } catch (e) {
-          log('ERROR', `Feishu admin notify failed ${adminId}: ${e.message}`);
-        }
-      }
-    }
-  };
+  const notifier = createNotifier({
+    log,
+    getConfig: () => config,
+    getBridges: () => ({ telegramBridge, feishuBridge }),
+  });
+  const notifyFn = notifier.notify;
+  const adminNotifyFn = notifier.notifyAdmin;
 
   // Start dispatch socket server (low-latency IPC, fallback: file polling still works)
   const dispatchSocket = startDispatchSocket(config);
@@ -3543,72 +2501,27 @@ async function main() {
   // Start heartbeat scheduler
   let heartbeatTimer = startHeartbeat(config, notifyFn);
 
-  // Hot reload: re-read config and restart heartbeat scheduler
-  function reloadConfig() {
-    const newConfig = loadConfig();
-    if (!newConfig) return { success: false, error: 'Failed to read config' };
-    config = newConfig;
-    refreshLogMaxSize(config);
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    heartbeatTimer = startHeartbeat(config, notifyFn);
-    const { general, project } = getAllTasks(config);
-    const totalCount = general.length + project.length;
-    log('INFO', `Config reloaded: ${totalCount} tasks (${project.length} in projects)`);
-    return { success: true, tasks: totalCount };
-  }
+  const runtimeWatchers = setupRuntimeWatchers({
+    fs,
+    path,
+    CONFIG_FILE,
+    METAME_DIR,
+    loadConfig,
+    refreshLogMaxSize,
+    startHeartbeat,
+    getAllTasks,
+    log,
+    notifyFn,
+    adminNotifyFn,
+    activeProcesses,
+    getConfig: () => config,
+    setConfig: (next) => { config = next; },
+    getHeartbeatTimer: () => heartbeatTimer,
+    setHeartbeatTimer: (next) => { heartbeatTimer = next; },
+    onRestartRequested: () => process.exit(0),
+  });
   // Expose reloadConfig to handleCommand via closure
-  global._metameReload = reloadConfig;
-
-  // Auto-reload: watch daemon.yaml for changes (e.g. Claude edits it via askClaude)
-  let _reloadDebounce = null;
-  fs.watchFile(CONFIG_FILE, { interval: 2000 }, (curr, prev) => {
-    if (curr.mtimeMs === prev.mtimeMs) return;
-    // Debounce: wait 1s for file write to finish
-    if (_reloadDebounce) clearTimeout(_reloadDebounce);
-    _reloadDebounce = setTimeout(() => {
-      log('INFO', 'daemon.yaml changed on disk — auto-reloading config');
-      const r = reloadConfig();
-      if (r.success) {
-        log('INFO', `Auto-reload OK: ${r.tasks} tasks`);
-        adminNotifyFn(`🔄 Config auto-reloaded. ${r.tasks} heartbeat tasks active.`).catch(() => { });
-      } else {
-        log('ERROR', `Auto-reload failed: ${r.error}`);
-      }
-    }, 1000);
-  });
-
-  // Auto-restart: watch daemon.js for code changes (hot restart)
-  // If Claude tasks are running, defer restart until they complete.
-  const DAEMON_SCRIPT = path.join(METAME_DIR, 'daemon.js');
-  const _startTime = Date.now();
-  let _restartDebounce = null;
-  let _pendingRestart = false;
-  fs.watchFile(DAEMON_SCRIPT, { interval: 3000 }, (curr, prev) => {
-    if (curr.mtimeMs === prev.mtimeMs) return;
-    // Ignore file changes within 10s of startup (avoids restart loop)
-    if (Date.now() - _startTime < 10000) return;
-    if (_restartDebounce) clearTimeout(_restartDebounce);
-    _restartDebounce = setTimeout(() => {
-      if (activeProcesses.size > 0) {
-        // Active Claude tasks running — defer restart
-        log('INFO', `daemon.js changed on disk — deferring restart (${activeProcesses.size} active task(s))`);
-        _pendingRestart = true;
-      } else {
-        log('INFO', 'daemon.js changed on disk — exiting for restart...');
-        process.exit(0);
-      }
-    }, 2000);
-  });
-  // Hook: after every Claude task completes, check if restart is pending
-  const _origDelete = activeProcesses.delete.bind(activeProcesses);
-  activeProcesses.delete = function (key) {
-    const result = _origDelete(key);
-    if (_pendingRestart && activeProcesses.size === 0) {
-      log('INFO', 'All tasks completed — executing deferred restart...');
-      setTimeout(() => process.exit(0), 500);
-    }
-    return result;
-  };
+  global._metameReload = runtimeWatchers.reloadConfig;
 
   // Start bridges (both can run simultaneously)
   telegramBridge = await startTelegramBridge(config, executeTaskByName);
@@ -3622,8 +2535,7 @@ async function main() {
   // Graceful shutdown
   const shutdown = () => {
     log('INFO', 'Daemon shutting down...');
-    fs.unwatchFile(CONFIG_FILE);
-    fs.unwatchFile(DAEMON_SCRIPT);
+    runtimeWatchers.stop();
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (dispatchSocket) try { dispatchSocket.close(); } catch { }
     try { fs.unlinkSync(SOCK_PATH); } catch { }
