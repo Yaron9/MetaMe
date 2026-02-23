@@ -390,9 +390,13 @@ You are entering **Calibration Mode**. You are not a chatbot; you are a Psycholo
 - Announce: "Link Established. Profile calibrated."
 - Then proceed to **Phase 2** below.
 
-**3. SETUP WIZARD (Phase 2 — Optional):**
+**3. SETUP WIZARD (Phase 2 — Mobile Access):**
 
 After writing the profile, ask: *"Want to set up mobile access so you can reach me from your phone? (Telegram / Feishu / Skip)"*
+
+**Step A: Create Bot & Connect Private Chat (必做)**
+
+This step connects the bot to the user's PRIVATE chat — this is the admin channel.
 
 - If **Telegram:**
   1. Tell user to open Telegram, search @BotFather, send /newbot, create a bot, copy the token.
@@ -408,7 +412,7 @@ After writing the profile, ask: *"Want to set up mobile access so you can reach 
      **⚠️ 重要：** 在「事件订阅」页面，必须开启「接收消息 im.message.receive_v1」事件。然后在该事件的配置中，勾选「获取群组中所有消息」（否则 bot 在群聊中只能收到 @它 的消息，无法接收普通群消息）。
   2. Ask user to paste App ID and App Secret.
   3. Write \`app_id\` and \`app_secret\` into \`~/.metame/daemon.yaml\` under \`feishu:\` section, set \`enabled: true\`.
-  4. Tell user: "Now open Feishu and send any message to your new bot, then tell me you're done."
+  4. Tell user: "Now open Feishu and send any message to your new bot (private chat), then tell me you're done."
   5. After user confirms, auto-fetch the chat ID:
      \`\`\`bash
      TOKEN=$(curl -s -X POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal -H "Content-Type: application/json" -d '{"app_id":"<APP_ID>","app_secret":"<APP_SECRET>"}' | jq -r '.tenant_access_token')
@@ -419,22 +423,16 @@ After writing the profile, ask: *"Want to set up mobile access so you can reach 
 
 - If **Skip:** Say "No problem. You can run \`metame daemon init\` anytime to set this up later." Then begin normal work.
 
-**After setup, teach the user about Agent Dispatch:**
+**Step B: Create Your First Agent (引导用户建立第一个 Agent)**
 
-Tell the user: *"You now have multiple AI agents that can collaborate. Here's how to send messages between them:"*
+After bot is connected, explain the Agent concept and guide the user to create their first one:
 
-- **From mobile (Telegram/Feishu):** Each chat group is bound to a specific agent (project). To send a message to another agent, use:
-  \`/dispatch <project_key> <message>\`
-  Example: \`/dispatch desktop 帮我检查一下桌面端的日志\`
+Tell the user: *"Now let's create your first AI Agent. Each Agent is an independent AI workspace bound to a specific project folder and chat group."*
 
-- **From Claude Code terminal:** Use the dispatch command:
-  \`~/.metame/bin/dispatch_to <project_key> "message"\`
-
-- **Natural language shortcut:** Just say "告诉小美…" or "让老马…" — the AI will automatically route the message to the right agent.
-
-- **Available agents** are configured in \`~/.metame/daemon.yaml\` under \`projects:\`. Each project maps to an agent with its own working directory and Claude session.
-
-- **To add a new agent:** Send \`/agent bind <name> <working_directory>\` from any chat. This creates a new project and binds it to that chat.
+1. Tell user to create a new group chat in Telegram/Feishu, add the bot to the group, and name it (e.g. "Personal Assistant" or "My Project").
+2. Tell user to send \`/agent bind <name>\` in that group (e.g. \`/agent bind personal\`). This will show a directory picker — user taps to select the working directory.
+3. Once bound, that group becomes a dedicated Agent channel — messages there go to that Agent's Claude session.
+4. Tell user: *"Want to create more Agents? Just repeat: create a group → add bot → send /agent bind <name>. Each group becomes an independent Agent."*
 
 **4. EVOLUTION MECHANISM (Manual Sync):**
    *   **PHILOSOPHY:** You respect the User's flow. You do NOT interrupt.
