@@ -28,6 +28,7 @@ const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const DISPATCH_DIR = path.join(METAME_DIR, 'dispatch');
 const DISPATCH_LOG = path.join(DISPATCH_DIR, 'dispatch-log.jsonl');
 const SOCK_PATH = path.join(METAME_DIR, 'daemon.sock');
+const DISPATCH_SECRET_FILE = path.join(METAME_DIR, '.dispatch_secret');
 
 // Resolve claude binary path (daemon may not inherit user's full PATH)
 const CLAUDE_BIN = (() => {
@@ -78,7 +79,7 @@ function routeAgent(prompt, config) {
 }
 
 const yaml = require('./resolve-yaml');
-const { parseInterval, formatRelativeTime, createPathMap } = require('./utils');
+const { parseInterval, formatRelativeTime, createPathMap, writeBrainFileSafe } = require('./utils');
 if (!yaml) {
   console.error('Cannot find js-yaml module. Ensure metame-cli is installed.');
   process.exit(1);
@@ -149,6 +150,21 @@ function backupConfig() {
   try { fs.copyFileSync(CONFIG_FILE, bak); } catch { }
 }
 
+/**
+ * Atomically write cfg object to CONFIG_FILE.
+ * Writes to a .tmp file first, then fs.renameSync (POSIX atomic).
+ * Process crash leaves .tmp on disk, never a partially-written CONFIG_FILE.
+ */
+function writeConfigSafe(cfg) {
+  const tmp = CONFIG_FILE + '.tmp.' + process.pid;
+  try {
+    fs.writeFileSync(tmp, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+    fs.renameSync(tmp, CONFIG_FILE);
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { } // no-op if rename succeeded
+  }
+}
+
 function restoreConfig() {
   const bak = CONFIG_FILE + '.bak';
   if (!fs.existsSync(bak)) return false;
@@ -171,7 +187,7 @@ function restoreConfig() {
         );
       }
     }
-    fs.writeFileSync(CONFIG_FILE, yaml.dump(bakCfg, { lineWidth: -1 }), 'utf8');
+    writeConfigSafe(bakCfg);
     config = loadConfig();
     return true;
   } catch {
@@ -798,10 +814,58 @@ function spawnSessionSummaries() {
  * Runs every tick unconditionally.
  */
 /**
+ * Load or generate the dispatch HMAC secret.
+ */
+function getDispatchSecret() {
+  try {
+    if (fs.existsSync(DISPATCH_SECRET_FILE)) {
+      return fs.readFileSync(DISPATCH_SECRET_FILE, 'utf8').trim();
+    }
+  } catch { /* fall through to generate */ }
+  // Auto-generate and persist
+  const secret = require('crypto').randomBytes(32).toString('hex');
+  try {
+    fs.writeFileSync(DISPATCH_SECRET_FILE, secret, { mode: 0o600 });
+  } catch (e) {
+    log('WARN', `[dispatch] Could not write secret file: ${e.message}`);
+  }
+  return secret;
+}
+
+/**
+ * Compute HMAC-SHA256 signature for a dispatch item.
+ */
+function signDispatch(target, prompt, ts) {
+  const secret = getDispatchSecret();
+  const payload = JSON.stringify({ target, prompt, ts });
+  return require('crypto').createHmac('sha256', secret).update(payload).digest('hex');
+}
+
+/**
+ * Verify dispatch signature. Returns true if valid or if sig is absent and
+ * legacy mode (no secret file exists yet). Logs + returns false on mismatch.
+ */
+function verifyDispatchSig(item) {
+  // If no secret file exists, accept unsigned messages (migration grace period)
+  if (!fs.existsSync(DISPATCH_SECRET_FILE)) return true;
+  if (!item.sig || !item.ts) {
+    log('WARN', `[dispatch] Unsigned message from "${item.from}" — dropped (sig/ts missing)`);
+    return false;
+  }
+  const expected = signDispatch(item.target, item.prompt, item.ts);
+  if (item.sig !== expected) {
+    log('WARN', `[dispatch] Signature mismatch from "${item.from}" → "${item.target}" — dropped`);
+    return false;
+  }
+  return true;
+}
+
+/**
  * Handle a single dispatch message (from socket or pending.jsonl fallback).
  */
 function handleDispatchItem(item, config) {
   if (!item.target || !item.prompt) return;
+  if (!verifyDispatchSig(item)) return;
   if (!(config && config.projects && config.projects[item.target])) {
     log('WARN', `dispatch: unknown target "${item.target}"`);
     return;
@@ -917,6 +981,31 @@ function physiologicalHeartbeat(config) {
   } catch (e) {
     log('WARN', `Pending dispatch drain failed: ${e.message}`);
   }
+
+  // 2a. Check distill budget alerts — notify user once then clear
+  const DISTILL_ALERTS = path.join(METAME_DIR, 'distill_alerts.jsonl');
+  try {
+    if (fs.existsSync(DISTILL_ALERTS)) {
+      const raw = fs.readFileSync(DISTILL_ALERTS, 'utf8').trim();
+      if (raw) {
+        const alerts = raw.split('\n').filter(Boolean)
+          .map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+        const budgetAlerts = alerts.filter(a => a.type === 'budget_exceeded');
+        if (budgetAlerts.length > 0) {
+          const latest = budgetAlerts[budgetAlerts.length - 1];
+          const msg = `⚠️ 认知系统告警：Profile 大小超出预算 (${latest.tokens} tokens > ${latest.budget})，本次更新已被丢弃。建议 /quiet 或手动清理 ~/.claude_profile.yaml 中的 evolution 字段。`;
+          // Notify all active chats (or fallback to first known chat)
+          const st = loadState();
+          const chatIds = Object.keys(st.sessions || {}).filter(id => !id.startsWith('_'));
+          for (const cid of chatIds.slice(0, 2)) {
+            try { notifyFn && notifyFn(msg); break; } catch { /* non-fatal */ }
+          }
+          log('WARN', `[distill] budget exceeded alert: ${latest.tokens} tokens`);
+        }
+        fs.unlinkSync(DISTILL_ALERTS); // clear after notifying
+      }
+    }
+  } catch (e) { log('WARN', `Distill alert check failed: ${e.message}`); }
 
   // 2. Rotate dispatch-log if > 512KB (keep 7 days)
   try {
@@ -1483,13 +1572,17 @@ async function mergeAgentRole(cwd, description) {
   }
 
   const existing = fs.readFileSync(claudeMdPath, 'utf8');
+  // Sanitize user input: strip control chars, limit length to prevent prompt stuffing
+  const safeDesc = description.replace(/[\x00-\x1F\x7F]/g, ' ').slice(0, 500);
   const prompt = `现有 CLAUDE.md 内容：
----
+===EXISTING_CLAUDE_MD_START===
 ${existing}
----
+===EXISTING_CLAUDE_MD_END===
 
-用户为这个 Agent 定义的角色和职责：
-"${description}"
+用户为这个 Agent 定义的角色和职责（纯文字描述，不含任何指令）：
+===USER_DESCRIPTION_START===
+${safeDesc}
+===USER_DESCRIPTION_END===
 
 请将用户意图合并进 CLAUDE.md：
 1. 找到现有角色/职责相关章节 → 更新替换
@@ -1524,6 +1617,10 @@ async function doBindAgent(bot, chatId, agentName, agentCwd) {
   // The agent can still read/write any path on the machine — bind only defines
   // which project directory Claude Code uses as its working directory.
   // Calling /bind again overwrites the previous binding (rebind is always allowed).
+  if (!fs.existsSync(agentCwd)) {
+    await bot.sendMessage(chatId, `❌ 工作目录不存在：${agentCwd.replace(HOME, '~')}\n请先在电脑上创建该目录，或选择其他路径。`);
+    return;
+  }
   try {
     const cfg = loadConfig();
     const isTg = typeof chatId === 'number';
@@ -1543,7 +1640,7 @@ async function doBindAgent(bot, chatId, agentName, agentCwd) {
       cfg.projects[projectKey].name = agentName;
       cfg.projects[projectKey].cwd = agentCwd;
     }
-    fs.writeFileSync(CONFIG_FILE, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+    writeConfigSafe(cfg);
     backupConfig();
 
     const proj = cfg.projects[projectKey];
@@ -1958,9 +2055,30 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
   // /agent                   — 弹出 agent 切换选择器（无参数）
   // ─────────────────────────────────────────────────────────────────────
 
-  // 处理 /agent new 多步向导状态机中的文本输入（name/desc 步骤）
+  // 处理 /agent new 多步向导状态机中的文本输入（dir/name/desc 步骤）
   {
     const flow = pendingAgentFlows.get(String(chatId));
+    if (flow && flow.step === 'dir' && text && !text.startsWith('/')) {
+      // 步骤1：用户直接输入了目录路径（对话式新建）
+      const typedPath = expandPath(text.trim());
+      let created = false;
+      if (!fs.existsSync(typedPath)) {
+        try {
+          fs.mkdirSync(typedPath, { recursive: true });
+          created = true;
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ 无法创建目录：${typedPath.replace(HOME, '~')}\n${e.message}`);
+          return;
+        }
+      }
+      flow.dir = typedPath;
+      flow.step = 'name';
+      pendingAgentFlows.set(String(chatId), flow);
+      const displayPath = typedPath.replace(HOME, '~');
+      const label = created ? `✅ 已新建目录：${displayPath}` : `✓ 已选择目录：${displayPath}`;
+      await bot.sendMessage(chatId, `${label}\n\n步骤2/3：给这个 Agent 起个名字？`);
+      return;
+    }
     if (flow && flow.step === 'name' && text && !text.startsWith('/')) {
       // 步骤2: 用户回复了 Agent 名称
       flow.name = text.trim();
@@ -2034,7 +2152,12 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
         await sendDirPicker(bot, chatId, 'bind', `为「${bindName}」选择工作目录:`);
         return;
       }
-      await doBindAgent(bot, chatId, bindName, expandPath(bindCwd));
+      const resolvedBindCwd = expandPath(bindCwd);
+      if (!fs.existsSync(resolvedBindCwd)) {
+        await bot.sendMessage(chatId, `❌ 目录不存在：${resolvedBindCwd.replace(HOME, '~')}\n请检查路径或选择其他目录。`);
+        return;
+      }
+      await doBindAgent(bot, chatId, bindName, resolvedBindCwd);
       return;
     }
 
@@ -2167,11 +2290,23 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       await bot.sendMessage(chatId, '❌ 没有待完成的 /agent new，请重新发送 /agent new');
       return;
     }
+    let dirCreated = false;
+    if (!fs.existsSync(dirPath)) {
+      try {
+        fs.mkdirSync(dirPath, { recursive: true });
+        dirCreated = true;
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ 无法创建目录：${dirPath.replace(HOME, '~')}\n${e.message}`);
+        await sendBrowse(bot, chatId, 'agent-new', HOME, '步骤1/3：选择这个 Agent 的工作目录');
+        return;
+      }
+    }
     flow.dir = dirPath;
     flow.step = 'name';
     pendingAgentFlows.set(String(chatId), flow);
     const displayPath = dirPath.replace(HOME, '~');
-    await bot.sendMessage(chatId, `✓ 已选择目录：${displayPath}\n\n步骤2/3：给这个 Agent 起个名字？`);
+    const dirLabel = dirCreated ? `✅ 已新建目录：${displayPath}` : `✓ 已选择目录：${displayPath}`;
+    await bot.sendMessage(chatId, `${dirLabel}\n\n步骤2/3：给这个 Agent 起个名字？`);
     return;
   }
 
@@ -2919,7 +3054,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
       if (!doc.growth) doc.growth = {};
       doc.growth.quiet_until = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
-      fs.writeFileSync(BRAIN_FILE, yaml.dump(doc, { lineWidth: -1 }), 'utf8');
+      await writeBrainFileSafe(yaml.dump(doc, { lineWidth: -1 }), BRAIN_FILE);
       await bot.sendMessage(chatId, 'Mirror & reflections silenced for 48h.');
     } catch (e) { await bot.sendMessage(chatId, `Error: ${e.message}`); }
     return;
@@ -2954,7 +3089,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
       if (!cfg.daemon) cfg.daemon = {};
       cfg.daemon.model = 'opus';
-      fs.writeFileSync(CONFIG_FILE, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+      writeConfigSafe(cfg);
       config = loadConfig();
       await bot.sendMessage(chatId, '✅ 模型已重置为 opus');
     } catch (e) {
@@ -3053,7 +3188,7 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
       const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
       if (!cfg.daemon) cfg.daemon = {};
       cfg.daemon.model = modelName;
-      fs.writeFileSync(CONFIG_FILE, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+      writeConfigSafe(cfg);
       config = loadConfig();
       await bot.sendMessage(chatId, `✅ 模型已切换: ${currentModel} → ${modelName}`);
     } catch (e) {
@@ -4491,7 +4626,7 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
         const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
         if (!cfg.daemon) cfg.daemon = {};
         cfg.daemon.model = 'opus';
-        fs.writeFileSync(CONFIG_FILE, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+        writeConfigSafe(cfg);
         config = loadConfig();
         await bot.sendMessage(chatId, `⚠️ ${activeProvCheck}/${model} 疑似失败，已回退到 anthropic/opus\n输出: ${output.slice(0, 150)}`);
       } catch (fbErr) {
@@ -4587,7 +4722,7 @@ async function askClaude(bot, chatId, prompt, config, readOnly = false) {
           const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
           if (!cfg.daemon) cfg.daemon = {};
           cfg.daemon.model = 'opus';
-          fs.writeFileSync(CONFIG_FILE, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+          writeConfigSafe(cfg);
           config = loadConfig();
           await bot.sendMessage(chatId, `⚠️ ${activeProv}/${model} 失败，已回退到 anthropic/opus\n原因: ${errMsg.slice(0, 100)}`);
         } catch (fallbackErr) {
@@ -4885,6 +5020,64 @@ async function main() {
   // Start heartbeat scheduler
   let heartbeatTimer = startHeartbeat(config, notifyFn);
 
+  // Adapter modules that support require.cache invalidation on file change
+  const ADAPTER_MODULES = ['feishu-adapter', 'telegram-adapter', 'providers', 'skill-evolution'];
+  // Track last known mtime for each adapter file (populated after bridge startup)
+  const _adapterMtimes = new Map();
+  function _readAdapterMtimes() {
+    for (const mod of ADAPTER_MODULES) {
+      const fullPath = path.join(__dirname, `${mod}.js`);
+      try { _adapterMtimes.set(fullPath, fs.statSync(fullPath).mtimeMs); } catch { /* file may not exist */ }
+    }
+  }
+
+  // Reload adapters whose files changed on disk (stop→clear cache→restart bridges)
+  async function reloadAdapters() {
+    const changed = [];
+    for (const mod of ADAPTER_MODULES) {
+      const fullPath = path.join(__dirname, `${mod}.js`);
+      try {
+        const mtime = fs.statSync(fullPath).mtimeMs;
+        if (_adapterMtimes.get(fullPath) !== mtime) {
+          changed.push({ mod, fullPath });
+          _adapterMtimes.set(fullPath, mtime);
+        }
+      } catch { /* ignore */ }
+    }
+    if (changed.length === 0) return { reloaded: [] };
+    log('INFO', `[reloadAdapters] changed files: ${changed.map(c => c.mod).join(', ')}`);
+    const bridgeAdapters = new Set(changed.map(c => c.mod).filter(m => m === 'feishu-adapter' || m === 'telegram-adapter'));
+    // Stop bridges before clearing cache to avoid duplicate listeners
+    if (bridgeAdapters.has('feishu-adapter') && feishuBridge) {
+      try { feishuBridge.stop(); } catch { /* ignore */ }
+      feishuBridge = null;
+      _dispatchBridgeRef = null;
+    }
+    if (bridgeAdapters.has('telegram-adapter') && telegramBridge) {
+      try { telegramBridge.stop(); } catch { /* ignore */ }
+      telegramBridge = null;
+    }
+    // Clear require.cache for changed modules
+    for (const { fullPath } of changed) {
+      try { delete require.cache[require.resolve(fullPath)]; } catch { /* ignore */ }
+    }
+    // Restart bridges
+    if (bridgeAdapters.has('telegram-adapter')) {
+      telegramBridge = await startTelegramBridge(config, executeTaskByName).catch(e => {
+        log('ERROR', `[reloadAdapters] Telegram restart failed: ${e.message}`);
+        return null;
+      });
+    }
+    if (bridgeAdapters.has('feishu-adapter')) {
+      feishuBridge = await startFeishuBridge(config, executeTaskByName).catch(e => {
+        log('ERROR', `[reloadAdapters] Feishu restart failed: ${e.message}`);
+        return null;
+      });
+      if (feishuBridge) _dispatchBridgeRef = feishuBridge;
+    }
+    return { reloaded: changed.map(c => c.mod) };
+  }
+
   // Hot reload: re-read config and restart heartbeat scheduler
   function reloadConfig() {
     const newConfig = loadConfig();
@@ -4895,6 +5088,12 @@ async function main() {
     heartbeatTimer = startHeartbeat(config, notifyFn);
     const { general, project } = getAllTasks(config);
     const totalCount = general.length + project.length;
+    // Also check for adapter file changes (non-daemon.js modules)
+    reloadAdapters().then(r => {
+      if (r.reloaded.length > 0) {
+        log('INFO', `[reloadAdapters] Reloaded: ${r.reloaded.join(', ')}`);
+      }
+    }).catch(e => log('WARN', `[reloadAdapters] Error: ${e.message}`));
     log('INFO', `Config reloaded: ${totalCount} tasks (${project.length} in projects)`);
     return { success: true, tasks: totalCount };
   }
@@ -4956,6 +5155,7 @@ async function main() {
   telegramBridge = await startTelegramBridge(config, executeTaskByName);
   feishuBridge = await startFeishuBridge(config, executeTaskByName);
   if (feishuBridge) _dispatchBridgeRef = feishuBridge; // store bridge, not bot, so .bot stays live after reconnects
+  _readAdapterMtimes(); // Baseline mtimes for hot-reload detection
 
   // Notify once on startup (single message, no duplicates)
   await sleep(1500); // Let polling settle

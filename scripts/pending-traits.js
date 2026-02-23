@@ -90,13 +90,26 @@ function upsertPending(pending, key, value, confidence, sourceQuote) {
 }
 
 /**
- * Get traits ready for promotion (count >= threshold OR confidence === 'high').
+ * Get traits ready for promotion.
+ * high confidence → always promote immediately.
+ * normal confidence → time-weighted count must reach threshold.
+ *   effective_count = count * max(0.3, 1 - age_days/60)
+ *   So recent observations count fully; 30-day-old observations count 50%;
+ *   60-day-old observations count at 30% floor (not zero — prevents complete stall).
  * Returns array of { key, value, source_quote }
  */
 function getPromotable(pending) {
   const ready = [];
+  const now = Date.now();
   for (const [key, meta] of Object.entries(pending)) {
-    if (meta.count >= PROMOTION_THRESHOLD || meta.confidence === 'high') {
+    if (meta.confidence === 'high') {
+      ready.push({ key, value: meta.value, source_quote: meta.source_quote });
+      continue;
+    }
+    const ageDays = Math.floor((now - new Date(meta.last_seen).getTime()) / (1000 * 60 * 60 * 24));
+    const ageWeight = Math.max(0.3, 1 - ageDays / 60);
+    const effectiveCount = meta.count * ageWeight;
+    if (effectiveCount >= PROMOTION_THRESHOLD) {
       ready.push({ key, value: meta.value, source_quote: meta.source_quote });
     }
   }

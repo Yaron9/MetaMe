@@ -181,8 +181,8 @@ async function run() {
   let sessionAnalytics;
   try {
     sessionAnalytics = require('./session-analytics');
-  } catch {
-    console.log('[memory-extract] session-analytics not available, exiting.');
+  } catch (e) {
+    console.log(`[memory-extract] session-analytics unavailable: ${e.message} — memory extraction disabled`);
     return { sessionsProcessed: 0, factsSaved: 0, factsSkipped: 0 };
   }
 
@@ -222,14 +222,15 @@ async function run() {
         const { facts, session_name } = await extractFacts(skeleton, null, distillEnv);
 
         if (facts.length > 0) {
-          const { saved, skipped } = memory.saveFacts(
+          const { saved, skipped, superseded } = memory.saveFacts(
             skeleton.session_id,
             skeleton.project || 'unknown',
             facts
           );
           totalSaved += saved;
           totalSkipped += skipped;
-          console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)}: ${saved} facts saved, ${skipped} skipped`);
+          const superMsg = superseded > 0 ? `, ${superseded} superseded` : '';
+          console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)}: ${saved} facts saved, ${skipped} skipped${superMsg}`);
         } else {
           console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)} (${session_name}): no facts extracted`);
         }
