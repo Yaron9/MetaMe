@@ -189,7 +189,7 @@ npm install -g metame-cli && metame
 
 1. Create a group chat in Telegram/Feishu, add your bot
 2. Send `/agent bind <name>` in the group (e.g. `/agent bind personal`)
-3. Pick a working directory from the buttons → done
+3. Pick a working directory from the buttons, or type a path directly — non-existent directories are created automatically → done
 
 > Want more Agents? Repeat: new group → add bot → `/agent bind <name>`. Each group = independent AI workspace.
 
@@ -220,7 +220,7 @@ The easiest way. Open any Telegram/Feishu group and use the `/agent` wizard:
 
 | Command | What it does |
 |---------|-------------|
-| `/agent new` | Step-by-step wizard: pick a directory → name the agent → describe its role. MetaMe writes the role into `CLAUDE.md` automatically. |
+| `/agent new` | Step-by-step wizard: pick a directory → name the agent → describe its role. MetaMe writes the role into `CLAUDE.md` automatically. You can also type a path directly in chat — if it doesn't exist, MetaMe creates it for you. |
 | `/agent bind <name> [dir]` | Quick bind: register this group as a named agent, optionally set working directory. |
 | `/agent list` | Show all configured agents. |
 | `/agent edit` | Update the current agent's role description (rewrites its `CLAUDE.md` section). |
@@ -231,13 +231,16 @@ Example flow:
 You:     /agent new
 Bot:     Please select a working directory:
          📁 ~/AGI   📁 ~/projects   📁 ~/Desktop
-You:     ~/AGI/MyProject
-Bot:     What should we name this agent?
+You:     ~/AGI/MyProject/NewDir
+Bot:     ✅ 已新建目录：~/AGI/MyProject/NewDir
+         What should we name this agent?
 You:     小美
 Bot:     Describe 小美's role and responsibilities:
 You:     Personal assistant. Manages my calendar, drafts messages, and tracks todos.
 Bot:     ✅ Agent「小美」created. CLAUDE.md updated with role definition.
 ```
+
+You can tap a button to pick an existing directory, or type any path directly in chat. If the path doesn't exist, it's created automatically. All entry points (`/agent new` wizard and `/agent bind`) validate that the directory is real before saving.
 
 ### From config file (for power users)
 

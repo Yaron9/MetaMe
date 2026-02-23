@@ -144,6 +144,15 @@ function getDb() {
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_entity  ON facts(entity)'); } catch {}
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_project ON facts(project)'); } catch {}
 
+  // Search frequency tracking: counts how many times a fact appeared in search results.
+  // This is a RELEVANCE PROXY, not a usefulness score — "searched" ≠ "actually helpful".
+  // Renamed from recall_count (was ambiguous). Migration copies existing data forward.
+  try { _db.exec('ALTER TABLE facts ADD COLUMN recall_count INTEGER DEFAULT 0'); } catch {}
+  try { _db.exec('ALTER TABLE facts ADD COLUMN search_count INTEGER DEFAULT 0'); } catch {}
+  try { _db.exec('ALTER TABLE facts ADD COLUMN last_searched_at TEXT'); } catch {}
+  // One-time migration: copy recall_count → search_count for existing rows
+  try { _db.exec('UPDATE facts SET search_count = recall_count WHERE recall_count > 0 AND search_count = 0'); } catch {}
+
   return _db;
 }
 
@@ -177,16 +186,20 @@ function saveSession({ sessionId, project, summary, keywords = '', mood = '', to
   return { ok: true, id: sessionId };
 }
 
+// Relations with "current state" semantics: new value replaces old.
+// Historical relations (tech_decision, bug_lesson, arch_convention, project_milestone) keep all versions.
+const STATEFUL_RELATIONS = new Set(['user_pref', 'config_fact', 'config_change', 'workflow_rule']);
+
 /**
  * Save atomic facts extracted from a session.
  *
  * @param {string} sessionId - Source session ID
  * @param {string} project   - Project key ('metame', 'desktop', '*' for global)
  * @param {Array}  facts     - Array of { entity, relation, value, confidence, tags }
- * @returns {{ saved: number, skipped: number }}
+ * @returns {{ saved: number, skipped: number, superseded: number }}
  */
 function saveFacts(sessionId, project, facts) {
-  if (!Array.isArray(facts) || facts.length === 0) return { saved: 0, skipped: 0 };
+  if (!Array.isArray(facts) || facts.length === 0) return { saved: 0, skipped: 0, superseded: 0 };
   const db = getDb();
 
   // Load existing facts for dedup check
@@ -200,8 +213,14 @@ function saveFacts(sessionId, project, facts) {
     ON CONFLICT(id) DO NOTHING
   `);
 
+  const supersede = db.prepare(`
+    UPDATE facts SET superseded_by = ?, updated_at = datetime('now')
+    WHERE entity = ? AND relation = ? AND id != ? AND superseded_by IS NULL
+  `);
+
   let saved = 0;
   let skipped = 0;
+  let superseded = 0;
   const savedFacts = [];
 
   for (const f of facts) {
@@ -225,6 +244,24 @@ function saveFacts(sessionId, project, facts) {
       savedFacts.push({ id, entity: f.entity, relation: f.relation, value: f.value,
         project: project === '*' ? '*' : project, tags: f.tags || [], created_at: new Date().toISOString() });
       saved++;
+
+      // For stateful relations, mark older active facts with same entity::relation as superseded
+      if (STATEFUL_RELATIONS.has(f.relation)) {
+        // Fetch the IDs being superseded before running the update (for audit log)
+        const db2 = getDb();
+        const toSupersede = db2.prepare(
+          'SELECT id, value FROM facts WHERE entity = ? AND relation = ? AND id != ? AND superseded_by IS NULL'
+        ).all(f.entity, f.relation, id);
+
+        const result = supersede.run(id, f.entity, f.relation, id);
+        const changes = result.changes || 0;
+        superseded += changes;
+
+        // Audit log: append to ~/.metame/memory_supersede_log.jsonl (never mutates, only appends)
+        if (changes > 0) {
+          _logSupersede(toSupersede, id, f.entity, f.relation, f.value, sessionId);
+        }
+      }
     } catch { skipped++; }
   }
 
@@ -235,7 +272,48 @@ function saveFacts(sessionId, project, facts) {
     if (qmdClient) qmdClient.upsertFacts(savedFacts);
   }
 
-  return { saved, skipped };
+  return { saved, skipped, superseded };
+}
+
+/**
+ * Increment search_count and last_searched_at for a list of fact IDs.
+ * Semantics: "this fact appeared in search results" — NOT "this fact was useful".
+ * High search_count = frequently retrieved. Low/zero = candidate for pruning.
+ * Non-fatal; called after each successful search.
+ */
+function _trackSearch(ids) {
+  if (!ids || ids.length === 0) return;
+  try {
+    const db = getDb();
+    const placeholders = ids.map(() => '?').join(',');
+    db.prepare(
+      `UPDATE facts SET search_count = search_count + 1, last_searched_at = datetime('now')
+       WHERE id IN (${placeholders})`
+    ).run(...ids);
+  } catch { /* non-fatal */ }
+}
+
+const SUPERSEDE_LOG = path.join(os.homedir(), '.metame', 'memory_supersede_log.jsonl');
+
+/**
+ * Append supersede operations to audit log (append-only, never mutated).
+ * Each line: { ts, new_id, new_value_prefix, entity, relation, superseded: [{id, value_prefix}], session_id }
+ * Use this to investigate accidental overwrites or replay if needed.
+ */
+function _logSupersede(oldFacts, newId, entity, relation, newValue, sessionId) {
+  if (!oldFacts || oldFacts.length === 0) return;
+  try {
+    const entry = {
+      ts: new Date().toISOString(),
+      entity,
+      relation,
+      new_id: newId,
+      new_value: newValue.slice(0, 80),
+      session_id: sessionId,
+      superseded: oldFacts.map(f => ({ id: f.id, value: f.value.slice(0, 80) })),
+    };
+    fs.appendFileSync(SUPERSEDE_LOG, JSON.stringify(entry) + '\n', 'utf8');
+  } catch { /* non-fatal */ }
 }
 
 /**
@@ -272,7 +350,10 @@ async function searchFactsAsync(query, { limit = 5, project = null } = {}) {
         const idOrder = new Map(ids.map((id, i) => [id, i]));
         rows.sort((a, b) => (idOrder.get(a.id) ?? 999) - (idOrder.get(b.id) ?? 999));
 
-        if (rows.length > 0) return rows.slice(0, limit);
+        if (rows.length > 0) {
+          _trackSearch(rows.map(r => r.id));
+          return rows.slice(0, limit);
+        }
       }
     } catch { /* QMD failed, fall through to FTS5 */ }
   }
@@ -317,7 +398,10 @@ function searchFacts(query, { limit = 5, project = null } = {}) {
       params = [sanitized, limit];
     }
     const ftsResults = db.prepare(sql).all(...params);
-    if (ftsResults.length > 0) return ftsResults;
+    if (ftsResults.length > 0) {
+      _trackSearch(ftsResults.map(r => r.id));
+      return ftsResults;
+    }
   } catch { /* FTS error, fall through */ }
 
   // LIKE fallback
@@ -331,9 +415,11 @@ function searchFacts(query, { limit = 5, project = null } = {}) {
        FROM facts WHERE (entity LIKE ? OR value LIKE ? OR tags LIKE ?)
        AND superseded_by IS NULL
        ORDER BY created_at DESC LIMIT ?`;
-  return project
+  const likeResults = project
     ? db.prepare(likeSql).all(like, like, like, project, limit)
     : db.prepare(likeSql).all(like, like, like, limit);
+  if (likeResults.length > 0) _trackSearch(likeResults.map(r => r.id));
+  return likeResults;
 }
 
 /**

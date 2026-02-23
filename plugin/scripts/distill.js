@@ -20,13 +20,16 @@ const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const LOCK_FILE = path.join(HOME, '.metame', 'distill.lock');
 
 const { hasKey, isLocked, getTier, getWritableKeysForPrompt, estimateTokens, TOKEN_BUDGET } = require('./schema');
-const { loadPending, savePending, upsertPending, getPromotable, removePromoted } = require('./pending-traits');
+const { loadPending, savePending, upsertPending, getPromotable, removePromoted, expireStale } = require('./pending-traits');
+const { writeBrainFileSafe } = require('./utils');
 
 // Session analytics — local skeleton extraction (zero API cost)
 let sessionAnalytics = null;
 try {
   sessionAnalytics = require('./session-analytics');
-} catch { /* session-analytics.js not available — graceful fallback */ }
+} catch (e) {
+  console.log(`[distill] session-analytics unavailable: ${e.message} — behavior extraction disabled`);
+}
 
 // Provider env for distillation (cheap relay for background tasks)
 let distillEnv = {};
@@ -115,7 +118,9 @@ async function distill() {
           // For long sessions, extract pivot points
           sessionSummary = sessionAnalytics.summarizeSession(skeleton, latest.path);
         }
-      } catch { /* non-fatal */ }
+      } catch (e) {
+        console.log(`[distill] session context extraction failed: ${e.message}`);
+      }
     }
 
     // 4. Read current profile
@@ -169,9 +174,9 @@ async function distill() {
       budgetForMessages = availableForContent;
     }
 
-    // Format signals: tag metacognitive signals so Haiku treats them differently
+    // Format signals: tag metacognitive and correction signals so Haiku treats them differently
     const formatSignal = (s, i) => {
-      const tag = s.type === 'metacognitive' ? ' [META]' : '';
+      const tag = s.type === 'metacognitive' ? ' [META]' : s.type === 'correction' ? ' [CORRECTION]' : '';
       return `${i + 1}. "${s.text}"${tag}`;
     };
 
@@ -215,6 +220,7 @@ BIAS PREVENTION:
 - Single observation = STATE, not TRAIT. T3 cognition needs 3+ observations.
 - L1 Surface → needs 5+, L2 Behavior → needs 3, L3 Self-declaration → direct write.
 - Contradiction with existing value → do NOT output (needs accumulation).
+- EXCEPTION: [CORRECTION] signals are explicit user corrections — they CAN and SHOULD overwrite contradicting existing values directly, with _confidence: high. The user is teaching us we were wrong.
 
 BEHAVIORAL ANALYSIS — _behavior block (always output, use null if insufficient signal):
   decision_pattern: premature_closure | exploratory | iterative | null
@@ -302,6 +308,7 @@ Do NOT repeat existing unchanged values.`;
 
       // Strategic merge: tier-aware upsert with pending traits
       const pendingTraits = loadPending();
+      expireStale(pendingTraits); // remove observations not seen for >30 days
       const confidenceMap = updates._confidence || {};
       const sourceMap = updates._source || {};
       const merged = strategicMerge(profile, filtered, lockedKeys, pendingTraits, confidenceMap, sourceMap);
@@ -343,12 +350,17 @@ Do NOT repeat existing unchanged values.`;
         tokens = estimateTokens(restored);
       }
       if (tokens > TOKEN_BUDGET) {
-        // Step 3: Reject write entirely, keep previous version
+        // Step 3: Reject write entirely — emit alert so daemon can notify user
+        const alertFile = path.join(HOME, '.metame', 'distill_alerts.jsonl');
+        try {
+          const alert = { ts: new Date().toISOString(), type: 'budget_exceeded', tokens, budget: TOKEN_BUDGET };
+          fs.appendFileSync(alertFile, JSON.stringify(alert) + '\n', 'utf8');
+        } catch { /* non-fatal */ }
         cleanup();
         return { updated: false, behavior, signalCount: signals.length, summary: `Profile too large (${tokens} tokens > ${TOKEN_BUDGET}). Write rejected to prevent bloat.` };
       }
 
-      fs.writeFileSync(BRAIN_FILE, restored, 'utf8');
+      await writeBrainFileSafe(restored, BRAIN_FILE);
 
       // Mark session as analyzed after successful distill
       if (skeleton && sessionAnalytics) {
