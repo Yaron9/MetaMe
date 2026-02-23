@@ -2638,45 +2638,32 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     return;
   }
 
-  // /npm login — run npm login on the daemon machine, send URL to phone
-  if (text === '/npm login' || text === '/npm-login') {
-    await bot.sendMessage(chatId, '🔐 正在启动 npm 登录，稍等...');
+  // /npm login [token] — set npm auth via access token (mobile-friendly)
+  if (text === '/npm login' || text === '/npm-login' || text.startsWith('/npm login ') || text.startsWith('/npm-login ')) {
+    const token = text.replace(/^\/npm[ -]login\s*/, '').trim();
+    if (!token) {
+      await bot.sendMessage(chatId, '🔐 npm 登录（手机操作）\n\n' +
+        '1. 手机浏览器打开：\nhttps://www.npmjs.com/settings/tokens/new?type=publish\n\n' +
+        '2. 登录 npm 账号\n' +
+        '3. Token type 选 Publish\n' +
+        '4. 点 Generate Token\n' +
+        '5. 复制 token，发送：\n/npm login npm_xxxxxxxx');
+      return;
+    }
     try {
-      const loginProc = spawn('npm', ['login', '--auth-type=web'], {
-        cwd: HOME, stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, BROWSER: 'echo' }, // prevent opening local browser
-      });
-      let output = '';
-      let urlSent = false;
-      const onData = async (chunk) => {
-        output += chunk;
-        if (!urlSent) {
-          const urlMatch = output.match(/(https?:\/\/\S+)/);
-          if (urlMatch) {
-            urlSent = true;
-            await bot.sendMessage(chatId, `🌐 在手机浏览器打开此链接完成登录：\n\n${urlMatch[1]}`);
-          }
-        }
-      };
-      loginProc.stdout.on('data', onData);
-      loginProc.stderr.on('data', onData);
-      const exitCode = await new Promise((resolve) => {
-        const timer = setTimeout(() => { loginProc.kill(); resolve(-1); }, 120000);
-        loginProc.on('close', (code) => { clearTimeout(timer); resolve(code); });
-        loginProc.on('error', () => { clearTimeout(timer); resolve(1); });
-      });
-      if (exitCode === 0) {
-        try {
-          const whoami = execSync('npm whoami 2>&1', { encoding: 'utf8', timeout: 10000 }).trim();
-          await bot.sendMessage(chatId, `✅ npm 已登录: ${whoami}`);
-        } catch { await bot.sendMessage(chatId, '✅ npm login 完成'); }
-      } else if (exitCode === -1) {
-        await bot.sendMessage(chatId, '⏰ 登录超时（2分钟），请重试 /npm login');
-      } else if (!urlSent) {
-        await bot.sendMessage(chatId, `❌ npm login 失败\n${output.slice(0, 500)}`);
+      const npmrc = path.join(HOME, '.npmrc');
+      let content = '';
+      try { content = fs.readFileSync(npmrc, 'utf8'); } catch {}
+      if (content.includes('//registry.npmjs.org/:_authToken=')) {
+        content = content.replace(/\/\/registry\.npmjs\.org\/:_authToken=.*/g, `//registry.npmjs.org/:_authToken=${token}`);
+      } else {
+        content = content.trimEnd() + `\n//registry.npmjs.org/:_authToken=${token}\n`;
       }
+      fs.writeFileSync(npmrc, content, { mode: 0o600 });
+      const whoami = execSync('npm whoami 2>&1', { encoding: 'utf8', timeout: 10000 }).trim();
+      await bot.sendMessage(chatId, `✅ npm 已登录: ${whoami}`);
     } catch (e) {
-      await bot.sendMessage(chatId, `❌ ${e.message}`);
+      await bot.sendMessage(chatId, `❌ 登录失败，请检查 token 是否正确\n${(e.stdout || e.stderr || e.message || '').slice(0, 300)}`);
     }
     return;
   }
