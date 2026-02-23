@@ -2638,6 +2638,43 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     return;
   }
 
+  // /npm login — open browser for npm web login (non-blocking)
+  if (text === '/npm login' || text === '/npm-login') {
+    await bot.sendMessage(chatId, '🔐 Opening npm login in browser...');
+    try {
+      // Spawn detached so daemon event loop is not blocked
+      const loginProc = spawn('npm', ['login', '--auth-type=web'], {
+        cwd: HOME, detached: false, stdio: ['ignore', 'pipe', 'pipe']
+      });
+      let output = '';
+      loginProc.stdout.on('data', d => { output += d; });
+      loginProc.stderr.on('data', d => { output += d; });
+      // Send URL to user as soon as it appears in output
+      const urlTimer = setInterval(async () => {
+        const urlMatch = output.match(/https?:\/\/\S+/);
+        if (urlMatch) {
+          clearInterval(urlTimer);
+          await bot.sendMessage(chatId, `🌐 请在浏览器完成登录：\n${urlMatch[0]}`);
+        }
+      }, 500);
+      loginProc.on('close', async (code) => {
+        clearInterval(urlTimer);
+        if (code === 0) {
+          await bot.sendMessage(chatId, `✅ npm login 成功`);
+        } else {
+          await bot.sendMessage(chatId, `❌ npm login 失败 (exit ${code})\n${output.slice(0, 500)}`);
+        }
+      });
+      loginProc.on('error', async (e) => {
+        clearInterval(urlTimer);
+        await bot.sendMessage(chatId, `❌ npm login 错误: ${e.message}`);
+      });
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ npm login 失败: ${e.message}`);
+    }
+    return;
+  }
+
   // /publish <otp> — npm publish with OTP (zero latency, no Claude)
   if (text.startsWith('/publish ')) {
     const otp = text.slice(9).trim();
