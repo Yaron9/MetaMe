@@ -2643,11 +2643,10 @@ async function handleCommand(bot, chatId, text, config, executeTaskByName, sende
     const token = text.replace(/^\/npm[ -]login\s*/, '').trim();
     if (!token) {
       await bot.sendMessage(chatId, '🔐 npm 登录（手机操作）\n\n' +
-        '1. 手机浏览器打开：\nhttps://www.npmjs.com/settings/tokens/new?type=publish\n\n' +
-        '2. 登录 npm 账号\n' +
-        '3. Token type 选 Publish\n' +
-        '4. 点 Generate Token\n' +
-        '5. 复制 token，发送：\n/npm login npm_xxxxxxxx');
+        '1. 打开 https://www.npmjs.com/settings/tokens\n' +
+        '2. 点 Generate New Token → Classic Token\n' +
+        '3. 选 Publish，点 Generate\n' +
+        '4. 复制 token，发送：\n\n/npm login npm_xxxxxxxx');
       return;
     }
     try {
