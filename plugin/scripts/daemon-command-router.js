@@ -103,7 +103,7 @@ function createCommandRouter(deps) {
 
   function isLikelyDirectAgentAction(input) {
     const text = String(input || '').trim();
-    return /^(?:请|帮我|麻烦|给我|给这个群|给当前群|在这个群|把这个群|把当前群|将这个群|我想|我要|我需要|创建|新建|新增|搞一个|加一个|create|bind|绑定|列出|查看|显示|有哪些|解绑|取消绑定|断开绑定|修改|调整)/i.test(text);
+    return /^(?:请|帮我|麻烦|给我|给这个群|给当前群|在这个群|把这个群|把当前群|将这个群|这个群|当前群|本群|群里|我想|我要|我需要|创建|新建|新增|搞一个|加一个|create|bind|绑定|列出|查看|显示|有哪些|解绑|取消绑定|断开绑定|修改|调整)/i.test(text);
   }
 
   function looksLikeAgentIssueReport(input) {

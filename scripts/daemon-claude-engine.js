@@ -25,6 +25,7 @@ function createClaudeEngine(deps) {
     normalizeCwd,
     isContentFile,
     sendFileButtons,
+    findSessionFile,
     listRecentSessions,
     getSession,
     createSession,
@@ -38,6 +39,70 @@ function createClaudeEngine(deps) {
     statusThrottleMs = 3000,
     fallbackThrottleMs = 8000,
   } = deps;
+  const SESSION_CWD_VALIDATION_TTL_MS = 30 * 1000;
+  const _sessionCwdValidationCache = new Map(); // key: `${sessionId}@@${cwd}` -> { inCwd, ts }
+
+  function decodeProjectDirName(dirName) {
+    const raw = String(dirName || '');
+    if (!raw) return '';
+    if (raw.startsWith('-')) return '/' + raw.slice(1).replace(/-/g, '/');
+    return raw.replace(/-/g, '/');
+  }
+
+  function cacheSessionCwdValidation(cacheKey, inCwd) {
+    _sessionCwdValidationCache.set(cacheKey, { inCwd: !!inCwd, ts: Date.now() });
+    if (_sessionCwdValidationCache.size > 512) {
+      const firstKey = _sessionCwdValidationCache.keys().next().value;
+      if (firstKey) _sessionCwdValidationCache.delete(firstKey);
+    }
+    return !!inCwd;
+  }
+
+  function isSessionInCwd(sessionId, cwd) {
+    const safeSessionId = String(sessionId || '').trim();
+    if (!safeSessionId || !cwd) return false;
+
+    const normCwd = normalizeCwd(cwd);
+    const cacheKey = `${safeSessionId}@@${normCwd}`;
+    const cached = _sessionCwdValidationCache.get(cacheKey);
+    if (cached && (Date.now() - cached.ts) < SESSION_CWD_VALIDATION_TTL_MS) {
+      return !!cached.inCwd;
+    }
+
+    try {
+      // Fast path: locate the exact session file, then validate its indexed projectPath.
+      if (typeof findSessionFile === 'function') {
+        const sessionFile = findSessionFile(safeSessionId);
+        if (!sessionFile) return cacheSessionCwdValidation(cacheKey, false);
+
+        const projectDir = path.dirname(sessionFile);
+        const indexFile = path.join(projectDir, 'sessions-index.json');
+        if (fs.existsSync(indexFile)) {
+          const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+          const entries = Array.isArray(data && data.entries) ? data.entries : [];
+          const entry = entries.find(e => e && e.sessionId === safeSessionId);
+          if (entry && entry.projectPath) {
+            return cacheSessionCwdValidation(cacheKey, normalizeCwd(entry.projectPath) === normCwd);
+          }
+        }
+
+        // Fallback: infer from encoded Claude project folder name.
+        const inferredPath = decodeProjectDirName(path.basename(projectDir));
+        if (inferredPath) {
+          return cacheSessionCwdValidation(cacheKey, normalizeCwd(inferredPath) === normCwd);
+        }
+        return cacheSessionCwdValidation(cacheKey, false);
+      }
+
+      // Ultimate fallback (legacy path): scoped scan in target cwd.
+      const recentInCwd = listRecentSessions(1000, normCwd);
+      const existsInCwd = recentInCwd.some(s => s.sessionId === safeSessionId);
+      return cacheSessionCwdValidation(cacheKey, existsInCwd);
+    } catch {
+      // Conservative fallback: if validation infra fails, avoid false positives by preserving current session.
+      return cacheSessionCwdValidation(cacheKey, true);
+    }
+  }
 
   /**
    * Parse [[FILE:...]] markers from Claude output.
@@ -541,8 +606,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     // Safety guard: prevent stale state from resuming another workspace's session.
     if (!usePinnedSkillSession && session && session.started && session.id && session.id !== '__continue__' && session.cwd) {
       const sessionCwd = normalizeCwd(session.cwd);
-      const recentInCwd = listRecentSessions(1000, sessionCwd);
-      const existsInCwd = recentInCwd.some(s => s.sessionId === session.id);
+      const existsInCwd = isSessionInCwd(session.id, sessionCwd);
       if (!existsInCwd) {
         log('WARN', `Session mismatch detected for ${chatId}: ${session.id.slice(0, 8)} not found in ${sessionCwd}; creating fresh session`);
         session = createSession(chatId, sessionCwd, boundProject && boundProject.name ? boundProject.name : '');
