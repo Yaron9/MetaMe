@@ -33,7 +33,7 @@ Token 守则：Glob/Grep 定位再读、大任务后 `/compact`、Profile ≤800
 
 ## 架构概览
 
-MetaMe = Claude Code 认知层 + 手机端桥接。`metame-cli@1.4.2`，Node ≥22.5。
+MetaMe = Claude Code 认知层 + 手机端桥接。`metame-cli@1.4.11`，Node ≥22.5。
 
 ```
 index.js                      ← CLI 入口 (metame 命令)
@@ -48,7 +48,7 @@ scripts/
   daemon-admin-commands.js    ← 管理态指令 (/status /budget /fix /reload 等)
   daemon-exec-commands.js     ← 执行态指令 (/run /stop /quit /sh 等)
   daemon-ops-commands.js      ← 运维态指令 (/undo /nosleep /help 等)
-  daemon-dispatch.js          ← Dispatch 子系统 (验签/Socket/文件回退)
+  # Dispatch 目前仍在 daemon.js 内（含 Socket/文件回退），尚未独立 daemon-dispatch.js
   daemon-bridges.js           ← 桥接管理 (Telegram/Feishu bots 启动与销毁)
   daemon-file-browser.js      ← 文件浏览/下载缓存
   daemon-runtime-lifecycle.js ← PID 管理 + 热重载 watcher
@@ -96,7 +96,7 @@ install.sh / install.ps1      ← 一键安装脚本
 
 **独立于认知系统运行**，提取事实而非偏好。
 
-- `memory-extract.js` 心跳任务（2h），扫描未分析 session JSONL
+- `memory-extract.js` 心跳任务（默认 4h，可配置），扫描未分析 session JSONL
 - Haiku 提取 7 类事实：`tech_decision|bug_lesson|arch_convention|config_fact|user_pref|workflow_rule|project_milestone`
 - 存入 SQLite (`~/.metame/memory.db`)，FTS5 全文搜索 + QMD 向量检索
 - 会话名/标签存入 `~/.metame/session_tags.json`
@@ -112,7 +112,7 @@ install.sh / install.ps1      ← 一键安装脚本
 | `daemon-task-scheduler.js` | `startHeartbeat()` / `executeTask()` — 心跳与任务调度 |
 | `daemon-session-store.js` | 会话 JSONL 扫描、标签读写、session 状态存取 |
 | `daemon-command-router.js` | `handleCommand()` — 指令路由分发 |
-| `daemon-dispatch.js` | `dispatchTask()` — 跨 Agent 消息调度，含 HMAC 验签 |
+| `daemon.js`（内联） | `dispatchTask()` / `handleDispatchItem()` — 跨 Agent 消息调度 |
 | `daemon-bridges.js` | Telegram/Feishu Bot 启动、热接管、停止 |
 | `daemon-runtime-lifecycle.js` | PID 管理、daemon.js 热重启 watcher |
 
@@ -128,7 +128,7 @@ install.sh / install.ps1      ← 一键安装脚本
 **Dispatch 系统：**
 - `~/.metame/bin/dispatch_to <project> "内容"` → Unix socket (`daemon.sock`) 或 `pending.jsonl` 回退
 - 防风暴：20次/目标/小时，总计60次/小时，最大深度2，循环检测
-- 消息携带 HMAC-SHA256 签名（`ts` + `sig`），daemon 验签后才执行
+- 当前实现依赖本机 Unix socket + 文件权限控制（尚未实现消息级 HMAC 验签）
 - 虚拟 chatId `_agent_<project>` 用于 dispatch 会话
 
 ### 飞书卡片 (feishu-adapter.js)
@@ -206,7 +206,15 @@ npm version patch && git push && git push --tags
 
 ## 已知限制
 
-- Plugin 版无 daemon，只有 profile 注入 + slash commands
+- Plugin 版有 daemon，但生命周期跟随 Claude Code（关闭 Claude 后不常驻）
 - `install.sh` 未在 Linux ARM 上测试
 - WSL systemd 自启动需用户手动 `systemd=true`
 - `README中文版.md` 和英文版可能不同步
+
+## 架构审查补充（2026-02-24）
+
+- `/reload` 现已做严格 YAML 校验；解析失败会拒绝应用，不再把空配置写入运行态。
+- 配置热更新已覆盖路由与 dispatch（动态读取当前 config）；但 bot 凭证本身变更仍建议重启 daemon。
+- `timeout` 现支持统一写法（推荐秒），并兼容 legacy 毫秒值；workflow 也已改为使用 `CLAUDE_BIN`。
+- Token 基线（当前生产配置）：`daemon.model=sonnet`；自媒体侧保留 `daily-topic-hotspot` + `weekend-review`（均为 `haiku`）。
+- 降噪基线：保留“每天 22:00 选题热点推送”与“周末 22:00 周总结数据收集”，其余自媒体任务不启用。
