@@ -105,11 +105,11 @@ Built into the daemon. Runs every 60 seconds regardless of what's in your config
 - Detects when you go idle → generates session continuity summaries
 
 **Layer 1 — System Evolution (built-in defaults)**
-Three tasks shipped out of the box. Only fire when you're idle — they never interrupt active work:
+Three tasks shipped out of the box. They are precondition-gated and run only when useful:
 
 ```yaml
 - cognitive-distill   # 4h · has signals? → distill preferences into profile
-- memory-extract      # 2h · scan sessions → extract long-term facts + topic tags
+- memory-extract      # 4h · scan sessions → extract long-term facts + topic tags
 - skill-evolve        # 6h · has signals? → evolve skills from task outcomes
 ```
 
@@ -150,7 +150,7 @@ Chain skills into multi-step workflows — research → write → publish — fu
           prompt: "Publish it"
 ```
 
-Task options: `require_idle` (defer when you're active), `precondition` (shell guard — skip if false, zero tokens), `notify` (push result to phone), `model`, `cwd`, `allowedTools`, `timeout`.
+Task options: `require_idle` (defer when you're active, retry on next heartbeat tick), `precondition` (shell guard — skip if false, zero tokens), `notify` (push result to phone), `model`, `cwd`, `allowedTools`, `timeout`.
 
 ### 5. Skills That Evolve Themselves
 
@@ -319,14 +319,14 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
                                           │   (memory layer)  ← NEW      │
                                           └──────────────────────────────┘
                                                        ↑
-                                          sleep mode → memory consolidation
-                                                       (background, automatic)
+                                          idle mode → summaries + background memory tasks
+                                                      (automatic, precondition-gated)
 ```
 
 - **Profile** (`~/.claude_profile.yaml`): Your cognitive fingerprint. Injected into every Claude session via `CLAUDE.md`.
-- **Daemon** (`scripts/daemon.js`): Background process handling Telegram/Feishu messages, heartbeat tasks, Unix socket dispatch, and sleep-mode memory triggers.
-- **Distillation** (`scripts/distill.js`): On each launch, silently analyzes your recent messages and updates your profile.
-- **Memory Extract** (`scripts/memory-extract.js`): Triggered on sleep mode. Extracts long-term facts and session topic tags from completed conversations.
+- **Daemon** (`scripts/daemon.js`): Background process handling Telegram/Feishu messages, heartbeat tasks, Unix socket dispatch, and idle/sleep transitions.
+- **Distillation** (`scripts/distill.js`): Heartbeat task (default 4h, signal-gated) that updates your profile.
+- **Memory Extract** (`scripts/memory-extract.js`): Heartbeat task (default 4h, idle-gated) that extracts long-term facts and session topic tags.
 - **Session Summarize** (`scripts/session-summarize.js`): Generates a 2-4 sentence summary for idle sessions. Injected as context when resuming after a 2h+ gap.
 
 ## Security
@@ -349,7 +349,7 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 | Session summary (per session) | ~400–900 tokens input + ≤250 tokens output (Haiku) |
 | Mobile commands (`/stop`, `/list`, `/undo`) | 0 tokens |
 
-> Both memory consolidation and session summarization run in the background via Haiku (`--model haiku`). Input is capped by code: skeleton text ≤ 3,000 chars, summary output ≤ 500 chars. Neither runs per-message — memory consolidation triggers on sleep mode (30-min idle), summaries trigger once per idle session.
+> Both memory consolidation and session summarization run in the background via Haiku (`--model haiku`). Input is capped by code: skeleton text ≤ 3,000 chars, summary output ≤ 500 chars. Neither runs per-message — memory consolidation follows heartbeat schedule with idle/precondition guards, and summaries trigger once per idle session on sleep-mode transitions.
 
 ## Plugin
 
