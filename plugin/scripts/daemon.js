@@ -728,6 +728,10 @@ function checkCooldown(chatId) {
   return { ok: true };
 }
 
+function resetCooldown(chatId) {
+  delete _lastClaudeCall[chatId];
+}
+
 // Path shortener — imported from ./utils
 const { shortenPath, expandPath } = createPathMap();
 const {
@@ -1207,6 +1211,7 @@ const { handleCommand } = createCommandRouter({
   loadConfig,
   checkBudget,
   checkCooldown,
+  resetCooldown,
   routeAgent,
   normalizeCwd,
   attachOrCreateSession,
