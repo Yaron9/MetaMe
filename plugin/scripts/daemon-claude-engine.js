@@ -42,13 +42,6 @@ function createClaudeEngine(deps) {
   const SESSION_CWD_VALIDATION_TTL_MS = 30 * 1000;
   const _sessionCwdValidationCache = new Map(); // key: `${sessionId}@@${cwd}` -> { inCwd, ts }
 
-  function decodeProjectDirName(dirName) {
-    const raw = String(dirName || '');
-    if (!raw) return '';
-    if (raw.startsWith('-')) return '/' + raw.slice(1).replace(/-/g, '/');
-    return raw.replace(/-/g, '/');
-  }
-
   function cacheSessionCwdValidation(cacheKey, inCwd) {
     _sessionCwdValidationCache.set(cacheKey, { inCwd: !!inCwd, ts: Date.now() });
     if (_sessionCwdValidationCache.size > 512) {
@@ -84,14 +77,23 @@ function createClaudeEngine(deps) {
           if (entry && entry.projectPath) {
             return cacheSessionCwdValidation(cacheKey, normalizeCwd(entry.projectPath) === normCwd);
           }
+          // sessions-index may lag behind new sessions; use project-level path from any entry.
+          const anyProjectPath = (entries.find(e => e && e.projectPath) || {}).projectPath;
+          if (anyProjectPath) {
+            return cacheSessionCwdValidation(cacheKey, normalizeCwd(anyProjectPath) === normCwd);
+          }
         }
 
-        // Fallback: infer from encoded Claude project folder name.
-        const inferredPath = decodeProjectDirName(path.basename(projectDir));
-        if (inferredPath) {
-          return cacheSessionCwdValidation(cacheKey, normalizeCwd(inferredPath) === normCwd);
+        // Weak fallback: encode normCwd using Claude's folder convention and accept
+        // only positive match. If it doesn't match, keep current session to avoid
+        // false mismatches for paths with non-ASCII/special characters.
+        const expectedDirName = '-' + normCwd.replace(/^\//, '').replace(/[\/_ ]/g, '-');
+        const actualDirName = path.basename(projectDir);
+        if (actualDirName === expectedDirName) {
+          return cacheSessionCwdValidation(cacheKey, true);
         }
-        return cacheSessionCwdValidation(cacheKey, false);
+        // Unable to prove mismatch safely.
+        return cacheSessionCwdValidation(cacheKey, true);
       }
 
       // Ultimate fallback (legacy path): scoped scan in target cwd.
