@@ -234,6 +234,121 @@ function extractSkeleton(jsonlPath) {
 }
 
 /**
+ * Extract compact evidence from a session JSONL for memory extraction.
+ * Returns { user_messages, tool_traces, key_results, file_anchors }.
+ */
+function extractEvidence(jsonlPath, budget = 3000) {
+  const content = fs.readFileSync(jsonlPath, 'utf8');
+  const lines = content.split('\n');
+
+  const totalBudget = Math.max(600, budget);
+  const userBudget = Math.floor(totalBudget / 3);
+  const toolBudget = Math.floor(totalBudget / 3);
+  const resultBudget = totalBudget - userBudget - toolBudget;
+
+  const evidence = {
+    user_messages: [],
+    tool_traces: [],
+    key_results: [],
+    file_anchors: [],
+  };
+
+  const seen = {
+    user: new Set(),
+    tool: new Set(),
+    result: new Set(),
+    file: new Set(),
+  };
+  const used = { user: 0, tool: 0, result: 0 };
+
+  const addWithBudget = (bucket, key, text, maxChars) => {
+    if (!text || !text.trim()) return;
+    const normalized = text.replace(/\s+/g, ' ').trim();
+    if (!normalized || seen[key].has(normalized)) return;
+    const room = maxChars - used[key];
+    if (room <= 0) return;
+    const clipped = normalized.slice(0, room);
+    if (clipped.length < 12) return;
+    bucket.push(clipped);
+    seen[key].add(normalized);
+    used[key] += clipped.length;
+  };
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    if (!line.includes('"type"')) continue;
+
+    let entry;
+    try { entry = JSON.parse(line); } catch { continue; }
+
+    // User raw messages (exclude tool_result wrappers)
+    if (entry.type === 'user' && entry.message && entry.message.content) {
+      const msg = entry.message.content;
+      if (typeof msg === 'string') {
+        addWithBudget(evidence.user_messages, 'user', msg, userBudget);
+      } else if (Array.isArray(msg)) {
+        for (const item of msg) {
+          if (item && item.type === 'text' && item.text) {
+            addWithBudget(evidence.user_messages, 'user', item.text, userBudget);
+          } else if (item && item.type === 'tool_result' && item.is_error) {
+            const toolText = typeof item.content === 'string'
+              ? item.content
+              : Array.isArray(item.content)
+                ? item.content.map(c => (typeof c === 'string' ? c : c && c.text ? c.text : '')).join(' ')
+                : '';
+            addWithBudget(evidence.key_results, 'result', `tool_result error: ${toolText.slice(0, 120)}`, resultBudget);
+          }
+        }
+      }
+    }
+
+    if (entry.type === 'assistant' && entry.message && Array.isArray(entry.message.content)) {
+      for (const item of entry.message.content) {
+        if (!item || item.type !== 'tool_use') continue;
+        const name = item.name || 'unknown';
+        const input = item.input || {};
+
+        if ((name === 'Write' || name === 'Edit') && typeof input.file_path === 'string') {
+          const base = path.basename(input.file_path);
+          const trace = `${name} ${base}`;
+          addWithBudget(evidence.tool_traces, 'tool', trace, toolBudget);
+          if (base && !seen.file.has(base)) {
+            evidence.file_anchors.push(base);
+            seen.file.add(base);
+          }
+        } else if (name === 'Bash' && typeof input.command === 'string') {
+          const cmd = input.command.replace(/\s+/g, ' ').trim();
+          const trace = `Bash ${cmd.slice(0, 120)}`;
+          addWithBudget(evidence.tool_traces, 'tool', trace, toolBudget);
+        }
+      }
+    }
+
+    // tool_result can appear as standalone event in some transcripts
+    if (entry.type === 'tool_result') {
+      const result = entry.message || {};
+      const isError = !!result.is_error;
+      const snippet = typeof result.content === 'string'
+        ? result.content
+        : Array.isArray(result.content)
+          ? result.content.map(c => (typeof c === 'string' ? c : c && c.text ? c.text : '')).join(' ')
+          : '';
+      if (isError) {
+        addWithBudget(evidence.key_results, 'result', `tool_result error: ${snippet.slice(0, 120)}`, resultBudget);
+      }
+    }
+  }
+
+  // Tight caps keep payload small and predictable
+  evidence.user_messages = evidence.user_messages.slice(0, 8);
+  evidence.tool_traces = evidence.tool_traces.slice(0, 12);
+  evidence.key_results = evidence.key_results.slice(0, 6);
+  evidence.file_anchors = evidence.file_anchors.slice(0, 12);
+
+  return evidence;
+}
+
+/**
  * Format skeleton as a compact one-liner for injection into the distill prompt.
  * Target: ~60 tokens.
  */
@@ -467,6 +582,7 @@ module.exports = {
   findAllUnanalyzedSessions,
   findAllUnextractedSessions,
   extractSkeleton,
+  extractEvidence,
   formatForPrompt,
   formatGoalContext,
   summarizeSession,

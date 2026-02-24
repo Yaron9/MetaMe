@@ -63,6 +63,48 @@ function createClaudeEngine(deps) {
   }
 
   /**
+   * Build a richer fact-retrieval query from the user prompt.
+   * Adds lightweight code anchors (filenames/commands/identifiers) for better recall.
+   */
+  function buildFactSearchQuery(prompt, projectKey) {
+    const text = String(prompt || '').replace(/\s+/g, ' ').trim();
+    if (!text) return projectKey || '';
+
+    const anchors = [];
+    const seen = new Set();
+    const add = (v) => {
+      const t = String(v || '').trim();
+      if (!t || seen.has(t)) return;
+      seen.add(t);
+      anchors.push(t);
+    };
+
+    // File/path-like anchors: daemon.js, scripts/memory-extract.js, foo.ts
+    const fileLike = text.match(/\b(?:[\w.-]+\/)*[\w.-]+\.[a-zA-Z0-9]{1,8}\b/g) || [];
+    for (const f of fileLike.slice(0, 6)) {
+      add(path.basename(f));
+    }
+
+    // Command-like anchors: git commit, npm run build, node index.js ...
+    const cmdLike = text.match(/\b(?:git|npm|pnpm|yarn|npx|node|python|pytest|make)\b[^,.;\n]{0,48}/gi) || [];
+    for (const c of cmdLike.slice(0, 4)) {
+      add(c.toLowerCase());
+    }
+
+    // Symbol-like anchors: snake_case / camelCase identifiers often present in bug reports
+    const idLike = text.match(/\b[A-Za-z_][A-Za-z0-9_]{2,}\b/g) || [];
+    for (const id of idLike) {
+      if (anchors.length >= 12) break;
+      if (id.includes('_') || /[a-z][A-Z]/.test(id)) add(id);
+    }
+
+    const parts = [text.slice(0, 260)];
+    if (projectKey) parts.push(projectKey);
+    if (anchors.length > 0) parts.push(anchors.slice(0, 10).join(' '));
+    return parts.join(' ').slice(0, 520);
+  }
+
+  /**
    * Auto-generate a session name using Haiku (async, non-blocking).
    * Writes to Claude's session file (unified with /rename).
    */
@@ -516,11 +558,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       // Uses QMD hybrid search if available, falls back to FTS5.
       if (!session.started) {
         const searchFn = memory.searchFactsAsync || memory.searchFacts;
-        const facts = await Promise.resolve(searchFn(prompt, { limit: 5, project: projectKey || undefined }));
+        const factQuery = buildFactSearchQuery(prompt, projectKey);
+        const facts = await Promise.resolve(searchFn(factQuery, { limit: 5, project: projectKey || undefined }));
         if (facts.length > 0) {
           const factItems = facts.map(f => `- [${f.relation}] ${f.value}`).join('\n');
           memoryHint += `\n\n<!-- FACTS:START -->\n[Relevant knowledge and user preferences retrieved for this query. Follow these constraints implicitly:\n${factItems}]\n<!-- FACTS:END -->`;
-          log('INFO', `[MEMORY] Injected ${facts.length} facts based on prompt`);
+          log('INFO', `[MEMORY] Injected ${facts.length} facts (query_len=${factQuery.length})`);
         }
       }
 
