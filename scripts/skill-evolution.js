@@ -286,6 +286,49 @@ function checkHotEvolution(signal) {
   }
 
   saveEvolutionQueue(yaml, queue);
+
+  // Rule 4: Track insight outcomes (success/failure per skill)
+  if (signal.skills_invoked && signal.skills_invoked.length > 0) {
+    const isSuccess = signal.outcome === 'success' && !signal.error && !signal.has_tool_failure;
+    const isFail = !isSuccess && (signal.error || signal.has_tool_failure ||
+      (signal.prompt && complaintRe.test(signal.prompt)));
+    if (isSuccess || isFail) {
+      for (const sk of signal.skills_invoked) {
+        const skillDir = findSkillDir(sk);
+        if (skillDir) trackInsightOutcome(skillDir, isSuccess);
+      }
+    }
+  }
+}
+
+/**
+ * Update insight outcome stats in evolution.json for a skill.
+ * Tracks success_count, fail_count, last_applied_at per insight text.
+ */
+function trackInsightOutcome(skillDir, isSuccess) {
+  const evoPath = path.join(skillDir, 'evolution.json');
+  let data = {};
+  try { data = JSON.parse(fs.readFileSync(evoPath, 'utf8')); } catch { return; }
+
+  if (!data.insights_stats) data.insights_stats = {};
+  const now = new Date().toISOString();
+  const allInsights = [
+    ...(data.preferences || []),
+    ...(data.fixes || []),
+    ...(data.contexts || []),
+  ];
+
+  for (const insight of allInsights) {
+    if (!data.insights_stats[insight]) {
+      data.insights_stats[insight] = { success_count: 0, fail_count: 0, last_applied_at: null };
+    }
+    const stat = data.insights_stats[insight];
+    if (isSuccess) stat.success_count++;
+    else stat.fail_count++;
+    stat.last_applied_at = now;
+  }
+
+  try { fs.writeFileSync(evoPath, JSON.stringify(data, null, 2), 'utf8'); } catch {}
 }
 
 // ─────────────────────────────────────────────
@@ -687,14 +730,24 @@ function smartStitch(skillDir) {
   sections.push('\n\n## User-Learned Best Practices & Constraints');
   sections.push('\n> **Auto-Generated Section**: Maintained by skill-evolution-manager. Do not edit manually.');
 
+  // Helper: get quality indicator for an insight based on stats
+  const getQualityTag = (insight) => {
+    const stat = data.insights_stats?.[insight];
+    if (!stat || stat.success_count + stat.fail_count < 3) return ''; // insufficient data
+    const total = stat.success_count + stat.fail_count;
+    const failRate = stat.fail_count / total;
+    if (failRate > 0.6) return ' ⚠️'; // >60% fail rate
+    return '';
+  };
+
   if (data.preferences?.length) {
     sections.push('\n### User Preferences');
-    for (const item of data.preferences) sections.push(`- ${item}`);
+    for (const item of data.preferences) sections.push(`- ${item}${getQualityTag(item)}`);
   }
 
   if (data.fixes?.length) {
     sections.push('\n### Known Fixes & Workarounds');
-    for (const item of data.fixes) sections.push(`- ${item}`);
+    for (const item of data.fixes) sections.push(`- ${item}${getQualityTag(item)}`);
   }
 
   if (data.custom_prompts) {
@@ -776,6 +829,7 @@ module.exports = {
   resolveQueueItem,
   mergeEvolution,
   smartStitch,
+  trackInsightOutcome,
   listInstalledSkills,
 };
 
