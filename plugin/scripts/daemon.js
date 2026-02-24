@@ -863,8 +863,13 @@ async function doBindAgent(bot, chatId, agentName, agentCwd) {
     } else {
       await bot.sendMessage(chatId, `${icon} ${agentName} ${action}\n目录: ${displayCwd}`);
     }
+    return {
+      ok: true,
+      data: { projectKey, cwd: agentCwd, isNewProject: isNew, project: cfg.projects[projectKey] },
+    };
   } catch (e) {
     await bot.sendMessage(chatId, `❌ 绑定失败: ${e.message}`);
+    return { ok: false, error: e.message };
   }
 }
 
@@ -1082,6 +1087,7 @@ const { spawnClaudeAsync, askClaude } = createClaudeEngine({
   normalizeCwd,
   isContentFile,
   sendFileButtons,
+  findSessionFile,
   listRecentSessions,
   getSession,
   createSession,

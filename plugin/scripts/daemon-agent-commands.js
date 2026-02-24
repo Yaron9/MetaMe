@@ -108,11 +108,22 @@ function createAgentCommandHandler(deps) {
     }
 
     // Backward-compatible fallback
-    await doBindAgent(bot, chatId, agentName, agentCwd);
-    if (agentCwd && typeof attachOrCreateSession === 'function') {
-      attachOrCreateSession(chatId, normalizeCwd(agentCwd), agentName || '');
+    const fallback = await doBindAgent(bot, chatId, agentName, agentCwd);
+    if (!fallback || fallback.ok === false) {
+      return { ok: false, error: (fallback && fallback.error) || 'bind failed' };
     }
-    return { ok: true, data: { cwd: agentCwd } };
+    const fallbackCwd = (fallback.data && fallback.data.cwd) || agentCwd;
+    if (fallbackCwd && typeof attachOrCreateSession === 'function') {
+      attachOrCreateSession(chatId, normalizeCwd(fallbackCwd), agentName || '');
+    }
+    return {
+      ok: true,
+      data: {
+        cwd: fallbackCwd,
+        projectKey: fallback && fallback.data ? fallback.data.projectKey : null,
+        project: fallback && fallback.data ? fallback.data.project : null,
+      },
+    };
   }
 
   async function editRoleViaUnifiedApi(workspaceDir, deltaText) {
@@ -128,7 +139,10 @@ function createAgentCommandHandler(deps) {
     if (agentTools && typeof agentTools.createNewWorkspaceAgent === 'function') {
       return agentTools.createNewWorkspaceAgent(name, dir, roleDesc, chatId);
     }
-    await doBindAgent({ sendMessage: async () => {} }, chatId, name, dir);
+    const bound = await doBindAgent({ sendMessage: async () => {} }, chatId, name, dir);
+    if (!bound || bound.ok === false) {
+      return { ok: false, error: (bound && bound.error) || 'bind failed' };
+    }
     const merged = await mergeAgentRole(dir, roleDesc);
     if (merged.error) return { ok: false, error: merged.error };
     return { ok: true, data: { cwd: dir, project: { name }, role: merged } };
