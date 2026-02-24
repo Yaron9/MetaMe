@@ -17,6 +17,7 @@ function createAdminCommandHandler(deps) {
     getAllTasks,
     dispatchTask,
     log,
+    skillEvolution,
   } = deps;
 
   async function handleAdminCommand(ctx) {
@@ -37,6 +38,89 @@ function createAdminCommandHandler(deps) {
         }
       } catch { /* ignore */ }
       await bot.sendMessage(chatId, msg);
+      return { handled: true, config };
+    }
+
+    // /skill-evo — inspect and resolve skill evolution queue
+    if (text === '/skill-evo' || text.startsWith('/skill-evo ')) {
+      if (!skillEvolution) {
+        await bot.sendMessage(chatId, '❌ skill-evolution 模块不可用');
+        return { handled: true, config };
+      }
+
+      const arg = text.slice('/skill-evo'.length).trim();
+      const renderItem = (i) => {
+        const id = i.id || '-';
+        const target = i.skill_name ? `skill=${i.skill_name}` : (i.search_hint ? `hint=${i.search_hint}` : 'global');
+        const seen = i.last_seen || i.detected || '-';
+        const ev = i.evidence_count || 1;
+        return `- [${id}] ${i.type}/${i.status} (${target}, ev=${ev})\n  ${i.reason || '(no reason)'}\n  last: ${seen}`;
+      };
+
+      if (!arg || arg === 'list') {
+        const pending = skillEvolution.listQueueItems({ status: 'pending', limit: 10 });
+        const notified = skillEvolution.listQueueItems({ status: 'notified', limit: 10 });
+        const resolved = skillEvolution.listQueueItems({ limit: 50 }).filter(i => i.status === 'installed' || i.status === 'dismissed').slice(0, 5);
+
+        const lines = ['🧬 Skill Evolution Queue'];
+        lines.push(`pending: ${pending.length} | notified: ${notified.length} | resolved(last): ${resolved.length}`);
+        if (pending.length > 0) {
+          lines.push('\nPending:');
+          for (const item of pending.slice(0, 5)) lines.push(renderItem(item));
+        }
+        if (notified.length > 0) {
+          lines.push('\nNotified:');
+          for (const item of notified.slice(0, 5)) lines.push(renderItem(item));
+        }
+        if (resolved.length > 0) {
+          lines.push('\nResolved (latest):');
+          for (const item of resolved) lines.push(renderItem(item));
+        }
+        if (pending.length === 0 && notified.length === 0 && resolved.length === 0) {
+          lines.push('\n(queue empty)');
+        }
+        lines.push('\n用法: /skill-evo done <id> | /skill-evo dismiss <id>');
+
+        await bot.sendMessage(chatId, lines.join('\n'));
+
+        if (bot.sendButtons) {
+          const actionable = [...notified, ...pending].slice(0, 3);
+          if (actionable.length > 0) {
+            const buttons = [];
+            for (const item of actionable) {
+              const label = `${item.type}:${(item.skill_name || item.search_hint || 'item').slice(0, 10)}`;
+              buttons.push([
+                { text: `✅ ${label}`, callback_data: `/skill-evo done ${item.id}` },
+                { text: `🙈 ${label}`, callback_data: `/skill-evo dismiss ${item.id}` },
+              ]);
+            }
+            await bot.sendButtons(chatId, '处理建议项：', buttons);
+          }
+        }
+        return { handled: true, config };
+      }
+
+      const doneMatch = arg.match(/^(?:done|install|installed)\s+(\S+)$/i);
+      if (doneMatch) {
+        const id = doneMatch[1];
+        const ok = skillEvolution.resolveQueueItemById
+          ? skillEvolution.resolveQueueItemById(id, 'installed')
+          : false;
+        await bot.sendMessage(chatId, ok ? `✅ 已标记 installed: ${id}` : `❌ 未找到可处理项: ${id}`);
+        return { handled: true, config };
+      }
+
+      const dismissMatch = arg.match(/^(?:dismiss|skip|ignored?)\s+(\S+)$/i);
+      if (dismissMatch) {
+        const id = dismissMatch[1];
+        const ok = skillEvolution.resolveQueueItemById
+          ? skillEvolution.resolveQueueItemById(id, 'dismissed')
+          : false;
+        await bot.sendMessage(chatId, ok ? `✅ 已标记 dismissed: ${id}` : `❌ 未找到可处理项: ${id}`);
+        return { handled: true, config };
+      }
+
+      await bot.sendMessage(chatId, '用法: /skill-evo list | /skill-evo done <id> | /skill-evo dismiss <id>');
       return { handled: true, config };
     }
 

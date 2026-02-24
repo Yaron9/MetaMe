@@ -339,6 +339,7 @@ function createCommandRouter(deps) {
         '',
         `⚙️ /model [${currentModel}] /provider [${currentProvider}] /status /tasks /run /budget /reload`,
         '🧠 /memory — 记忆统计 · /memory <关键词> — 搜索事实',
+        '🧬 /skill-evo — 查看/处理技能演化队列',
         `🔧 /doctor /fix /reset /sh <cmd> /nosleep [${getNoSleepProcess() ? 'ON' : 'OFF'}]`,
         '',
         '直接打字即可对话 💬',

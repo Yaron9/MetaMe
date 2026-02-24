@@ -52,6 +52,8 @@ try { skillEvolution = require('./skill-evolution'); } catch { /* graceful fallb
 const SKILL_ROUTES = [
   { name: 'macos-mail-calendar', pattern: /邮件|邮箱|收件箱|日历|日程|会议|schedule|email|mail|calendar|unread|inbox/i },
   { name: 'heartbeat-task-manager', pattern: /提醒|remind|闹钟|定时|每[天周月]/i },
+  { name: 'skill-manager', pattern: /找技能|管理技能|更新技能|安装技能|skill manager|find skill|skill scout|skills?\s+for/i },
+  { name: 'skill-evolution-manager', pattern: /\/evolve\b|复盘一下|记录一下(这个)?经验|保存到\s*skill|skill evolution/i },
 ];
 
 function routeSkill(prompt) {
@@ -1031,6 +1033,7 @@ const { handleAdminCommand } = createAdminCommandHandler({
   getAllTasks,
   dispatchTask,
   log,
+  skillEvolution,
 });
 
 const { handleSessionCommand } = createSessionCommandHandler({
