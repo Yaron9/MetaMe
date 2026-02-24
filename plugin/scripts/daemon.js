@@ -1148,6 +1148,7 @@ const { handleAgentCommand } = createAgentCommandHandler({
   doBindAgent,
   mergeAgentRole,
   agentTools,
+  attachOrCreateSession,
   agentFlowTtlMs: getAgentFlowTtlMs,
   agentBindTtlMs: getAgentBindTtlMs,
 });

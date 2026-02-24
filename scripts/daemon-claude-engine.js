@@ -467,13 +467,19 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     // Skill routing: detect skill first, then decide session
     // BUT: if agent was explicitly addressed by nickname, don't let skill routing hijack the session
     const skill = agentMatch ? null : routeSkill(prompt);
+    const chatIdStr = String(chatId);
+    const chatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
+    const boundProjectKey = chatAgentMap[chatIdStr] || (chatIdStr.startsWith('_agent_') ? chatIdStr.slice(7) : null);
+    const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
+    const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
 
     // Skills with dedicated pinned sessions (reused across days, no re-injection needed)
     const PINNED_SKILL_SESSIONS = new Set(['macos-mail-calendar', 'skill-manager']);
+    const usePinnedSkillSession = !!(skill && PINNED_SKILL_SESSIONS.has(skill));
 
     let session = getSession(chatId);
 
-    if (skill && PINNED_SKILL_SESSIONS.has(skill)) {
+    if (usePinnedSkillSession) {
       // Use a dedicated long-lived session per skill
       const state = loadState();
       if (!state.pinned_sessions) state.pinned_sessions = {};
@@ -494,21 +500,52 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         log('INFO', `Pinned session created for skill ${skill}: ${session.id.slice(0, 8)}`);
       }
     } else if (!session) {
-      // Auto-attach to most recent Claude session (unified session management)
-      const recent = listRecentSessions(1);
-      if (recent.length > 0 && recent[0].sessionId && recent[0].projectPath) {
-        const target = recent[0];
-        const state = loadState();
-        state.sessions[chatId] = {
-          id: target.sessionId,
-          cwd: target.projectPath,
-          started: true,
-        };
-        saveState(state);
-        session = state.sessions[chatId];
-        log('INFO', `Auto-attached ${chatId} to recent session: ${target.sessionId.slice(0, 8)} (${path.basename(target.projectPath)})`);
+      if (boundCwd) {
+        // Agent-bound chats must stay in their own workspace: never attach to another project's session.
+        const recentInBound = listRecentSessions(1, boundCwd);
+        if (recentInBound.length > 0 && recentInBound[0].sessionId) {
+          const target = recentInBound[0];
+          const state = loadState();
+          state.sessions[chatId] = {
+            id: target.sessionId,
+            cwd: boundCwd,
+            started: true,
+          };
+          saveState(state);
+          session = state.sessions[chatId];
+          log('INFO', `Auto-attached ${chatId} to bound-session: ${target.sessionId.slice(0, 8)} (${path.basename(boundCwd)})`);
+        } else {
+          session = createSession(chatId, boundCwd, boundProject && boundProject.name ? boundProject.name : '');
+          log('INFO', `Created fresh session for bound workspace: ${path.basename(boundCwd)}`);
+        }
       } else {
-        session = createSession(chatId);
+        // Non-bound chats keep legacy behavior: attach global recent, else create.
+        const recent = listRecentSessions(1);
+        if (recent.length > 0 && recent[0].sessionId && recent[0].projectPath) {
+          const target = recent[0];
+          const state = loadState();
+          state.sessions[chatId] = {
+            id: target.sessionId,
+            cwd: target.projectPath,
+            started: true,
+          };
+          saveState(state);
+          session = state.sessions[chatId];
+          log('INFO', `Auto-attached ${chatId} to recent session: ${target.sessionId.slice(0, 8)} (${path.basename(target.projectPath)})`);
+        } else {
+          session = createSession(chatId);
+        }
+      }
+    }
+
+    // Safety guard: prevent stale state from resuming another workspace's session.
+    if (!usePinnedSkillSession && session && session.started && session.id && session.id !== '__continue__' && session.cwd) {
+      const sessionCwd = normalizeCwd(session.cwd);
+      const recentInCwd = listRecentSessions(1000, sessionCwd);
+      const existsInCwd = recentInCwd.some(s => s.sessionId === session.id);
+      if (!existsInCwd) {
+        log('WARN', `Session mismatch detected for ${chatId}: ${session.id.slice(0, 8)} not found in ${sessionCwd}; creating fresh session`);
+        session = createSession(chatId, sessionCwd, boundProject && boundProject.name ? boundProject.name : '');
       }
     }
 
