@@ -159,12 +159,24 @@ const {
 // ---------------------------------------------------------
 // CONFIG & STATE
 // ---------------------------------------------------------
-function loadConfig() {
-  try {
-    return yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
-  } catch {
-    return {};
+function loadConfigStrict() {
+  if (!fs.existsSync(CONFIG_FILE)) {
+    return { ok: false, error: `Config not found: ${CONFIG_FILE}` };
   }
+  try {
+    const parsed = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    if (!parsed || typeof parsed !== 'object') {
+      return { ok: false, error: 'Config must be a YAML mapping/object' };
+    }
+    return { ok: true, config: parsed };
+  } catch (e) {
+    return { ok: false, error: `YAML parse error: ${e.message}` };
+  }
+}
+
+function loadConfig() {
+  const strict = loadConfigStrict();
+  return strict.ok ? strict.config : {};
 }
 
 function writeConfigSafe(nextConfig) {
@@ -622,7 +634,7 @@ function handleDispatchItem(item, config) {
 /**
  * Start Unix Domain Socket server for low-latency dispatch.
  */
-function startDispatchSocket(config) {
+function startDispatchSocket(getConfig) {
   const net = require('net');
   try { fs.unlinkSync(SOCK_PATH); } catch { /* ok */ }
   const server = net.createServer((conn) => {
@@ -631,7 +643,8 @@ function startDispatchSocket(config) {
     conn.on('end', () => {
       try {
         const item = JSON.parse(buf);
-        handleDispatchItem(item, config);
+        const liveCfg = typeof getConfig === 'function' ? getConfig() : getConfig;
+        handleDispatchItem(item, liveCfg || {});
         conn.write(JSON.stringify({ ok: true }) + '\n');
       } catch (e) {
         try { conn.write(JSON.stringify({ ok: false, error: e.message }) + '\n'); } catch { /* ignore */ }
@@ -1255,9 +1268,14 @@ function sleep(ms) {
 // MAIN
 // ---------------------------------------------------------
 async function main() {
-  let config = loadConfig();
+  const strictBoot = loadConfigStrict();
+  if (!strictBoot.ok) {
+    console.error(`Invalid daemon config. ${strictBoot.error}`);
+    process.exit(1);
+  }
+  let config = strictBoot.config;
   refreshLogMaxSize(config);
-  if (!config || Object.keys(config).length === 0) {
+  if (Object.keys(config).length === 0) {
     console.error('No daemon config found. Run: metame daemon init');
     process.exit(1);
   }
@@ -1342,7 +1360,7 @@ async function main() {
   const adminNotifyFn = notifier.notifyAdmin;
 
   // Start dispatch socket server (low-latency IPC, fallback: file polling still works)
-  const dispatchSocket = startDispatchSocket(config);
+  const dispatchSocket = startDispatchSocket(() => config);
 
   // Start heartbeat scheduler
   let heartbeatTimer = startHeartbeat(config, notifyFn);
@@ -1353,6 +1371,7 @@ async function main() {
     CONFIG_FILE,
     METAME_DIR,
     loadConfig,
+    loadConfigStrict,
     refreshLogMaxSize,
     startHeartbeat,
     getAllTasks,

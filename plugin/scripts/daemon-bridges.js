@@ -48,9 +48,10 @@ function createBridgeStarter(deps) {
               const chatId = cb.message && cb.message.chat.id;
               bot.answerCallback(cb.id).catch(() => { });
               if (chatId && cb.data) {
-                const allowedIds = (loadConfig().telegram && loadConfig().telegram.allowed_chat_ids) || [];
+                const liveCfg = loadConfig();
+                const allowedIds = (liveCfg.telegram && liveCfg.telegram.allowed_chat_ids) || [];
                 if (!allowedIds.includes(chatId)) continue;
-                handleCommand(bot, chatId, cb.data, config, executeTaskByName).catch(e => {
+                handleCommand(bot, chatId, cb.data, liveCfg, executeTaskByName).catch(e => {
                   log('ERROR', `Telegram callback handler error: ${e.message}`);
                 });
               }
@@ -62,7 +63,8 @@ function createBridgeStarter(deps) {
             const msg = update.message;
             const chatId = msg.chat.id;
 
-            const allowedIds = (loadConfig().telegram && loadConfig().telegram.allowed_chat_ids) || [];
+            const liveCfg = loadConfig();
+            const allowedIds = (liveCfg.telegram && liveCfg.telegram.allowed_chat_ids) || [];
             const trimmedText = msg.text && msg.text.trim();
             const isBindCmd = trimmedText && (
               trimmedText.startsWith('/agent bind')
@@ -100,7 +102,7 @@ function createBridgeStarter(deps) {
                   ? `User uploaded a file to the project: ${destPath}\nUser says: "${caption}"`
                   : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
 
-                handleCommand(bot, chatId, prompt, config, executeTaskByName).catch(e => {
+                handleCommand(bot, chatId, prompt, liveCfg, executeTaskByName).catch(e => {
                   log('ERROR', `Telegram file handler error: ${e.message}`);
                 });
               } catch (err) {
@@ -111,7 +113,7 @@ function createBridgeStarter(deps) {
             }
 
             if (msg.text) {
-              handleCommand(bot, chatId, msg.text.trim(), config, executeTaskByName).catch(e => {
+              handleCommand(bot, chatId, msg.text.trim(), liveCfg, executeTaskByName).catch(e => {
                 log('ERROR', `Telegram handler error: ${e.message}`);
               });
             }
@@ -175,7 +177,7 @@ function createBridgeStarter(deps) {
             return;
           }
           if (text) {
-            await handleCommand(bot, chatId, text, config, executeTaskByName, senderId, true);
+            await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, senderId, true);
           }
           return;
         }
@@ -196,7 +198,7 @@ function createBridgeStarter(deps) {
               ? `User uploaded a file to the project: ${destPath}\nUser says: "${text}"`
               : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
 
-            await handleCommand(bot, chatId, prompt, config, executeTaskByName);
+            await handleCommand(bot, chatId, prompt, liveCfg, executeTaskByName);
           } catch (err) {
             log('ERROR', `Feishu file download failed: ${err.message}`);
             await bot.sendMessage(chatId, `❌ Download failed: ${err.message}`);
@@ -216,7 +218,7 @@ function createBridgeStarter(deps) {
               log('INFO', `Session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
             }
           }
-          await handleCommand(bot, chatId, text, config, executeTaskByName, senderId);
+          await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, senderId);
         }
       });
 

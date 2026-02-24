@@ -49,6 +49,57 @@ function createTaskScheduler(deps) {
     }
   }
 
+  // Timeout compatibility:
+  // - numeric values <= 10000 are treated as seconds (recommended)
+  // - numeric values > 10000 are treated as legacy milliseconds
+  // - string values like "500ms", "30s", "5m", "1h" are supported
+  function resolveTimeoutMs(raw, defaultSeconds) {
+    if (typeof raw === 'string') {
+      const m = raw.trim().match(/^(\d+(?:\.\d+)?)(ms|s|m|h)$/i);
+      if (m) {
+        const v = Number(m[1]);
+        const u = m[2].toLowerCase();
+        if (u === 'ms') return Math.max(1, Math.floor(v));
+        if (u === 's') return Math.max(1, Math.floor(v * 1000));
+        if (u === 'm') return Math.max(1, Math.floor(v * 60 * 1000));
+        if (u === 'h') return Math.max(1, Math.floor(v * 60 * 60 * 1000));
+      }
+    }
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return defaultSeconds * 1000;
+    if (n > 10000) return Math.floor(n); // legacy ms
+    return Math.floor(n * 1000); // default seconds
+  }
+
+  function maybeSaveTaskMemory(task, output, tokenCost = 0, sessionId = '') {
+    if (!task || !task.memory_log) return;
+    try {
+      const memory = require('./memory');
+      const nowIso = new Date().toISOString();
+      const projectKey = (task._project && task._project.key) || 'heartbeat';
+      const memoryId = `${task.name}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const summaryText = String(output || '(no output)').trim() || '(no output)';
+      const summary = [
+        `[heartbeat task] ${task.name}`,
+        sessionId ? `session: ${sessionId}` : '',
+        summaryText,
+      ].filter(Boolean).join('\n').slice(0, 8000);
+      const keywords = [task.name, 'heartbeat', 'evolution', nowIso.slice(0, 10)].join(',');
+      memory.saveSession({
+        sessionId: memoryId,
+        project: projectKey,
+        summary,
+        keywords,
+        mood: '',
+        tokenCost: Number(tokenCost) || 0,
+      });
+      memory.close();
+      log('INFO', `Task ${task.name}: memory_log saved (${memoryId})`);
+    } catch (e) {
+      log('WARN', `Task ${task.name}: memory_log failed: ${e.message}`);
+    }
+  }
+
   function executeTask(task, config) {
     if (task.enabled === false) {
       log('INFO', `Skipping disabled task: ${task.name}`);
@@ -87,7 +138,7 @@ function createTaskScheduler(deps) {
         delete scriptEnv.CLAUDECODE;
         const output = execSync(task.command, {
           encoding: 'utf8',
-          timeout: (task.timeout || 120) * 1000,
+          timeout: resolveTimeoutMs(task.timeout, 120),
           maxBuffer: 1024 * 1024,
           env: scriptEnv,
         }).trim();
@@ -135,8 +186,28 @@ function createTaskScheduler(deps) {
 
     // Persistent session: reuse same session across runs (for tasks like weekly-review)
     if (task.persistent_session) {
-      const savedSessionId = state.tasks[task.name]?.session_id;
-      if (savedSessionId) {
+      const meta = state.tasks[task.name] || {};
+      const savedSessionId = meta.session_id;
+      const rotateDays = Number(task.persistent_session_rotate_days || 0);
+      const rotateMs = Number.isFinite(rotateDays) && rotateDays > 0
+        ? rotateDays * 24 * 60 * 60 * 1000
+        : 0;
+      let createdAtIso = meta.session_created_at || '';
+      // Backfill legacy state so old persistent sessions don't rotate immediately after upgrade.
+      if (!createdAtIso && savedSessionId) {
+        createdAtIso = meta.last_run || new Date().toISOString();
+        if (!state.tasks[task.name]) state.tasks[task.name] = {};
+        state.tasks[task.name].session_created_at = createdAtIso;
+        saveState(state);
+      }
+      const createdAtMs = createdAtIso ? new Date(createdAtIso).getTime() : 0;
+      const shouldRotate = !!(
+        savedSessionId &&
+        rotateMs > 0 &&
+        (!createdAtMs || (Date.now() - createdAtMs) >= rotateMs)
+      );
+
+      if (savedSessionId && !shouldRotate) {
         claudeArgs.push('--resume', savedSessionId);
         log('INFO', `Executing task: ${task.name} (model: ${model}, resuming session ${savedSessionId.slice(0, 8)}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''})`);
       } else {
@@ -144,8 +215,13 @@ function createTaskScheduler(deps) {
         claudeArgs.push('--session-id', newSessionId);
         if (!state.tasks[task.name]) state.tasks[task.name] = {};
         state.tasks[task.name].session_id = newSessionId;
+        state.tasks[task.name].session_created_at = new Date().toISOString();
         saveState(state);
-        log('INFO', `Executing task: ${task.name} (model: ${model}, new session ${newSessionId.slice(0, 8)}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''})`);
+        if (savedSessionId && shouldRotate) {
+          log('INFO', `Executing task: ${task.name} (model: ${model}, rotated session ${savedSessionId.slice(0, 8)} -> ${newSessionId.slice(0, 8)}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''})`);
+        } else {
+          log('INFO', `Executing task: ${task.name} (model: ${model}, new session ${newSessionId.slice(0, 8)}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''})`);
+        }
       }
     } else {
       log('INFO', `Executing task: ${task.name} (model: ${model}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''})`);
@@ -154,7 +230,7 @@ function createTaskScheduler(deps) {
     // Use spawnClaudeAsync (non-blocking spawn with process-group kill) instead of
     // execFileSync (sync, blocks event loop, can't kill sub-agents).
     // executeTask now returns a Promise — callers must handle it with .then() or await.
-    const timeoutMs = task.timeout || 120000;
+    const timeoutMs = resolveTimeoutMs(task.timeout, 120);
     const asyncArgs = [...claudeArgs];
     const asyncEnv = { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined };
 
@@ -189,7 +265,14 @@ function createTaskScheduler(deps) {
         const output = stdout.trim();
         if (timedOut) {
           const prevSid = state.tasks[task.name]?.session_id;
-          state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'timeout', error: 'Task exceeded timeout', ...(prevSid && { session_id: prevSid }) };
+          const prevCreatedAt = state.tasks[task.name]?.session_created_at;
+          state.tasks[task.name] = {
+            last_run: new Date().toISOString(),
+            status: 'timeout',
+            error: 'Task exceeded timeout',
+            ...(prevSid && { session_id: prevSid }),
+            ...(prevCreatedAt && { session_created_at: prevCreatedAt }),
+          };
           saveState(state);
           return resolve({ success: false, error: 'timeout', output: '' });
         }
@@ -204,15 +287,30 @@ function createTaskScheduler(deps) {
           }
           log('ERROR', `Task ${task.name} failed (exit ${code}): ${errMsg}`);
           const prevSid = state.tasks[task.name]?.session_id;
-          state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: errMsg, ...(prevSid && { session_id: prevSid }) };
+          const prevCreatedAt = state.tasks[task.name]?.session_created_at;
+          state.tasks[task.name] = {
+            last_run: new Date().toISOString(),
+            status: 'error',
+            error: errMsg,
+            ...(prevSid && { session_id: prevSid }),
+            ...(prevCreatedAt && { session_created_at: prevCreatedAt }),
+          };
           saveState(state);
           return resolve({ success: false, error: errMsg, output: '' });
         }
         const estimatedTokens = Math.ceil((fullPrompt.length + output.length) / 4);
         recordTokens(state, estimatedTokens);
         const prevSessionId = state.tasks[task.name]?.session_id;
-        state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'success', output_preview: output.slice(0, 200), ...(prevSessionId && { session_id: prevSessionId }) };
+        const prevCreatedAt = state.tasks[task.name]?.session_created_at;
+        state.tasks[task.name] = {
+          last_run: new Date().toISOString(),
+          status: 'success',
+          output_preview: output.slice(0, 200),
+          ...(prevSessionId && { session_id: prevSessionId }),
+          ...(prevCreatedAt && { session_created_at: prevCreatedAt }),
+        };
         saveState(state);
+        maybeSaveTaskMemory(task, output, estimatedTokens, prevSessionId || '');
         log('INFO', `Task ${task.name} completed (est. ${estimatedTokens} tokens)`);
         resolve({ success: true, output, tokens: estimatedTokens });
       });
@@ -268,8 +366,8 @@ function createTaskScheduler(deps) {
 
       log('INFO', `Workflow ${task.name} step ${i + 1}/${steps.length}: ${step.skill || 'prompt'}`);
       try {
-        const output = execFileSync('claude', args, {
-          input: prompt, encoding: 'utf8', timeout: step.timeout || 300000, maxBuffer: 5 * 1024 * 1024, cwd, env: { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined },
+        const output = execFileSync(CLAUDE_BIN, args, {
+          input: prompt, encoding: 'utf8', timeout: resolveTimeoutMs(step.timeout, 300), maxBuffer: 5 * 1024 * 1024, cwd, env: { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined },
         }).trim();
         const tk = Math.ceil((prompt.length + output.length) / 4);
         totalTokens += tk;
@@ -291,6 +389,7 @@ function createTaskScheduler(deps) {
     const lastOk = [...outputs].reverse().find(o => !o.error);
     state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'success', output_preview: (lastOk ? lastOk.output : '').slice(0, 200), steps_completed: outputs.filter(o => !o.error).length, steps_total: steps.length };
     saveState(state);
+    maybeSaveTaskMemory(task, (lastOk ? lastOk.output : ''), totalTokens, sessionId);
     log('INFO', `Workflow ${task.name} done: ${outputs.filter(o => !o.error).length}/${steps.length} steps (${totalTokens} tokens)`);
     return { success: true, output: outputs.map(o => `Step ${o.step} (${o.skill || 'prompt'}): ${o.error ? 'FAILED' : 'OK'}`).join('\n') + '\n\n' + (lastOk ? lastOk.output : ''), tokens: totalTokens };
   }
@@ -367,19 +466,22 @@ function createTaskScheduler(deps) {
       for (const task of enabledTasks) {
         if (currentTime >= (nextRun[task.name] || 0)) {
           const intervalSec = parseInterval(task.interval);
-          nextRun[task.name] = currentTime + intervalSec * 1000;
-
           // Dream tasks: only run when user is idle
           if (task.require_idle && !isUserIdle()) {
+            // Retry on next scheduler tick instead of waiting full interval.
+            nextRun[task.name] = currentTime + checkIntervalSec * 1000;
             log('INFO', `[DAEMON] Deferring dream task "${task.name}" — user active`);
             continue;
           }
 
           if (runningTasks.has(task.name)) {
+            // Task is still running; skip this cycle and keep full interval cadence.
+            nextRun[task.name] = currentTime + intervalSec * 1000;
             log('WARN', `Task ${task.name} still running — skipping this interval`);
             continue;
           }
 
+          nextRun[task.name] = currentTime + intervalSec * 1000;
           runningTasks.add(task.name);
           // executeTask now returns a Promise (async, non-blocking, process-group kill)
           Promise.resolve(executeTask(task, config))

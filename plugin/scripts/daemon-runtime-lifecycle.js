@@ -41,6 +41,7 @@ function setupRuntimeWatchers(deps) {
     CONFIG_FILE,
     METAME_DIR,
     loadConfig,
+    loadConfigStrict,
     refreshLogMaxSize,
     startHeartbeat,
     getAllTasks,
@@ -56,8 +57,11 @@ function setupRuntimeWatchers(deps) {
   } = deps;
 
   function reloadConfig() {
-    const newConfig = loadConfig();
-    if (!newConfig) return { success: false, error: 'Failed to read config' };
+    const strict = typeof loadConfigStrict === 'function'
+      ? loadConfigStrict()
+      : { ok: true, config: loadConfig() };
+    if (!strict.ok) return { success: false, error: strict.error || 'Failed to read config' };
+    const newConfig = strict.config;
     setConfig(newConfig);
     refreshLogMaxSize(newConfig);
     const timer = getHeartbeatTimer();

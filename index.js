@@ -665,7 +665,7 @@ const KERNEL_BODY = PROTOCOL_NORMAL
 
 const CAPABILITY_SECTIONS = [
   '## Agent Dispatch',
-  `"告诉X/让X" → \`~/.metame/bin/dispatch_to <project_key> "内容"\`，手机端 \`/dispatch <key> <消息>\`。` + dispatchTable,
+  `"告诉X/让X" → \`~/.metame/bin/dispatch_to <project_key> "内容"\`，手机端 \`/dispatch to <key> <消息>\`。` + dispatchTable,
   '新增 Agent：`/agent bind <名称> <工作目录>`',
   '',
   '## 跨会话记忆',
@@ -1363,8 +1363,8 @@ if (isDaemon) {
           cfg.feishu.app_secret = feishuSecret;
           if (!cfg.feishu.allowed_chat_ids) cfg.feishu.allowed_chat_ids = [];
           console.log("  ✅ Feishu configured!");
-          console.log("  Note: allowed_chat_ids is empty = allow all users.");
-          console.log("        To restrict, add chat IDs to daemon.yaml later.\n");
+          console.log("  Note: allowed_chat_ids is empty = deny all users.");
+          console.log("        Add chat IDs to daemon.yaml or use /agent bind from target chat.\n");
         }
       } else {
         console.log("  Skipped.\n");
@@ -1595,12 +1595,28 @@ WantedBy=default.target
 
     // Tasks
     const tasks = state.tasks || {};
-    if (Object.keys(tasks).length > 0) {
+    const configuredTaskNames = new Set();
+    for (const t of ((config.heartbeat && config.heartbeat.tasks) || [])) {
+      if (t && t.name) configuredTaskNames.add(t.name);
+    }
+    for (const proj of Object.values(config.projects || {})) {
+      for (const t of ((proj && proj.heartbeat_tasks) || [])) {
+        if (t && t.name) configuredTaskNames.add(t.name);
+      }
+    }
+    const taskEntries = Object.entries(tasks).filter(([name]) =>
+      configuredTaskNames.size === 0 || configuredTaskNames.has(name)
+    );
+    if (taskEntries.length > 0) {
       console.log("   Recent tasks:");
-      for (const [name, info] of Object.entries(tasks)) {
+      for (const [name, info] of taskEntries) {
         const icon = info.status === 'success' ? '✅' : '❌';
         console.log(`     ${icon} ${name}: ${info.last_run || 'unknown'}`);
         if (info.output_preview) console.log(`        ${info.output_preview.slice(0, 80)}...`);
+      }
+      const hiddenStale = Object.keys(tasks).length - taskEntries.length;
+      if (hiddenStale > 0) {
+        console.log(`     … ${hiddenStale} stale task record(s) hidden`);
       }
     }
     process.exit(0);
