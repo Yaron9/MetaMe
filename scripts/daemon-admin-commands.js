@@ -58,12 +58,19 @@ function createAdminCommandHandler(deps) {
       };
 
       if (!arg || arg === 'list') {
-        const pending = skillEvolution.listQueueItems({ status: 'pending', limit: 10 });
-        const notified = skillEvolution.listQueueItems({ status: 'notified', limit: 10 });
-        const resolved = skillEvolution.listQueueItems({ limit: 50 }).filter(i => i.status === 'installed' || i.status === 'dismissed').slice(0, 5);
+        const pendingAll = skillEvolution.listQueueItems({ status: 'pending', limit: 200 });
+        const notifiedAll = skillEvolution.listQueueItems({ status: 'notified', limit: 200 });
+        const installedAll = skillEvolution.listQueueItems({ status: 'installed', limit: 200 });
+        const dismissedAll = skillEvolution.listQueueItems({ status: 'dismissed', limit: 200 });
+
+        const pending = pendingAll.slice(0, 10);
+        const notified = notifiedAll.slice(0, 10);
+        const resolved = [...installedAll, ...dismissedAll]
+          .sort((a, b) => new Date(b.last_seen || b.detected || 0).getTime() - new Date(a.last_seen || a.detected || 0).getTime())
+          .slice(0, 5);
 
         const lines = ['🧬 Skill Evolution Queue'];
-        lines.push(`pending: ${pending.length} | notified: ${notified.length} | resolved(last): ${resolved.length}`);
+        lines.push(`pending: ${pendingAll.length} | notified: ${notifiedAll.length} | resolved(total): ${installedAll.length + dismissedAll.length}`);
         if (pending.length > 0) {
           lines.push('\nPending:');
           for (const item of pending.slice(0, 5)) lines.push(renderItem(item));
