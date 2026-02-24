@@ -757,14 +757,6 @@ function attachOrCreateSession(chatId, projCwd, name) {
   const state = loadState();
   // Virtual agent chatIds (_agent_*) always get a fresh one-shot session.
   // They must not resume real sessions, to avoid concurrency conflicts.
-  if (!String(chatId).startsWith('_agent_')) {
-    const recent = listRecentSessions(1, projCwd);
-    if (recent.length > 0 && recent[0].sessionId) {
-      state.sessions[chatId] = { id: recent[0].sessionId, cwd: projCwd, started: true };
-      saveState(state);
-      return;
-    }
-  }
   const newSess = createSession(chatId, projCwd, name || '');
   state.sessions[chatId] = { id: newSess.id, cwd: projCwd, started: false };
   saveState(state);
