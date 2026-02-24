@@ -23,6 +23,7 @@ function createAgentCommandHandler(deps) {
     doBindAgent,
     mergeAgentRole,
     agentTools,
+    attachOrCreateSession,
     agentFlowTtlMs,
     agentBindTtlMs,
   } = deps;
@@ -99,12 +100,18 @@ function createAgentCommandHandler(deps) {
       const icon = p.icon || '🤖';
       const action = res.data.isNewProject ? '绑定成功' : '重新绑定';
       const displayCwd = String(res.data.cwd || '').replace(HOME, '~');
+      if (res.data.cwd && typeof attachOrCreateSession === 'function') {
+        attachOrCreateSession(chatId, normalizeCwd(res.data.cwd), p.name || agentName || res.data.projectKey || '');
+      }
       await bot.sendMessage(chatId, `${icon} ${p.name || agentName} ${action}\n目录: ${displayCwd}`);
       return { ok: true, data: res.data };
     }
 
     // Backward-compatible fallback
     await doBindAgent(bot, chatId, agentName, agentCwd);
+    if (agentCwd && typeof attachOrCreateSession === 'function') {
+      attachOrCreateSession(chatId, normalizeCwd(agentCwd), agentName || '');
+    }
     return { ok: true, data: { cwd: agentCwd } };
   }
 
@@ -251,6 +258,9 @@ function createAgentCommandHandler(deps) {
         if (!created.ok) {
           await bot.sendMessage(chatId, `❌ 创建 Agent 失败: ${created.error}`);
           return true;
+        }
+        if (created.data && created.data.cwd && typeof attachOrCreateSession === 'function') {
+          attachOrCreateSession(chatId, normalizeCwd(created.data.cwd), name || '');
         }
         const roleInfo = created.data.role || {};
         if (roleInfo.skipped) {

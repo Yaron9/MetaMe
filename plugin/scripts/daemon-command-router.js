@@ -59,7 +59,7 @@ function createCommandRouter(deps) {
   }
 
   function extractPathFromText(input) {
-    const m = String(input || '').match(/(?:~\/|\/)[^\s，。；;!！?？"“”'‘’`]+/);
+    const m = String(input || '').match(/(?:~\/|\/|\.\/|\.\.\/)[^\s，。；;!！?？"“”'‘’`]+/);
     if (!m) return '';
     return m[0].replace(/[，。；;!！?？]+$/, '');
   }
@@ -101,6 +101,18 @@ function createCommandRouter(deps) {
     return '';
   }
 
+  function isLikelyDirectAgentAction(input) {
+    const text = String(input || '').trim();
+    return /^(?:请|帮我|麻烦|给我|给这个群|给当前群|在这个群|把这个群|把当前群|将这个群|我想|我要|我需要|创建|新建|新增|搞一个|加一个|create|bind|绑定|列出|查看|显示|有哪些|解绑|取消绑定|断开绑定|修改|调整)/i.test(text);
+  }
+
+  function looksLikeAgentIssueReport(input) {
+    const text = String(input || '').trim();
+    const hasIssueWords = /(用户反馈|反馈|报错|bug|问题|故障|异常|修复|改一下|修一下|任务|工单|代码)/i.test(text);
+    const hasAgentWords = /(agent|智能体|session|会话|目录|工作区|绑定|切换)/i.test(text);
+    return hasIssueWords && hasAgentWords;
+  }
+
   function projectNameFromResult(data, fallbackName) {
     if (data && data.project && data.project.name) return data.project.name;
     if (data && data.projectKey) return data.projectKey;
@@ -123,6 +135,11 @@ function createCommandRouter(deps) {
     if (hasFreshPendingFlow(key) || hasFreshPendingFlow(key + ':edit')) return false;
     const input = text.trim();
     if (!input) return false;
+    const directAction = isLikelyDirectAgentAction(input);
+    const issueReport = looksLikeAgentIssueReport(input);
+    if (issueReport && !directAction) return false;
+    const workspaceDir = extractPathFromText(input);
+    const hasWorkspacePath = !!workspaceDir;
 
     const hasAgentContext = /(agent|智能体|工作区|人设|绑定|当前群|这个群|chat|workspace)/i.test(input);
     const wantsList = /(列出|查看|显示|有哪些|list|show)/i.test(input) && /(agent|智能体|工作区|绑定)/i.test(input);
@@ -131,10 +148,10 @@ function createCommandRouter(deps) {
       ((/(角色|职责|人设)/i.test(input) && /(改|修改|调整|更新|变成|改成|改为)/i.test(input)) ||
       /(把这个agent|把当前agent|当前群.*角色|当前群.*职责)/i.test(input));
     const wantsCreate =
-      (/(创建|新建|新增|搞一个|加一个|create)/i.test(input) && /(agent|智能体|人设|工作区)/i.test(input));
+      (/(创建|新建|新增|搞一个|加一个|create)/i.test(input) && /(agent|智能体|人设|工作区)/i.test(input) && (directAction || hasWorkspacePath));
     const wantsBind =
       !wantsCreate &&
-      (/(绑定|bind)/i.test(input) && hasAgentContext);
+      (/(绑定|bind)/i.test(input) && hasAgentContext && (directAction || hasWorkspacePath));
 
     if (!wantsList && !wantsUnbind && !wantsEditRole && !wantsCreate && !wantsBind) {
       return false;
@@ -195,9 +212,12 @@ function createCommandRouter(deps) {
     }
 
     if (wantsCreate) {
-      const workspaceDir = extractPathFromText(input);
       if (!workspaceDir) {
-        await bot.sendMessage(chatId, '请补充工作目录，例如：`给这个群创建一个 Agent，目录是 ~/projects/foo`');
+        await bot.sendMessage(chatId, [
+          '我可以帮你创建并绑定 Agent，还差一个工作目录。',
+          '例如：`给这个群创建一个 Agent，目录是 ~/projects/foo`',
+          '也可以直接回我一个路径（`~/`、`/`、`./`、`../` 开头都行）。',
+        ].join('\n'));
         return true;
       }
       const agentName = deriveAgentName(input, workspaceDir);
@@ -215,7 +235,6 @@ function createCommandRouter(deps) {
     }
 
     if (wantsBind) {
-      const workspaceDir = extractPathFromText(input);
       const agentName = deriveAgentName(input, workspaceDir);
       const res = await agentTools.bindAgentToChat(chatId, agentName, workspaceDir || null);
       if (!res.ok) {
