@@ -6,6 +6,7 @@ function createCommandRouter(deps) {
     loadConfig,
     checkBudget,
     checkCooldown,
+    resetCooldown,
     routeAgent,
     normalizeCwd,
     attachOrCreateSession,
@@ -357,6 +358,7 @@ function createCommandRouter(deps) {
         if (msgs.length === 0) return;
         const combined = msgs.join('\n');
         log('INFO', `Processing ${msgs.length} queued message(s) for ${chatId}`);
+        resetCooldown(chatId); // queued msgs already waited, skip cooldown
         try {
           await handleCommand(bot, chatId, combined, config, executeTaskByName);
         } catch (e) {
