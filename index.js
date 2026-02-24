@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 
 // ---------------------------------------------------------
 // 1. CONFIGURATION
@@ -29,8 +29,16 @@ if (!fs.existsSync(METAME_DIR)) {
 
 // Auto-deploy bundled scripts to ~/.metame/
 // IMPORTANT: daemon.yaml is USER CONFIG — never overwrite it. Only daemon-default.yaml (template) is synced.
-const BUNDLED_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js', 'skill-evolution.js', 'memory.js', 'memory-extract.js', 'qmd-client.js', 'session-summarize.js'];
 const scriptsDir = path.join(__dirname, 'scripts');
+const BUNDLED_BASE_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js', 'skill-evolution.js', 'memory.js', 'memory-extract.js', 'qmd-client.js', 'session-summarize.js'];
+const DAEMON_MODULE_SCRIPTS = (() => {
+  try {
+    return fs.readdirSync(scriptsDir).filter((f) => /^daemon-[\w-]+\.js$/.test(f));
+  } catch {
+    return [];
+  }
+})();
+const BUNDLED_SCRIPTS = [...new Set([...BUNDLED_BASE_SCRIPTS, ...DAEMON_MODULE_SCRIPTS])];
 
 // Protect daemon.yaml: create backup before any sync operation
 const DAEMON_YAML_BACKUP = path.join(METAME_DIR, 'daemon.yaml.bak');
@@ -213,14 +221,11 @@ function spawnDistillBackground() {
 
   if (!hasSignals && !bootstrap) return;
 
-  if (hasSignals) {
-    const bufferFile = path.join(METAME_DIR, 'raw_signals.jsonl');
-    const lines = fs.readFileSync(bufferFile, 'utf8').trim().split('\n').filter(l => l.trim());
-    console.log(`🧠 MetaMe: Distilling ${lines.length} moment${lines.length > 1 ? 's' : ''} in background...`);
-  }
+  // Note: status display is handled separately in startup output — no log here
   if (bootstrap) {
-    console.log('📊 MetaMe: Bootstrapping session history...');
+    // Background bootstrap — silent, no need to inform user
   }
+
 
   // Spawn as detached background process — won't block Claude launch
   // Remove CLAUDECODE env var so distill.js can call `claude -p` without nested-session rejection
@@ -609,41 +614,72 @@ try {
   // Non-fatal
 }
 
-// Prepend the new Protocol to the top (mirror + reflection inside markers)
-const newContent = finalProtocol + mirrorLine + reflectionLine + METAME_END + "\n" + fileContent;
+// Project-level CLAUDE.md: KERNEL has moved to global ~/.claude/CLAUDE.md.
+// Only inject dynamic per-session observations (mirror / reflection).
+// If nothing dynamic, write the cleaned file with no METAME block at all.
+const dynamicContent = mirrorLine + reflectionLine;
+const newContent = dynamicContent.trim()
+  ? METAME_START + '\n' + dynamicContent + METAME_END + '\n' + fileContent
+  : fileContent;
 fs.writeFileSync(PROJECT_FILE, newContent, 'utf8');
 
 // ---------------------------------------------------------
-// 4.7 GLOBAL CLAUDE.MD INJECTION (Agent capabilities)
+// 4.7 GLOBAL CLAUDE.MD INJECTION (Full Kernel + Capabilities)
 // ---------------------------------------------------------
-// Inject MetaMe capabilities into ~/.claude/CLAUDE.md so ALL projects' agents
-// automatically know about dispatch, memory, and skill systems.
+// Inject the full MetaMe KERNEL into ~/.claude/CLAUDE.md.
+// This file is read by ALL Claude Code sessions regardless of working directory,
+// so every project (小美, 3D, MetaMe, etc.) gets the system automatically.
+// Project-level CLAUDE.md only needs role definitions — no kernel duplication.
 const GLOBAL_CLAUDE_MD = path.join(os.homedir(), '.claude', 'CLAUDE.md');
 const GLOBAL_MARKER_START = '<!-- METAME-GLOBAL:START -->';
 const GLOBAL_MARKER_END = '<!-- METAME-GLOBAL:END -->';
 
-// Sections to inject (each only injected if not already present in user's manual content)
-const GLOBAL_SECTIONS = [
-  { detect: /dispatch_to|Agent Dispatch/i, text: [
-    '## Agent Dispatch',
-    '"告诉X/让X"→ `~/.metame/bin/dispatch_to <project_key> "内容"`，手机端 `/dispatch <key> <消息>`。',
-    '新增 Agent：`/agent bind <名称> <工作目录>`',
-  ]},
-  { detect: /memory-search\.js|跨会话记忆/i, text: [
-    '## 跨会话记忆',
-    '用户提"上次/之前"时搜索：`node ~/.metame/memory-search.js "关键词1" "keyword2"`',
-    '一次传 3-4 个关键词（中文+英文+函数名），`--facts` 只搜事实，`--sessions` 只搜会话。',
-  ]},
-  { detect: /skill-manager|Skills.*技能/i, text: [
-    '## Skills',
-    '能力不足/工具缺失/任务失败 → 先查 `cat ~/.claude/skills/skill-manager/SKILL.md`，不要自己猜。',
-  ]},
-  { detect: /\[\[FILE:|手机端文件/i, text: [
-    '## 手机端文件交互',
-    '**收**：用户发图片/文件自动存到 `upload/`，用 Read 查看。',
-    '**发**：回复末尾加 `[[FILE:/absolute/path]]`，daemon 自动发手机。不要读内容再复述。',
-  ]},
-];
+// Build dynamic Agent dispatch table from daemon.yaml projects.
+// Only include agents whose cwd actually exists on disk — test/stale agents
+// with deleted paths are automatically excluded, no manual cleanup needed.
+let dispatchTable = '';
+try {
+  const daemonYamlPath = path.join(os.homedir(), '.metame', 'daemon.yaml');
+  if (fs.existsSync(daemonYamlPath)) {
+    const daemonCfg = yaml.load(fs.readFileSync(daemonYamlPath, 'utf8')) || {};
+    const projects = daemonCfg.projects || {};
+    const rows = Object.entries(projects)
+      .filter(([, p]) => {
+        if (!p || !p.name || !p.cwd) return false;
+        // Expand ~ to home directory
+        const expandedCwd = String(p.cwd).replace(/^~/, os.homedir());
+        return fs.existsSync(expandedCwd);
+      })
+      .map(([key, p]) => `| \`${key}\` | ${p.name} |`);
+    if (rows.length > 0) {
+      dispatchTable = '\n\n| project_key | 昵称 |\n|-------------|------|\n' + rows.join('\n') + '\n\n`--new` 强制新建会话（用户说"新开会话"时加此参数）。';
+    }
+  }
+} catch { /* daemon.yaml missing or invalid — skip dispatch table */ }
+
+
+// Full kernel body: reuse PROTOCOL_NORMAL, strip project-level marker
+const KERNEL_BODY = PROTOCOL_NORMAL
+  .replace(/^<!-- METAME:START -->\n/, '')  // remove project-level marker
+  .trimEnd();
+
+const CAPABILITY_SECTIONS = [
+  '## Agent Dispatch',
+  `"告诉X/让X" → \`~/.metame/bin/dispatch_to <project_key> "内容"\`，手机端 \`/dispatch <key> <消息>\`。` + dispatchTable,
+  '新增 Agent：`/agent bind <名称> <工作目录>`',
+  '',
+  '## 跨会话记忆',
+  '用户提"上次/之前"时搜索：`node ~/.metame/memory-search.js "关键词1" "keyword2"`',
+  '一次传 3-4 个关键词（中文+英文+函数名），`--facts` 只搜事实，`--sessions` 只搜会话。',
+  '',
+  '## Skills',
+  '能力不足/工具缺失/任务失败 → 先查 `cat ~/.claude/skills/skill-manager/SKILL.md`，不要自己猜。',
+  '',
+  '## 手机端文件交互',
+  '**收**：用户发图片/文件自动存到 `upload/`，用 Read 查看。',
+  '**发**：回复末尾加 `[[FILE:/absolute/path]]`，daemon 自动发手机。不要读内容再复述。',
+
+].join('\n');
 
 try {
   const globalDir = path.join(os.homedir(), '.claude');
@@ -652,34 +688,32 @@ try {
   let globalContent = '';
   if (fs.existsSync(GLOBAL_CLAUDE_MD)) {
     globalContent = fs.readFileSync(GLOBAL_CLAUDE_MD, 'utf8');
-    // Remove previous injection
+    // Remove previous global injection (always replace with latest)
     globalContent = globalContent.replace(new RegExp(
-      GLOBAL_MARKER_START.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') +
+      GLOBAL_MARKER_START.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&') +
       '[\\s\\S]*?' +
-      GLOBAL_MARKER_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\n?'
+      GLOBAL_MARKER_END.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&') + '\\n?'
     ), '');
   }
 
-  // Only inject sections not already present in user's manual content
-  const contentOutsideMarkers = globalContent;
-  const needed = GLOBAL_SECTIONS.filter(s => !s.detect.test(contentOutsideMarkers));
+  const injection =
+    GLOBAL_MARKER_START + '\n' +
+    KERNEL_BODY + '\n\n' +
+    '# MetaMe 能力注入（自动生成，勿手动编辑）\n\n' +
+    CAPABILITY_SECTIONS + '\n\n' +
+    GLOBAL_MARKER_END;
 
-  if (needed.length > 0) {
-    const injection = GLOBAL_MARKER_START + '\n\n# MetaMe 能力注入（自动生成，勿手动编辑）\n\n' +
-      needed.map(s => s.text.join('\n')).join('\n\n') + '\n\n' + GLOBAL_MARKER_END;
-    const finalGlobal = globalContent.trimEnd() + '\n\n' + injection + '\n';
-    fs.writeFileSync(GLOBAL_CLAUDE_MD, finalGlobal, 'utf8');
-  } else {
-    // All sections already present, just clean up stale marker block
-    fs.writeFileSync(GLOBAL_CLAUDE_MD, globalContent.trimEnd() + '\n', 'utf8');
-  }
+  const finalGlobal = globalContent.trimEnd() + (globalContent.trim() ? '\n\n' : '') + injection + '\n';
+  fs.writeFileSync(GLOBAL_CLAUDE_MD, finalGlobal, 'utf8');
 } catch (e) {
   // Non-fatal: global CLAUDE.md injection is best-effort
   console.error(`⚠️ Failed to inject global CLAUDE.md: ${e.message}`);
 }
 
+
+
+
 console.log("🔮 MetaMe: Link Established.");
-console.log("🧬 Protocol: Dynamic Handshake Active");
 
 // Memory system status — show live stats without blocking launch
 try {
@@ -699,6 +733,39 @@ try {
   }
 } catch { /* non-fatal */ }
 
+// Cognitive distillation status — always show so user knows the system's state
+try {
+  const bufferFile = path.join(METAME_DIR, 'raw_signals.jsonl');
+  const pendingCount = fs.existsSync(bufferFile)
+    ? fs.readFileSync(bufferFile, 'utf8').trim().split('\n').filter(l => l.trim()).length
+    : 0;
+
+  if (pendingCount > 0) {
+    console.log(`🧬 Cognition: ${pendingCount} moment${pendingCount > 1 ? 's' : ''} pending distillation`);
+  } else {
+    // Show last distill time
+    let lastDistillStr = '从未';
+    try {
+      const profilePath = path.join(process.env.HOME || '', '.claude_profile.yaml');
+      if (fs.existsSync(profilePath)) {
+        const _yaml = require('js-yaml');
+        const profile = _yaml.load(fs.readFileSync(profilePath, 'utf8'));
+        const distillLog = profile && profile.evolution && profile.evolution.auto_distill;
+        if (Array.isArray(distillLog) && distillLog.length > 0) {
+          const lastTs = new Date(distillLog[distillLog.length - 1].ts).getTime();
+          const diffMs = Date.now() - lastTs;
+          const diffH = Math.floor(diffMs / 3600000);
+          const diffM = Math.floor((diffMs % 3600000) / 60000);
+          lastDistillStr = diffH > 0 ? `${diffH}h${diffM}m 前` : `${diffM}m 前`;
+        }
+      }
+    } catch { /* non-fatal */ }
+    console.log(`🧬 Cognition: 无新信号 · 上次蒸馏 ${lastDistillStr}`);
+  }
+} catch { /* non-fatal */ }
+
+
+
 // ---------------------------------------------------------
 // 4.9 AUTO-UPDATE CHECK (non-blocking)
 // ---------------------------------------------------------
@@ -715,7 +782,7 @@ const CURRENT_VERSION = require('./package.json').version;
         res.on('end', () => {
           try { resolve(JSON.parse(data).version); } catch { reject(); }
         });
-      }).on('error', reject).on('timeout', function() { this.destroy(); reject(); });
+      }).on('error', reject).on('timeout', function () { this.destroy(); reject(); });
     });
 
     if (latest && latest !== CURRENT_VERSION) {
@@ -729,6 +796,71 @@ const CURRENT_VERSION = require('./package.json').version;
       }
     }
   } catch { /* network unavailable, skip silently */ }
+})();
+
+// ---------------------------------------------------------
+// 4.95 QMD OPTIONAL INSTALL PROMPT (one-time)
+// ---------------------------------------------------------
+// Only prompt when: TTY environment + QMD not installed + never asked before.
+// Uses synchronous fs.readSync on stdin — no async/readline complexity.
+// Writes a flag file after asking so this prompt never appears again.
+(function maybeOfferQmd() {
+  const QMD_OFFERED_FILE = path.join(METAME_DIR, '.qmd_offered');
+  const isTTY = Boolean(process.stdout.isTTY && process.stdin.isTTY);
+  if (!isTTY) return;                          // non-interactive env: CI, pipe, etc.
+  if (fs.existsSync(QMD_OFFERED_FILE)) return; // already offered before
+
+  // Check if QMD already installed
+  try { execSync('which qmd', { stdio: 'pipe', timeout: 2000 }); return; } catch { }
+
+  // Mark as offered NOW — so crash/ctrl-c won't re-ask
+  try { fs.writeFileSync(QMD_OFFERED_FILE, new Date().toISOString(), 'utf8'); } catch { }
+
+  // Check bun availability
+  let bunAvailable = false;
+  try { execSync('which bun', { stdio: 'pipe', timeout: 2000 }); bunAvailable = true; } catch { }
+
+  console.log('');
+  console.log('┌─ 🔍 记忆搜索增强（可选，免费）');
+  console.log('│');
+  console.log('│  当前模式：基础全文搜索（FTS5）');
+  console.log('│  安装 QMD 后：BM25 + 向量语义 + 重排序 混合搜索');
+  console.log('│  效果：召回质量约 5x，模糊描述也能精准命中历史记忆');
+  if (!bunAvailable) {
+    console.log('│');
+    console.log('│  ⚠️  未检测到 bun，无法自动安装。');
+    console.log('│  手动安装：curl -fsSL https://bun.sh/install | bash');
+    console.log('│             bun install -g github:tobi/qmd');
+    console.log('└────────────────────────────────────────────────');
+    console.log('');
+    return;
+  }
+  console.log('│  耗时：约 30 秒');
+  console.log('│');
+
+  // Synchronous prompt — read one character from stdin
+  try {
+    process.stdout.write('└─ 立即安装？(y/N) › ');
+    const buf = Buffer.alloc(8);
+    const n = fs.readSync(0, buf, 0, 8);
+    const answer = buf.slice(0, n).toString().trim().toLowerCase();
+    process.stdout.write('\n');
+
+    if (answer === 'y' || answer === 'yes') {
+      console.log('   ⬇️  正在安装 QMD...');
+      try {
+        execSync('bun install -g github:tobi/qmd', { stdio: 'inherit', timeout: 120000 });
+        console.log('   ✅ QMD 已安装，下次记忆搜索自动启用向量模式。');
+      } catch {
+        console.log('   ⚠️  安装失败，可手动执行：bun install -g github:tobi/qmd');
+      }
+    } else {
+      console.log('   跳过。如需日后安装：bun install -g github:tobi/qmd');
+    }
+    console.log('');
+  } catch {
+    // stdin not readable (edge case) — silent skip
+  }
 })();
 
 // ---------------------------------------------------------

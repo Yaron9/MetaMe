@@ -1,28 +1,3 @@
-<!-- METAME:START -->
----
-## 🧠 SYSTEM KERNEL: SHADOW_MODE (Active)
-
-**1. THE BRAIN (Source of Truth):**
-   * **FILE:** `$HOME/.claude_profile.yaml`
-   * **RULE:** This file is your Ground Truth. If context is compressed (/compact), **RE-READ** this file immediately.
-   * **AUTO-LOCK:** Never edit lines marked `# [LOCKED]` (Core Values).
-   * **EVOLUTION:** Silently overwrite outdated status/focus.
-
-**2. EVOLUTION MECHANISM (Manual Sync):**
-   *   **PHILOSOPHY:** You respect the User's flow. You do NOT interrupt.
-   *   **TOOLS:**
-       1. **Log Insight:** `!metame evolve "Insight"` (For additive knowledge).
-       2. **Surgical Update:** `!metame set-trait key value` (For overwriting specific fields, e.g., `!metame set-trait status.focus "API Design"`).
-   *   **RULE:** Only use these tools when the User **EXPLICITLY** instructs you.
-   *   **REMINDER:** If the User expresses a strong persistent preference, you may gently ask *at the end of the task*: "Should I save this preference to your MetaMe profile?"
-
-**3. MEMORY SYSTEM (Three-Layer Recall):**
-   * **Long-term Facts** → injected as `<!-- FACTS:START -->` blocks. Follow implicitly, never repeat to user.
-   * **Session Summary** → injected as `[上次对话摘要，供参考]` when resuming after 2h+ gap. Use for continuity, do NOT quote back to user.
-   * **Background Pipeline:** Sleep mode triggers memory consolidation automatically. Memory improves over time without user action.
-   * **Search:** `node ~/.metame/memory-search.js "<keyword>"` to recall facts manually.
----
-<!-- METAME:END -->
 ---
 
 # JARVIS — 系统级 AI 总管
@@ -61,24 +36,39 @@ Token 守则：Glob/Grep 定位再读、大任务后 `/compact`、Profile ≤800
 MetaMe = Claude Code 认知层 + 手机端桥接。`metame-cli@1.4.2`，Node ≥22.5。
 
 ```
-index.js                   ← CLI 入口 (metame 命令)
+index.js                      ← CLI 入口 (metame 命令)
 scripts/
-  daemon.js                ← 常驻后台 (~4800行: Telegram/飞书/心跳/Dispatch)
-  feishu-adapter.js        ← 飞书 bot (WebSocket 长连接, V1+V2 卡片)
-  telegram-adapter.js      ← Telegram bot (轮询)
-  distill.js               ← 认知蒸馏 (Haiku, 信号→Profile)
-  signal-capture.js        ← 用户消息捕获 hook (3层过滤)
-  schema.js                ← Profile schema (43字段, 5层级, 800token)
-  memory.js                ← 记忆数据库 (SQLite+FTS5, QMD向量检索)
-  memory-extract.js        ← 事实提取 (独立心跳任务, Haiku)
-  session-analytics.js     ← 会话骨架提取 (本地零API)
-  pending-traits.js        ← 认知特质累积 (T3 置信度门槛)
-  skill-evolution.js       ← 技能进化 (热路径+冷路径)
-  providers.js             ← 多 Provider 管理 + callHaiku()
-  qmd-client.js            ← QMD 向量搜索客户端
-  utils.js                 ← 共享工具函数
-plugin/                    ← Plugin 版 (轻量, scripts/ 的镜像副本)
-install.sh / install.ps1   ← 一键安装脚本
+  daemon.js                   ← 常驻后台主编排器 (~1400行，已完成 God Object 重构)
+  daemon-claude-engine.js     ← Claude 子进程执行核心 (askClaude/spawnClaudeAsync/spawnClaudeStreaming)
+  daemon-task-scheduler.js    ← 心跳调度 + 任务执行引擎 (executeTask/startHeartbeat)
+  daemon-session-store.js     ← 会话读写工具 (扫描JSONL/标签/session状态)
+  daemon-session-commands.js  ← 会话 UI 指令 (/browse /memory /cd /sess 等)
+  daemon-command-router.js    ← 指令路由分发层
+  daemon-agent-commands.js    ← Agent 配置指令 (/agent bind/new/edit/list)
+  daemon-admin-commands.js    ← 管理态指令 (/status /budget /fix /reload 等)
+  daemon-exec-commands.js     ← 执行态指令 (/run /stop /quit /sh 等)
+  daemon-ops-commands.js      ← 运维态指令 (/undo /nosleep /help 等)
+  daemon-dispatch.js          ← Dispatch 子系统 (验签/Socket/文件回退)
+  daemon-bridges.js           ← 桥接管理 (Telegram/Feishu bots 启动与销毁)
+  daemon-file-browser.js      ← 文件浏览/下载缓存
+  daemon-runtime-lifecycle.js ← PID 管理 + 热重载 watcher
+  daemon-checkpoints.js       ← Git Checkpoint 工具
+  daemon-notify.js            ← 通知推送
+  feishu-adapter.js           ← 飞书 bot (WebSocket 长连接, V1+V2 卡片)
+  telegram-adapter.js         ← Telegram bot (轮询)
+  distill.js                  ← 认知蒸馏 (Haiku, 信号→Profile)
+  signal-capture.js           ← 用户消息捕获 hook (3层过滤)
+  schema.js                   ← Profile schema (43字段, 5层级, 800token)
+  memory.js                   ← 记忆数据库 (SQLite+FTS5, QMD向量检索)
+  memory-extract.js           ← 事实提取 (独立心跳任务, Haiku)
+  session-analytics.js        ← 会话骨架提取 (本地零API)
+  pending-traits.js           ← 认知特质累积 (T3 置信度门槛)
+  skill-evolution.js          ← 技能进化 (热路径+冷路径)
+  providers.js                ← 多 Provider 管理 + callHaiku()
+  qmd-client.js               ← QMD 向量搜索客户端
+  utils.js                    ← 共享工具函数 (writeBrainFileSafe 等)
+plugin/                       ← Plugin 版 (轻量, scripts/ 的镜像副本)
+install.sh / install.ps1      ← 一键安装脚本
 ```
 
 ## 核心子系统
@@ -112,23 +102,33 @@ install.sh / install.ps1   ← 一键安装脚本
 - 会话名/标签存入 `~/.metame/session_tags.json`
 - 搜索：`node ~/.metame/memory-search.js "<关键词>"`
 
-### Daemon (daemon.js)
+### Daemon 子系统（已完成 God Object 重构）
 
-**关键函数/模式：**
-- `getAllTasks(config)` / `findTask(config, name)` — 心跳任务统一读取（通用+项目）
-- `askClaude()` — 核心 Claude 子进程管理（`--resume` 续接、流式输出、超时15min）
-- `handleCommand()` — 用户消息路由 + 全部斜杠命令处理
-- `startHeartbeat()` — 心跳调度器（检查 interval/cron/idle 条件）
-- `isUserIdle()` — 检查 `~/.metame/local_active` mtime（>10min = 闲置）
+`daemon.js` 现为纯编排器 (~1400行)，核心业务已拆入独立模块：
+
+| 模块 | 职责入口 |
+|------|----------|
+| `daemon-claude-engine.js` | `askClaude()` — Claude 子进程管理（`--resume`/流式/超时） |
+| `daemon-task-scheduler.js` | `startHeartbeat()` / `executeTask()` — 心跳与任务调度 |
+| `daemon-session-store.js` | 会话 JSONL 扫描、标签读写、session 状态存取 |
+| `daemon-command-router.js` | `handleCommand()` — 指令路由分发 |
+| `daemon-dispatch.js` | `dispatchTask()` — 跨 Agent 消息调度，含 HMAC 验签 |
+| `daemon-bridges.js` | Telegram/Feishu Bot 启动、热接管、停止 |
+| `daemon-runtime-lifecycle.js` | PID 管理、daemon.js 热重启 watcher |
+
+**关键设计：Dispatch 假 Bot 适配器**（留在 `daemon.js`，被两个模块共享）
+- `createNullBot(onOutput)` — 后台静默执行时用，把 Claude 输出路由到回调而非真实频道
+- `createStreamForwardBot(realBot, chatId)` — Dispatch 时把 Claude 输出强制转发到指定 chatId（A 代理 B 发消息）
 
 **热加载机制：**
-- `daemon.yaml` 变化 → `fs.watchFile` 检测 → `reloadConfig()` 热重载配置（不重启进程）
-- `daemon.js` 文件变化 → `watchDaemonScript()` 检测 → 延迟重启（等活跃 Claude 任务完成）
-- **注意**：feishu-adapter.js 等依赖模块变化不会触发重启（Node require 缓存），需 daemon.js 同时变化或手动重启
+- `daemon.yaml` 变化 → `reloadConfig()` 热重载配置（不重启进程）
+- `daemon.js` 变化 → 延迟重启整个进程组（等活跃 Claude 任务完成）
+- `daemon-*.js` / `feishu-adapter.js` 等模块变化：需 sync daemon.js 触发重启，或手动 `metame stop && metame start`
 
 **Dispatch 系统：**
 - `~/.metame/bin/dispatch_to <project> "内容"` → Unix socket (`daemon.sock`) 或 `pending.jsonl` 回退
 - 防风暴：20次/目标/小时，总计60次/小时，最大深度2，循环检测
+- 消息携带 HMAC-SHA256 签名（`ts` + `sig`），daemon 验签后才执行
 - 虚拟 chatId `_agent_<project>` 用于 dispatch 会话
 
 ### 飞书卡片 (feishu-adapter.js)
@@ -151,7 +151,7 @@ V1 必须用于 `card.action.trigger` 回调（按钮点击）。V2 支持更丰
 | `scripts/` | `~/.metame/` | `metame` CLI 启动 | index.js 逐文件 diff 覆盖 |
 | `daemon.yaml` | 内存 config | 文件变化 | daemon `fs.watchFile` 热重载 |
 
-**重要**：index.js 同步到 `~/.metame/` 后**不会主动 kill daemon**。daemon 自己的 file watcher 检测 `~/.metame/daemon.js` 变化后延迟重启。但如果只改了非 daemon.js 的文件（如 feishu-adapter.js），daemon 不会自动重启。
+**重要**：`index.js` 同步到 `~/.metame/` 后**不会主动 kill daemon**。daemon 的 lifecycle watcher 检测到 `~/.metame/daemon.js` 变化后延迟重启。改了其他模块（如 `feishu-adapter.js`、`daemon-bridges.js` 等）需同时 sync `daemon.js` 或手动 `metame stop && metame start` 才生效。
 
 ## CLAUDE.md 注入
 
@@ -187,10 +187,15 @@ V1 必须用于 `card.action.trigger` 回调（按钮点击）。V2 支持更丰
 **根因**：V2 header **不支持** `text_size` 字段（放上去直接 400）。`text_size` 只在 **body 的 markdown 元素**上生效，plain_text 上无效。正确写法：`{ tag: 'markdown', content: c, text_size: 'x-large' }`。
 **教训**：text_size 属于 body markdown 元素，不属于 header 也不属于 plain_text。查历史代码比猜测更高效。
 
-### 坑3: daemon 不重启 — 非 daemon.js 文件变化不触发
-**症状**：改了 feishu-adapter.js 并 sync 到 ~/.metame/，`/reload` 后不生效。
-**根因**：daemon file watcher 只监控 daemon.js 和 daemon.yaml。其他 JS 模块被 Node require 缓存，`/reload` 只重载 yaml 配置。
-**解决**：需要同时 sync daemon.js（让 watcher 触发重启），或手动 `metame stop && metame start`。
+### 坑3: 改子模块不重启 — 需连带 sync daemon.js
+**症状**：改了 `feishu-adapter.js` 或任意 `daemon-*.js` 并 sync，`/reload` 后不生效。
+**根因**：`/reload` 只重载 `daemon.yaml` 配置；daemon lifecycle watcher 只监控 `daemon.js` 本身；其他 JS 模块被 Node require 缓存。
+**解决**：同时修改 `daemon.js` 中任意一行（让 watcher 触发重启），或手动 `metame stop && metame start`。
+
+### 坑4: 重构时安全补丁被静默覆盖
+**症状**：剥离代码时 Agent 平移了旧版函数体，已修复的 `mergeAgentRole` Prompt Injection 防护消失，`writeConfigSafe` 被换回 `fs.writeFileSync` 裸写。
+**根因**：Agent 在迁移复制函数体时基于旧版代码，而非最新已修复版本。
+**教训**：每轮重构后必须检查安全敏感点：`grep writeFileSync(CONFIG_FILE` 应为 0；`mergeAgentRole` 内必须有 `safeDesc` + `USER_DESCRIPTION_START` 围栏。
 
 ## 发版流程
 

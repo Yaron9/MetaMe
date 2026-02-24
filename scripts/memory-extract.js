@@ -21,7 +21,7 @@ const HOME = os.homedir();
 const LOCK_FILE = path.join(HOME, '.metame', 'memory-extract.lock');
 
 // Atomic fact extraction prompt (local copy — distill.js no longer exports this)
-const FACT_EXTRACTION_PROMPT = `你是精准的知识提取引擎。从以下会话骨架中提取「值得长期记住的原子事实」。
+const FACT_EXTRACTION_PROMPT = `你是精准的知识提取引擎。从以下会话材料中提取「值得长期记住的原子事实」。
 
 提取类型（必须是以下之一）：
 - tech_decision（技术决策：为什么选A不选B）
@@ -53,12 +53,13 @@ const FACT_EXTRACTION_PROMPT = `你是精准的知识提取引擎。从以下会
 - value长度20-200字
 - entity用英文点号路径，value可用中文
 - medium confidence必须有非空tags
+- 优先引用证据里的具体锚点（文件名、命令、报错关键词）；没有锚点时不要硬编
 - 没有值得提取的事实时 facts 返回 []
 
 只输出JSON对象，不要解释。
 
-会话骨架：
-{{SKELETON}}`.trim();
+会话材料（包含骨架 + 证据）：
+{{SESSION_INPUT}}`.trim();
 
 const SESSION_TAGS_FILE = path.join(os.homedir(), '.metame', 'session_tags.json');
 
@@ -105,12 +106,12 @@ const VAGUE_PATTERNS = [
 const ALLOWED_FLAT = new Set(['王总', 'system', 'user']);
 
 /**
- * Extract atomic facts from a session skeleton via Haiku.
+ * Extract atomic facts from session skeleton + evidence via Haiku.
  * Returns filtered fact array (may be empty).
  */
-async function extractFacts(skeleton, sessionSummary, distillEnv) {
-  const skeletonText = JSON.stringify({ skeleton, sessionSummary }, null, 2).slice(0, 3000);
-  const prompt = FACT_EXTRACTION_PROMPT.replace('{{SKELETON}}', skeletonText);
+async function extractFacts(skeleton, evidence, distillEnv) {
+  const sessionInput = JSON.stringify({ skeleton, evidence }, null, 2).slice(0, 4500);
+  const prompt = FACT_EXTRACTION_PROMPT.replace('{{SESSION_INPUT}}', sessionInput);
 
   let raw;
   try {
@@ -120,7 +121,7 @@ async function extractFacts(skeleton, sessionSummary, distillEnv) {
     ]);
   } catch (e) {
     console.log(`[memory-extract] Haiku call failed: ${e.message} | code:${e.code} killed:${e.killed} stdout:${String(e.stdout || '').slice(0, 100)} stderr:${String(e.stderr || '').slice(0, 100)}`);
-    return [];
+    return { facts: [], session_name: "未命名会话" };
   }
 
   let parsed;
@@ -219,7 +220,12 @@ async function run() {
           continue;
         }
 
-        const { facts, session_name } = await extractFacts(skeleton, null, distillEnv);
+        let evidence = null;
+        try {
+          evidence = sessionAnalytics.extractEvidence(session.path, 3000);
+        } catch { /* non-fatal */ }
+
+        const { facts, session_name } = await extractFacts(skeleton, evidence, distillEnv);
 
         if (facts.length > 0) {
           const { saved, skipped } = memory.saveFacts(

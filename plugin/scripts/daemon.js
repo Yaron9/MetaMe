@@ -93,6 +93,7 @@ const { createNotifier } = require('./daemon-notify');
 const { createClaudeEngine } = require('./daemon-claude-engine');
 const { createCommandRouter } = require('./daemon-command-router');
 const { createTaskScheduler } = require('./daemon-task-scheduler');
+const { createAgentTools } = require('./daemon-agent-tools');
 if (!yaml) {
   console.error('Cannot find js-yaml module. Ensure metame-cli is installed.');
   process.exit(1);
@@ -753,8 +754,9 @@ function attachOrCreateSession(chatId, projCwd, name) {
 }
 
 /**
- * 智能合并 Agent 角色描述到 CLAUDE.md
- * 如果目录中没有 CLAUDE.md，直接创建；否则调用 Claude 合并。
+ * Legacy fallback: 合并 Agent 角色描述到 CLAUDE.md。
+ * 主路径已迁移到 daemon-agent-tools.editAgentRoleDefinition。
+ * 保留该实现仅用于兼容回退路径。
  */
 async function mergeAgentRole(cwd, description) {
   const claudeMdPath = path.join(cwd, 'CLAUDE.md');
@@ -1044,29 +1046,6 @@ const { handleSessionCommand } = createSessionCommandHandler({
   sessionLabel,
 });
 
-const { handleAgentCommand } = createAgentCommandHandler({
-  fs,
-  path,
-  HOME,
-  loadConfig,
-  loadState,
-  saveState,
-  normalizeCwd,
-  expandPath,
-  sendBrowse,
-  sendDirPicker,
-  getSession,
-  listRecentSessions,
-  buildSessionCardElements,
-  sessionLabel,
-  loadSessionTags,
-  sessionRichLabel,
-  pendingBinds,
-  pendingAgentFlows,
-  doBindAgent,
-  mergeAgentRole,
-});
-
 // Message queue for messages received while a task is running
 const messageQueue = new Map(); // chatId -> { messages: string[], notified: false }
 
@@ -1106,6 +1085,62 @@ const { spawnClaudeAsync, askClaude } = createClaudeEngine({
   touchInteraction,
   statusThrottleMs: STATUS_THROTTLE_MS,
   fallbackThrottleMs: FALLBACK_THROTTLE_MS,
+});
+
+const agentTools = createAgentTools({
+  fs,
+  path,
+  HOME,
+  loadConfig,
+  writeConfigSafe,
+  backupConfig,
+  normalizeCwd,
+  expandPath,
+  spawnClaudeAsync,
+});
+
+function getAgentFlowTtlMs() {
+  try {
+    const cfg = loadConfig();
+    return cfg && cfg.daemon ? cfg.daemon.agent_flow_ttl_ms : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function getAgentBindTtlMs() {
+  try {
+    const cfg = loadConfig();
+    return cfg && cfg.daemon ? cfg.daemon.agent_bind_ttl_ms : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const { handleAgentCommand } = createAgentCommandHandler({
+  fs,
+  path,
+  HOME,
+  loadConfig,
+  loadState,
+  saveState,
+  normalizeCwd,
+  expandPath,
+  sendBrowse,
+  sendDirPicker,
+  getSession,
+  listRecentSessions,
+  buildSessionCardElements,
+  sessionLabel,
+  loadSessionTags,
+  sessionRichLabel,
+  pendingBinds,
+  pendingAgentFlows,
+  doBindAgent,
+  mergeAgentRole,
+  agentTools,
+  agentFlowTtlMs: getAgentFlowTtlMs,
+  agentBindTtlMs: getAgentBindTtlMs,
 });
 
 // Caffeinate process for /nosleep toggle (macOS only)
@@ -1174,6 +1209,9 @@ const { handleCommand } = createCommandRouter({
   messageQueue,
   sleep,
   log,
+  agentTools,
+  pendingAgentFlows,
+  agentFlowTtlMs: getAgentFlowTtlMs,
 });
 
 // Bind handleCommand for agent dispatch (must come after handleCommand definition)
@@ -1226,7 +1264,7 @@ async function main() {
 
   // Config validation: warn on unknown/suspect fields
   const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'heartbeat', 'budget', 'projects'];
-  const KNOWN_DAEMON = ['model', 'log_max_size', 'heartbeat_check_interval', 'session_allowed_tools', 'dangerously_skip_permissions', 'cooldown_seconds'];
+  const KNOWN_DAEMON = ['model', 'log_max_size', 'heartbeat_check_interval', 'session_allowed_tools', 'dangerously_skip_permissions', 'cooldown_seconds', 'agent_flow_ttl_ms', 'agent_bind_ttl_ms'];
   const VALID_MODELS = ['sonnet', 'opus', 'haiku'];
   for (const key of Object.keys(config)) {
     if (!KNOWN_SECTIONS.includes(key)) log('WARN', `Config: unknown section "${key}" (typo?)`);

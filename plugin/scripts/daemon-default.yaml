@@ -42,11 +42,11 @@ heartbeat:
       notify: false
       enabled: true
 
-    # 记忆提取：扫描未分析 session，提取长期事实和会话标签，2小时冷却
+    # 记忆提取：扫描未分析 session，提取长期事实和会话标签，4小时冷却（与 cognitive-distill 对齐）
     - name: memory-extract
       type: script
       command: node ~/.metame/memory-extract.js
-      interval: 2h
+      interval: 4h
       timeout: 600
       require_idle: true
       notify: false
