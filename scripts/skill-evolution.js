@@ -11,7 +11,7 @@
  *   - Writes to evolution_queue.yaml for immediate action
  *
  * COLD PATH (batched, Haiku-powered):
- *   - Piggybacks on distill.js (every 4h or on launch)
+ *   - Runs as standalone heartbeat script task (skill-evolve, default 6h)
  *   - Haiku analyzes accumulated skill signals for nuanced insights
  *   - Merges evolution data into skill's evolution.json + SKILL.md
  *
@@ -174,7 +174,8 @@ function extractSkillSignal(prompt, output, error, files, cwd, toolUsageLog) {
 
   const hasSkills = skills.length > 0;
   const hasError = !!error;
-  const hasToolFailure = output && /(?:failed|error|not found|not available|skill.{0,20}(?:missing|absent|not.{0,10}install))/i.test(output);
+  const outputText = typeof output === 'string' ? output : '';
+  const hasToolFailure = /(?:failed|error|not found|not available|skill.{0,20}(?:missing|absent|not.{0,10}install))/i.test(outputText);
 
   // Skip if no skill involvement and no failure
   if (!hasSkills && !hasError && !hasToolFailure) return null;
@@ -185,10 +186,11 @@ function extractSkillSignal(prompt, output, error, files, cwd, toolUsageLog) {
     skills_invoked: skills,
     tools_used: tools.slice(0, 20), // cap for storage
     error: error ? error.substring(0, 500) : null,
+    output_excerpt: outputText.substring(0, 500),
     has_tool_failure: !!hasToolFailure,
     files_modified: (files || []).slice(0, 10),
     cwd: cwd || null,
-    outcome: error ? 'error' : (output ? 'success' : 'empty'),
+    outcome: (hasError || hasToolFailure) ? 'error' : (outputText ? 'success' : 'empty'),
   };
 }
 
@@ -275,7 +277,12 @@ function checkHotEvolution(signal) {
 
   // Rule 3: Missing skill detection
   const missingRe = new RegExp(policy.missing_skill_patterns.join('|'), 'i');
-  if (signal.outcome !== 'success' && signal.prompt && missingRe.test((signal.error || '') + (signal.prompt || ''))) {
+  const missText = [(signal.error || ''), (signal.prompt || ''), (signal.output_excerpt || '')].join('\n');
+  const hasMissingPattern = missingRe.test(missText);
+  const hasExplicitSkillMiss = signal.has_tool_failure &&
+    /skill|技能|能力/i.test(missText) &&
+    /not found|missing|absent|no skill|找不到|没有找到|能力不足/i.test(missText);
+  if (signal.prompt && (hasMissingPattern || hasExplicitSkillMiss)) {
     addToQueue(queue, {
       type: 'skill_gap',
       skill_name: null,
@@ -295,7 +302,7 @@ function checkHotEvolution(signal) {
     if (isSuccess || isFail) {
       for (const sk of signal.skills_invoked) {
         const skillDir = findSkillDir(sk);
-        if (skillDir) trackInsightOutcome(skillDir, isSuccess);
+        if (skillDir) trackInsightOutcome(skillDir, isSuccess, signal);
       }
     }
   }
@@ -305,7 +312,51 @@ function checkHotEvolution(signal) {
  * Update insight outcome stats in evolution.json for a skill.
  * Tracks success_count, fail_count, last_applied_at per insight text.
  */
-function trackInsightOutcome(skillDir, isSuccess) {
+const INSIGHT_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'when', 'where',
+  'user', 'skill', 'meta', 'metame', 'should', 'always', 'never', 'please',
+  '问题', '用户', '技能', '需要', '应该', '这个', '那个', '以及', '如果', '然后',
+]);
+
+function extractInsightTokens(text) {
+  const raw = String(text || '').toLowerCase();
+  const en = raw.match(/[a-z][a-z0-9_.-]{2,}/g) || [];
+  const zh = raw.match(/[\u4e00-\u9fff]{2,}/g) || [];
+  const tokens = [...en, ...zh]
+    .map(t => t.trim())
+    .filter(t => t.length >= 2 && !INSIGHT_STOPWORDS.has(t));
+  return [...new Set(tokens)];
+}
+
+function pickMatchedInsights(allInsights, signal) {
+  if (!signal || !Array.isArray(allInsights) || allInsights.length === 0) return [];
+
+  const context = [
+    signal.prompt || '',
+    signal.error || '',
+    signal.output_excerpt || '',
+    ...(Array.isArray(signal.tools_used) ? signal.tools_used.map(t => `${t.name || ''} ${t.context || ''}`) : []),
+    ...(Array.isArray(signal.files_modified) ? signal.files_modified : []),
+  ].join('\n').toLowerCase();
+
+  const scored = allInsights
+    .map((insight) => {
+      const tokens = extractInsightTokens(insight).slice(0, 12);
+      if (tokens.length === 0) return { insight, score: 0 };
+      let score = 0;
+      for (const token of tokens) {
+        if (context.includes(token)) score++;
+      }
+      return { insight, score };
+    })
+    .filter(x => x.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (scored.length > 0) return scored.slice(0, 3).map(x => x.insight);
+  return allInsights.length === 1 ? [allInsights[0]] : [];
+}
+
+function trackInsightOutcome(skillDir, isSuccess, signal = null) {
   const evoPath = path.join(skillDir, 'evolution.json');
   let data = {};
   try { data = JSON.parse(fs.readFileSync(evoPath, 'utf8')); } catch { return; }
@@ -317,8 +368,9 @@ function trackInsightOutcome(skillDir, isSuccess) {
     ...(data.fixes || []),
     ...(data.contexts || []),
   ];
+  const targetInsights = signal ? pickMatchedInsights(allInsights, signal) : allInsights;
 
-  for (const insight of allInsights) {
+  for (const insight of targetInsights) {
     if (!data.insights_stats[insight]) {
       data.insights_stats[insight] = { success_count: 0, fail_count: 0, last_applied_at: null };
     }
@@ -333,7 +385,7 @@ function trackInsightOutcome(skillDir, isSuccess) {
 
 // ─────────────────────────────────────────────
 // Cold Path: Haiku-Powered Analysis
-// (called from distill.js)
+// (called by heartbeat script task: skill-evolve)
 // ─────────────────────────────────────────────
 
 /**
@@ -591,7 +643,16 @@ function loadEvolutionQueue(yaml) {
     if (!fs.existsSync(EVOLUTION_QUEUE_FILE)) return { items: [] };
     const content = fs.readFileSync(EVOLUTION_QUEUE_FILE, 'utf8');
     const data = yaml.load(content);
-    return data && Array.isArray(data.items) ? data : { items: [] };
+    const queue = data && Array.isArray(data.items) ? data : { items: [] };
+    let changed = false;
+    for (const item of queue.items) {
+      if (!item.id) {
+        item.id = `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        changed = true;
+      }
+    }
+    if (changed) saveEvolutionQueue(yaml, queue);
+    return queue;
   } catch {
     return { items: [] };
   }
@@ -604,18 +665,24 @@ function saveEvolutionQueue(yaml, queue) {
 }
 
 function addToQueue(queue, entry) {
-  // Dedup by type + skill_name (update existing instead of adding duplicate)
+  // Dedup pending entries by core key. Skill gaps also include search_hint so unrelated gaps don't collapse.
   const existing = queue.items.find(i =>
-    i.type === entry.type && i.skill_name === entry.skill_name && i.status === 'pending'
+    i.type === entry.type &&
+    i.skill_name === entry.skill_name &&
+    i.status === 'pending' &&
+    (entry.type !== 'skill_gap' || (i.search_hint || '') === (entry.search_hint || ''))
   );
 
   if (existing) {
     existing.evidence_count = (existing.evidence_count || 0) + (entry.evidence_count || 1);
     existing.last_seen = new Date().toISOString();
+    if (entry.reason) existing.reason = entry.reason;
+    if (entry.search_hint) existing.search_hint = entry.search_hint;
     return;
   }
 
   queue.items.push({
+    id: `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     ...entry,
     detected: new Date().toISOString(),
     last_seen: new Date().toISOString(),
@@ -639,13 +706,11 @@ function checkEvolutionQueue() {
 
   const queue = loadEvolutionQueue(yaml);
   const pendingItems = queue.items.filter(i => i.status === 'pending');
-  if (pendingItems.length === 0) return [];
-
   const notifications = [];
+  const policy = loadPolicy();
 
   for (const item of pendingItems) {
     // Require minimum evidence before notifying
-    const policy = loadPolicy();
     const minEvidence = item.type === 'skill_gap' ? policy.min_evidence_for_gap : policy.min_evidence_for_update;
     if ((item.evidence_count || 1) < minEvidence) continue;
 
@@ -655,13 +720,14 @@ function checkEvolutionQueue() {
   }
 
   // Prune old resolved items (> 30 days)
+  const beforeLen = queue.items.length;
   const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
   queue.items = queue.items.filter(i =>
     i.status === 'pending' || i.status === 'notified' ||
     (new Date(i.last_seen || i.detected).getTime() > cutoff)
   );
 
-  if (notifications.length > 0) {
+  if (notifications.length > 0 || queue.items.length !== beforeLen) {
     saveEvolutionQueue(yaml, queue);
   }
 
@@ -685,6 +751,42 @@ function resolveQueueItem(type, skillName, resolution) {
     item.resolved_at = new Date().toISOString();
     saveEvolutionQueue(yaml, queue);
   }
+}
+
+/**
+ * Mark queue item resolved by queue id.
+ * Returns true when updated.
+ */
+function resolveQueueItemById(id, resolution) {
+  let yaml;
+  try { yaml = require('js-yaml'); } catch { return false; }
+  if (!id) return false;
+
+  const queue = loadEvolutionQueue(yaml);
+  const item = queue.items.find(i =>
+    i.id === id && (i.status === 'pending' || i.status === 'notified')
+  );
+  if (!item) return false;
+
+  item.status = resolution; // 'installed' | 'dismissed'
+  item.resolved_at = new Date().toISOString();
+  saveEvolutionQueue(yaml, queue);
+  return true;
+}
+
+/**
+ * List queue items for manual triage.
+ */
+function listQueueItems({ status = null, limit = 20 } = {}) {
+  let yaml;
+  try { yaml = require('js-yaml'); } catch { return []; }
+  const queue = loadEvolutionQueue(yaml);
+  const items = Array.isArray(queue.items) ? queue.items : [];
+  const filtered = status ? items.filter(i => i.status === status) : items;
+  return filtered
+    .slice()
+    .sort((a, b) => new Date(b.last_seen || b.detected || 0).getTime() - new Date(a.last_seen || a.detected || 0).getTime())
+    .slice(0, Math.max(1, limit));
 }
 
 // ─────────────────────────────────────────────
@@ -726,8 +828,11 @@ function smartStitch(skillDir) {
   try { data = JSON.parse(fs.readFileSync(evoPath, 'utf8')); } catch { return; }
 
   // Build evolution section
+  const AUTO_START = '<!-- METAME-EVOLUTION:START -->';
+  const AUTO_END = '<!-- METAME-EVOLUTION:END -->';
   const sections = [];
-  sections.push('\n\n## User-Learned Best Practices & Constraints');
+  sections.push(`\n\n${AUTO_START}`);
+  sections.push('\n## User-Learned Best Practices & Constraints');
   sections.push('\n> **Auto-Generated Section**: Maintained by skill-evolution-manager. Do not edit manually.');
 
   // Helper: get quality indicator for an insight based on stats
@@ -755,13 +860,17 @@ function smartStitch(skillDir) {
     sections.push(`\n${data.custom_prompts}`);
   }
 
+  sections.push(`\n${AUTO_END}\n`);
   const evolutionBlock = sections.join('\n');
 
   let content = fs.readFileSync(skillMdPath, 'utf8');
-  const pattern = /(\n+## User-Learned Best Practices & Constraints[\s\S]*$)/;
+  const markerPattern = new RegExp(`${AUTO_START}[\\s\\S]*?${AUTO_END}\\n?`);
+  const legacyPattern = /\n+## User-Learned Best Practices & Constraints[\s\S]*?(?=\n##\s+|\n#\s+|$)/;
 
-  if (pattern.test(content)) {
-    content = content.replace(pattern, evolutionBlock);
+  if (markerPattern.test(content)) {
+    content = content.replace(markerPattern, evolutionBlock.trimStart());
+  } else if (legacyPattern.test(content)) {
+    content = content.replace(legacyPattern, evolutionBlock);
   } else {
     content = content + evolutionBlock;
   }
@@ -827,6 +936,8 @@ module.exports = {
   distillSkills,
   checkEvolutionQueue,
   resolveQueueItem,
+  resolveQueueItemById,
+  listQueueItems,
   mergeEvolution,
   smartStitch,
   trackInsightOutcome,

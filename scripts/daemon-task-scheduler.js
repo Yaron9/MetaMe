@@ -509,6 +509,7 @@ function createTaskScheduler(deps) {
           const notifications = skillEvolution.checkEvolutionQueue();
           for (const item of notifications) {
             let msg = '';
+            const idHint = item.id ? `\nID: \`${item.id}\`` : '';
             if (item.type === 'skill_gap') {
               msg = `🧬 *技能缺口检测*\n${item.reason}`;
               if (item.search_hint) msg += `\n搜索建议: \`${item.search_hint}\``;
@@ -517,6 +518,8 @@ function createTaskScheduler(deps) {
             } else if (item.type === 'user_complaint') {
               msg = `⚠️ *技能反馈*\n技能 \`${item.skill_name}\` 收到用户反馈\n${item.reason}`;
             }
+            if (msg && item.id) msg += `${idHint}\n处理: \`/skill-evo done ${item.id}\` 或 \`/skill-evo dismiss ${item.id}\``;
+            else if (msg) msg += idHint;
             if (msg && notifyFn) notifyFn(msg);
           }
         } catch (e) { log('WARN', `Skill evolution queue check failed: ${e.message}`); }
