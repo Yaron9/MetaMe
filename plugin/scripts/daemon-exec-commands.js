@@ -23,8 +23,129 @@ function createExecCommandHandler(deps) {
     loadConfig,
   } = deps;
 
+  function truncateOutput(output, maxLen = 4000) {
+    const text = (output || '').trim() || '(no output)';
+    return text.length > maxLen ? text.slice(0, maxLen) + '\n... (truncated)' : text;
+  }
+
+  function maxReplyLengthForChat(chatId, defaultLen) {
+    // Feishu text messages have a lower practical limit than Telegram.
+    return typeof chatId === 'number' ? defaultLen : Math.min(defaultLen, 1200);
+  }
+
+  async function runCommand(bin, args, options = {}) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const child = spawn(bin, args, options);
+      let stdout = '';
+      let stderr = '';
+
+      const finish = (code, errorText = '') => {
+        if (settled) return;
+        settled = true;
+        const merged = `${stdout}${stderr}${errorText}`;
+        resolve({
+          code: typeof code === 'number' ? code : 1,
+          stdout,
+          stderr: `${stderr}${errorText}`,
+          output: merged.trim(),
+        });
+      };
+
+      child.stdout.on('data', d => { stdout += d; });
+      child.stderr.on('data', d => { stderr += d; });
+      child.on('close', code => finish(code));
+      child.on('error', err => finish(1, `${stderr ? '\n' : ''}${err.message}`));
+    });
+  }
+
+  async function runMacCapabilityChecksInline() {
+    const checks = [];
+    const shotPath = `/tmp/metame_gui_test_${process.pid}_${Date.now()}.png`;
+    checks.push({ name: 'osascript binary available', mode: 'pass_on_zero', cmd: 'which osascript' });
+    checks.push({ name: 'AppleScript baseline', mode: 'pass_on_zero', cmd: 'osascript -e \'return "ok"\'' });
+    checks.push({ name: 'Finder automation', mode: 'pass_on_zero', cmd: 'osascript -e \'tell application "Finder" to get name of startup disk\'' });
+    checks.push({ name: 'System Events accessibility', mode: 'pass_on_zero', cmd: 'osascript -e \'tell application "System Events" to get UI elements enabled\'' });
+    checks.push({
+      name: 'GUI app launch/control (Calculator)',
+      mode: 'pass_on_zero',
+      cmd: 'open -a Calculator >/dev/null 2>&1; sleep 1; osascript -e \'tell application "System Events" to tell process "Calculator" to return {frontmost, (count of windows)}\'; osascript -e \'tell application "Calculator" to quit\' >/dev/null 2>&1',
+    });
+    checks.push({ name: 'Screenshot capability (screencapture)', mode: 'pass_on_zero', cmd: `screencapture -x '${shotPath}' && ls -lh '${shotPath}'` });
+    checks.push({ name: 'Full Disk probe: read ~/Library/Mail', mode: 'warn_on_nonzero', cmd: "ls '$HOME/Library/Mail' | head -n 3" });
+    checks.push({ name: 'Full Disk probe: query Safari History.db', mode: 'warn_on_nonzero', cmd: "sqlite3 '$HOME/Library/Safari/History.db' 'select count(*) from history_items;'" });
+
+    const lines = [];
+    let pass = 0;
+    let warn = 0;
+    let fail = 0;
+    lines.push('MetaMe macOS control capability check');
+    lines.push(`Timestamp: ${new Date().toISOString()}`);
+    lines.push('');
+
+    for (const c of checks) {
+      const r = await runCommand('bash', ['-o', 'pipefail', '-lc', c.cmd], { timeout: 30000 });
+      let level = 'FAIL';
+      if (c.mode === 'pass_on_zero') {
+        if (r.code === 0) {
+          pass++;
+          level = 'PASS';
+        } else {
+          fail++;
+          level = 'FAIL';
+        }
+      } else {
+        if (r.code === 0) {
+          pass++;
+          level = 'PASS';
+        } else {
+          warn++;
+          level = 'WARN';
+        }
+      }
+      lines.push(`[${level}] ${c.name}`);
+      if (r.output) lines.push(`  ${r.output.split('\n').join('\n  ')}`);
+    }
+
+    await runCommand('rm', ['-f', shotPath], { timeout: 3000 });
+    lines.push('');
+    lines.push(`Summary: pass=${pass} warn=${warn} fail=${fail}`);
+    return { code: fail > 0 ? 1 : 0, output: lines.join('\n') };
+  }
+
+  function macCommandHelp() {
+    return [
+      '🍎 macOS 控制命令',
+      '/mac check — 检查 AppleScript/UI 自动化/截图/磁盘权限',
+      '/mac perms — 查看建议开启的系统权限',
+      '/mac perms open — 打开系统设置权限页',
+      '/mac osa <AppleScript> — 直接执行 AppleScript',
+      '/mac jxa <JavaScript> — 通过 osascript 执行 JXA',
+      '',
+      '示例:',
+      '/mac osa tell application "Finder" to get name of startup disk',
+    ].join('\n');
+  }
+
+  function macPermissionGuide() {
+    return [
+      '🛡 建议给 MetaMe/终端开启这些权限（系统设置 → 隐私与安全性）：',
+      '1) 辅助功能（Accessibility）',
+      '2) 自动化（Automation / Apple Events）',
+      '3) 完全磁盘访问（Full Disk Access）',
+      '4) 屏幕录制（Screen Recording）',
+      '',
+      '说明：',
+      '- 辅助功能/自动化：用于控制 Finder、System Events、GUI 应用',
+      '- 完全磁盘访问：用于读取 Mail/Safari 等受保护目录',
+      '- 屏幕录制：用于截图和视觉回传',
+      '',
+      '执行 `/mac perms open` 可尝试直接跳转到对应设置页。',
+    ].join('\n');
+  }
+
   async function handleExecCommand(ctx) {
-    const { bot, chatId, text, config, executeTaskByName } = ctx;
+    const { bot, chatId, text, config, executeTaskByName, nlIntentText } = ctx;
 
     if (text.startsWith('/run ')) {
       const cd = checkCooldown(chatId);
@@ -248,6 +369,127 @@ function createExecCommandHandler(deps) {
       return true;
     }
 
+    // /mac — macOS control helpers (AppleScript/JXA/permissions)
+    const macMatch = String(text || '').match(/^\/mac(?:\s+(.*))?$/i);
+    if (macMatch) {
+      if (process.platform !== 'darwin') {
+        await bot.sendMessage(chatId, '❌ /mac 仅支持 macOS');
+        return true;
+      }
+
+      const argRaw = (macMatch[1] || '').trim();
+      const arg = argRaw.toLowerCase();
+      if (!argRaw || arg === 'help') {
+        if (bot.sendButtons) {
+          await bot.sendButtons(chatId, macCommandHelp(), [
+            [{ text: '✅ /mac check', callback_data: '/mac check' }],
+            [{ text: '🛡 /mac perms', callback_data: '/mac perms' }],
+            [{ text: '⚙️ /mac perms open', callback_data: '/mac perms open' }],
+          ]);
+        } else {
+          await bot.sendMessage(chatId, macCommandHelp());
+        }
+        return true;
+      }
+
+      if (arg === 'check') {
+        const checkScript = path.join(__dirname, 'check-macos-control-capabilities.sh');
+        await bot.sendMessage(chatId, '🔍 正在检查 macOS 控制能力...');
+        let result;
+        if (fs.existsSync(checkScript)) {
+          result = await runCommand('bash', [checkScript], { timeout: 120000 });
+        } else {
+          await bot.sendMessage(chatId, '⚠️ 检测脚本缺失，已切换为内置检查模式。');
+          result = await runMacCapabilityChecksInline();
+        }
+        const out = truncateOutput(result.output, maxReplyLengthForChat(chatId, 3600));
+        if (result.code === 0) {
+          await bot.sendMessage(chatId, `✅ macOS 能力检查完成\n\n${out}`);
+        } else {
+          await bot.sendMessage(chatId, `⚠️ 检查未全部通过\n\n${out}`);
+        }
+        return true;
+      }
+
+      if (arg === 'perms' || arg === 'permissions') {
+        await bot.sendMessage(chatId, macPermissionGuide());
+        return true;
+      }
+
+      if (arg === 'perms open' || arg === 'permissions open') {
+        const panes = [
+          'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+          'x-apple.systempreferences:com.apple.preference.security?Privacy_Automation',
+          'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles',
+          'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+        ];
+        let ok = 0;
+        for (const pane of panes) {
+          const r = await runCommand('open', [pane], { timeout: 5000 });
+          if (r.code === 0) ok++;
+        }
+        await bot.sendMessage(chatId, `⚙️ 已尝试打开 ${ok}/${panes.length} 个权限设置页。\n若未跳转，请手动进入“系统设置 → 隐私与安全性”。`);
+        return true;
+      }
+
+      if (/^osa(?:\s+|$)/i.test(argRaw)) {
+        const script = argRaw.replace(/^osa(?:\s+|$)/i, '').trim();
+        if (!script) {
+          await bot.sendMessage(chatId, '用法: /mac osa <AppleScript>');
+          return true;
+        }
+        const result = await runCommand('osascript', ['-e', script], { timeout: 45000 });
+        const out = (result.output || '').trim();
+        if (result.code !== 0) {
+          await bot.sendMessage(chatId, `❌ AppleScript 执行失败\n${truncateOutput(out, maxReplyLengthForChat(chatId, 3000))}`);
+        } else if (nlIntentText) {
+          const label = String(nlIntentText).trim().slice(0, 120);
+          if (out) {
+            await bot.sendMessage(chatId, `✅ 已执行：${label}\n${truncateOutput(out, maxReplyLengthForChat(chatId, 1200))}`);
+          } else {
+            await bot.sendMessage(chatId, `✅ 已执行：${label}`);
+          }
+        } else {
+          if (out) {
+            await bot.sendMessage(chatId, `🍎 AppleScript 结果\n${truncateOutput(out, maxReplyLengthForChat(chatId, 3000))}`);
+          } else {
+            await bot.sendMessage(chatId, '✅ AppleScript 已执行（无返回值）');
+          }
+        }
+        return true;
+      }
+
+      if (/^jxa(?:\s+|$)/i.test(argRaw)) {
+        const script = argRaw.replace(/^jxa(?:\s+|$)/i, '').trim();
+        if (!script) {
+          await bot.sendMessage(chatId, '用法: /mac jxa <JavaScript>');
+          return true;
+        }
+        const result = await runCommand('osascript', ['-l', 'JavaScript', '-e', script], { timeout: 45000 });
+        const out = (result.output || '').trim();
+        if (result.code !== 0) {
+          await bot.sendMessage(chatId, `❌ JXA 执行失败\n${truncateOutput(out, maxReplyLengthForChat(chatId, 3000))}`);
+        } else if (nlIntentText) {
+          const label = String(nlIntentText).trim().slice(0, 120);
+          if (out) {
+            await bot.sendMessage(chatId, `✅ 已执行：${label}\n${truncateOutput(out, maxReplyLengthForChat(chatId, 1200))}`);
+          } else {
+            await bot.sendMessage(chatId, `✅ 已执行：${label}`);
+          }
+        } else {
+          if (out) {
+            await bot.sendMessage(chatId, `🍎 JXA 结果\n${truncateOutput(out, maxReplyLengthForChat(chatId, 3000))}`);
+          } else {
+            await bot.sendMessage(chatId, '✅ JXA 已执行（无返回值）');
+          }
+        }
+        return true;
+      }
+
+      await bot.sendMessage(chatId, macCommandHelp());
+      return true;
+    }
+
     // /sh [command] — direct shell execution (emergency lifeline)
     if (text === '/sh' || text.startsWith('/sh ')) {
       const command = text.slice(3).trim();
@@ -263,17 +505,8 @@ function createExecCommandHandler(deps) {
         return true;
       }
       try {
-        const child = spawn('sh', ['-c', command], { timeout: 30000 });
-        let stdout = '';
-        let stderr = '';
-        child.stdout.on('data', d => { stdout += d; });
-        child.stderr.on('data', d => { stderr += d; });
-        await new Promise((resolve) => {
-          child.on('close', resolve);
-          child.on('error', resolve);
-        });
-        let output = (stdout + stderr).trim() || '(no output)';
-        if (output.length > 4000) output = output.slice(0, 4000) + '\n... (truncated)';
+        const result = await runCommand('sh', ['-c', command], { timeout: 30000 });
+        const output = truncateOutput(result.output, maxReplyLengthForChat(chatId, 4000));
         await bot.sendMessage(chatId, `💻 $ ${command}\n${output}`);
       } catch (e) {
         await bot.sendMessage(chatId, `❌ ${e.message}`);
