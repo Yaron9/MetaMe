@@ -604,19 +604,26 @@ function createCommandRouter(deps) {
       }, 5000);
       return;
     }
-    // Nickname-only switch: bypass cooldown + budget (no Claude call)
-    const quickAgent = routeAgent(text, config);
-    if (quickAgent && !quickAgent.rest) {
-      const { key, proj } = quickAgent;
-      const projCwd = normalizeCwd(proj.cwd);
-      attachOrCreateSession(chatId, projCwd, proj.name || key);
-      log('INFO', `Agent switch via nickname: ${key} (${projCwd})`);
-      await bot.sendMessage(chatId, `${proj.icon || '🤖'} ${proj.name || key} 在线`);
-      return;
-    }
+    // Strict mode: chats with a fixed agent in chat_agent_map must not cross-dispatch
+    const _strictChatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
+    const _isStrictChat = !!(_strictChatAgentMap[String(chatId)] || projectKeyFromVirtualChatId(String(chatId)));
 
-    if (await tryHandleAgentIntent(bot, chatId, text, config)) {
-      return;
+    // Nickname-only switch: bypass cooldown + budget (no Claude call)
+    // Skipped for strict chats (fixed-agent groups)
+    if (!_isStrictChat) {
+      const quickAgent = routeAgent(text, config);
+      if (quickAgent && !quickAgent.rest) {
+        const { key, proj } = quickAgent;
+        const projCwd = normalizeCwd(proj.cwd);
+        attachOrCreateSession(chatId, projCwd, proj.name || key);
+        log('INFO', `Agent switch via nickname: ${key} (${projCwd})`);
+        await bot.sendMessage(chatId, `${proj.icon || '🤖'} ${proj.name || key} 在线`);
+        return;
+      }
+
+      if (await tryHandleAgentIntent(bot, chatId, text, config)) {
+        return;
+      }
     }
 
     const daemonCfg = (config && config.daemon) || {};
