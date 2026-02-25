@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 /**
  * utils.js — Pure utility functions extracted for testability.
@@ -30,6 +31,9 @@ async function writeBrainFileSafe(content, brainFile = BRAIN_FILE_DEFAULT) {
   const retryDelay = 150; // ms between retries
   const staleTimeout = 30000; // 30s: lock older than this is stale
 
+  const lockDir = path.dirname(BRAIN_LOCK_FILE);
+  if (!fs.existsSync(lockDir)) fs.mkdirSync(lockDir, { recursive: true });
+
   let acquired = false;
   for (let i = 0; i < maxRetries; i++) {
     try {
@@ -47,6 +51,10 @@ async function writeBrainFileSafe(content, brainFile = BRAIN_FILE_DEFAULT) {
       } catch { /* lock removed by another process */ }
       await new Promise(r => setTimeout(r, retryDelay));
     }
+  }
+
+  if (!acquired) {
+    throw new Error('Failed to acquire brain.lock for profile write');
   }
 
   const tmp = brainFile + '.tmp.' + process.pid;
@@ -118,10 +126,109 @@ function createPathMap() {
   return { shortenPath, expandPath };
 }
 
+// ---------------------------------------------------------
+// PROJECT SCOPE (stable workspace identity)
+// ---------------------------------------------------------
+function normalizeProjectPath(cwd) {
+  if (!cwd || typeof cwd !== 'string') return null;
+  const trimmed = cwd.trim();
+  if (!trimmed) return null;
+
+  const expanded = trimmed.startsWith('~')
+    ? path.join(os.homedir(), trimmed.slice(1))
+    : trimmed;
+
+  const resolved = path.resolve(expanded);
+  try {
+    return fs.realpathSync.native ? fs.realpathSync.native(resolved) : fs.realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function projectScopeFromCwd(cwd) {
+  const normalized = normalizeProjectPath(cwd);
+  if (!normalized) return null;
+  const digest = crypto.createHash('sha1').update(normalized).digest('hex').slice(0, 16);
+  return `proj_${digest}`;
+}
+
+function deriveProjectInfo(cwd) {
+  const projectPath = normalizeProjectPath(cwd);
+  if (!projectPath) return { project: null, project_id: null, project_path: null };
+  return {
+    project: path.basename(projectPath),
+    project_id: projectScopeFromCwd(projectPath),
+    project_path: projectPath,
+  };
+}
+
+// ---------------------------------------------------------
+// TOPIC DRIFT HELPERS
+// ---------------------------------------------------------
+function buildTopicSignature(text, maxTokens = 16) {
+  const input = String(text || '').toLowerCase();
+  if (!input) return [];
+
+  const stop = new Set(['help', 'please', 'this', 'that', 'with', 'from', 'into', 'have', 'been', 'will', 'just']);
+  const seen = new Set();
+  const tokens = [];
+  const push = (token) => {
+    const t = String(token || '').trim();
+    if (!t || seen.has(t) || stop.has(t)) return;
+    seen.add(t);
+    tokens.push(t);
+  };
+
+  // ASCII-like identifiers, commands, paths
+  const ascii = input.match(/[a-z0-9_./-]{2,}/g) || [];
+  for (const t of ascii) {
+    push(t);
+    if (tokens.length >= maxTokens) return tokens;
+  }
+
+  // Chinese: use 2-char shingles so short prompts still produce enough features.
+  const hanRuns = input.match(/[\u4e00-\u9fff]{2,}/g) || [];
+  for (const run of hanRuns) {
+    if (run.length === 2) {
+      push(run);
+    } else {
+      for (let i = 0; i < run.length - 1; i++) {
+        push(run.slice(i, i + 2));
+        if (tokens.length >= maxTokens) return tokens;
+      }
+    }
+    if (tokens.length >= maxTokens) return tokens;
+  }
+
+  return tokens;
+}
+
+function hasTopicDrift(prevSig, currSig, minTokens = 3, threshold = 0.25) {
+  if (!Array.isArray(prevSig) || !Array.isArray(currSig)) return false;
+  if (prevSig.length < minTokens || currSig.length < minTokens) return false;
+  const a = new Set(prevSig);
+  const b = new Set(currSig);
+  let common = 0;
+  for (const t of a) if (b.has(t)) common++;
+  const minBase = Math.min(a.size, b.size) || 1;
+  const overlapByMin = common / minBase;
+  if (overlapByMin >= 0.34) return false;
+  const union = a.size + b.size - common;
+  if (union <= 0) return false;
+  const jaccard = common / union;
+  return jaccard < threshold;
+}
+
 module.exports = {
   parseInterval,
   formatRelativeTime,
   createPathMap,
+  normalizeProjectPath,
+  projectScopeFromCwd,
+  deriveProjectInfo,
+  buildTopicSignature,
+  hasTopicDrift,
   writeBrainFileSafe,
   BRAIN_LOCK_FILE,
 };

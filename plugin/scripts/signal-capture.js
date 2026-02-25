@@ -13,6 +13,14 @@ const path = require('path');
 const os = require('os');
 
 const BUFFER_FILE = path.join(os.homedir(), '.metame', 'raw_signals.jsonl');
+const OVERFLOW_FILE = path.join(os.homedir(), '.metame', 'raw_signals.overflow.jsonl');
+const LOCK_FILE = path.join(os.homedir(), '.metame', 'raw_signals.lock');
+const LOCK_RETRY_MAX = 80;
+const LOCK_RETRY_MS = 8;
+const LOCK_STALE_MS = 30 * 1000;
+const MAX_BUFFER_LINES = 300;
+const MAX_CAPTURE_CHARS = 1600;
+const ABSOLUTE_MAX_CAPTURE_CHARS = 6000;
 
 // === CONFIDENCE PATTERNS ===
 
@@ -33,6 +41,90 @@ const CORRECTION_EN = /(no,? I meant|that's not what I|you misunderstood|wrong.+
 const META_ZH = /我(发现|意识到|觉得|反思|总结|复盘)|想错了|换个(思路|方向|方案)|回头(想想|看看)|之前的(方案|思路|方向).*(不行|不对|有问题)|我的(问题|毛病|习惯)是|下次(应该|要|得)/;
 const META_EN = /(I realize|looking back|on reflection|my (mistake|problem|habit) is|let me rethink|wrong approach|next time I should)/i;
 
+// Internal/system prompts must never enter cognition signal buffer.
+const INTERNAL_PROMPT_PATTERNS = [
+  /You are a MetaMe cognitive profile distiller/i,
+  /You are a metacognition pattern detector/i,
+  /你是精准的知识提取引擎/,
+  /RECALLED LONG-TERM FACTS \(context only/i,
+  /\[System hints - DO NOT mention these to user:/i,
+  /\[Mac automation policy - do NOT expose this block:/i,
+  /MANDATORY FIRST ACTION: The user has not been calibrated yet/i,
+  /<\!--\s*FACTS:START\s*-->/i,
+  /<\!--\s*MEMORY:START\s*-->/i,
+  /\[Task notification\]/i,
+  /<task-notification\b/i,
+];
+
+function sanitizeMetaMePrompt(text) {
+  let prompt = String(text || '');
+  if (!prompt) return '';
+
+  // Remove daemon-injected RAG blocks
+  prompt = prompt.replace(/<!--\s*FACTS:START\s*-->[\s\S]*?<!--\s*FACTS:END\s*-->/gi, ' ');
+  prompt = prompt.replace(/<!--\s*MEMORY:START\s*-->[\s\S]*?<!--\s*MEMORY:END\s*-->/gi, ' ');
+
+  // Remove daemon/system internal hint blocks
+  prompt = prompt.replace(/\[System hints - DO NOT mention these to user:[\s\S]*?\]/gi, ' ');
+  prompt = prompt.replace(/\[Mac automation policy - do NOT expose this block:[\s\S]*?\]/gi, ' ');
+  prompt = prompt.replace(/\[Task notification\][\s\S]*?(?=\n{2,}|$)/gi, ' ');
+  prompt = prompt.replace(/<task-notification\b[\s\S]*?<\/task-notification>/gi, ' ');
+  prompt = prompt.replace(/<task-notification\b[\s\S]*$/gi, ' ');
+
+  return prompt.trim();
+}
+
+function isInternalPrompt(text) {
+  const prompt = String(text || '');
+  if (!prompt) return false;
+  return INTERNAL_PROMPT_PATTERNS.some((re) => re.test(prompt));
+}
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withBufferLock(fn) {
+  const dir = path.dirname(BUFFER_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+  let acquired = false;
+  for (let i = 0; i < LOCK_RETRY_MAX; i++) {
+    try {
+      const fd = fs.openSync(LOCK_FILE, 'wx');
+      fs.writeSync(fd, process.pid.toString());
+      fs.closeSync(fd);
+      acquired = true;
+      break;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      try {
+        const age = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
+        if (age > LOCK_STALE_MS) {
+          fs.unlinkSync(LOCK_FILE);
+          continue;
+        }
+      } catch { /* lock released by another process */ }
+      sleep(LOCK_RETRY_MS);
+    }
+  }
+
+  if (!acquired) return false;
+  try {
+    fn();
+    return true;
+  } finally {
+    try { fs.unlinkSync(LOCK_FILE); } catch { /* non-fatal */ }
+  }
+}
+
+function writeBufferAtomically(lines) {
+  const tmp = BUFFER_FILE + `.tmp.${process.pid}`;
+  const content = lines.length > 0 ? (lines.join('\n') + '\n') : '';
+  fs.writeFileSync(tmp, content, 'utf8');
+  fs.renameSync(tmp, BUFFER_FILE);
+}
+
 // Read JSON from stdin
 let input = '';
 process.stdin.setEncoding('utf8');
@@ -40,7 +132,23 @@ process.stdin.on('data', (chunk) => { input += chunk; });
 process.stdin.on('end', () => {
   try {
     const data = JSON.parse(input);
-    const prompt = (data.prompt || '').trim();
+    let prompt = (data.prompt || '').trim();
+
+    // Internal Claude subprocesses (distill/memory extract/skill evolution) set this flag.
+    if (process.env.METAME_INTERNAL_PROMPT === '1') {
+      process.exit(0);
+    }
+
+    // Strip daemon/system injected wrappers first; keep user payload if present.
+    prompt = sanitizeMetaMePrompt(prompt);
+    if (!prompt) {
+      process.exit(0);
+    }
+
+    // Belt-and-suspenders: filter known internal prompt templates.
+    if (isInternalPrompt(prompt)) {
+      process.exit(0);
+    }
 
     // === LAYER 0: Metacognitive bypass — always capture self-reflection ===
     const isMeta = META_ZH.test(prompt) || META_EN.test(prompt);
@@ -53,6 +161,14 @@ process.stdin.on('end', () => {
     const weightedLen = [...prompt].reduce((sum, ch) => sum + (ch.charCodeAt(0) > 0x2e80 ? 3 : 1), 0);
     if (weightedLen < 15) {
       process.exit(0);
+    }
+
+    // Hard cap to prevent giant prompt pastes from poisoning distill budget.
+    if (prompt.length > ABSOLUTE_MAX_CAPTURE_CHARS) {
+      process.exit(0);
+    }
+    if (prompt.length > MAX_CAPTURE_CHARS) {
+      prompt = prompt.slice(0, MAX_CAPTURE_CHARS);
     }
 
     // Skip messages that are purely code or file paths
@@ -113,18 +229,62 @@ process.stdin.on('end', () => {
       cwd: data.cwd || null
     };
 
-    // Append to buffer, drop oldest if over cap
-    let existingLines = [];
-    try {
-      existingLines = fs.readFileSync(BUFFER_FILE, 'utf8')
-        .split('\n').filter(l => l.trim());
-    } catch {
-      // File doesn't exist yet, that's fine
+    // Append/update with process-level lock to avoid concurrent read-modify-write loss.
+    const locked = withBufferLock(() => {
+      let existingLines = [];
+      try {
+        existingLines = fs.readFileSync(BUFFER_FILE, 'utf8').split('\n').filter(l => l.trim());
+      } catch {
+        // File doesn't exist yet, that's fine
+      }
+
+      // Drain overflow written during prior lock-contention periods.
+      // unlink AFTER writeBufferAtomically succeeds — crash-safe ordering.
+      let overflowDrained = false;
+      try {
+        const overflowLines = fs.readFileSync(OVERFLOW_FILE, 'utf8').split('\n').filter(Boolean);
+        if (overflowLines.length > 0) {
+          existingLines = existingLines.concat(overflowLines);
+          overflowDrained = true;
+        }
+      } catch { /* no overflow file — normal case */ }
+
+      // Opportunistic hygiene: remove old internal/system lines if any slipped in historically.
+      existingLines = existingLines.filter((line) => {
+        try {
+          const parsed = JSON.parse(line);
+          const p = String(parsed && parsed.prompt ? parsed.prompt : '');
+          if (!p) return false;
+          if (p.length > ABSOLUTE_MAX_CAPTURE_CHARS) return false;
+          if (isInternalPrompt(p)) return false;
+          return true;
+        } catch {
+          return false;
+        }
+      });
+
+      existingLines.push(JSON.stringify(entry));
+      if (existingLines.length > MAX_BUFFER_LINES) {
+        existingLines = existingLines.slice(-MAX_BUFFER_LINES);
+      }
+      writeBufferAtomically(existingLines);
+      // Unlink overflow only after main file is safely written.
+      if (overflowDrained) {
+        try { fs.unlinkSync(OVERFLOW_FILE); } catch { /* already gone */ }
+      }
+    });
+
+    if (!locked) {
+      // Last-resort fallback: write to overflow side-file so the next lock-holder
+      // can drain, clean, and cap it — never bypassing buffer rules.
+      // Guard against unbounded growth: drop entry if overflow already at cap.
+      fs.mkdirSync(path.dirname(OVERFLOW_FILE), { recursive: true });
+      try {
+        const ofLines = fs.readFileSync(OVERFLOW_FILE, 'utf8').split('\n').filter(Boolean);
+        if (ofLines.length >= MAX_BUFFER_LINES) return; // shed load
+      } catch { /* overflow file doesn't exist yet */ }
+      fs.appendFileSync(OVERFLOW_FILE, JSON.stringify(entry) + '\n', 'utf8');
     }
-
-    existingLines.push(JSON.stringify(entry));
-
-    fs.writeFileSync(BUFFER_FILE, existingLines.join('\n') + '\n');
 
   } catch {
     // Silently ignore parse errors — never block the user's workflow

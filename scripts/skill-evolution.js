@@ -35,6 +35,8 @@ const os = require('os');
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
 const SKILL_SIGNAL_FILE = path.join(METAME_DIR, 'skill_signals.jsonl');
+const SKILL_SIGNAL_OVERFLOW_FILE = path.join(METAME_DIR, 'skill_signals.overflow.jsonl');
+const SKILL_SIGNAL_LOCK_FILE = path.join(METAME_DIR, 'skill_signals.lock');
 const EVOLUTION_QUEUE_FILE = path.join(METAME_DIR, 'evolution_queue.yaml');
 const EVOLUTION_POLICY_FILE = path.join(METAME_DIR, 'evolution_policy.yaml');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
@@ -113,6 +115,54 @@ Respond with ONLY a JSON code block:
 If no actionable insights, respond with exactly: NO_EVOLUTION`,
 };
 
+function clampInt(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  const i = Math.floor(n);
+  return Math.max(min, Math.min(max, i));
+}
+
+function sanitizePatternList(value, fallback) {
+  const list = Array.isArray(value) ? value : fallback;
+  const clean = [];
+  for (const v of list) {
+    if (typeof v !== 'string') continue;
+    const p = v.trim();
+    if (!p || p.length > 300) continue;
+    try {
+      // Validate regex compileability once so hot path won't crash at runtime.
+      // eslint-disable-next-line no-new
+      new RegExp(p, 'i');
+      clean.push(p);
+    } catch { /* invalid pattern */ }
+  }
+  return clean.length > 0 ? clean : fallback.slice();
+}
+
+function sanitizePolicy(input) {
+  const merged = { ...DEFAULT_POLICY, ...(input && typeof input === 'object' ? input : {}) };
+  const policy = {
+    ...merged,
+    version: clampInt(merged.version, DEFAULT_POLICY.version, 1, 1000000),
+    hot_failure_threshold: clampInt(merged.hot_failure_threshold, DEFAULT_POLICY.hot_failure_threshold, 1, 50),
+    hot_failure_window_minutes: clampInt(merged.hot_failure_window_minutes, DEFAULT_POLICY.hot_failure_window_minutes, 1, 24 * 60),
+    min_signals_for_distill: clampInt(merged.min_signals_for_distill, DEFAULT_POLICY.min_signals_for_distill, 1, 5000),
+    max_signals_buffer: clampInt(merged.max_signals_buffer, DEFAULT_POLICY.max_signals_buffer, 20, 20000),
+    min_evidence_for_update: clampInt(merged.min_evidence_for_update, DEFAULT_POLICY.min_evidence_for_update, 1, 20),
+    min_evidence_for_gap: clampInt(merged.min_evidence_for_gap, DEFAULT_POLICY.min_evidence_for_gap, 1, 20),
+    max_updates_per_analysis: clampInt(merged.max_updates_per_analysis, DEFAULT_POLICY.max_updates_per_analysis, 1, 20),
+    max_gaps_per_analysis: clampInt(merged.max_gaps_per_analysis, DEFAULT_POLICY.max_gaps_per_analysis, 1, 20),
+    self_eval_interval: clampInt(merged.self_eval_interval, DEFAULT_POLICY.self_eval_interval, 1, 1000),
+    cold_path_run_count: clampInt(merged.cold_path_run_count, DEFAULT_POLICY.cold_path_run_count, 0, 1000000),
+    complaint_patterns: sanitizePatternList(merged.complaint_patterns, DEFAULT_POLICY.complaint_patterns),
+    missing_skill_patterns: sanitizePatternList(merged.missing_skill_patterns, DEFAULT_POLICY.missing_skill_patterns),
+    prompt_template: (typeof merged.prompt_template === 'string' && merged.prompt_template.trim())
+      ? merged.prompt_template
+      : DEFAULT_POLICY.prompt_template,
+  };
+  return policy;
+}
+
 function loadPolicy() {
   let yaml;
   try { yaml = require('js-yaml'); } catch { return { ...DEFAULT_POLICY }; }
@@ -125,8 +175,7 @@ function loadPolicy() {
     }
     const content = fs.readFileSync(EVOLUTION_POLICY_FILE, 'utf8');
     const loaded = yaml.load(content) || {};
-    // Merge with defaults (new fields auto-added on upgrade)
-    return { ...DEFAULT_POLICY, ...loaded };
+    return sanitizePolicy(loaded);
   } catch {
     return { ...DEFAULT_POLICY };
   }
@@ -135,7 +184,7 @@ function loadPolicy() {
 function savePolicy(yaml, policy) {
   try {
     if (!fs.existsSync(METAME_DIR)) fs.mkdirSync(METAME_DIR, { mode: 0o700, recursive: true });
-    fs.writeFileSync(EVOLUTION_POLICY_FILE, yaml.dump(policy, { lineWidth: 120 }), 'utf8');
+    fs.writeFileSync(EVOLUTION_POLICY_FILE, yaml.dump(sanitizePolicy(policy), { lineWidth: 120 }), 'utf8');
   } catch {}
 }
 
@@ -197,20 +246,92 @@ function extractSkillSignal(prompt, output, error, files, cwd, toolUsageLog) {
 /**
  * Append a skill signal to the JSONL buffer.
  */
+function withSkillSignalLock(fn) {
+  if (!fs.existsSync(METAME_DIR)) fs.mkdirSync(METAME_DIR, { mode: 0o700, recursive: true });
+  const maxRetry = 80;
+  const retryMs = 8;
+  const staleMs = 30 * 1000;
+
+  let acquired = false;
+  for (let i = 0; i < maxRetry; i++) {
+    try {
+      const fd = fs.openSync(SKILL_SIGNAL_LOCK_FILE, 'wx');
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      acquired = true;
+      break;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      try {
+        const age = Date.now() - fs.statSync(SKILL_SIGNAL_LOCK_FILE).mtimeMs;
+        if (age > staleMs) {
+          fs.unlinkSync(SKILL_SIGNAL_LOCK_FILE);
+          continue;
+        }
+      } catch { /* lock released elsewhere */ }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryMs);
+    }
+  }
+
+  if (!acquired) return false;
+  try {
+    fn();
+    return true;
+  } finally {
+    try { fs.unlinkSync(SKILL_SIGNAL_LOCK_FILE); } catch {}
+  }
+}
+
+function writeSkillSignalLines(lines) {
+  const tmp = SKILL_SIGNAL_FILE + `.tmp.${process.pid}`;
+  const content = Array.isArray(lines) && lines.length > 0 ? lines.join('\n') + '\n' : '';
+  fs.writeFileSync(tmp, content, 'utf8');
+  fs.renameSync(tmp, SKILL_SIGNAL_FILE);
+}
+
 function appendSkillSignal(signal) {
   if (!signal) return;
   try {
-    if (!fs.existsSync(METAME_DIR)) fs.mkdirSync(METAME_DIR, { mode: 0o700, recursive: true });
-
-    // Append
-    fs.appendFileSync(SKILL_SIGNAL_FILE, JSON.stringify(signal) + '\n', 'utf8');
-
-    // Truncate if over limit (keep newest)
-    const content = fs.readFileSync(SKILL_SIGNAL_FILE, 'utf8').trim();
-    const lines = content.split('\n');
+    const payload = JSON.stringify(signal);
     const policy = loadPolicy();
-    if (lines.length > policy.max_signals_buffer) {
-      fs.writeFileSync(SKILL_SIGNAL_FILE, lines.slice(-policy.max_signals_buffer).join('\n') + '\n', 'utf8');
+
+    const locked = withSkillSignalLock(() => {
+      let lines = [];
+      try {
+        lines = fs.readFileSync(SKILL_SIGNAL_FILE, 'utf8').split('\n').filter(Boolean);
+      } catch { /* first write */ }
+
+      // Drain overflow written during prior lock-contention periods.
+      // unlink AFTER writeSkillSignalLines succeeds — crash-safe ordering.
+      let overflowDrained = false;
+      try {
+        const overflowLines = fs.readFileSync(SKILL_SIGNAL_OVERFLOW_FILE, 'utf8').split('\n').filter(Boolean);
+        if (overflowLines.length > 0) {
+          lines = lines.concat(overflowLines);
+          overflowDrained = true;
+        }
+      } catch { /* no overflow file — normal case */ }
+
+      lines.push(payload);
+      if (lines.length > policy.max_signals_buffer) {
+        lines = lines.slice(-policy.max_signals_buffer);
+      }
+      writeSkillSignalLines(lines);
+      // Unlink overflow only after main file is safely written.
+      if (overflowDrained) {
+        try { fs.unlinkSync(SKILL_SIGNAL_OVERFLOW_FILE); } catch { /* already gone */ }
+      }
+    });
+
+    if (!locked) {
+      // Last-resort fallback: write to overflow side-file so the next lock-holder
+      // can drain and apply max_signals_buffer cap — never bypassing buffer rules.
+      // Guard against unbounded growth: drop entry if overflow already at cap.
+      try {
+        const ofLines = fs.readFileSync(SKILL_SIGNAL_OVERFLOW_FILE, 'utf8').split('\n').filter(Boolean);
+        if (ofLines.length >= policy.max_signals_buffer) return;
+      } catch { /* overflow file doesn't exist yet */ }
+      fs.appendFileSync(SKILL_SIGNAL_OVERFLOW_FILE, payload + '\n', 'utf8');
     }
   } catch {
     // Non-fatal
@@ -263,7 +384,12 @@ function checkHotEvolution(signal) {
   }
 
   // Rule 2: User complaints about a skill
-  const complaintRe = new RegExp(policy.complaint_patterns.join('|'), 'i');
+  let complaintRe;
+  try {
+    complaintRe = new RegExp(policy.complaint_patterns.join('|'), 'i');
+  } catch {
+    complaintRe = new RegExp(DEFAULT_POLICY.complaint_patterns.join('|'), 'i');
+  }
   if (signal.prompt && complaintRe.test(signal.prompt) && signal.skills_invoked.length > 0) {
     for (const sk of signal.skills_invoked) {
       addToQueue(queue, {
@@ -276,7 +402,12 @@ function checkHotEvolution(signal) {
   }
 
   // Rule 3: Missing skill detection
-  const missingRe = new RegExp(policy.missing_skill_patterns.join('|'), 'i');
+  let missingRe;
+  try {
+    missingRe = new RegExp(policy.missing_skill_patterns.join('|'), 'i');
+  } catch {
+    missingRe = new RegExp(DEFAULT_POLICY.missing_skill_patterns.join('|'), 'i');
+  }
   const missText = [(signal.error || ''), (signal.prompt || ''), (signal.output_excerpt || '')].join('\n');
   const hasMissingPattern = missingRe.test(missText);
   const hasExplicitSkillMiss = signal.has_tool_failure &&
@@ -414,7 +545,6 @@ async function distillSkills() {
   // Get installed skills list
   const installedSkills = listInstalledSkills();
   if (installedSkills.length === 0) {
-    clearSignals();
     return null;
   }
 
@@ -466,7 +596,6 @@ async function distillSkills() {
 
     const jsonMatch = result.match(/```json\s*([\s\S]*?)```/);
     if (!jsonMatch) {
-      clearSignals();
       return null;
     }
 
@@ -624,8 +753,15 @@ RULES:
     const patchData = yaml.load(yamlMatch[1]);
     if (!patchData || typeof patchData !== 'object') return;
 
-    // Apply patch (merge, don't overwrite entirely)
-    const newPolicy = { ...policy, ...patchData };
+    // Apply patch with schema/type sanitization.
+    const newPolicy = sanitizePolicy({ ...policy, ...patchData });
+    if (newPolicy.version <= policy.version) {
+      newPolicy.version = policy.version + 1;
+    }
+    if (JSON.stringify(newPolicy) === JSON.stringify(policy)) {
+      console.log('🧬 Policy self-eval: patch produced no effective change.');
+      return;
+    }
     savePolicy(yaml, newPolicy);
     console.log(`🧬 Policy self-evolved: v${policy.version} → v${newPolicy.version}`);
 
@@ -896,7 +1032,10 @@ function readRecentSignals() {
 }
 
 function clearSignals() {
-  try { fs.writeFileSync(SKILL_SIGNAL_FILE, '', 'utf8'); } catch {}
+  try {
+    const locked = withSkillSignalLock(() => writeSkillSignalLines([]));
+    if (!locked) fs.writeFileSync(SKILL_SIGNAL_FILE, '', 'utf8');
+  } catch {}
 }
 
 function listInstalledSkills() {

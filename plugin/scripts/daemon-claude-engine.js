@@ -1,5 +1,7 @@
 'use strict';
 
+const { classifyChatUsage } = require('./usage-classifier');
+
 function createClaudeEngine(deps) {
   const {
     fs,
@@ -230,7 +232,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const child = spawn(CLAUDE_BIN, args, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, ...getActiveProviderEnv(), CLAUDECODE: undefined },
+        env: {
+          ...process.env,
+          ...getActiveProviderEnv(),
+          CLAUDECODE: undefined,
+          METAME_INTERNAL_PROMPT: '1',
+        },
       });
 
       let stdout = '';
@@ -830,7 +837,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       if (wasNew) markSessionStarted(chatId);
 
       const estimated = Math.ceil((prompt.length + output.length) / 4);
-      recordTokens(loadState(), estimated);
+      const chatCategory = classifyChatUsage(chatId, {
+        projectKey: boundProjectKey || '',
+        cwd: session && session.cwd,
+        homeDir: HOME,
+      });
+      recordTokens(loadState(), estimated, { category: chatCategory });
 
       // Parse [[FILE:...]] markers from output (Claude's explicit file sends)
       const { markedFiles, cleanOutput } = parseFileMarkers(output);

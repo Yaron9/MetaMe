@@ -30,7 +30,7 @@ if (!fs.existsSync(METAME_DIR)) {
 // Auto-deploy bundled scripts to ~/.metame/
 // IMPORTANT: daemon.yaml is USER CONFIG — never overwrite it. Only daemon-default.yaml (template) is synced.
 const scriptsDir = path.join(__dirname, 'scripts');
-const BUNDLED_BASE_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js', 'skill-evolution.js', 'memory.js', 'memory-extract.js', 'qmd-client.js', 'session-summarize.js', 'check-macos-control-capabilities.sh'];
+const BUNDLED_BASE_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js', 'skill-evolution.js', 'memory.js', 'memory-extract.js', 'memory-search.js', 'qmd-client.js', 'session-summarize.js', 'check-macos-control-capabilities.sh'];
 const DAEMON_MODULE_SCRIPTS = (() => {
   try {
     return fs.readdirSync(scriptsDir).filter((f) => /^daemon-[\w-]+\.js$/.test(f));
@@ -1755,15 +1755,22 @@ if (!isKnownUser) {
 // RAG: inject relevant facts based on current project (desktop-side equivalent of daemon RAG)
 try {
   const memory = require(path.join(__dirname, 'scripts', 'memory.js'));
-  // Derive project key from git repo name or cwd basename
-  let projectQuery = path.basename(process.cwd());
+  const { projectScopeFromCwd } = require(path.join(__dirname, 'scripts', 'utils.js'));
+  // Keep cwd basename as authoritative project filter for legacy rows (scope IS NULL).
+  const cwdProject = path.basename(process.cwd());
+  let repoProject = cwdProject;
   try {
     const { execSync } = require('child_process');
     const remote = execSync('git remote get-url origin 2>/dev/null || true', { encoding: 'utf8', stdio: 'pipe' }).trim();
-    if (remote) projectQuery = path.basename(remote, '.git');
+    if (remote) repoProject = path.basename(remote, '.git');
   } catch { /* not a git repo, use dirname */ }
 
-  const facts = memory.searchFacts(projectQuery, { limit: 5 });
+  const factQuery = repoProject === cwdProject ? cwdProject : `${repoProject} ${cwdProject}`;
+  const facts = memory.searchFacts(factQuery, {
+    limit: 5,
+    project: cwdProject || undefined,
+    scope: projectScopeFromCwd(process.cwd()) || undefined,
+  });
   if (facts.length > 0) {
     const factBlock = facts.map(f => `- [${f.relation}] ${f.value}`).join('\n');
     launchArgs.push(

@@ -2,7 +2,16 @@
 
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseInterval, formatRelativeTime, createPathMap } = require('./utils');
+const {
+  parseInterval,
+  formatRelativeTime,
+  createPathMap,
+  normalizeProjectPath,
+  projectScopeFromCwd,
+  deriveProjectInfo,
+  buildTopicSignature,
+  hasTopicDrift,
+} = require('./utils');
 
 // ---------------------------------------------------------
 // parseInterval
@@ -121,5 +130,56 @@ describe('createPathMap', () => {
     }
     const id = shortenPath('/path/1000');
     assert.ok(Buffer.byteLength(id) < 10, `id "${id}" too long`);
+  });
+});
+
+// ---------------------------------------------------------
+// project scope helpers
+// ---------------------------------------------------------
+describe('project scope helpers', () => {
+  it('normalizes absolute paths', () => {
+    assert.equal(normalizeProjectPath('/tmp/./metame/../metame'), '/tmp/metame');
+  });
+
+  it('returns deterministic scope ids for the same cwd', () => {
+    const a = projectScopeFromCwd('/tmp/metame');
+    const b = projectScopeFromCwd('/tmp/./metame');
+    assert.equal(a, b);
+    assert.match(a, /^proj_[a-f0-9]{16}$/);
+  });
+
+  it('derives project info from cwd', () => {
+    const info = deriveProjectInfo('/tmp/demo-repo');
+    assert.equal(info.project, 'demo-repo');
+    assert.equal(info.project_path, '/tmp/demo-repo');
+    assert.match(info.project_id, /^proj_[a-f0-9]{16}$/);
+  });
+});
+
+// ---------------------------------------------------------
+// topic drift helpers
+// ---------------------------------------------------------
+describe('topic drift helpers', () => {
+  it('extracts signature tokens for Chinese prompts', () => {
+    const sig = buildTopicSignature('修复登录超时并优化缓存策略');
+    assert.ok(sig.length >= 3, `expected >=3 tokens, got ${sig.length}`);
+  });
+
+  it('extracts signature tokens for mixed Chinese/English prompts', () => {
+    const sig = buildTopicSignature('修复 daemon memory-extract timeout');
+    assert.ok(sig.includes('daemon'));
+    assert.ok(sig.some(t => /[\u4e00-\u9fff]/.test(t)));
+  });
+
+  it('detects drift when signatures diverge', () => {
+    const a = buildTopicSignature('修复登录超时和重试策略');
+    const b = buildTopicSignature('重构支付流水和对账报表');
+    assert.equal(hasTopicDrift(a, b), true);
+  });
+
+  it('does not flag drift for similar topics', () => {
+    const a = buildTopicSignature('优化 memory 检索和缓存命中');
+    const b = buildTopicSignature('memory 检索改进与缓存策略');
+    assert.equal(hasTopicDrift(a, b), false);
   });
 });

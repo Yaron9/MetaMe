@@ -1,5 +1,7 @@
 'use strict';
 
+const { classifyTaskUsage } = require('./usage-classifier');
+
 function createExecCommandHandler(deps) {
   const {
     fs,
@@ -186,7 +188,7 @@ function createExecCommandHandler(deps) {
         await bot.sendMessage(chatId, `❌ ${taskName}: ${error}`);
       } else {
         const est = Math.ceil((fullPrompt.length + (output || '').length) / 4);
-        recordTokens(loadState(), est);
+        recordTokens(loadState(), est, { category: classifyTaskUsage({ name: taskName }) });
         const st = loadState();
         st.tasks[taskName] = { last_run: new Date().toISOString(), status: 'success', output_preview: (output || '').slice(0, 200) };
         saveState(st);

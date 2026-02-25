@@ -11,43 +11,105 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { deriveProjectInfo } = require('./utils');
 
 const HOME = os.homedir();
 const PROJECTS_ROOT = path.join(HOME, '.claude', 'projects');
 const STATE_FILE = path.join(HOME, '.metame', 'analytics_state.json');
-const MAX_STATE_ENTRIES = 200;
+const STATE_DB = path.join(HOME, '.metame', 'analytics_state.db');
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 const MIN_FILE_SIZE = 1024;               // 1KB
+let _stateDb = null;
+let _stmtIsProcessed = null;
+let _stmtMarkProcessed = null;
 
 /**
- * Load analytics state (set of already-analyzed session IDs).
+ * Initialize analytics state DB.
  */
-function loadState() {
-  try {
-    if (fs.existsSync(STATE_FILE)) {
-      return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    }
-  } catch { /* corrupt state — start fresh */ }
-  return { analyzed: {} };
+function getStateDb() {
+  if (_stateDb) return _stateDb;
+  const dir = path.dirname(STATE_DB);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+  const { DatabaseSync } = require('node:sqlite');
+  _stateDb = new DatabaseSync(STATE_DB);
+  _stateDb.exec('PRAGMA journal_mode = WAL');
+  _stateDb.exec('PRAGMA busy_timeout = 3000');
+  _stateDb.exec(`
+    CREATE TABLE IF NOT EXISTS processed_sessions (
+      kind         TEXT NOT NULL,
+      session_id   TEXT NOT NULL,
+      processed_at INTEGER NOT NULL,
+      PRIMARY KEY (kind, session_id)
+    )
+  `);
+  _stateDb.exec('CREATE INDEX IF NOT EXISTS idx_processed_kind_ts ON processed_sessions(kind, processed_at)');
+  _stateDb.exec('CREATE TABLE IF NOT EXISTS state_meta (key TEXT PRIMARY KEY, value TEXT)');
+  migrateLegacyStateOnce(_stateDb);
+  return _stateDb;
 }
 
 /**
- * Save analytics state.
+ * One-time migration from legacy JSON state file.
  */
-function saveState(state) {
-  // Cap entries for both tracking keys
-  for (const key of ['analyzed', 'facts_analyzed']) {
-    if (!state[key]) continue;
-    const keys = Object.keys(state[key]);
-    if (keys.length > MAX_STATE_ENTRIES) {
-      const sorted = keys.sort((a, b) => (state[key][a] || 0) - (state[key][b] || 0));
-      const toRemove = sorted.slice(0, keys.length - MAX_STATE_ENTRIES);
-      for (const k of toRemove) delete state[key][k];
+function migrateLegacyStateOnce(db) {
+  try {
+    const migrated = db.prepare("SELECT value FROM state_meta WHERE key = 'legacy_json_migrated'").get();
+    if (migrated && migrated.value === '1') return;
+
+    if (fs.existsSync(STATE_FILE)) {
+      let raw = null;
+      try { raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { raw = null; }
+      if (raw && typeof raw === 'object') {
+        const insert = db.prepare(`
+          INSERT INTO processed_sessions (kind, session_id, processed_at)
+          VALUES (?, ?, ?)
+          ON CONFLICT(kind, session_id) DO UPDATE SET processed_at = excluded.processed_at
+        `);
+        const tx = db.transaction(() => {
+          for (const [sid, ts] of Object.entries(raw.analyzed || {})) {
+            insert.run('analyzed', sid, Number(ts) || Date.now());
+          }
+          for (const [sid, ts] of Object.entries(raw.facts_analyzed || {})) {
+            insert.run('facts_analyzed', sid, Number(ts) || Date.now());
+          }
+        });
+        tx();
+      }
     }
+
+    db.prepare("INSERT OR REPLACE INTO state_meta (key, value) VALUES ('legacy_json_migrated', '1')").run();
+  } catch {
+    // non-fatal
   }
-  const dir = path.dirname(STATE_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+}
+
+function isProcessed(kind, sessionId) {
+  if (!kind || !sessionId) return false;
+  const db = getStateDb();
+  if (!_stmtIsProcessed) {
+    _stmtIsProcessed = db.prepare(
+      'SELECT 1 AS ok FROM processed_sessions WHERE kind = ? AND session_id = ? LIMIT 1'
+    );
+  }
+  const row = _stmtIsProcessed.get(kind, sessionId);
+  return !!(row && row.ok === 1);
+}
+
+/**
+ * Mark a session as processed in DB.
+ */
+function markProcessed(kind, sessionId) {
+  if (!sessionId) return;
+  const db = getStateDb();
+  if (!_stmtMarkProcessed) {
+    _stmtMarkProcessed = db.prepare(`
+      INSERT INTO processed_sessions (kind, session_id, processed_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(kind, session_id) DO UPDATE SET processed_at = excluded.processed_at
+    `);
+  }
+  _stmtMarkProcessed.run(kind, sessionId, Date.now());
 }
 
 /**
@@ -55,7 +117,6 @@ function saveState(state) {
  * Returns { path, session_id, mtime } or null.
  */
 function findLatestUnanalyzedSession() {
-  const state = loadState();
   let best = null;
 
   try {
@@ -72,7 +133,7 @@ function findLatestUnanalyzedSession() {
       for (const file of files) {
         if (!file.endsWith('.jsonl')) continue;
         const sessionId = file.replace('.jsonl', '');
-        if (state.analyzed[sessionId]) continue;
+        if (isProcessed('analyzed', sessionId)) continue;
 
         const fullPath = path.join(fullDir, file);
         let fstat;
@@ -114,6 +175,8 @@ function extractSkeleton(jsonlPath) {
     message_count: 0,
     duration_min: 0,
     project: null,
+    project_id: null,
+    project_path: null,
     branch: null,
     file_dirs: new Set(),
     intent: null,
@@ -145,7 +208,10 @@ function extractSkeleton(jsonlPath) {
     if (type === 'user') {
       // Extract project and branch from first occurrence
       if (!skeleton.project && entry.cwd) {
-        skeleton.project = path.basename(entry.cwd);
+        const info = deriveProjectInfo(entry.cwd);
+        skeleton.project = info.project;
+        skeleton.project_id = info.project_id;
+        skeleton.project_path = info.project_path;
       }
       if (!skeleton.branch && entry.gitBranch) {
         skeleton.branch = entry.gitBranch;
@@ -387,7 +453,6 @@ function formatForPrompt(skeleton) {
  * Returns array of { path, session_id, mtime }. Capped at `limit`.
  */
 function findAllUnanalyzedSessions(limit = 30) {
-  const state = loadState();
   const results = [];
 
   try {
@@ -404,7 +469,7 @@ function findAllUnanalyzedSessions(limit = 30) {
       for (const file of files) {
         if (!file.endsWith('.jsonl')) continue;
         const sessionId = file.replace('.jsonl', '');
-        if (state.analyzed[sessionId]) continue;
+        if (isProcessed('analyzed', sessionId)) continue;
 
         const fullPath = path.join(fullDir, file);
         let fstat;
@@ -428,9 +493,7 @@ function findAllUnanalyzedSessions(limit = 30) {
  * Mark a session as analyzed (cognitive distill / pattern detection).
  */
 function markAnalyzed(sessionId) {
-  const state = loadState();
-  state.analyzed[sessionId] = Date.now();
-  saveState(state);
+  markProcessed('analyzed', sessionId);
 }
 
 /**
@@ -438,8 +501,6 @@ function markAnalyzed(sessionId) {
  * Uses a separate `facts_analyzed` key so distill and memory-extract don't interfere.
  */
 function findAllUnextractedSessions(limit = 30) {
-  const state = loadState();
-  const factsAnalyzed = state.facts_analyzed || {};
   const results = [];
 
   try {
@@ -456,7 +517,7 @@ function findAllUnextractedSessions(limit = 30) {
       for (const file of files) {
         if (!file.endsWith('.jsonl')) continue;
         const sessionId = file.replace('.jsonl', '');
-        if (factsAnalyzed[sessionId]) continue;
+        if (isProcessed('facts_analyzed', sessionId)) continue;
 
         const fullPath = path.join(fullDir, file);
         let fstat;
@@ -479,10 +540,36 @@ function findAllUnextractedSessions(limit = 30) {
  * Mark a session as facts-extracted (used by memory-extract, independent of markAnalyzed).
  */
 function markFactsExtracted(sessionId) {
-  const state = loadState();
-  if (!state.facts_analyzed) state.facts_analyzed = {};
-  state.facts_analyzed[sessionId] = Date.now();
-  saveState(state); // saveState() caps both analyzed and facts_analyzed
+  markProcessed('facts_analyzed', sessionId);
+}
+
+/**
+ * Find a session jsonl by its session id.
+ * Returns { path, session_id, mtime } or null.
+ */
+function findSessionById(sessionId) {
+  const sid = String(sessionId || '').trim();
+  if (!sid) return null;
+
+  try {
+    const projectDirs = fs.readdirSync(PROJECTS_ROOT);
+    for (const dir of projectDirs) {
+      const fullDir = path.join(PROJECTS_ROOT, dir);
+      let stat;
+      try { stat = fs.statSync(fullDir); } catch { continue; }
+      if (!stat.isDirectory()) continue;
+
+      const fullPath = path.join(fullDir, `${sid}.jsonl`);
+      let fstat;
+      try { fstat = fs.statSync(fullPath); } catch { continue; }
+      if (fstat.size > MAX_FILE_SIZE || fstat.size < MIN_FILE_SIZE) continue;
+      return { path: fullPath, session_id: sid, mtime: fstat.mtimeMs };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
 
 /**
@@ -579,6 +666,7 @@ function summarizeSession(skeleton, jsonlPath) {
 
 module.exports = {
   findLatestUnanalyzedSession,
+  findSessionById,
   findAllUnanalyzedSessions,
   findAllUnextractedSessions,
   extractSkeleton,

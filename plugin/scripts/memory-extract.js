@@ -121,7 +121,7 @@ async function extractFacts(skeleton, evidence, distillEnv) {
     ]);
   } catch (e) {
     console.log(`[memory-extract] Haiku call failed: ${e.message} | code:${e.code} killed:${e.killed} stdout:${String(e.stdout || '').slice(0, 100)} stderr:${String(e.stderr || '').slice(0, 100)}`);
-    return { facts: [], session_name: "未命名会话" };
+    return { ok: false, facts: [], session_name: "未命名会话" };
   }
 
   let parsed;
@@ -129,7 +129,7 @@ async function extractFacts(skeleton, evidence, distillEnv) {
     const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     parsed = JSON.parse(cleaned);
   } catch {
-    return { facts: [], session_name: "未命名会话" };
+    return { ok: false, facts: [], session_name: "未命名会话" };
   }
 
   let facts = Array.isArray(parsed.facts) ? parsed.facts : [];
@@ -144,7 +144,7 @@ async function extractFacts(skeleton, evidence, distillEnv) {
     return true;
   });
 
-  return { facts: filteredFacts, session_name };
+  return { ok: true, facts: filteredFacts, session_name };
 }
 
 /**
@@ -225,13 +225,21 @@ async function run() {
           evidence = sessionAnalytics.extractEvidence(session.path, 3000);
         } catch { /* non-fatal */ }
 
-        const { facts, session_name } = await extractFacts(skeleton, evidence, distillEnv);
+        const { ok, facts, session_name } = await extractFacts(skeleton, evidence, distillEnv);
+        if (!ok) {
+          console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)}: extraction failed, will retry later`);
+          continue;
+        }
 
         if (facts.length > 0) {
+          const fallbackScope = skeleton.session_id
+            ? `sess_${String(skeleton.session_id).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24)}`
+            : null;
           const { saved, skipped, superseded } = memory.saveFacts(
             skeleton.session_id,
             skeleton.project || 'unknown',
-            facts
+            facts,
+            { scope: skeleton.project_id || fallbackScope }
           );
           totalSaved += saved;
           totalSkipped += skipped;
