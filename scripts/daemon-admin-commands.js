@@ -225,27 +225,99 @@ function createAdminCommandHandler(deps) {
       return { handled: true, config };
     }
 
-    // /task, /teamtask — inspect team task board
-    if (/^\/task(?:\s|$)/.test(text) || /^\/teamtask(?:\s|$)/.test(text)) {
+    // /TeamTask — create/list/detail/resume team collaboration tasks
+    const teamTaskCmdMatch = text.match(/^\/teamtask(?:\s+([\s\S]+))?$/i);
+    if (teamTaskCmdMatch) {
+      const args = String(teamTaskCmdMatch[1] || '').trim();
+      if (/^create$/i.test(args)) {
+        await bot.sendMessage(chatId, '❌ 用法: /TeamTask create <agent> <目标> [--scope <scopeId>] [--parent <taskId>]');
+        return { handled: true, config };
+      }
+      const createMatch = args.match(/^create\s+([\s\S]+)$/i);
+      if (createMatch) {
+        if (!taskEnvelope) {
+          await bot.sendMessage(chatId, '❌ task protocol 不可用');
+          return { handled: true, config };
+        }
+        const parsed = parseTeamTaskArgs(createMatch[1]);
+        if (!parsed || !parsed.targetName || !parsed.goal) {
+          await bot.sendMessage(chatId, '❌ 用法: /TeamTask create <agent> <目标> [--scope <scopeId>] [--parent <taskId>]');
+          return { handled: true, config };
+        }
+        const { targetName, goal, scopeId, parentTaskId } = parsed;
+        const targetKey = resolveProjectKey(targetName, config.projects || {});
+        if (!targetKey) {
+          await bot.sendMessage(chatId, `未找到 agent: ${targetName}\n可用: ${Object.keys(config.projects || {}).join(', ')}`);
+          return { handled: true, config };
+        }
+        const senderKey = resolveSenderKey(chatId, config);
+        const participants = (scopeId && taskBoard && taskBoard.listScopeParticipants)
+          ? taskBoard.listScopeParticipants(scopeId)
+          : [];
+        participants.push(senderKey, targetKey);
+        const envelope = taskEnvelope.normalizeTaskEnvelope({
+          from_agent: senderKey,
+          to_agent: targetKey,
+          scope_id: scopeId || '',
+          parent_task_id: parentTaskId || null,
+          participants,
+          goal,
+          task_kind: 'team',
+          definition_of_done: [
+            '输出可执行结果和关键结论',
+            '必要时给出产物路径与下一步建议',
+          ],
+          inputs: {
+            source_chat_id: String(chatId),
+            source: 'mobile_teamtask',
+          },
+          priority: 'normal',
+          status: 'queued',
+        });
+        const checked = taskEnvelope.validateTaskEnvelope(envelope);
+        if (!checked.ok) {
+          await bot.sendMessage(chatId, `❌ TeamTask 无效: ${checked.error}`);
+          return { handled: true, config };
+        }
+        const result = dispatchTask(targetKey, {
+          from: senderKey,
+          type: 'task',
+          priority: envelope.priority,
+          payload: {
+            title: goal.slice(0, 60),
+            prompt: goal,
+            task_envelope: envelope,
+          },
+          callback: false,
+        }, config);
+        if (result.success) {
+          await bot.sendMessage(chatId, [
+            `✅ 已创建 TeamTask 并派发: ${envelope.task_id}`,
+            `Scope: ${envelope.scope_id || envelope.task_id}`,
+            `查看: /TeamTask ${envelope.task_id}`,
+          ].join('\n'));
+        } else {
+          await bot.sendMessage(chatId, `❌ 创建 TeamTask 失败: ${result.error}`);
+        }
+        return { handled: true, config };
+      }
+
       if (!taskBoard) {
         await bot.sendMessage(chatId, '❌ Task Board 不可用');
         return { handled: true, config };
       }
-      const isTeamAlias = /^\/teamtask(?:\s|$)/.test(text);
-      const cmd = isTeamAlias ? '/teamtask' : '/task';
-      const args = text.slice(cmd.length).trim();
 
-      if (!args) {
+      if (!args || /^list$/i.test(args)) {
         const recent = taskBoard.listRecentTasks(10, null, 'team');
         if (recent.length === 0) {
-          await bot.sendMessage(chatId, '暂无 team task。\n使用 /dispatch task <agent> <goal> 创建。');
+          await bot.sendMessage(chatId, '暂无 TeamTask。\n使用 /TeamTask create <agent> <goal> 创建。');
           return { handled: true, config };
         }
-        let msg = '🧩 Team Tasks (最近10条)\n';
+        let msg = '🧩 TeamTask (最近10条)\n';
         for (const t of recent) {
           msg += `\n- ${t.task_id} [${t.status}] scope=${t.scope_id || t.task_id}\n  ${t.from_agent}→${t.to_agent} · ${t.goal.slice(0, 80)}`;
         }
-        msg += '\n\n查看详情: /task <task_id>\n续跑: /task resume <task_id>';
+        msg += '\n\n查看详情: /TeamTask <task_id>\n续跑: /TeamTask resume <task_id>';
         await bot.sendMessage(chatId, msg);
         return { handled: true, config };
       }
@@ -255,7 +327,7 @@ function createAdminCommandHandler(deps) {
         const taskId = resumeMatch[1];
         const task = taskBoard.getTask(taskId);
         if (!task || task.task_kind !== 'team') {
-          await bot.sendMessage(chatId, `❌ 未找到 team task: ${taskId}`);
+          await bot.sendMessage(chatId, `❌ 未找到 TeamTask: ${taskId}`);
           return { handled: true, config };
         }
         const targetKey = task.to_agent;
@@ -308,16 +380,21 @@ function createAdminCommandHandler(deps) {
 
         if (result.success) {
           taskBoard.appendTaskEvent(task.task_id, 'task_resume_requested', String(chatId), { by: String(chatId) });
-          await bot.sendMessage(chatId, `✅ 已续跑 team task: ${task.task_id}`);
+          await bot.sendMessage(chatId, `✅ 已续跑 TeamTask: ${task.task_id}`);
         } else {
           await bot.sendMessage(chatId, `❌ 续跑失败: ${result.error}`);
         }
         return { handled: true, config };
       }
 
+      if (/^resume$/i.test(args)) {
+        await bot.sendMessage(chatId, '❌ 用法: /TeamTask resume <task_id>');
+        return { handled: true, config };
+      }
+
       const task = taskBoard.getTask(args);
       if (!task || task.task_kind !== 'team') {
-        await bot.sendMessage(chatId, `❌ 未找到 team task: ${args}`);
+        await bot.sendMessage(chatId, `❌ 未找到 TeamTask: ${args}`);
         return { handled: true, config };
       }
       const events = taskBoard.listTaskEvents(task.task_id, 8);
@@ -325,7 +402,7 @@ function createAdminCommandHandler(deps) {
       const scopeTasks = taskBoard.listScopeTasks(scopeId, 12);
       const scopeParticipants = taskBoard.listScopeParticipants(scopeId);
       let detail = [
-        `🧩 Team Task: ${task.task_id}`,
+        `🧩 TeamTask: ${task.task_id}`,
         `Scope: ${scopeId}`,
         `状态: ${task.status}`,
         `优先级: ${task.priority}`,
@@ -404,76 +481,6 @@ function createAdminCommandHandler(deps) {
         return { handled: true, config };
       }
 
-      // /dispatch task <agent> <goal>  (team task protocol)
-      const teamTaskMatch = args.match(/^task\s+(.+)$/s);
-      if (teamTaskMatch) {
-        if (!taskEnvelope) {
-          await bot.sendMessage(chatId, '❌ task protocol 不可用');
-          return { handled: true, config };
-        }
-        const parsed = parseTeamTaskArgs(teamTaskMatch[1]);
-        if (!parsed || !parsed.targetName || !parsed.goal) {
-          await bot.sendMessage(chatId, '❌ 用法: /dispatch task <agent> <目标> [--scope <scopeId>] [--parent <taskId>]');
-          return { handled: true, config };
-        }
-        const { targetName, goal, scopeId, parentTaskId } = parsed;
-        const targetKey = resolveProjectKey(targetName, config.projects || {});
-        if (!targetKey) {
-          await bot.sendMessage(chatId, `未找到 agent: ${targetName}\n可用: ${Object.keys(config.projects || {}).join(', ')}`);
-          return { handled: true, config };
-        }
-        const senderKey = resolveSenderKey(chatId, config);
-        const participants = (scopeId && taskBoard && taskBoard.listScopeParticipants)
-          ? taskBoard.listScopeParticipants(scopeId)
-          : [];
-        participants.push(senderKey, targetKey);
-        const envelope = taskEnvelope.normalizeTaskEnvelope({
-          from_agent: senderKey,
-          to_agent: targetKey,
-          scope_id: scopeId || '',
-          parent_task_id: parentTaskId || null,
-          participants,
-          goal,
-          task_kind: 'team',
-          definition_of_done: [
-            '输出可执行结果和关键结论',
-            '必要时给出产物路径与下一步建议',
-          ],
-          inputs: {
-            source_chat_id: String(chatId),
-            source: 'mobile_dispatch',
-          },
-          priority: 'normal',
-          status: 'queued',
-        });
-        const checked = taskEnvelope.validateTaskEnvelope(envelope);
-        if (!checked.ok) {
-          await bot.sendMessage(chatId, `❌ team task 无效: ${checked.error}`);
-          return { handled: true, config };
-        }
-        const result = dispatchTask(targetKey, {
-          from: senderKey,
-          type: 'task',
-          priority: envelope.priority,
-          payload: {
-            title: goal.slice(0, 60),
-            prompt: goal,
-            task_envelope: envelope,
-          },
-          callback: false,
-        }, config);
-        if (result.success) {
-          await bot.sendMessage(chatId, [
-            `✅ 已创建 team task 并派发: ${envelope.task_id}`,
-            `Scope: ${envelope.scope_id || envelope.task_id}`,
-            `查看: /task ${envelope.task_id}`,
-          ].join('\n'));
-        } else {
-          await bot.sendMessage(chatId, `❌ 创建 team task 失败: ${result.error}`);
-        }
-        return { handled: true, config };
-      }
-
       // /dispatch to <agent> <prompt>
       const toMatch = args.match(/^to\s+(\S+)\s+(.+)$/s);
       if (toMatch) {
@@ -525,9 +532,9 @@ function createAdminCommandHandler(deps) {
         '用法:',
         '/dispatch status — 查看状态',
         '/dispatch log — 查看记录',
-        '/dispatch task <agent> <目标> [--scope <id>] [--parent <id>] — 创建/续接 team task',
-        '/dispatch to <agent> <任务内容> — 兼容旧模式',
-        '/task — 查看 team task 列表',
+        '/dispatch to <agent> <任务内容> — 直接跨 agent 派发',
+        '/TeamTask create <agent> <目标> [--scope <id>] [--parent <id>] — 创建/续接 TeamTask',
+        '/TeamTask — 查看 TeamTask 列表',
       ].join('\n'));
       return { handled: true, config };
     }
