@@ -188,7 +188,7 @@ function createExecCommandHandler(deps) {
         await bot.sendMessage(chatId, `❌ ${taskName}: ${error}`);
       } else {
         const est = Math.ceil((fullPrompt.length + (output || '').length) / 4);
-        recordTokens(loadState(), est, { category: classifyTaskUsage({ name: taskName }) });
+        recordTokens(loadState(), est, { category: classifyTaskUsage({ name: taskName, type: 'manual_task' }) });
         const st = loadState();
         st.tasks[taskName] = { last_run: new Date().toISOString(), status: 'success', output_preview: (output || '').slice(0, 200) };
         saveState(st);

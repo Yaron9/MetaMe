@@ -598,7 +598,6 @@ function createAdminCommandHandler(deps) {
       let lines = [`📊 Token 用量 — ${label}`, `合计: ${grandTotal.toLocaleString()} / ${limit.toLocaleString()} tokens (${budgetPct}%)`];
 
       // Render by canonical order, then extras
-      const rendered = new Set();
       const orderedKeys = [...USAGE_CATEGORY_ORDER, ...Object.keys(totals).filter(k => !USAGE_CATEGORY_ORDER.includes(k))];
       for (const key of orderedKeys) {
         const n = totals[key] || 0;
@@ -607,7 +606,6 @@ function createAdminCommandHandler(deps) {
         const lbl = USAGE_CATEGORY_LABEL[key] || key;
         const bar = '█'.repeat(Math.round(Number(pct) / 10)).padEnd(10, '░');
         lines.push(`${lbl}: ${n.toLocaleString()} tokens (${pct}%) ${bar}`);
-        rendered.add(key);
       }
 
       await bot.sendMessage(chatId, lines.join('\n'));
