@@ -49,8 +49,27 @@ try { skillEvolution = require('./skill-evolution'); } catch { /* graceful fallb
 // ---------------------------------------------------------
 // SKILL ROUTING (keyword → /skillname prefix, like metame-desktop)
 // ---------------------------------------------------------
+function isMacLocalOrchestratorIntent(prompt) {
+  const text = String(prompt || '').trim();
+  if (!text) return false;
+
+  // Explicit macOS automation keywords.
+  if (/\b(?:mac|macos|applescript|osascript|jxa|hammerspoon|aerospace|yabai|skhd|raycast|launchctl|keyboard maestro)\b/i.test(text)) {
+    return true;
+  }
+  if (/(自动化|辅助功能|系统设置|隐私|权限|锁屏|锁定屏幕|睡眠|休眠|静音|取消静音|音量)/.test(text)) {
+    return true;
+  }
+
+  // General verbs must be paired with explicit macOS targets to avoid over-routing.
+  const hasAction = /(?:打开|关闭|启动|退出|切到|唤起|锁屏|锁定屏幕|睡眠|休眠|静音|取消静音|调(?:高|低|整)?音量|open|launch|quit|activate|lock\s*screen|sleep|mute|unmute)/i.test(text);
+  const hasTarget = /(?:微信|WeChat|飞书|Feishu|Finder|Safari|Terminal|iTerm|系统设置|System Settings|电脑|System Events|mac)/i.test(text);
+  return hasAction && hasTarget;
+}
+
 const SKILL_ROUTES = [
   { name: 'macos-mail-calendar', pattern: /邮件|邮箱|收件箱|日历|日程|会议|schedule|email|mail|calendar|unread|inbox/i },
+  { name: 'macos-local-orchestrator', match: isMacLocalOrchestratorIntent },
   { name: 'heartbeat-task-manager', pattern: /提醒|remind|闹钟|定时|每[天周月]/i },
   { name: 'skill-manager', pattern: /找技能|管理技能|更新技能|安装技能|skill manager|skill scout|(?:find|look for)\s+skills?/i },
   { name: 'skill-evolution-manager', pattern: /\/evolve\b|复盘一下|记录一下(这个)?经验|保存到\s*skill|skill evolution/i },
@@ -58,7 +77,10 @@ const SKILL_ROUTES = [
 
 function routeSkill(prompt) {
   for (const r of SKILL_ROUTES) {
-    if (r.pattern.test(prompt)) return r.name;
+    const matched = typeof r.match === 'function'
+      ? r.match(prompt)
+      : (r.pattern ? r.pattern.test(prompt) : false);
+    if (matched) return r.name;
   }
   return null;
 }
@@ -1289,7 +1311,19 @@ async function main() {
 
   // Config validation: warn on unknown/suspect fields
   const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'heartbeat', 'budget', 'projects'];
-  const KNOWN_DAEMON = ['model', 'log_max_size', 'heartbeat_check_interval', 'session_allowed_tools', 'dangerously_skip_permissions', 'cooldown_seconds', 'agent_flow_ttl_ms', 'agent_bind_ttl_ms'];
+  const KNOWN_DAEMON = [
+    'model',
+    'log_max_size',
+    'heartbeat_check_interval',
+    'session_allowed_tools',
+    'dangerously_skip_permissions',
+    'cooldown_seconds',
+    'agent_flow_ttl_ms',
+    'agent_bind_ttl_ms',
+    'mac_control_mode',
+    'enable_nl_mac_control',
+    'enable_nl_mac_fallback',
+  ];
   const VALID_MODELS = ['sonnet', 'opus', 'haiku'];
   for (const key of Object.keys(config)) {
     if (!KNOWN_SECTIONS.includes(key)) log('WARN', `Config: unknown section "${key}" (typo?)`);
