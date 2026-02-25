@@ -64,7 +64,7 @@ Claude:       ✏️ Edit: api/login.ts
               ✅ Fixed. 3 tests passing.
 ```
 
-Start on your laptop, continue on the train. `/stop` to interrupt, `/undo` to rollback, `/sh ls` for raw shell access when everything else breaks.
+Start on your laptop, continue on the train. `/stop` to interrupt, `/undo` to rollback, `/mac check` for macOS automation diagnostics, and `/sh ls` for raw shell access when everything else breaks.
 
 ### 3. Layered Memory That Works While You Sleep
 
@@ -208,7 +208,7 @@ npm install -g metame-cli && metame
 | **Browser Automation** | Built-in Playwright MCP. Browser control out of the box for every user. |
 | **Provider Relay** | Route through any Anthropic-compatible API. Use GPT-4, DeepSeek, Gemini — zero config file mutation. |
 | **Metacognition** | Detects behavioral patterns (decision style, comfort zones, goal drift) and injects mirror observations. Zero extra API cost. |
-| **Emergency Tools** | `/doctor` diagnostics, `/sh` raw shell, `/fix` config restore, `/undo` git-based rollback. |
+| **Emergency Tools** | `/doctor` diagnostics, `/mac` macOS control helpers, `/sh` raw shell, `/fix` config restore, `/undo` git-based rollback. |
 
 ## Defining Your Agents
 
@@ -294,6 +294,7 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 | `/list` | Browse & download project files |
 | `/model` | Switch model (sonnet/opus/haiku) |
 | `/agent bind <name> [dir]` | Register group as dedicated agent |
+| `/mac` | macOS control helper: permissions check/open + AppleScript/JXA execution |
 | `/sh <cmd>` | Raw shell — bypasses Claude |
 | `/memory` | Memory stats: fact count, session tags, DB size |
 | `/memory <keyword>` | Search long-term facts by keyword |

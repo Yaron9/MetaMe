@@ -129,6 +129,115 @@ function createCommandRouter(deps) {
     return { key: key || null, project: proj || null };
   }
 
+  function escapeAppleScriptString(input) {
+    return String(input || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  }
+
+  function resolveAppNameFromNaturalLanguage(rawName) {
+    if (!rawName) return null;
+    const aliasMap = {
+      '微信': 'WeChat',
+      'wechat': 'WeChat',
+      '飞书': 'Feishu',
+      'feishu': 'Feishu',
+      'finder': 'Finder',
+      '访达': 'Finder',
+      'safari': 'Safari',
+      'chrome': 'Google Chrome',
+      '谷歌浏览器': 'Google Chrome',
+      'calendar': 'Calendar',
+      '日历': 'Calendar',
+      'mail': 'Mail',
+      '邮件': 'Mail',
+      'notes': 'Notes',
+      '备忘录': 'Notes',
+      'terminal': 'Terminal',
+      'iterm': 'iTerm',
+      'iterm2': 'iTerm',
+      'system settings': 'System Settings',
+      '系统设置': 'System Settings',
+    };
+    let name = String(rawName).trim();
+    name = name.replace(/[。！？!?，,;；:：]+$/g, '').trim();
+    if (!name) return null;
+    const key = name.toLowerCase();
+    if (aliasMap[key]) return aliasMap[key];
+    if (aliasMap[name]) return aliasMap[name];
+    if (!/^[a-zA-Z0-9_\u4e00-\u9fa5 .()\-]{1,64}$/.test(name)) return null;
+    return name;
+  }
+
+  function deriveMacNaturalLanguageCommand(input) {
+    const text = String(input || '').trim();
+    if (!text) return null;
+
+    // Priority 1: explicit permission/setup intents
+    if (/(打开|进入).*(权限|隐私).*设置/.test(text) || /(权限|隐私).*(设置|页面).*(打开|进入)/.test(text)) {
+      return '/mac perms open';
+    }
+    if (/(检查|检测|体检).*(mac|权限|自动化|脚本)/i.test(text) || /(mac|权限|自动化).*(检查|检测|体检)/i.test(text)) {
+      return '/mac check';
+    }
+    if (/(权限|授权).*(怎么|如何|开启|打开|配置)/.test(text)) {
+      return '/mac perms';
+    }
+
+    // Priority 2: volume / mute
+    if (/(取消静音|解除静音|恢复声音|unmute)/i.test(text)) {
+      return '/mac osa set volume without output muted';
+    }
+    if (/(静音|mute)/i.test(text)) {
+      return '/mac osa set volume with output muted';
+    }
+    const volMatch = text.match(/(?:音量|volume)[^\d]{0,8}(\d{1,3})/i) || text.match(/调到\s*(\d{1,3})\s*(?:%|％)/);
+    if (volMatch) {
+      const v = Math.max(0, Math.min(100, Number(volMatch[1])));
+      if (Number.isFinite(v)) return `/mac osa set volume output volume ${v}`;
+    }
+
+    // Priority 3: common system actions
+    if (/(锁屏|锁定屏幕|lock\s*screen)/i.test(text)) {
+      return '/mac osa tell application "System Events" to keystroke "q" using {control down, command down}';
+    }
+    if (/(让|使|进入)?.*(电脑|系统|mac).*(睡眠|休眠)|(^睡眠$)|(^sleep$)/i.test(text)) {
+      return '/mac osa tell application "System Events" to sleep';
+    }
+
+    // Priority 4: app open/close
+    const openMatch = text.match(/(?:请|帮我|麻烦)?(?:把)?(?:打开|启动|唤起|切到)\s*([a-zA-Z0-9_\u4e00-\u9fa5 .()\-]{1,64})(?:\s*(?:应用|app))?$/i);
+    if (openMatch) {
+      const app = resolveAppNameFromNaturalLanguage(openMatch[1]);
+      if (app) return `/mac osa tell application "${escapeAppleScriptString(app)}" to activate`;
+    }
+    const closeMatch = text.match(/(?:请|帮我|麻烦)?(?:把)?(?:关闭|退出|停止)\s*([a-zA-Z0-9_\u4e00-\u9fa5 .()\-]{1,64})(?:\s*(?:应用|app))?$/i);
+    if (closeMatch) {
+      const app = resolveAppNameFromNaturalLanguage(closeMatch[1]);
+      if (app) return `/mac osa tell application "${escapeAppleScriptString(app)}" to quit`;
+    }
+
+    return null;
+  }
+
+  async function tryHandleMacNaturalLanguageIntent(bot, chatId, text, config) {
+    if (!text || text.startsWith('/')) return false;
+    if (process.platform !== 'darwin') return false;
+    const daemonCfg = (config && config.daemon) || {};
+    if (daemonCfg.enable_nl_mac_control === false) return false;
+
+    const syntheticCommand = deriveMacNaturalLanguageCommand(text);
+    if (!syntheticCommand) return false;
+
+    log('INFO', `NL mac intent [${String(chatId).slice(-8)}]: ${text.slice(0, 80)} -> ${syntheticCommand}`);
+    return handleExecCommand({
+      bot,
+      chatId,
+      text: syntheticCommand,
+      config,
+      executeTaskByName: () => ({ success: false, error: 'not available' }),
+      nlIntentText: text,
+    });
+  }
+
   async function tryHandleAgentIntent(bot, chatId, text, config) {
     if (!agentTools || !text || text.startsWith('/')) return false;
     const key = String(chatId);
@@ -340,7 +449,7 @@ function createCommandRouter(deps) {
         `⚙️ /model [${currentModel}] /provider [${currentProvider}] /status /tasks /run /budget /reload`,
         '🧠 /memory — 记忆统计 · /memory <关键词> — 搜索事实',
         '🧬 /skill-evo — 查看/处理技能演化队列',
-        `🔧 /doctor /fix /reset /sh <cmd> /nosleep [${getNoSleepProcess() ? 'ON' : 'OFF'}]`,
+        `🔧 /doctor /fix /reset /mac /sh <cmd> /nosleep [${getNoSleepProcess() ? 'ON' : 'OFF'}]`,
         '',
         '直接打字即可对话 💬',
       ].join('\n'));
@@ -399,6 +508,10 @@ function createCommandRouter(deps) {
     }
 
     if (await tryHandleAgentIntent(bot, chatId, text, config)) {
+      return;
+    }
+
+    if (await tryHandleMacNaturalLanguageIntent(bot, chatId, text, config)) {
       return;
     }
 

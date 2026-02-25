@@ -64,7 +64,7 @@ Claude：    ✏️ Edit: api/login.ts
             ✅ 修好了，3 个测试通过。
 ```
 
-笔记本上开始，地铁上继续。`/stop` 中断、`/undo` 回退、`/sh ls` 直接跑 shell——模型挂了也有后路。
+笔记本上开始，地铁上继续。`/stop` 中断、`/undo` 回退、`/mac check` 做 macOS 自动化体检、`/sh ls` 直接跑 shell——模型挂了也有后路。
 
 ### 3. 睡觉时也在工作的分层记忆
 
@@ -210,7 +210,7 @@ npm install -g metame-cli && metame
 | **浏览器自动化** | 内置 Playwright MCP，开箱即用。配合 Skill 实现发布、填表、抓取等自动化。 |
 | **模型中继** | 兼容任何 Anthropic API 中继。GPT-4、DeepSeek、Gemini 随意切换，零文件污染。 |
 | **元认知** | 检测行为模式（决策风格、舒适区、目标偏离），注入镜像观察。零额外 API 成本。 |
-| **应急工具** | `/doctor` 诊断、`/sh` 原始 shell、`/fix` 配置恢复、`/undo` 基于 git 的回退。 |
+| **应急工具** | `/doctor` 诊断、`/mac` macOS 控制工具、`/sh` 原始 shell、`/fix` 配置恢复、`/undo` 基于 git 的回退。 |
 
 ## 定义你的智能体
 
@@ -296,6 +296,7 @@ feishu:
 | `/list` | 浏览和下载项目文件 |
 | `/model` | 切换模型（sonnet/opus/haiku） |
 | `/agent bind <名称> [目录]` | 将群注册为专属 Agent |
+| `/mac` | macOS 控制助手：权限检查/跳转 + AppleScript/JXA 执行 |
 | `/sh <命令>` | 原始 shell——绕过 Claude |
 | `/memory` | 记忆统计：事实数量、已标签 session 数、DB 大小 |
 | `/memory <关键词>` | 按关键词搜索长期事实 |
