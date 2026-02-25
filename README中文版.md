@@ -124,7 +124,8 @@ projects:
     heartbeat_tasks:
       - name: "daily-draft"
         prompt: "调研 AI 热点，写一篇文章"
-        interval: "24h"
+        at: "09:30"
+        days: "weekdays"
         model: "sonnet"
         notify: true
 
@@ -132,7 +133,7 @@ heartbeat:
   tasks:
     - name: "morning-brief"
       prompt: "总结我昨天的 git 活动"
-      interval: "24h"
+      at: "09:00"
       notify: true
 ```
 
@@ -150,7 +151,7 @@ heartbeat:
           prompt: "发布文章"
 ```
 
-任务参数：`require_idle`（用户活跃时推迟，并在下一次心跳重试）、`precondition`（shell 守卫，条件不满足直接跳过）、`notify`（完成后推送手机）、`model`、`cwd`、`allowedTools`、`timeout`。
+任务参数：`interval`（按间隔执行）、`at`（本地固定时间 `HH:MM`）、`days`（可选星期过滤），以及 `require_idle`（用户活跃时推迟，并在下一次心跳重试）、`precondition`（shell 守卫，条件不满足直接跳过）、`notify`（完成后推送手机）、`model`、`cwd`、`allowedTools`、`timeout`。
 
 ### 5. 会自我进化的技能系统
 
@@ -265,7 +266,8 @@ projects:
     heartbeat_tasks:
       - name: "daily-review"
         prompt: "回顾昨天的提交记录，标记潜在问题"
-        interval: "24h"
+        at: "20:30"
+        days: [mon, tue, wed, thu, fri]
         notify: true
 
 feishu:

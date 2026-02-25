@@ -124,7 +124,8 @@ projects:
     heartbeat_tasks:
       - name: "daily-draft"
         prompt: "Research top AI news and write an article"
-        interval: "24h"
+        at: "09:30"
+        days: "weekdays"
         model: "sonnet"
         notify: true
 
@@ -132,7 +133,7 @@ heartbeat:
   tasks:
     - name: "morning-brief"
       prompt: "Summarize my git activity from yesterday"
-      interval: "24h"
+      at: "09:00"
       notify: true
 ```
 
@@ -150,7 +151,7 @@ Chain skills into multi-step workflows — research → write → publish — fu
           prompt: "Publish it"
 ```
 
-Task options: `require_idle` (defer when you're active, retry on next heartbeat tick), `precondition` (shell guard — skip if false, zero tokens), `notify` (push result to phone), `model`, `cwd`, `allowedTools`, `timeout`.
+Task options: `interval` (every N seconds/minutes/hours/days), `at` (fixed local `HH:MM`), `days` (optional day filter), `require_idle` (defer when you're active, retry on next heartbeat tick), `precondition` (shell guard — skip if false, zero tokens), `notify` (push result to phone), `model`, `cwd`, `allowedTools`, `timeout`.
 
 ### 5. Skills That Evolve Themselves
 
@@ -263,7 +264,8 @@ projects:
     heartbeat_tasks:
       - name: "daily-review"
         prompt: "Review yesterday's commits and flag any issues"
-        interval: "24h"
+        at: "20:30"
+        days: [mon, tue, wed, thu, fri]
         notify: true
 
 feishu:

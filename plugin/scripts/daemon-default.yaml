@@ -24,7 +24,8 @@ projects:
   #     - name: "daily-task"
   #       cwd: "~/AGI/MyProject"
   #       model: "sonnet"
-  #       interval: "24h"
+  #       at: "09:30"         # fixed local time (HH:MM)
+  #       days: "weekdays"    # optional: weekdays | weekends | [mon, tue, ...]
   #       notify: true
   #       enabled: true
   #       prompt: "..."
@@ -68,13 +69,15 @@ heartbeat:
     # Scheduled task (calls claude -p with your profile context):
     # - name: "morning-news"
     #   prompt: "抓取今天的AI领域重要新闻，整理成3条摘要，中英双语。"
-    #   interval: "24h"
+    #   at: "09:00"         # 每天本地时间 09:00
+    #   days: "weekdays"    # 可选，不填表示每天
     #   model: "haiku"
     #   notify: true
     #
     # - name: "weekly-review"
     #   prompt: "基于我的profile，生成本周个人成长回顾和下周建议。"
-    #   interval: "7d"
+    #   at: "20:30"
+    #   days: [sun]
     #   model: "haiku"
     #   notify: true
     #
@@ -93,6 +96,10 @@ heartbeat:
     #   interval: "6h"
     #   precondition: "test -s ~/.metame/skill_signals.jsonl"
     #   notify: false
+    #
+    # Scheduling:
+    # - interval: "6h"  -> run every 6 hours (legacy + fully supported)
+    # - at: "HH:MM"     -> run at fixed local time, optional days filter
     #
     # precondition: shell command, empty output → skip (zero tokens)
     # type: "script" → runs command directly instead of claude -p
