@@ -1,5 +1,157 @@
 'use strict';
 
+const WEEKDAY_INDEX = Object.freeze({
+  sun: 0,
+  sunday: 0,
+  mon: 1,
+  monday: 1,
+  tue: 2,
+  tues: 2,
+  tuesday: 2,
+  wed: 3,
+  wednesday: 3,
+  thu: 4,
+  thur: 4,
+  thurs: 4,
+  thursday: 4,
+  fri: 5,
+  friday: 5,
+  sat: 6,
+  saturday: 6,
+});
+
+function parseAtTime(raw) {
+  const text = String(raw || '').trim();
+  const m = text.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+  if (!m) return null;
+  return { hour: Number(m[1]), minute: Number(m[2]) };
+}
+
+function parseDays(raw) {
+  if (raw === undefined || raw === null || raw === '') return { ok: true, days: null };
+
+  let tokens = [];
+  if (Array.isArray(raw)) {
+    tokens = raw;
+  } else if (typeof raw === 'string') {
+    const lower = raw.trim().toLowerCase();
+    if (!lower || lower === 'daily' || lower === 'everyday' || lower === 'all') {
+      return { ok: true, days: null };
+    }
+    if (lower === 'weekdays' || lower === 'workdays') {
+      return { ok: true, days: new Set([1, 2, 3, 4, 5]) };
+    }
+    if (lower === 'weekends') {
+      return { ok: true, days: new Set([0, 6]) };
+    }
+    tokens = lower.split(/[\s,|/]+/).filter(Boolean);
+  } else {
+    return { ok: false, error: 'days must be string or array' };
+  }
+
+  const out = new Set();
+  for (const token of tokens) {
+    let day = null;
+    if (typeof token === 'number' && Number.isInteger(token)) {
+      day = token;
+    } else if (typeof token === 'string' && token.trim()) {
+      const t = token.trim().toLowerCase();
+      if (/^\d+$/.test(t)) day = Number(t);
+      else if (Object.prototype.hasOwnProperty.call(WEEKDAY_INDEX, t)) day = WEEKDAY_INDEX[t];
+    }
+    if (!Number.isInteger(day) || day < 0 || day > 6) {
+      return { ok: false, error: `invalid day token: ${String(token)}` };
+    }
+    out.add(day);
+  }
+
+  return { ok: true, days: out.size > 0 ? out : null };
+}
+
+function dayAllowed(days, day) {
+  if (!days || days.size === 0) return true;
+  return days.has(day);
+}
+
+function nextClockRunAfter(schedule, fromMs) {
+  const baseMs = Number.isFinite(fromMs) ? fromMs : Date.now();
+  const start = new Date(baseMs + 1000);
+  start.setSeconds(0, 0);
+
+  for (let offset = 0; offset <= 8; offset++) {
+    const candidate = new Date(start);
+    candidate.setDate(start.getDate() + offset);
+    candidate.setHours(schedule.hour, schedule.minute, 0, 0);
+    const ts = candidate.getTime();
+    if (ts <= baseMs) continue;
+    if (!dayAllowed(schedule.days, candidate.getDay())) continue;
+    return ts;
+  }
+
+  return baseMs + 24 * 60 * 60 * 1000;
+}
+
+function buildTaskSchedule(task, parseInterval) {
+  const atRaw = typeof task.at === 'string' ? task.at.trim() : '';
+  if (atRaw) {
+    const at = parseAtTime(atRaw);
+    if (!at) return { ok: false, error: `invalid at time "${task.at}"` };
+    const parsedDays = parseDays(task.days !== undefined ? task.days : task.weekdays);
+    if (!parsedDays.ok) return { ok: false, error: parsedDays.error };
+    return {
+      ok: true,
+      schedule: {
+        mode: 'clock',
+        hour: at.hour,
+        minute: at.minute,
+        days: parsedDays.days,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    schedule: {
+      mode: 'interval',
+      intervalSec: parseInterval(task.interval),
+    },
+  };
+}
+
+function nextRunAfter(schedule, fromMs) {
+  if (!schedule || schedule.mode !== 'clock') {
+    const intervalSec = schedule && Number.isFinite(schedule.intervalSec)
+      ? schedule.intervalSec
+      : 3600;
+    return fromMs + intervalSec * 1000;
+  }
+  return nextClockRunAfter(schedule, fromMs);
+}
+
+function computeInitialNextRun(task, schedule, state, nowMs, checkIntervalSec, newTaskIndex) {
+  if (!schedule || schedule.mode !== 'clock') {
+    const intervalSec = schedule && Number.isFinite(schedule.intervalSec)
+      ? schedule.intervalSec
+      : 3600;
+    const lastRun = state.tasks[task.name] && state.tasks[task.name].last_run;
+    if (lastRun) {
+      const elapsed = (nowMs - new Date(lastRun).getTime()) / 1000;
+      return nowMs + Math.max(0, (intervalSec - elapsed)) * 1000;
+    }
+    return nowMs + checkIntervalSec * 1000 * newTaskIndex;
+  }
+
+  const lastRun = state.tasks[task.name] && state.tasks[task.name].last_run;
+  if (lastRun) {
+    const lastMs = new Date(lastRun).getTime();
+    if (Number.isFinite(lastMs) && lastMs > 0) {
+      const dueAfterLast = nextClockRunAfter(schedule, lastMs);
+      if (dueAfterLast <= nowMs) return nowMs;
+    }
+  }
+  return nextClockRunAfter(schedule, nowMs);
+}
+
 function createTaskScheduler(deps) {
   const {
     fs,
@@ -418,7 +570,19 @@ function createTaskScheduler(deps) {
 
     const enabledTasks = tasks.filter(t => t.enabled !== false);
     const checkIntervalSec = (config.daemon && config.daemon.heartbeat_check_interval) || 60;
-    log('INFO', `Heartbeat scheduler started (check every ${checkIntervalSec}s, ${enabledTasks.length}/${tasks.length} tasks enabled)`);
+    const taskSchedules = new Map();
+    const runnableTasks = [];
+    for (const task of enabledTasks) {
+      const parsed = buildTaskSchedule(task, parseInterval);
+      if (!parsed.ok) {
+        log('WARN', `Skipping task "${task.name}": ${parsed.error}`);
+        continue;
+      }
+      taskSchedules.set(task.name, parsed.schedule);
+      runnableTasks.push(task);
+    }
+
+    log('INFO', `Heartbeat scheduler started (check every ${checkIntervalSec}s, ${runnableTasks.length}/${tasks.length} tasks enabled)`);
 
     // Even with zero tasks, the physiological heartbeat still runs
 
@@ -428,18 +592,11 @@ function createTaskScheduler(deps) {
     const state = loadState();
 
     let newTaskIndex = 0;
-    for (const task of enabledTasks) {
-      const intervalSec = parseInterval(task.interval);
-      const lastRun = state.tasks[task.name] && state.tasks[task.name].last_run;
-      if (lastRun) {
-        const elapsed = (now - new Date(lastRun).getTime()) / 1000;
-        nextRun[task.name] = now + Math.max(0, (intervalSec - elapsed)) * 1000;
-      } else {
-        // First run: stagger new tasks to avoid thundering herd
-        // Each new task waits an additional check interval beyond the first
-        newTaskIndex++;
-        nextRun[task.name] = now + checkIntervalSec * 1000 * newTaskIndex;
-      }
+    for (const task of runnableTasks) {
+      const schedule = taskSchedules.get(task.name);
+      if (!schedule) continue;
+      if (schedule.mode !== 'clock') newTaskIndex++;
+      nextRun[task.name] = computeInitialNextRun(task, schedule, state, now, checkIntervalSec, newTaskIndex);
     }
 
     // Tracks tasks currently running (prevents concurrent runs of the same task)
@@ -463,9 +620,10 @@ function createTaskScheduler(deps) {
 
       // ② Task heartbeat (burns tokens on schedule)
       const currentTime = Date.now();
-      for (const task of enabledTasks) {
+      for (const task of runnableTasks) {
+        const schedule = taskSchedules.get(task.name);
+        if (!schedule) continue;
         if (currentTime >= (nextRun[task.name] || 0)) {
-          const intervalSec = parseInterval(task.interval);
           // Dream tasks: only run when user is idle
           if (task.require_idle && !isUserIdle()) {
             // Retry on next scheduler tick instead of waiting full interval.
@@ -476,12 +634,12 @@ function createTaskScheduler(deps) {
 
           if (runningTasks.has(task.name)) {
             // Task is still running; skip this cycle and keep full interval cadence.
-            nextRun[task.name] = currentTime + intervalSec * 1000;
+            nextRun[task.name] = nextRunAfter(schedule, currentTime);
             log('WARN', `Task ${task.name} still running — skipping this interval`);
             continue;
           }
 
-          nextRun[task.name] = currentTime + intervalSec * 1000;
+          nextRun[task.name] = nextRunAfter(schedule, currentTime);
           runningTasks.add(task.name);
           // executeTask now returns a Promise (async, non-blocking, process-group kill)
           Promise.resolve(executeTask(task, config))
@@ -539,4 +697,14 @@ function createTaskScheduler(deps) {
   };
 }
 
-module.exports = { createTaskScheduler };
+module.exports = {
+  createTaskScheduler,
+  _private: {
+    parseAtTime,
+    parseDays,
+    nextClockRunAfter,
+    buildTaskSchedule,
+    computeInitialNextRun,
+    nextRunAfter,
+  },
+};
