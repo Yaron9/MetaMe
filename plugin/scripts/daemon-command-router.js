@@ -53,6 +53,82 @@ function createCommandRouter(deps) {
     return true;
   }
 
+  const pendingMacConfirmations = new Map();
+  const MAC_CONFIRM_TTL_MS = 2 * 60 * 1000;
+
+  function setPendingMacConfirmation(chatId, payload) {
+    pendingMacConfirmations.set(String(chatId), { ...payload, createdAt: Date.now() });
+  }
+
+  function getPendingMacConfirmation(chatId) {
+    const key = String(chatId);
+    const pending = pendingMacConfirmations.get(key);
+    if (!pending) return null;
+    if ((Date.now() - Number(pending.createdAt || 0)) > MAC_CONFIRM_TTL_MS) {
+      pendingMacConfirmations.delete(key);
+      return null;
+    }
+    return pending;
+  }
+
+  function clearPendingMacConfirmation(chatId) {
+    pendingMacConfirmations.delete(String(chatId));
+  }
+
+  function isAffirmativeConfirmation(input) {
+    return /^(确认|确认执行|执行|继续|好|好的|可以|同意|yes|y|ok|okay)$/i.test(String(input || '').trim());
+  }
+
+  function isNegativeConfirmation(input) {
+    return /^(取消|不执行|不用了|算了|停止|否|no|n)$/i.test(String(input || '').trim());
+  }
+
+  function isReadOnlyMacNaturalLanguageCommand(command) {
+    const normalized = String(command || '').trim().toLowerCase();
+    return normalized === '/mac check' || normalized === '/mac perms';
+  }
+
+  async function requestMacSideEffectConfirmation(bot, chatId, originalText, syntheticCommand, sourceTag) {
+    const label = String(originalText || '').trim().slice(0, 160);
+    setPendingMacConfirmation(chatId, { originalText: label, syntheticCommand, sourceTag });
+    await bot.sendMessage(chatId, [
+      '⚠️ 检测到可能有副作用的 macOS 操作，已暂停自动执行。',
+      `来源: ${sourceTag}`,
+      `原始请求: ${label || '(empty)'}`,
+      `拟执行命令: ${syntheticCommand}`,
+      '回复“确认”执行，回复“取消”放弃（120 秒内有效）。',
+    ].join('\n'));
+  }
+
+  async function tryResolvePendingMacConfirmation(bot, chatId, text, config, executeTaskByName) {
+    const pending = getPendingMacConfirmation(chatId);
+    if (!pending) return false;
+
+    const trimmed = String(text || '').trim();
+    if (isNegativeConfirmation(trimmed)) {
+      clearPendingMacConfirmation(chatId);
+      await bot.sendMessage(chatId, '✅ 已取消该 macOS 操作。');
+      return true;
+    }
+
+    if (isAffirmativeConfirmation(trimmed)) {
+      clearPendingMacConfirmation(chatId);
+      log('WARN', `Mac side-effect confirmed [${String(chatId).slice(-8)}] (${pending.sourceTag})`);
+      return handleExecCommand({
+        bot,
+        chatId,
+        text: pending.syntheticCommand,
+        config,
+        executeTaskByName,
+        nlIntentText: pending.originalText,
+      });
+    }
+
+    // Any unrelated message cancels stale pending intent to avoid context stickiness.
+    clearPendingMacConfirmation(chatId);
+    return false;
+  }
+
   function extractQuotedContent(input) {
     const m = String(input || '').match(/[“"'「](.+?)[”"'」]/);
     return m ? m[1].trim() : '';
@@ -218,16 +294,33 @@ function createCommandRouter(deps) {
     return null;
   }
 
-  async function tryHandleMacNaturalLanguageIntent(bot, chatId, text, config) {
+  async function tryHandleMacNaturalLanguageIntent(bot, chatId, text, config, options = {}) {
     if (!text || text.startsWith('/')) return false;
     if (process.platform !== 'darwin') return false;
     const daemonCfg = (config && config.daemon) || {};
     if (daemonCfg.enable_nl_mac_control === false) return false;
+    const sourceTag = String(options.source || 'direct');
+    const safeOnly = !!options.safeOnly;
+    const confirmSideEffects = !!options.confirmSideEffects;
 
     const syntheticCommand = deriveMacNaturalLanguageCommand(text);
     if (!syntheticCommand) return false;
+    const isReadOnly = isReadOnlyMacNaturalLanguageCommand(syntheticCommand);
 
-    log('INFO', `NL mac intent [${String(chatId).slice(-8)}]: ${text.slice(0, 80)} -> ${syntheticCommand}`);
+    if (safeOnly && !isReadOnly) {
+      if (confirmSideEffects) {
+        await requestMacSideEffectConfirmation(bot, chatId, text, syntheticCommand, sourceTag);
+        return true;
+      }
+      return false;
+    }
+
+    if (confirmSideEffects && !isReadOnly) {
+      await requestMacSideEffectConfirmation(bot, chatId, text, syntheticCommand, sourceTag);
+      return true;
+    }
+
+    log('INFO', `NL mac intent [${String(chatId).slice(-8)}] (${sourceTag}): ${text.slice(0, 80)} -> ${syntheticCommand}`);
     return handleExecCommand({
       bot,
       chatId,
@@ -376,6 +469,10 @@ function createCommandRouter(deps) {
       return;
     }
 
+    if (await tryResolvePendingMacConfirmation(bot, chatId, text, config, executeTaskByName)) {
+      return;
+    }
+
     // --- chat_agent_map: auto-switch agent based on dedicated chatId ---
     // Configure in daemon.yaml: feishu.chat_agent_map or telegram.chat_agent_map
     //   e.g.  chat_agent_map: { "oc_xxx": "personal", "oc_yyy": "metame" }
@@ -511,7 +608,12 @@ function createCommandRouter(deps) {
       return;
     }
 
-    if (await tryHandleMacNaturalLanguageIntent(bot, chatId, text, config)) {
+    const daemonCfg = (config && config.daemon) || {};
+    const macControlMode = String(daemonCfg.mac_control_mode || 'claude-first').trim().toLowerCase();
+    const macLocalFirst = (macControlMode === 'local-first');
+    const macFallbackEnabled = (daemonCfg.enable_nl_mac_fallback !== false);
+    const allowLocalMacControl = !readOnly && (daemonCfg.enable_nl_mac_control !== false);
+    if (macLocalFirst && allowLocalMacControl && await tryHandleMacNaturalLanguageIntent(bot, chatId, text, config, { source: 'local-first' })) {
       return;
     }
 
@@ -521,7 +623,19 @@ function createCommandRouter(deps) {
       await bot.sendMessage(chatId, 'Daily token budget exceeded.');
       return;
     }
-    await askClaude(bot, chatId, text, config, readOnly);
+    const claudeResult = await askClaude(bot, chatId, text, config, readOnly);
+    const claudeFailed = !!(claudeResult && claudeResult.ok === false);
+    const claudeInterrupted = !!(claudeResult && claudeResult.interrupted);
+    if (claudeFailed && !claudeInterrupted && !macLocalFirst && macFallbackEnabled && allowLocalMacControl) {
+      const fallbackHandled = await tryHandleMacNaturalLanguageIntent(bot, chatId, text, config, {
+        source: 'claude-fallback',
+        safeOnly: true,
+        confirmSideEffects: true,
+      });
+      if (fallbackHandled) {
+        log('WARN', `Claude-first mac fallback handled for ${String(chatId).slice(-8)} (mode=${macControlMode})`);
+      }
+    }
   }
 
   return { handleCommand };
