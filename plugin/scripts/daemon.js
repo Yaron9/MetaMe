@@ -103,6 +103,8 @@ function routeAgent(prompt, config) {
 
 const yaml = require('./resolve-yaml');
 const { parseInterval, formatRelativeTime, createPathMap } = require('./utils');
+const { createTaskBoard } = require('./task-board');
+const taskEnvelope = require('./daemon-task-envelope');
 const { createAdminCommandHandler } = require('./daemon-admin-commands');
 const { createExecCommandHandler } = require('./daemon-exec-commands');
 const { createOpsCommandHandler } = require('./daemon-ops-commands');
@@ -341,6 +343,10 @@ function getBudgetWarning(config, state) {
   return 'ok';
 }
 
+const taskBoard = createTaskBoard({
+  logger: (msg) => log('WARN', msg),
+});
+
 // ---------------------------------------------------------
 // AGENT DISPATCH — virtual chatId inter-agent communication
 // ---------------------------------------------------------
@@ -373,25 +379,29 @@ function createNullBot(onOutput) {
  * Forward bot: routes all calls to a real bot with a fixed chatId.
  * Used for dispatch tasks so Claude's streaming output appears in the target's Feishu channel.
  */
-function createStreamForwardBot(realBot, chatId) {
+function createStreamForwardBot(realBot, chatId, onOutput = null) {
   // Track edit-broken state independently so dispatch failures don't poison realBot's flag
   let _editBroken = false;
   return {
     sendMessage: async (_, text) => {
       log('INFO', `[StreamBot→${chatId.slice(-8)}] msg: ${String(text).slice(0, 80)}`);
+      if (onOutput) onOutput(text);
       return realBot.sendMessage(chatId, text);
     },
     sendMarkdown: async (_, text) => {
       log('INFO', `[StreamBot→${chatId.slice(-8)}] md: ${String(text).slice(0, 80)}`);
+      if (onOutput) onOutput(text);
       return realBot.sendMarkdown(chatId, text);
     },
     sendCard: async (_, card) => {
       const title = typeof card === 'object' ? (card.title || card.body || '').slice(0, 60) : String(card).slice(0, 60);
       log('INFO', `[StreamBot→${chatId.slice(-8)}] card: ${title}`);
+      if (onOutput) onOutput(typeof card === 'object' ? (card.body || card.title || JSON.stringify(card)) : card);
       return realBot.sendCard(chatId, card);
     },
     sendRawCard: async (_, header, elements) => {
       log('INFO', `[StreamBot→${chatId.slice(-8)}] rawcard: ${String(header).slice(0, 60)}`);
+      if (onOutput) onOutput(header);
       return realBot.sendRawCard(chatId, header, elements);
     },
     sendButtons: async (_, text, buttons) => realBot.sendButtons(chatId, text, buttons),
@@ -415,6 +425,60 @@ function createStreamForwardBot(realBot, chatId) {
   };
 }
 
+function extractArtifactPaths(text) {
+  const out = new Set();
+  const src = String(text || '');
+  const re = /\[\[FILE:([^\]]+)\]\]/g;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    const v = String(m[1] || '').trim();
+    if (v) out.add(v.slice(0, 500));
+  }
+  return [...out];
+}
+
+function inferTaskStatusFromOutput(text) {
+  const s = String(text || '');
+  if (/(^|\b)(blocked|卡住|阻塞|waiting for|等待)(\b|$)/i.test(s)) return 'blocked';
+  if (/(^|\b)(failed|失败|error|异常|报错)(\b|$)/i.test(s)) return 'failed';
+  return 'done';
+}
+
+function summarizeTaskInputs(inputs) {
+  if (!inputs || typeof inputs !== 'object') return '(none)';
+  const lines = [];
+  for (const [k, v] of Object.entries(inputs)) {
+    if (typeof v === 'string') lines.push(`- ${k}: ${v}`);
+    else lines.push(`- ${k}: ${JSON.stringify(v)}`);
+    if (lines.length >= 8) break;
+  }
+  return lines.length > 0 ? lines.join('\n') : '(none)';
+}
+
+function buildPromptFromTaskEnvelope(envelope, fallbackPrompt) {
+  const goal = envelope.goal || fallbackPrompt || 'No goal provided';
+  const dod = Array.isArray(envelope.definition_of_done) && envelope.definition_of_done.length > 0
+    ? envelope.definition_of_done.map((x, i) => `${i + 1}. ${x}`).join('\n')
+    : '1. 给出可执行的结果与关键结论\n2. 给出相关产物路径（如有）';
+  const inputs = summarizeTaskInputs(envelope.inputs || {});
+  const taskId = envelope.task_id || 'unknown';
+  return [
+    `任务ID: ${taskId}`,
+    `任务目标: ${goal}`,
+    '',
+    '完成标准 (DoD):',
+    dod,
+    '',
+    '输入上下文:',
+    inputs,
+    '',
+    '执行要求:',
+    '1. 先用1-2句“计划：...”说明方案',
+    '2. 再执行任务',
+    '3. 结尾给出“结果摘要：...”和“产物：...”',
+  ].join('\n');
+}
+
 /**
  * Dispatch a task/message to another agent via virtual chatId.
  * @param {string} targetProject - project key (e.g. 'digital_me', 'desktop')
@@ -424,17 +488,55 @@ function createStreamForwardBot(realBot, chatId) {
  */
 function dispatchTask(targetProject, message, config, replyFn, streamOptions = null) {
   const LIMITS = { max_per_hour_per_target: 20, max_total_per_hour: 60, max_depth: 2 };
+  const payload = (message && message.payload && typeof message.payload === 'object')
+    ? message.payload
+    : {};
+
+  let envelope = null;
+  if (payload.task_envelope) {
+    try {
+      envelope = taskEnvelope.normalizeTaskEnvelope(payload.task_envelope, {
+        from_agent: message.from || 'unknown',
+        to_agent: targetProject,
+      });
+      const checked = taskEnvelope.validateTaskEnvelope(envelope);
+      if (!checked.ok) {
+        log('WARN', `Dispatch blocked: invalid task_envelope (${checked.error})`);
+        return { success: false, error: `invalid_task_envelope:${checked.error}` };
+      }
+    } catch (e) {
+      log('WARN', `Dispatch blocked: task_envelope parse failed (${e.message})`);
+      return { success: false, error: 'invalid_task_envelope' };
+    }
+  }
+
+  const markTaskBlocked = (reason) => {
+    if (!envelope || !taskBoard) return;
+    const nowIso = new Date().toISOString();
+    taskBoard.upsertTask({
+      ...envelope,
+      status: 'blocked',
+      last_error: reason,
+      updated_at: nowIso,
+    });
+    taskBoard.appendTaskEvent(envelope.task_id, 'dispatch_blocked', message.from || 'system', {
+      reason,
+      target: targetProject,
+    });
+  };
 
   // Anti-storm: check chain depth
   const chain = message.chain || [];
   if (chain.length >= LIMITS.max_depth) {
     log('WARN', `Dispatch blocked: max depth ${LIMITS.max_depth} reached (chain: ${chain.join('→')})`);
+    markTaskBlocked('max_depth_exceeded');
     return { success: false, error: 'max_depth_exceeded' };
   }
 
   // Anti-storm: check for cycles
   if (chain.includes(targetProject)) {
     log('WARN', `Dispatch blocked: cycle detected (${chain.join('→')}→${targetProject})`);
+    markTaskBlocked('cycle_detected');
     return { success: false, error: 'cycle_detected' };
   }
 
@@ -449,10 +551,12 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
       const toTarget = recent.filter(e => e.to === targetProject).length;
       if (toTarget >= LIMITS.max_per_hour_per_target) {
         log('WARN', `Dispatch blocked: rate limit to ${targetProject} (${toTarget}/${LIMITS.max_per_hour_per_target} per hour)`);
+        markTaskBlocked('rate_limit_target');
         return { success: false, error: 'rate_limit_target' };
       }
       if (recent.length >= LIMITS.max_total_per_hour) {
         log('WARN', `Dispatch blocked: total rate limit (${recent.length}/${LIMITS.max_total_per_hour} per hour)`);
+        markTaskBlocked('rate_limit_total');
         return { success: false, error: 'rate_limit_total' };
       }
     }
@@ -462,6 +566,7 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
 
   if (!_handleCommand) {
     log('WARN', 'Dispatch: handleCommand not yet bound, dropping task');
+    markTaskBlocked('handler_not_ready');
     return { success: false, error: 'handler_not_ready' };
   }
 
@@ -471,18 +576,49 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
     to: targetProject,
     type: message.type || 'task',
     priority: message.priority || 'normal',
-    payload: message.payload || {},
+    payload,
     callback: message.callback || false,
     new_session: !!message.new_session,
     chain: [...chain, message.from || 'unknown'],
+    task_id: envelope ? envelope.task_id : null,
     created_at: new Date().toISOString(),
   };
+
+  if (envelope && taskBoard) {
+    const nowIso = new Date().toISOString();
+    taskBoard.upsertTask({
+      ...envelope,
+      status: 'queued',
+      updated_at: nowIso,
+    });
+    taskBoard.appendTaskEvent(envelope.task_id, 'dispatch_enqueued', fullMsg.from || 'system', {
+      dispatch_id: fullMsg.id,
+      target: targetProject,
+      priority: fullMsg.priority,
+    });
+    taskBoard.recordHandoff({
+      handoff_id: taskEnvelope.newHandoffId(),
+      task_id: envelope.task_id,
+      from_agent: envelope.from_agent || fullMsg.from || 'unknown',
+      to_agent: targetProject,
+      payload: {
+        dispatch_id: fullMsg.id,
+        title: payload.title || '',
+        prompt: payload.prompt || '',
+      },
+      status: 'sent',
+      created_at: nowIso,
+      updated_at: nowIso,
+    });
+  }
 
   // Write to dispatch log for audit / rate-limiting
   if (!fs.existsSync(DISPATCH_DIR)) fs.mkdirSync(DISPATCH_DIR, { recursive: true });
   fs.appendFileSync(DISPATCH_LOG, JSON.stringify({ ...fullMsg, dispatched_at: new Date().toISOString() }) + '\n', 'utf8');
 
-  const rawPrompt = fullMsg.payload.prompt || fullMsg.payload.title || 'No prompt provided';
+  const rawPrompt = envelope
+    ? buildPromptFromTaskEnvelope(envelope, fullMsg.payload.prompt || fullMsg.payload.title || '')
+    : (fullMsg.payload.prompt || fullMsg.payload.title || 'No prompt provided');
 
   // Inject sender identity when dispatched by another agent (not directly from user)
   const userSources = new Set(['unknown', 'claude_session', '_claude_session', 'user']);
@@ -509,9 +645,26 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
   const sessionMode = forceNew ? 'fresh session (forced)' : 'existing virtual session';
   log('INFO', `Dispatching ${fullMsg.type} to ${targetProject} via ${sessionMode}: ${rawPrompt.slice(0, 80)}`);
 
+  let _taskFinalized = false;
   const outputHandler = (output) => {
     const outStr = typeof output === 'object' ? (output.body || JSON.stringify(output)) : String(output);
     log('INFO', `Dispatch output from ${targetProject}: ${outStr.slice(0, 200)}`);
+    if (envelope && taskBoard && !_taskFinalized && outStr.trim().length > 2) {
+      const status = inferTaskStatusFromOutput(outStr);
+      const artifacts = extractArtifactPaths(outStr);
+      const update = {
+        summary: outStr.slice(0, 1200),
+        artifacts,
+      };
+      if (status === 'failed') update.last_error = outStr.slice(0, 400);
+      taskBoard.markTaskStatus(envelope.task_id, status, update);
+      taskBoard.appendTaskEvent(envelope.task_id, 'task_result', targetProject, {
+        status,
+        preview: outStr.slice(0, 240),
+        artifact_count: artifacts.length,
+      });
+      _taskFinalized = true;
+    }
     if (replyFn && outStr.trim().length > 2) {
       replyFn(outStr);
     } else if (!replyFn && fullMsg.callback && fullMsg.from && config) {
@@ -531,7 +684,7 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
   // If streamOptions provided, use real bot so output appears in target's Feishu channel.
   // Otherwise fall back to nullBot which captures output for replyFn.
   const nullBot = streamOptions?.bot && streamOptions?.chatId
-    ? createStreamForwardBot(streamOptions.bot, streamOptions.chatId)
+    ? createStreamForwardBot(streamOptions.bot, streamOptions.chatId, outputHandler)
     : createNullBot(outputHandler);
   // Permission inheritance: if daemon runs with dangerously_skip_permissions, dispatched agents
   // inherit the same level — they need Write access for implementation tasks.
@@ -546,11 +699,19 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
     }
   }
   const dispatchReadOnly = !(config.daemon && config.daemon.dangerously_skip_permissions);
+  if (envelope && taskBoard) {
+    taskBoard.markTaskStatus(envelope.task_id, 'running', { summary: `dispatched via ${sessionMode}` });
+    taskBoard.appendTaskEvent(envelope.task_id, 'task_started', targetProject, { session_mode: sessionMode });
+  }
   _handleCommand(nullBot, dispatchChatId, prompt, config, null, null, dispatchReadOnly).catch(e => {
     log('ERROR', `Dispatch handleCommand failed for ${targetProject}: ${e.message}`);
+    if (envelope && taskBoard) {
+      taskBoard.markTaskStatus(envelope.task_id, 'failed', { last_error: e.message, summary: 'dispatch execution failed' });
+      taskBoard.appendTaskEvent(envelope.task_id, 'task_failed', targetProject, { error: e.message.slice(0, 200) });
+    }
   });
 
-  return { success: true, id: fullMsg.id };
+  return { success: true, id: fullMsg.id, task_id: envelope ? envelope.task_id : null };
 }
 
 /**
@@ -1056,6 +1217,8 @@ const { handleAdminCommand } = createAdminCommandHandler({
   dispatchTask,
   log,
   skillEvolution,
+  taskBoard,
+  taskEnvelope,
 });
 
 const { handleSessionCommand } = createSessionCommandHandler({
