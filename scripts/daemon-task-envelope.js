@@ -8,6 +8,16 @@ function sanitizeText(input, maxLen = 800) {
   return String(input || '').replace(/[\x00-\x1F\x7F]/g, ' ').trim().slice(0, maxLen);
 }
 
+function normalizeScopeId(value, fallbackTaskId) {
+  const raw = sanitizeText(value, 120) || sanitizeText(fallbackTaskId, 120);
+  if (!raw) return '';
+  const cleaned = raw
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return cleaned.slice(0, 120);
+}
+
 function sanitizeStringArray(values, maxItems = 20, maxItemLen = 300) {
   if (!Array.isArray(values)) return [];
   const out = [];
@@ -69,10 +79,15 @@ function normalizeTaskEnvelope(raw, overrides = {}) {
   const parentTaskId = sanitizeText(merged.parent_task_id, 80) || null;
   const fromAgent = sanitizeText(merged.from_agent, 80) || 'unknown';
   const toAgent = sanitizeText(merged.to_agent, 80);
+  const scopeId = normalizeScopeId(merged.scope_id, taskId) || taskId;
   const goal = sanitizeText(merged.goal, 500);
   const definitionOfDone = normalizeDefinitionOfDone(merged.definition_of_done);
   const artifacts = sanitizeStringArray(merged.artifacts, 30, 500);
   const ownedPaths = sanitizeStringArray(merged.owned_paths, 30, 500);
+  const participantBase = sanitizeStringArray(merged.participants, 30, 80);
+  if (fromAgent) participantBase.push(fromAgent);
+  if (toAgent) participantBase.push(toAgent);
+  const participants = sanitizeStringArray(participantBase, 30, 80);
   const statusRaw = sanitizeText(merged.status, 20).toLowerCase();
   const priorityRaw = sanitizeText(merged.priority, 20).toLowerCase();
   const kindRaw = sanitizeText(merged.task_kind, 20).toLowerCase();
@@ -85,9 +100,11 @@ function normalizeTaskEnvelope(raw, overrides = {}) {
 
   return {
     task_id: taskId,
+    scope_id: scopeId,
     parent_task_id: parentTaskId,
     from_agent: fromAgent,
     to_agent: toAgent,
+    participants,
     goal,
     definition_of_done: definitionOfDone,
     inputs,
@@ -104,6 +121,7 @@ function normalizeTaskEnvelope(raw, overrides = {}) {
 function validateTaskEnvelope(env) {
   if (!env || typeof env !== 'object') return { ok: false, error: 'envelope_missing' };
   if (!sanitizeText(env.task_id, 80)) return { ok: false, error: 'task_id_required' };
+  if (!normalizeScopeId(env.scope_id, env.task_id)) return { ok: false, error: 'scope_id_required' };
   if (!sanitizeText(env.from_agent, 80)) return { ok: false, error: 'from_agent_required' };
   if (!sanitizeText(env.to_agent, 80)) return { ok: false, error: 'to_agent_required' };
   if (!sanitizeText(env.goal, 500)) return { ok: false, error: 'goal_required' };
@@ -119,6 +137,7 @@ module.exports = {
   ALLOWED_TASK_KIND,
   newTaskId,
   newHandoffId,
+  normalizeScopeId,
   normalizeTaskEnvelope,
   validateTaskEnvelope,
 };

@@ -54,11 +54,13 @@ function createTaskBoard(opts = {}) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS tasks (
         task_id             TEXT PRIMARY KEY,
+        scope_id            TEXT NOT NULL DEFAULT '',
         parent_task_id      TEXT,
         from_agent          TEXT NOT NULL,
         to_agent            TEXT NOT NULL,
         goal                TEXT NOT NULL,
         task_kind           TEXT NOT NULL DEFAULT 'team',
+        participants        TEXT NOT NULL DEFAULT '[]',
         definition_of_done  TEXT NOT NULL DEFAULT '[]',
         inputs              TEXT NOT NULL DEFAULT '{}',
         artifacts           TEXT NOT NULL DEFAULT '[]',
@@ -71,7 +73,9 @@ function createTaskBoard(opts = {}) {
         updated_at          TEXT NOT NULL
       )
     `);
+    try { db.exec("ALTER TABLE tasks ADD COLUMN scope_id TEXT NOT NULL DEFAULT ''"); } catch {}
     try { db.exec("ALTER TABLE tasks ADD COLUMN task_kind TEXT NOT NULL DEFAULT 'team'"); } catch {}
+    try { db.exec("ALTER TABLE tasks ADD COLUMN participants TEXT NOT NULL DEFAULT '[]'"); } catch {}
 
     db.exec(`
       CREATE TABLE IF NOT EXISTS handoffs (
@@ -98,6 +102,7 @@ function createTaskBoard(opts = {}) {
     `);
 
     try { db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)'); } catch {}
+    try { db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_scope_id ON tasks(scope_id)'); } catch {}
     try { db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at)'); } catch {}
     try { db.exec('CREATE INDEX IF NOT EXISTS idx_events_task_id ON task_events(task_id)'); } catch {}
     try { db.exec('CREATE INDEX IF NOT EXISTS idx_handoffs_task_id ON handoffs(task_id)'); } catch {}
@@ -109,11 +114,13 @@ function createTaskBoard(opts = {}) {
     const nowIso = new Date().toISOString();
     const safe = {
       task_id: sanitizeText(task.task_id, 80),
+      scope_id: sanitizeText(task.scope_id, 120) || sanitizeText(task.task_id, 80),
       parent_task_id: sanitizeText(task.parent_task_id, 80) || null,
       from_agent: sanitizeText(task.from_agent, 80) || 'unknown',
       to_agent: sanitizeText(task.to_agent, 80),
       goal: sanitizeText(task.goal, 500),
       task_kind: sanitizeText(task.task_kind, 20) || 'team',
+      participants: sanitizeStringArray(task.participants, 40, 80),
       definition_of_done: sanitizeStringArray(task.definition_of_done, 20, 300),
       inputs: task.inputs && typeof task.inputs === 'object' ? task.inputs : {},
       artifacts: sanitizeStringArray(task.artifacts, 40, 500),
@@ -131,15 +138,18 @@ function createTaskBoard(opts = {}) {
 
     const sql = `
       INSERT INTO tasks (
-        task_id, parent_task_id, from_agent, to_agent, goal, definition_of_done, inputs,
-        task_kind, artifacts, owned_paths, status, priority, summary, last_error, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        task_id, scope_id, parent_task_id, from_agent, to_agent, goal, task_kind, participants,
+        definition_of_done, inputs, artifacts, owned_paths, status, priority, summary, last_error,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(task_id) DO UPDATE SET
+        scope_id = excluded.scope_id,
         parent_task_id = excluded.parent_task_id,
         from_agent = excluded.from_agent,
         to_agent = excluded.to_agent,
         goal = excluded.goal,
         task_kind = excluded.task_kind,
+        participants = excluded.participants,
         definition_of_done = excluded.definition_of_done,
         inputs = excluded.inputs,
         artifacts = excluded.artifacts,
@@ -153,13 +163,15 @@ function createTaskBoard(opts = {}) {
     try {
       getDb().prepare(sql).run(
         safe.task_id,
+        safe.scope_id,
         safe.parent_task_id,
         safe.from_agent,
         safe.to_agent,
         safe.goal,
+        safe.task_kind,
+        toJson(safe.participants, []),
         toJson(safe.definition_of_done, []),
         toJson(safe.inputs, {}),
-        safe.task_kind,
         toJson(safe.artifacts, []),
         toJson(safe.owned_paths, []),
         safe.status,
@@ -240,6 +252,7 @@ function createTaskBoard(opts = {}) {
       if (!row) return null;
       return {
         ...row,
+        participants: parseJsonSafe(row.participants, []),
         definition_of_done: parseJsonSafe(row.definition_of_done, []),
         inputs: parseJsonSafe(row.inputs, {}),
         artifacts: parseJsonSafe(row.artifacts, []),
@@ -267,6 +280,7 @@ function createTaskBoard(opts = {}) {
       const rows = getDb().prepare(sql).all(...params);
       return rows.map(r => ({
         ...r,
+        participants: parseJsonSafe(r.participants, []),
         definition_of_done: parseJsonSafe(r.definition_of_done, []),
         inputs: parseJsonSafe(r.inputs, {}),
         artifacts: parseJsonSafe(r.artifacts, []),
@@ -291,6 +305,45 @@ function createTaskBoard(opts = {}) {
       logWarn(`TaskBoard listTaskEvents failed: ${e.message}`);
       return [];
     }
+  }
+
+  function listScopeTasks(scopeId, limit = 30) {
+    const safeScopeId = sanitizeText(scopeId, 120);
+    if (!safeScopeId) return [];
+    const lim = Math.max(1, Math.min(200, Number(limit) || 30));
+    try {
+      const rows = getDb()
+        .prepare('SELECT * FROM tasks WHERE scope_id = ? ORDER BY updated_at DESC LIMIT ?')
+        .all(safeScopeId, lim);
+      return rows.map(r => ({
+        ...r,
+        participants: parseJsonSafe(r.participants, []),
+        definition_of_done: parseJsonSafe(r.definition_of_done, []),
+        inputs: parseJsonSafe(r.inputs, {}),
+        artifacts: parseJsonSafe(r.artifacts, []),
+        owned_paths: parseJsonSafe(r.owned_paths, []),
+      }));
+    } catch (e) {
+      logWarn(`TaskBoard listScopeTasks failed: ${e.message}`);
+      return [];
+    }
+  }
+
+  function listScopeParticipants(scopeId) {
+    const tasks = listScopeTasks(scopeId, 200);
+    const set = new Set();
+    for (const t of tasks) {
+      const arr = Array.isArray(t.participants) ? t.participants : [];
+      for (const p of arr) {
+        const v = sanitizeText(p, 80);
+        if (v) set.add(v);
+      }
+      const from = sanitizeText(t.from_agent, 80);
+      const to = sanitizeText(t.to_agent, 80);
+      if (from) set.add(from);
+      if (to) set.add(to);
+    }
+    return [...set];
   }
 
   function markTaskStatus(taskId, status, opts = {}) {
@@ -330,6 +383,8 @@ function createTaskBoard(opts = {}) {
     recordHandoff,
     getTask,
     listRecentTasks,
+    listScopeTasks,
+    listScopeParticipants,
     listTaskEvents,
     markTaskStatus,
     addArtifacts,

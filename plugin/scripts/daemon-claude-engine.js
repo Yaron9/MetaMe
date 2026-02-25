@@ -171,6 +171,16 @@ function createClaudeEngine(deps) {
     return parts.join(' ').slice(0, 520);
   }
 
+  function projectKeyFromVirtualChatId(chatId) {
+    const v = String(chatId || '');
+    if (v.startsWith('_agent_')) return v.slice(7) || null;
+    if (v.startsWith('_scope_')) {
+      const idx = v.lastIndexOf('__');
+      if (idx > 7 && idx + 2 < v.length) return v.slice(idx + 2);
+    }
+    return null;
+  }
+
   function isMacAutomationIntent(prompt) {
     const text = String(prompt || '').trim();
     if (!text) return false;
@@ -542,7 +552,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const skill = agentMatch ? null : routeSkill(prompt);
     const chatIdStr = String(chatId);
     const chatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
-    const boundProjectKey = chatAgentMap[chatIdStr] || (chatIdStr.startsWith('_agent_') ? chatIdStr.slice(7) : null);
+    const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
     const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
     const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
 
@@ -651,7 +661,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const _cid = String(chatId);
       const _cfg = loadConfig();
       const _agentMap = { ...(_cfg.telegram ? _cfg.telegram.chat_agent_map : {}), ...(_cfg.feishu ? _cfg.feishu.chat_agent_map : {}) };
-      const projectKey = _agentMap[_cid] || (_cid.startsWith('_agent_') ? _cid.slice(7) : null);
+      const projectKey = _agentMap[_cid] || projectKeyFromVirtualChatId(_cid);
 
       // 1. Inject recent session memories ONLY on first message of a session
       if (!session.started) {

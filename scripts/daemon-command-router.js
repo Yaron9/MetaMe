@@ -195,6 +195,16 @@ function createCommandRouter(deps) {
     return fallbackName || 'workspace-agent';
   }
 
+  function projectKeyFromVirtualChatId(chatId) {
+    const v = String(chatId || '');
+    if (v.startsWith('_agent_')) return v.slice(7) || null;
+    if (v.startsWith('_scope_')) {
+      const idx = v.lastIndexOf('__');
+      if (idx > 7 && idx + 2 < v.length) return v.slice(idx + 2);
+    }
+    return null;
+  }
+
   function getBoundProjectForChat(chatId, cfg) {
     const map = {
       ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}),
@@ -479,7 +489,7 @@ function createCommandRouter(deps) {
     const chatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
     const _chatIdStr = String(chatId);
     const mappedKey = chatAgentMap[_chatIdStr] ||
-      (_chatIdStr.startsWith('_agent_') ? _chatIdStr.slice(7) : null);
+      projectKeyFromVirtualChatId(_chatIdStr);
     if (mappedKey && config.projects && config.projects[mappedKey]) {
       const proj = config.projects[mappedKey];
       const projCwd = normalizeCwd(proj.cwd);
@@ -544,7 +554,7 @@ function createCommandRouter(deps) {
         '/quit — 结束会话，重新加载 MCP/配置',
         '',
         `⚙️ /model [${currentModel}] /provider [${currentProvider}] /status /tasks /run /budget /reload`,
-        '🧩 /dispatch task <agent> <目标> · /task · /task <id>',
+        '🧩 /dispatch task <agent> <目标> [--scope <id>] · /task · /task <id>',
         '🧠 /memory — 记忆统计 · /memory <关键词> — 搜索事实',
         '🧬 /skill-evo — 查看/处理技能演化队列',
         `🔧 /doctor /fix /reset /mac /sh <cmd> /nosleep [${getNoSleepProcess() ? 'ON' : 'OFF'}]`,

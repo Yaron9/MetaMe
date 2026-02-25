@@ -41,6 +41,47 @@ function createAdminCommandHandler(deps) {
     return map[String(chatId)] || 'user';
   }
 
+  function popFlag(input, flagName) {
+    const src = String(input || '');
+    const re = new RegExp(`(?:^|\\s)--${flagName}\\s+(\\S+)`, 'i');
+    const m = src.match(re);
+    if (!m) return { text: src.trim(), value: '' };
+    const value = String(m[1] || '').trim();
+    const text = src.replace(m[0], ' ').replace(/\s+/g, ' ').trim();
+    return { text, value };
+  }
+
+  function parseTeamTaskArgs(raw) {
+    const src = String(raw || '').trim();
+    const first = src.match(/^(\S+)\s+([\s\S]+)$/);
+    if (!first) return null;
+    const targetName = first[1];
+    let rest = first[2].trim();
+    const scopePop = popFlag(rest, 'scope');
+    rest = scopePop.text;
+    const parentPop = popFlag(rest, 'parent');
+    rest = parentPop.text;
+    return {
+      targetName,
+      goal: rest,
+      scopeId: scopePop.value || '',
+      parentTaskId: parentPop.value || '',
+    };
+  }
+
+  function formatTaskSchedule(task) {
+    const at = typeof task.at === 'string' ? task.at.trim() : '';
+    if (at) {
+      const rawDays = task.days !== undefined ? task.days : task.weekdays;
+      let daysLabel = '';
+      if (Array.isArray(rawDays)) daysLabel = rawDays.join(',');
+      else if (typeof rawDays === 'string') daysLabel = rawDays.trim();
+      return daysLabel ? `at ${at} ${daysLabel}` : `at ${at}`;
+    }
+    if (task.interval) return `every ${task.interval}`;
+    return 'unspecified';
+  }
+
   async function handleAdminCommand(ctx) {
     const { bot, chatId, text } = ctx;
     const state = ctx.state || {};
@@ -159,7 +200,7 @@ function createAdminCommandHandler(deps) {
         msg += '📋 General:\n';
         for (const t of general) {
           const ts = state.tasks[t.name] || {};
-          msg += `${t.enabled !== false ? '✅' : '⏸'} ${t.name} (${t.interval}) ${ts.status || 'never_run'}\n`;
+          msg += `${t.enabled !== false ? '✅' : '⏸'} ${t.name} (${formatTaskSchedule(t)}) ${ts.status || 'never_run'}\n`;
         }
       }
       // Project tasks grouped by _project
@@ -173,7 +214,7 @@ function createAdminCommandHandler(deps) {
         msg += `\n${proj.icon} ${proj.name}:\n`;
         for (const t of tasks) {
           const ts = state.tasks[t.name] || {};
-          msg += `${t.enabled !== false ? '✅' : '⏸'} ${t.name} (${t.interval}) ${ts.status || 'never_run'}\n`;
+          msg += `${t.enabled !== false ? '✅' : '⏸'} ${t.name} (${formatTaskSchedule(t)}) ${ts.status || 'never_run'}\n`;
         }
       }
       if (!msg) {
@@ -202,7 +243,7 @@ function createAdminCommandHandler(deps) {
         }
         let msg = '🧩 Team Tasks (最近10条)\n';
         for (const t of recent) {
-          msg += `\n- ${t.task_id} [${t.status}] ${t.from_agent}→${t.to_agent}\n  ${t.goal.slice(0, 80)}`;
+          msg += `\n- ${t.task_id} [${t.status}] scope=${t.scope_id || t.task_id}\n  ${t.from_agent}→${t.to_agent} · ${t.goal.slice(0, 80)}`;
         }
         msg += '\n\n查看详情: /task <task_id>\n续跑: /task resume <task_id>';
         await bot.sendMessage(chatId, msg);
@@ -228,14 +269,18 @@ function createAdminCommandHandler(deps) {
             status: 'queued',
             updated_at: new Date().toISOString(),
             task_kind: 'team',
+            participants: taskBoard.listScopeParticipants(task.scope_id || task.task_id),
           }, {
             from_agent: task.from_agent || resolveSenderKey(chatId, config),
             to_agent: targetKey,
+            scope_id: task.scope_id || task.task_id,
           })
           : {
             task_id: task.task_id,
+            scope_id: task.scope_id || task.task_id,
             from_agent: task.from_agent || resolveSenderKey(chatId, config),
             to_agent: targetKey,
+            participants: taskBoard.listScopeParticipants(task.scope_id || task.task_id),
             goal: task.goal,
             definition_of_done: task.definition_of_done || [],
             inputs: task.inputs || {},
@@ -276,13 +321,20 @@ function createAdminCommandHandler(deps) {
         return { handled: true, config };
       }
       const events = taskBoard.listTaskEvents(task.task_id, 8);
+      const scopeId = task.scope_id || task.task_id;
+      const scopeTasks = taskBoard.listScopeTasks(scopeId, 12);
+      const scopeParticipants = taskBoard.listScopeParticipants(scopeId);
       let detail = [
         `🧩 Team Task: ${task.task_id}`,
+        `Scope: ${scopeId}`,
         `状态: ${task.status}`,
         `优先级: ${task.priority}`,
         `流向: ${task.from_agent} → ${task.to_agent}`,
         `目标: ${task.goal}`,
       ];
+      if (scopeParticipants.length > 0) {
+        detail.push(`参与者: ${scopeParticipants.join(', ')}`);
+      }
       if (Array.isArray(task.definition_of_done) && task.definition_of_done.length > 0) {
         detail.push('DoD:');
         for (const d of task.definition_of_done.slice(0, 6)) detail.push(`- ${d}`);
@@ -295,6 +347,12 @@ function createAdminCommandHandler(deps) {
       if (events.length > 0) {
         detail.push('最近事件:');
         for (const ev of events.slice(0, 5)) detail.push(`- [${ev.event_type}] ${ev.actor} @ ${ev.created_at}`);
+      }
+      if (scopeTasks.length > 1) {
+        detail.push('同 Scope 相关任务:');
+        for (const st of scopeTasks.filter(x => x.task_id !== task.task_id).slice(0, 5)) {
+          detail.push(`- ${st.task_id} [${st.status}] ${st.from_agent}→${st.to_agent}`);
+        }
       }
       await bot.sendMessage(chatId, detail.join('\n'));
       return { handled: true, config };
@@ -347,23 +405,34 @@ function createAdminCommandHandler(deps) {
       }
 
       // /dispatch task <agent> <goal>  (team task protocol)
-      const teamTaskMatch = args.match(/^task\s+(\S+)\s+(.+)$/s);
+      const teamTaskMatch = args.match(/^task\s+(.+)$/s);
       if (teamTaskMatch) {
         if (!taskEnvelope) {
           await bot.sendMessage(chatId, '❌ task protocol 不可用');
           return { handled: true, config };
         }
-        const targetName = teamTaskMatch[1];
-        const goal = teamTaskMatch[2].trim();
+        const parsed = parseTeamTaskArgs(teamTaskMatch[1]);
+        if (!parsed || !parsed.targetName || !parsed.goal) {
+          await bot.sendMessage(chatId, '❌ 用法: /dispatch task <agent> <目标> [--scope <scopeId>] [--parent <taskId>]');
+          return { handled: true, config };
+        }
+        const { targetName, goal, scopeId, parentTaskId } = parsed;
         const targetKey = resolveProjectKey(targetName, config.projects || {});
         if (!targetKey) {
           await bot.sendMessage(chatId, `未找到 agent: ${targetName}\n可用: ${Object.keys(config.projects || {}).join(', ')}`);
           return { handled: true, config };
         }
         const senderKey = resolveSenderKey(chatId, config);
+        const participants = (scopeId && taskBoard && taskBoard.listScopeParticipants)
+          ? taskBoard.listScopeParticipants(scopeId)
+          : [];
+        participants.push(senderKey, targetKey);
         const envelope = taskEnvelope.normalizeTaskEnvelope({
           from_agent: senderKey,
           to_agent: targetKey,
+          scope_id: scopeId || '',
+          parent_task_id: parentTaskId || null,
+          participants,
           goal,
           task_kind: 'team',
           definition_of_done: [
@@ -394,7 +463,11 @@ function createAdminCommandHandler(deps) {
           callback: false,
         }, config);
         if (result.success) {
-          await bot.sendMessage(chatId, `✅ 已创建 team task 并派发: ${envelope.task_id}\n查看: /task ${envelope.task_id}`);
+          await bot.sendMessage(chatId, [
+            `✅ 已创建 team task 并派发: ${envelope.task_id}`,
+            `Scope: ${envelope.scope_id || envelope.task_id}`,
+            `查看: /task ${envelope.task_id}`,
+          ].join('\n'));
         } else {
           await bot.sendMessage(chatId, `❌ 创建 team task 失败: ${result.error}`);
         }
@@ -452,7 +525,7 @@ function createAdminCommandHandler(deps) {
         '用法:',
         '/dispatch status — 查看状态',
         '/dispatch log — 查看记录',
-        '/dispatch task <agent> <目标> — 创建 team task',
+        '/dispatch task <agent> <目标> [--scope <id>] [--parent <id>] — 创建/续接 team task',
         '/dispatch to <agent> <任务内容> — 兼容旧模式',
         '/task — 查看 team task 列表',
       ].join('\n'));

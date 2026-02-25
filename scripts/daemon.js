@@ -455,6 +455,16 @@ function summarizeTaskInputs(inputs) {
   return lines.length > 0 ? lines.join('\n') : '(none)';
 }
 
+function buildDispatchChatId(targetProject, scopeId) {
+  const target = String(targetProject || '').trim();
+  if (!target) return '_agent_unknown';
+  const safeScope = taskEnvelope && taskEnvelope.normalizeScopeId
+    ? taskEnvelope.normalizeScopeId(scopeId, '')
+    : '';
+  if (safeScope) return `_scope_${safeScope}__${target}`;
+  return `_agent_${target}`;
+}
+
 function buildPromptFromTaskEnvelope(envelope, fallbackPrompt) {
   const goal = envelope.goal || fallbackPrompt || 'No goal provided';
   const dod = Array.isArray(envelope.definition_of_done) && envelope.definition_of_done.length > 0
@@ -462,8 +472,14 @@ function buildPromptFromTaskEnvelope(envelope, fallbackPrompt) {
     : '1. 给出可执行的结果与关键结论\n2. 给出相关产物路径（如有）';
   const inputs = summarizeTaskInputs(envelope.inputs || {});
   const taskId = envelope.task_id || 'unknown';
+  const scopeId = envelope.scope_id || taskId;
+  const participants = Array.isArray(envelope.participants) && envelope.participants.length > 0
+    ? envelope.participants.join(', ')
+    : `${envelope.from_agent || 'unknown'}, ${envelope.to_agent || 'unknown'}`;
   return [
     `任务ID: ${taskId}`,
+    `协作Scope: ${scopeId}`,
+    `参与Agent: ${participants}`,
     `任务目标: ${goal}`,
     '',
     '完成标准 (DoD):',
@@ -498,6 +514,7 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
       envelope = taskEnvelope.normalizeTaskEnvelope(payload.task_envelope, {
         from_agent: message.from || 'unknown',
         to_agent: targetProject,
+        task_kind: payload.task_envelope && payload.task_envelope.task_kind ? payload.task_envelope.task_kind : 'team',
       });
       const checked = taskEnvelope.validateTaskEnvelope(envelope);
       if (!checked.ok) {
@@ -581,6 +598,7 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
     new_session: !!message.new_session,
     chain: [...chain, message.from || 'unknown'],
     task_id: envelope ? envelope.task_id : null,
+    scope_id: envelope ? envelope.scope_id : null,
     created_at: new Date().toISOString(),
   };
 
@@ -595,6 +613,7 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
       dispatch_id: fullMsg.id,
       target: targetProject,
       priority: fullMsg.priority,
+      scope_id: envelope.scope_id,
     });
     taskBoard.recordHandoff({
       handoff_id: taskEnvelope.newHandoffId(),
@@ -603,6 +622,7 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
       to_agent: targetProject,
       payload: {
         dispatch_id: fullMsg.id,
+        scope_id: envelope.scope_id,
         title: payload.title || '',
         prompt: payload.prompt || '',
       },
@@ -636,12 +656,12 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
   // Daemon sends the ack autonomously; Claude should just state its plan in the reply text.
   prompt = `[行为要求：回复开头用1-2句「计划：xxx」说明执行方案，再开始执行。不要调用 dispatch_to，daemon 会自动转发你的回复。]\n\n${prompt}`;
 
-  // Prefer target's real Feishu chatId so dispatch reuses the existing session
-  // (--resume, no CLAUDE.md re-read, no token waste). Fall back to _agent_* virtual
-  // All dispatches use _agent_* virtual chatId to ensure a clean session with
-  // the correct project context. Real Feishu chatIds are only for direct user messages.
+  // team task with scope_id uses scoped virtual chatId:
+  //   _scope_<scope_id>__<agent>
+  // which allows N-agent collaboration under the same task scope while
+  // keeping per-agent execution sessions isolated.
   const forceNew = !!fullMsg.new_session;
-  const dispatchChatId = `_agent_${targetProject}`;
+  const dispatchChatId = buildDispatchChatId(targetProject, envelope && envelope.scope_id);
   const sessionMode = forceNew ? 'fresh session (forced)' : 'existing virtual session';
   log('INFO', `Dispatching ${fullMsg.type} to ${targetProject} via ${sessionMode}: ${rawPrompt.slice(0, 80)}`);
 
@@ -940,8 +960,8 @@ const {
  */
 function attachOrCreateSession(chatId, projCwd, name) {
   const state = loadState();
-  // Virtual agent chatIds (_agent_*) always get a fresh one-shot session.
-  // They must not resume real sessions, to avoid concurrency conflicts.
+  // Virtual chatIds (_agent_* / _scope_*) are isolated from real user chats.
+  // This avoids cross-context session collisions between user chat and dispatch flows.
   const newSess = createSession(chatId, projCwd, name || '');
   state.sessions[chatId] = { id: newSess.id, cwd: projCwd, started: false };
   saveState(state);
