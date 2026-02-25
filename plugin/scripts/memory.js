@@ -9,9 +9,9 @@
  * DB: ~/.metame/memory.db
  *
  * API:
- *   saveSession({ sessionId, project, summary, keywords, mood })
- *   searchSessions(query, { limit, project })
- *   recentSessions({ limit, project })
+ *   saveSession({ sessionId, project, scope, summary, keywords, mood })
+ *   searchSessions(query, { limit, project, scope })
+ *   recentSessions({ limit, project, scope })
  *   getSession(sessionId)
  *   stats()
  *   close()
@@ -45,6 +45,7 @@ function getDb() {
     CREATE TABLE IF NOT EXISTS sessions (
       id         TEXT PRIMARY KEY,
       project    TEXT NOT NULL,
+      scope      TEXT DEFAULT NULL,
       summary    TEXT NOT NULL,
       keywords   TEXT DEFAULT '',
       mood       TEXT DEFAULT '',
@@ -88,6 +89,10 @@ function getDb() {
     try { _db.exec(t); } catch { /* trigger may already exist */ }
   }
 
+  // Backward-compatible migration for old DBs without `scope`
+  try { _db.exec('ALTER TABLE sessions ADD COLUMN scope TEXT DEFAULT NULL'); } catch {}
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_scope ON sessions(scope)'); } catch {}
+
 
   // ── Facts table: atomic knowledge triples ──
   _db.exec(`
@@ -100,6 +105,7 @@ function getDb() {
       source_type  TEXT NOT NULL DEFAULT 'session',
       source_id    TEXT,
       project      TEXT NOT NULL DEFAULT '*',
+      scope        TEXT DEFAULT NULL,
       tags         TEXT DEFAULT '[]',
       created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -142,7 +148,12 @@ function getDb() {
 
   // Indexes
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_entity  ON facts(entity)'); } catch {}
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_entity_relation ON facts(entity, relation)'); } catch {}
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_project ON facts(project)'); } catch {}
+
+  // Backward-compatible migration for old DBs without `scope`
+  try { _db.exec('ALTER TABLE facts ADD COLUMN scope TEXT DEFAULT NULL'); } catch {}
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_scope   ON facts(scope)'); } catch {}
 
   // Search frequency tracking: counts how many times a fact appeared in search results.
   // This is a RELEVANCE PROXY, not a usefulness score — "searched" ≠ "actually helpful".
@@ -162,27 +173,42 @@ function getDb() {
  * @param {object} opts
  * @param {string} opts.sessionId  - Claude session ID (unique key)
  * @param {string} opts.project    - Project key (e.g. 'metame', 'desktop')
+ * @param {string|null} [opts.scope] - Stable workspace scope ID (e.g. proj_<hash>)
  * @param {string} opts.summary    - Distilled summary text
  * @param {string} [opts.keywords] - Comma-separated keywords for search boost
  * @param {string} [opts.mood]     - User mood/sentiment detected
  * @param {number} [opts.tokenCost] - Approximate token cost of the session
  * @returns {{ ok: boolean, id: string }}
  */
-function saveSession({ sessionId, project, summary, keywords = '', mood = '', tokenCost = 0 }) {
+function saveSession({ sessionId, project, scope = null, summary, keywords = '', mood = '', tokenCost = 0 }) {
   if (!sessionId || !project || !summary) {
     throw new Error('saveSession requires sessionId, project, summary');
   }
+  const normalizedProject = project === '*' ? '*' : String(project || 'unknown');
+  const normalizedScope = normalizedProject === '*'
+    ? '*'
+    : (scope && typeof scope === 'string' ? scope : null);
   const db = getDb();
   const stmt = db.prepare(`
-    INSERT INTO sessions (id, project, summary, keywords, mood, token_cost)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO sessions (id, project, scope, summary, keywords, mood, token_cost)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
+      project = excluded.project,
+      scope = excluded.scope,
       summary = excluded.summary,
       keywords = excluded.keywords,
       mood = excluded.mood,
       token_cost = excluded.token_cost
   `);
-  stmt.run(sessionId, project, summary.slice(0, 10000), keywords.slice(0, 1000), mood.slice(0, 100), tokenCost);
+  stmt.run(
+    sessionId,
+    normalizedProject,
+    normalizedScope,
+    summary.slice(0, 10000),
+    keywords.slice(0, 1000),
+    mood.slice(0, 100),
+    tokenCost
+  );
   return { ok: true, id: sessionId };
 }
 
@@ -196,32 +222,53 @@ const STATEFUL_RELATIONS = new Set(['user_pref', 'config_fact', 'config_change',
  * @param {string} sessionId - Source session ID
  * @param {string} project   - Project key ('metame', 'desktop', '*' for global)
  * @param {Array}  facts     - Array of { entity, relation, value, confidence, tags }
+ * @param {object} [opts]
+ * @param {string|null} [opts.scope] - Stable workspace scope ID (e.g. proj_<hash>)
  * @returns {{ saved: number, skipped: number, superseded: number }}
  */
-function saveFacts(sessionId, project, facts) {
+function saveFacts(sessionId, project, facts, { scope = null } = {}) {
   if (!Array.isArray(facts) || facts.length === 0) return { saved: 0, skipped: 0, superseded: 0 };
   const db = getDb();
+  const normalizedProject = project === '*' ? '*' : String(project || 'unknown');
+  const fallbackSessionScope = (() => {
+    const sid = String(sessionId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24);
+    return sid ? `sess_${sid}` : null;
+  })();
+  const normalizedScope = normalizedProject === '*'
+    ? '*'
+    : (scope && typeof scope === 'string' ? scope : (normalizedProject === 'unknown' ? fallbackSessionScope : null));
 
-  // Load existing facts for dedup check
-  const existing = db.prepare(
-    "SELECT entity, relation, value FROM facts WHERE project IN (?, '*')"
-  ).all(project);
+  let dedupScopeSql = '';
+  let dedupScopeParams = [];
+  if (normalizedScope === '*') {
+    dedupScopeSql = `((scope = '*') OR (scope IS NULL AND project = '*'))`;
+  } else if (normalizedScope) {
+    dedupScopeSql = `((scope = ?) OR (scope = '*') OR (scope IS NULL AND project IN (?, '*')))`;
+    dedupScopeParams = [normalizedScope, normalizedProject];
+  } else {
+    dedupScopeSql = `(project IN (?, '*'))`;
+    dedupScopeParams = [normalizedProject];
+  }
 
-  const insert = db.prepare(`
-    INSERT INTO facts (id, entity, relation, value, confidence, source_type, source_id, project, tags, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, 'session', ?, ?, ?, datetime('now'), datetime('now'))
-    ON CONFLICT(id) DO NOTHING
+  const existsDup = db.prepare(`
+    SELECT 1 AS ok
+    FROM facts
+    WHERE entity = ? AND relation = ? AND substr(value, 1, 50) = ?
+      AND ${dedupScopeSql}
+    LIMIT 1
   `);
 
-  const supersede = db.prepare(`
-    UPDATE facts SET superseded_by = ?, updated_at = datetime('now')
-    WHERE entity = ? AND relation = ? AND id != ? AND superseded_by IS NULL
+  const insert = db.prepare(`
+    INSERT INTO facts (id, entity, relation, value, confidence, source_type, source_id, project, scope, tags, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 'session', ?, ?, ?, ?, datetime('now'), datetime('now'))
+    ON CONFLICT(id) DO NOTHING
   `);
 
   let saved = 0;
   let skipped = 0;
   let superseded = 0;
   const savedFacts = [];
+  const batchDedup = new Set();
 
   for (const f of facts) {
     // Basic validation
@@ -231,29 +278,49 @@ function saveFacts(sessionId, project, facts) {
     // Dedup: same entity+relation with similar value prefix
     const dupKey = `${f.entity}::${f.relation}`;
     const prefix = f.value.slice(0, 50);
-    const isDup = existing.some(e =>
-      `${e.entity}::${e.relation}` === dupKey && e.value.slice(0, 50) === prefix
-    );
+    const dedupKey = `${dupKey}::${prefix}`;
+    const isBatchDup = batchDedup.has(dedupKey);
+    const dbDup = existsDup.get(f.entity, f.relation, prefix, ...dedupScopeParams);
+    const isDup = isBatchDup || !!(dbDup && dbDup.ok === 1);
     if (isDup) { skipped++; continue; }
 
     const id = `f-${sessionId.slice(0, 8)}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const tags = JSON.stringify(Array.isArray(f.tags) ? f.tags.slice(0, 3) : []);
     try {
       insert.run(id, f.entity, f.relation, f.value.slice(0, 300),
-        f.confidence || 'medium', sessionId, project === '*' ? '*' : project, tags);
+        f.confidence || 'medium', sessionId, normalizedProject, normalizedScope, tags);
+      batchDedup.add(dedupKey);
       savedFacts.push({ id, entity: f.entity, relation: f.relation, value: f.value,
-        project: project === '*' ? '*' : project, tags: f.tags || [], created_at: new Date().toISOString() });
+        project: normalizedProject, scope: normalizedScope, tags: f.tags || [], created_at: new Date().toISOString() });
       saved++;
 
       // For stateful relations, mark older active facts with same entity::relation as superseded
       if (STATEFUL_RELATIONS.has(f.relation)) {
+        let whereSql = '';
+        let filterParams = [];
+        if (normalizedScope === '*') {
+          whereSql = `((scope = '*') OR (scope IS NULL AND project = '*'))`;
+        } else if (normalizedScope) {
+          whereSql = `((scope = ?) OR (scope IS NULL AND project = ?))`;
+          filterParams = [normalizedScope, normalizedProject];
+        } else {
+          whereSql = `(project IN (?, '*'))`;
+          filterParams = [normalizedProject];
+        }
+
         // Fetch the IDs being superseded before running the update (for audit log)
         const db2 = getDb();
         const toSupersede = db2.prepare(
-          'SELECT id, value FROM facts WHERE entity = ? AND relation = ? AND id != ? AND superseded_by IS NULL'
-        ).all(f.entity, f.relation, id);
+          `SELECT id, value FROM facts
+           WHERE entity = ? AND relation = ? AND id != ? AND superseded_by IS NULL
+             AND ${whereSql}`
+        ).all(f.entity, f.relation, id, ...filterParams);
 
-        const result = supersede.run(id, f.entity, f.relation, id);
+        const result = db.prepare(
+          `UPDATE facts SET superseded_by = ?, updated_at = datetime('now')
+           WHERE entity = ? AND relation = ? AND id != ? AND superseded_by IS NULL
+             AND ${whereSql}`
+        ).run(id, f.entity, f.relation, id, ...filterParams);
         const changes = result.changes || 0;
         superseded += changes;
 
@@ -317,15 +384,36 @@ function _logSupersede(oldFacts, newId, entity, relation, newValue, sessionId) {
 }
 
 /**
+ * Scope filter semantics (new + legacy):
+ * - New rows: prefer `scope` exact match or global scope '*'
+ * - Legacy rows (scope NULL): fallback to project match or project='*'
+ */
+function _matchesFactScope(row, project, scope) {
+  if (!row) return false;
+  const rowScope = row.scope === undefined ? null : row.scope;
+  if (scope) {
+    if (rowScope === scope || rowScope === '*') return true;
+    if (rowScope === null) {
+      if (!project) return false;
+      return row.project === project || row.project === '*';
+    }
+    return false;
+  }
+  if (project) return row.project === project || row.project === '*';
+  return true;
+}
+
+/**
  * Search facts: QMD hybrid search (if available) → FTS5 → LIKE fallback.
  *
  * @param {string} query          - Search keywords / natural language
  * @param {object} [opts]
  * @param {number} [opts.limit=5] - Max results
  * @param {string} [opts.project] - Filter by project (also always includes '*')
+ * @param {string} [opts.scope]   - Stable workspace scope (also includes global '*')
  * @returns {Promise<Array>|Array} Fact objects
  */
-async function searchFactsAsync(query, { limit = 5, project = null } = {}) {
+async function searchFactsAsync(query, { limit = 5, project = null, scope = null } = {}) {
   // Try QMD hybrid search first
   let qmdClient = null;
   try { qmdClient = require('./qmd-client'); } catch { /* not available */ }
@@ -337,13 +425,13 @@ async function searchFactsAsync(query, { limit = 5, project = null } = {}) {
         const db = getDb();
         const placeholders = ids.map(() => '?').join(',');
         let rows = db.prepare(
-          `SELECT id, entity, relation, value, confidence, project, tags, created_at
+          `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
            FROM facts WHERE id IN (${placeholders}) AND superseded_by IS NULL`
         ).all(...ids);
 
-        // Apply project filter
-        if (project) {
-          rows = rows.filter(r => r.project === project || r.project === '*');
+        // Apply project/scope filter
+        if (project || scope) {
+          rows = rows.filter(r => _matchesFactScope(r, project, scope));
         }
 
         // Preserve QMD ranking order
@@ -358,7 +446,7 @@ async function searchFactsAsync(query, { limit = 5, project = null } = {}) {
     } catch { /* QMD failed, fall through to FTS5 */ }
   }
 
-  return searchFacts(query, { limit, project });
+  return searchFacts(query, { limit, project, scope });
 }
 
 /**
@@ -368,9 +456,10 @@ async function searchFactsAsync(query, { limit = 5, project = null } = {}) {
  * @param {object} [opts]
  * @param {number} [opts.limit=5] - Max results
  * @param {string} [opts.project] - Filter by project (also always includes '*')
- * @returns {Array<{ id, entity, relation, value, confidence, project, tags, created_at }>}
+ * @param {string} [opts.scope]   - Stable workspace scope (also includes global '*')
+ * @returns {Array<{ id, entity, relation, value, confidence, project, scope, tags, created_at }>}
  */
-function searchFacts(query, { limit = 5, project = null } = {}) {
+function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
   if (!query || !query.trim()) return [];
   const db = getDb();
 
@@ -380,9 +469,27 @@ function searchFacts(query, { limit = 5, project = null } = {}) {
   // FTS5 path
   try {
     let sql, params;
-    if (project) {
+    if (scope && project) {
       sql = `
-        SELECT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.tags, f.created_at, rank
+        SELECT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at, rank
+        FROM facts_fts fts JOIN facts f ON f.rowid = fts.rowid
+        WHERE facts_fts MATCH ?
+          AND ((f.scope = ? OR f.scope = '*') OR (f.scope IS NULL AND (f.project = ? OR f.project = '*')))
+          AND f.superseded_by IS NULL
+        ORDER BY rank LIMIT ?
+      `;
+      params = [sanitized, scope, project, limit];
+    } else if (scope) {
+      sql = `
+        SELECT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at, rank
+        FROM facts_fts fts JOIN facts f ON f.rowid = fts.rowid
+        WHERE facts_fts MATCH ? AND (f.scope = ? OR f.scope = '*') AND f.superseded_by IS NULL
+        ORDER BY rank LIMIT ?
+      `;
+      params = [sanitized, scope, limit];
+    } else if (project) {
+      sql = `
+        SELECT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at, rank
         FROM facts_fts fts JOIN facts f ON f.rowid = fts.rowid
         WHERE facts_fts MATCH ? AND (f.project = ? OR f.project = '*') AND f.superseded_by IS NULL
         ORDER BY rank LIMIT ?
@@ -390,7 +497,7 @@ function searchFacts(query, { limit = 5, project = null } = {}) {
       params = [sanitized, project, limit];
     } else {
       sql = `
-        SELECT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.tags, f.created_at, rank
+        SELECT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at, rank
         FROM facts_fts fts JOIN facts f ON f.rowid = fts.rowid
         WHERE facts_fts MATCH ? AND f.superseded_by IS NULL
         ORDER BY rank LIMIT ?
@@ -406,18 +513,33 @@ function searchFacts(query, { limit = 5, project = null } = {}) {
 
   // LIKE fallback
   const like = '%' + query.trim() + '%';
-  const likeSql = project
-    ? `SELECT id, entity, relation, value, confidence, project, tags, created_at
+  const likeSql = scope && project
+    ? `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
+       FROM facts WHERE (entity LIKE ? OR value LIKE ? OR tags LIKE ?)
+       AND ((scope = ? OR scope = '*') OR (scope IS NULL AND (project = ? OR project = '*')))
+       AND superseded_by IS NULL
+       ORDER BY created_at DESC LIMIT ?`
+    : scope
+      ? `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
+       FROM facts WHERE (entity LIKE ? OR value LIKE ? OR tags LIKE ?)
+       AND (scope = ? OR scope = '*') AND superseded_by IS NULL
+       ORDER BY created_at DESC LIMIT ?`
+      : project
+        ? `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
        FROM facts WHERE (entity LIKE ? OR value LIKE ? OR tags LIKE ?)
        AND (project = ? OR project = '*') AND superseded_by IS NULL
        ORDER BY created_at DESC LIMIT ?`
-    : `SELECT id, entity, relation, value, confidence, project, tags, created_at
+        : `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
        FROM facts WHERE (entity LIKE ? OR value LIKE ? OR tags LIKE ?)
        AND superseded_by IS NULL
        ORDER BY created_at DESC LIMIT ?`;
-  const likeResults = project
-    ? db.prepare(likeSql).all(like, like, like, project, limit)
-    : db.prepare(likeSql).all(like, like, like, limit);
+  const likeResults = scope && project
+    ? db.prepare(likeSql).all(like, like, like, scope, project, limit)
+    : scope
+      ? db.prepare(likeSql).all(like, like, like, scope, limit)
+      : project
+        ? db.prepare(likeSql).all(like, like, like, project, limit)
+        : db.prepare(likeSql).all(like, like, like, limit);
   if (likeResults.length > 0) _trackSearch(likeResults.map(r => r.id));
   return likeResults;
 }
@@ -429,9 +551,10 @@ function searchFacts(query, { limit = 5, project = null } = {}) {
  * @param {object} [opts]
  * @param {number} [opts.limit=5] - Max results
  * @param {string} [opts.project] - Filter by project
- * @returns {Array<{ id, project, summary, keywords, mood, created_at, rank }>}
+ * @param {string} [opts.scope] - Stable workspace scope (also includes global '*')
+ * @returns {Array<{ id, project, scope, summary, keywords, mood, created_at, rank }>}
  */
-function searchSessions(query, { limit = 5, project = null } = {}) {
+function searchSessions(query, { limit = 5, project = null, scope = null } = {}) {
   if (!query || !query.trim()) return [];
   const db = getDb();
 
@@ -439,9 +562,26 @@ function searchSessions(query, { limit = 5, project = null } = {}) {
   const sanitized = query.trim().split(/\s+/).map(t => '"' + t.replace(/"/g, '') + '"').join(' ');
 
   let sql, params;
-  if (project) {
+  if (scope && project) {
     sql = `
-      SELECT s.id, s.project, s.summary, s.keywords, s.mood, s.created_at, s.token_cost, rank
+      SELECT s.id, s.project, s.scope, s.summary, s.keywords, s.mood, s.created_at, s.token_cost, rank
+      FROM sessions_fts f JOIN sessions s ON s.rowid = f.rowid
+      WHERE sessions_fts MATCH ?
+        AND ((s.scope = ? OR s.scope = '*') OR (s.scope IS NULL AND (s.project = ? OR s.project = '*')))
+      ORDER BY rank LIMIT ?
+    `;
+    params = [sanitized, scope, project, limit];
+  } else if (scope) {
+    sql = `
+      SELECT s.id, s.project, s.scope, s.summary, s.keywords, s.mood, s.created_at, s.token_cost, rank
+      FROM sessions_fts f JOIN sessions s ON s.rowid = f.rowid
+      WHERE sessions_fts MATCH ? AND (s.scope = ? OR s.scope = '*')
+      ORDER BY rank LIMIT ?
+    `;
+    params = [sanitized, scope, limit];
+  } else if (project) {
+    sql = `
+      SELECT s.id, s.project, s.scope, s.summary, s.keywords, s.mood, s.created_at, s.token_cost, rank
       FROM sessions_fts f JOIN sessions s ON s.rowid = f.rowid
       WHERE sessions_fts MATCH ? AND s.project = ?
       ORDER BY rank LIMIT ?
@@ -449,7 +589,7 @@ function searchSessions(query, { limit = 5, project = null } = {}) {
     params = [sanitized, project, limit];
   } else {
     sql = `
-      SELECT s.id, s.project, s.summary, s.keywords, s.mood, s.created_at, s.token_cost, rank
+      SELECT s.id, s.project, s.scope, s.summary, s.keywords, s.mood, s.created_at, s.token_cost, rank
       FROM sessions_fts f JOIN sessions s ON s.rowid = f.rowid
       WHERE sessions_fts MATCH ?
       ORDER BY rank LIMIT ?
@@ -464,12 +604,34 @@ function searchSessions(query, { limit = 5, project = null } = {}) {
 
   // LIKE fallback (handles short CJK terms like "飞书" that trigram can't match)
   const likeParam = '%' + query.trim() + '%';
-  const likeSql = project
-    ? 'SELECT id, project, summary, keywords, mood, created_at, token_cost FROM sessions WHERE (summary LIKE ? OR keywords LIKE ?) AND project = ? ORDER BY created_at DESC LIMIT ?'
-    : 'SELECT id, project, summary, keywords, mood, created_at, token_cost FROM sessions WHERE (summary LIKE ? OR keywords LIKE ?) ORDER BY created_at DESC LIMIT ?';
-  return project
-    ? db.prepare(likeSql).all(likeParam, likeParam, project, limit)
-    : db.prepare(likeSql).all(likeParam, likeParam, limit);
+  const likeSql = scope && project
+    ? `SELECT id, project, scope, summary, keywords, mood, created_at, token_cost
+       FROM sessions
+       WHERE (summary LIKE ? OR keywords LIKE ?)
+         AND ((scope = ? OR scope = '*') OR (scope IS NULL AND (project = ? OR project = '*')))
+       ORDER BY created_at DESC LIMIT ?`
+    : scope
+      ? `SELECT id, project, scope, summary, keywords, mood, created_at, token_cost
+       FROM sessions
+       WHERE (summary LIKE ? OR keywords LIKE ?)
+         AND (scope = ? OR scope = '*')
+       ORDER BY created_at DESC LIMIT ?`
+      : project
+        ? `SELECT id, project, scope, summary, keywords, mood, created_at, token_cost
+       FROM sessions
+       WHERE (summary LIKE ? OR keywords LIKE ?) AND project = ?
+       ORDER BY created_at DESC LIMIT ?`
+        : `SELECT id, project, scope, summary, keywords, mood, created_at, token_cost
+       FROM sessions
+       WHERE (summary LIKE ? OR keywords LIKE ?)
+       ORDER BY created_at DESC LIMIT ?`;
+  return scope && project
+    ? db.prepare(likeSql).all(likeParam, likeParam, scope, project, limit)
+    : scope
+      ? db.prepare(likeSql).all(likeParam, likeParam, scope, limit)
+      : project
+        ? db.prepare(likeSql).all(likeParam, likeParam, project, limit)
+        : db.prepare(likeSql).all(likeParam, likeParam, limit);
 }
 
 /**
@@ -478,17 +640,34 @@ function searchSessions(query, { limit = 5, project = null } = {}) {
  * @param {object} [opts]
  * @param {number} [opts.limit=3] - Max results
  * @param {string} [opts.project] - Filter by project
- * @returns {Array<{ id, project, summary, keywords, mood, created_at }>}
+ * @param {string} [opts.scope] - Stable workspace scope (also includes global '*')
+ * @returns {Array<{ id, project, scope, summary, keywords, mood, created_at }>}
  */
-function recentSessions({ limit = 3, project = null } = {}) {
+function recentSessions({ limit = 3, project = null, scope = null } = {}) {
   const db = getDb();
+  if (scope && project) {
+    return db.prepare(
+      `SELECT id, project, scope, summary, keywords, mood, created_at, token_cost
+       FROM sessions
+       WHERE ((scope = ? OR scope = '*') OR (scope IS NULL AND (project = ? OR project = '*')))
+       ORDER BY created_at DESC LIMIT ?`
+    ).all(scope, project, limit);
+  }
+  if (scope) {
+    return db.prepare(
+      `SELECT id, project, scope, summary, keywords, mood, created_at, token_cost
+       FROM sessions
+       WHERE (scope = ? OR scope = '*')
+       ORDER BY created_at DESC LIMIT ?`
+    ).all(scope, limit);
+  }
   if (project) {
     return db.prepare(
-      'SELECT id, project, summary, keywords, mood, created_at, token_cost FROM sessions WHERE project = ? ORDER BY created_at DESC LIMIT ?'
+      'SELECT id, project, scope, summary, keywords, mood, created_at, token_cost FROM sessions WHERE project = ? ORDER BY created_at DESC LIMIT ?'
     ).all(project, limit);
   }
   return db.prepare(
-    'SELECT id, project, summary, keywords, mood, created_at, token_cost FROM sessions ORDER BY created_at DESC LIMIT ?'
+    'SELECT id, project, scope, summary, keywords, mood, created_at, token_cost FROM sessions ORDER BY created_at DESC LIMIT ?'
   ).all(limit);
 }
 

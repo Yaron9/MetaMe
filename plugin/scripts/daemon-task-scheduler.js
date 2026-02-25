@@ -1,5 +1,7 @@
 'use strict';
 
+const { classifyTaskUsage } = require('./usage-classifier');
+
 const WEEKDAY_INDEX = Object.freeze({
   sun: 0,
   sunday: 0,
@@ -286,7 +288,11 @@ function createTaskScheduler(deps) {
     if (task.type === 'script') {
       log('INFO', `Executing script task: ${task.name} → ${task.command}`);
       try {
-        const scriptEnv = { ...process.env, METAME_ROOT: process.env.METAME_ROOT || '' };
+        const scriptEnv = {
+          ...process.env,
+          METAME_ROOT: process.env.METAME_ROOT || '',
+          METAME_INTERNAL_PROMPT: '1',
+        };
         delete scriptEnv.CLAUDECODE;
         const output = execSync(task.command, {
           encoding: 'utf8',
@@ -384,7 +390,12 @@ function createTaskScheduler(deps) {
     // executeTask now returns a Promise — callers must handle it with .then() or await.
     const timeoutMs = resolveTimeoutMs(task.timeout, 120);
     const asyncArgs = [...claudeArgs];
-    const asyncEnv = { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined };
+    const asyncEnv = {
+      ...process.env,
+      ...getDaemonProviderEnv(),
+      CLAUDECODE: undefined,
+      METAME_INTERNAL_PROMPT: '1',
+    };
 
     return new Promise((resolve) => {
       const child = spawn(CLAUDE_BIN, asyncArgs, {
@@ -451,7 +462,7 @@ function createTaskScheduler(deps) {
           return resolve({ success: false, error: errMsg, output: '' });
         }
         const estimatedTokens = Math.ceil((fullPrompt.length + output.length) / 4);
-        recordTokens(state, estimatedTokens);
+        recordTokens(state, estimatedTokens, { category: classifyTaskUsage(task) });
         const prevSessionId = state.tasks[task.name]?.session_id;
         const prevCreatedAt = state.tasks[task.name]?.session_created_at;
         state.tasks[task.name] = {
@@ -519,7 +530,17 @@ function createTaskScheduler(deps) {
       log('INFO', `Workflow ${task.name} step ${i + 1}/${steps.length}: ${step.skill || 'prompt'}`);
       try {
         const output = execFileSync(CLAUDE_BIN, args, {
-          input: prompt, encoding: 'utf8', timeout: resolveTimeoutMs(step.timeout, 300), maxBuffer: 5 * 1024 * 1024, cwd, env: { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined },
+          input: prompt,
+          encoding: 'utf8',
+          timeout: resolveTimeoutMs(step.timeout, 300),
+          maxBuffer: 5 * 1024 * 1024,
+          cwd,
+          env: {
+            ...process.env,
+            ...getDaemonProviderEnv(),
+            CLAUDECODE: undefined,
+            METAME_INTERNAL_PROMPT: '1',
+          },
         }).trim();
         const tk = Math.ceil((prompt.length + output.length) / 4);
         totalTokens += tk;
@@ -530,14 +551,14 @@ function createTaskScheduler(deps) {
         log('ERROR', `Workflow ${task.name} step ${i + 1} failed: ${e.message.slice(0, 200)}`);
         outputs.push({ step: i + 1, skill: step.skill || null, error: e.message.slice(0, 200) });
         if (!step.optional) {
-          recordTokens(loadState(), totalTokens);
+          recordTokens(loadState(), totalTokens, { category: classifyTaskUsage(task) });
           state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: `Step ${i + 1} failed`, steps_completed: i, steps_total: steps.length };
           saveState(state);
           return { success: false, error: `Step ${i + 1} failed`, output: outputs.map(o => `Step ${o.step}: ${o.error ? 'FAILED' : 'OK'}`).join('\n'), tokens: totalTokens };
         }
       }
     }
-    recordTokens(loadState(), totalTokens);
+    recordTokens(loadState(), totalTokens, { category: classifyTaskUsage(task) });
     const lastOk = [...outputs].reverse().find(o => !o.error);
     state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'success', output_preview: (lastOk ? lastOk.output : '').slice(0, 200), steps_completed: outputs.filter(o => !o.error).length, steps_total: steps.length };
     saveState(state);

@@ -103,6 +103,10 @@ function routeAgent(prompt, config) {
 
 const yaml = require('./resolve-yaml');
 const { parseInterval, formatRelativeTime, createPathMap } = require('./utils');
+const {
+  USAGE_RETENTION_DAYS_DEFAULT,
+  normalizeUsageCategory,
+} = require('./usage-classifier');
 const { createTaskBoard } = require('./task-board');
 const taskEnvelope = require('./daemon-task-envelope');
 const { createAdminCommandHandler } = require('./daemon-admin-commands');
@@ -255,19 +259,56 @@ function restoreConfig() {
 
 let _cachedState = null;
 
+function ensureUsageShape(state) {
+  if (!state.usage || typeof state.usage !== 'object') state.usage = {};
+  if (!state.usage.categories || typeof state.usage.categories !== 'object') state.usage.categories = {};
+  if (!state.usage.daily || typeof state.usage.daily !== 'object') state.usage.daily = {};
+  const keepDays = Number(state.usage.retention_days);
+  state.usage.retention_days = Number.isFinite(keepDays) && keepDays >= 7
+    ? Math.floor(keepDays)
+    : USAGE_RETENTION_DAYS_DEFAULT;
+}
+
+function ensureStateShape(state) {
+  if (!state || typeof state !== 'object') return {
+    pid: null,
+    budget: { date: null, tokens_used: 0 },
+    tasks: {},
+    sessions: {},
+    started_at: null,
+    usage: { retention_days: USAGE_RETENTION_DAYS_DEFAULT, categories: {}, daily: {} },
+  };
+  if (!state.budget || typeof state.budget !== 'object') state.budget = { date: null, tokens_used: 0 };
+  if (typeof state.budget.tokens_used !== 'number') state.budget.tokens_used = Number(state.budget.tokens_used) || 0;
+  if (!Object.prototype.hasOwnProperty.call(state.budget, 'date')) state.budget.date = null;
+  if (!state.tasks || typeof state.tasks !== 'object') state.tasks = {};
+  if (!state.sessions || typeof state.sessions !== 'object') state.sessions = {};
+  ensureUsageShape(state);
+  return state;
+}
+
+function pruneDailyUsage(usage, todayIso) {
+  const keepDays = usage.retention_days || USAGE_RETENTION_DAYS_DEFAULT;
+  const cutoff = new Date(`${todayIso}T00:00:00.000Z`);
+  cutoff.setUTCDate(cutoff.getUTCDate() - (keepDays - 1));
+  const cutoffIso = cutoff.toISOString().slice(0, 10);
+  for (const day of Object.keys(usage.daily || {})) {
+    if (day < cutoffIso) delete usage.daily[day];
+  }
+}
+
 function _readStateFromDisk() {
   try {
     const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    if (!s.sessions) s.sessions = {};
-    return s;
+    return ensureStateShape(s);
   } catch {
-    return {
+    return ensureStateShape({
       pid: null,
       budget: { date: null, tokens_used: 0 },
       tasks: {},
       sessions: {},
       started_at: null,
-    };
+    });
   }
 }
 
@@ -277,9 +318,65 @@ function loadState() {
 }
 
 function saveState(state) {
-  _cachedState = state;
+  const next = ensureStateShape(state);
+  if (_cachedState && _cachedState !== next) {
+    const current = ensureStateShape(_cachedState);
+
+    const currentBudgetDate = String(current.budget.date || '');
+    const nextBudgetDate = String(next.budget.date || '');
+    const currentBudgetTokens = Math.max(0, Math.floor(Number(current.budget.tokens_used) || 0));
+    const nextBudgetTokens = Math.max(0, Math.floor(Number(next.budget.tokens_used) || 0));
+    if (currentBudgetDate && (!nextBudgetDate || currentBudgetDate > nextBudgetDate)) {
+      next.budget.date = currentBudgetDate;
+      next.budget.tokens_used = currentBudgetTokens;
+    } else if (currentBudgetDate && currentBudgetDate === nextBudgetDate) {
+      next.budget.tokens_used = Math.max(currentBudgetTokens, nextBudgetTokens);
+    }
+
+    const currentKeepDays = Number(current.usage.retention_days) || USAGE_RETENTION_DAYS_DEFAULT;
+    const nextKeepDays = Number(next.usage.retention_days) || USAGE_RETENTION_DAYS_DEFAULT;
+    next.usage.retention_days = Math.max(currentKeepDays, nextKeepDays);
+
+    for (const [category, curMeta] of Object.entries(current.usage.categories || {})) {
+      if (!next.usage.categories[category] || typeof next.usage.categories[category] !== 'object') {
+        next.usage.categories[category] = {};
+      }
+      const curTotal = Math.max(0, Math.floor(Number(curMeta && curMeta.total) || 0));
+      const nextTotal = Math.max(0, Math.floor(Number(next.usage.categories[category].total) || 0));
+      if (curTotal > nextTotal) next.usage.categories[category].total = curTotal;
+
+      const curUpdated = String(curMeta && curMeta.updated_at || '');
+      const nextUpdated = String(next.usage.categories[category].updated_at || '');
+      if (curUpdated && curUpdated > nextUpdated) next.usage.categories[category].updated_at = curUpdated;
+    }
+
+    for (const [day, curDayUsageRaw] of Object.entries(current.usage.daily || {})) {
+      const curDayUsage = (curDayUsageRaw && typeof curDayUsageRaw === 'object') ? curDayUsageRaw : {};
+      if (!next.usage.daily[day] || typeof next.usage.daily[day] !== 'object') {
+        next.usage.daily[day] = {};
+      }
+      const nextDayUsage = next.usage.daily[day];
+      for (const [key, curValue] of Object.entries(curDayUsage)) {
+        const curNum = Math.max(0, Math.floor(Number(curValue) || 0));
+        const nextNum = Math.max(0, Math.floor(Number(nextDayUsage[key]) || 0));
+        if (curNum > nextNum) nextDayUsage[key] = curNum;
+      }
+      const categorySum = Object.entries(nextDayUsage)
+        .filter(([key]) => key !== 'total')
+        .reduce((sum, [, value]) => sum + Math.max(0, Math.floor(Number(value) || 0)), 0);
+      nextDayUsage.total = Math.max(Math.max(0, Math.floor(Number(nextDayUsage.total) || 0)), categorySum);
+    }
+
+    const currentUsageUpdated = String(current.usage.updated_at || '');
+    const nextUsageUpdated = String(next.usage.updated_at || '');
+    if (currentUsageUpdated && currentUsageUpdated > nextUsageUpdated) {
+      next.usage.updated_at = currentUsageUpdated;
+    }
+  }
+
+  _cachedState = next;
   try {
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+    fs.writeFileSync(STATE_FILE, JSON.stringify(next, null, 2), 'utf8');
   } catch (e) {
     log('ERROR', `Failed to save state: ${e.message}`);
   }
@@ -313,6 +410,7 @@ function buildProfilePreamble() {
 // BUDGET TRACKING
 // ---------------------------------------------------------
 function checkBudget(config, state) {
+  state = ensureStateShape(state);
   const today = new Date().toISOString().slice(0, 10);
   if (state.budget.date !== today) {
     state.budget.date = today;
@@ -323,14 +421,44 @@ function checkBudget(config, state) {
   return state.budget.tokens_used < limit;
 }
 
-function recordTokens(state, tokens) {
+function recordTokens(state, tokens, meta = null) {
+  const amount = Math.max(0, Math.floor(Number(tokens) || 0));
+  if (!amount) return;
+
+  const liveState = ensureStateShape(loadState());
   const today = new Date().toISOString().slice(0, 10);
-  if (state.budget.date !== today) {
-    state.budget.date = today;
-    state.budget.tokens_used = 0;
+  if (liveState.budget.date !== today) {
+    liveState.budget.date = today;
+    liveState.budget.tokens_used = 0;
   }
-  state.budget.tokens_used += tokens;
-  saveState(state);
+  liveState.budget.tokens_used += amount;
+
+  const category = normalizeUsageCategory(meta && meta.category, {
+    logger: (msg) => log('WARN', `[USAGE] ${msg}`),
+  });
+  ensureUsageShape(liveState);
+
+  if (!liveState.usage.categories[category] || typeof liveState.usage.categories[category] !== 'object') {
+    liveState.usage.categories[category] = { total: 0 };
+  }
+  liveState.usage.categories[category].total = (Number(liveState.usage.categories[category].total) || 0) + amount;
+  liveState.usage.categories[category].updated_at = new Date().toISOString();
+
+  if (!liveState.usage.daily[today] || typeof liveState.usage.daily[today] !== 'object') {
+    liveState.usage.daily[today] = { total: 0 };
+  }
+  const dayUsage = liveState.usage.daily[today];
+  dayUsage.total = (Number(dayUsage.total) || 0) + amount;
+  dayUsage[category] = (Number(dayUsage[category]) || 0) + amount;
+  liveState.usage.updated_at = new Date().toISOString();
+  pruneDailyUsage(liveState.usage, today);
+
+  if (state && typeof state === 'object' && state !== liveState) {
+    state.budget = liveState.budget;
+    state.usage = liveState.usage;
+  }
+
+  saveState(liveState);
 }
 
 

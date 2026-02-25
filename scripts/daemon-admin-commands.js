@@ -1,5 +1,11 @@
 'use strict';
 
+const {
+  USAGE_CATEGORY_ORDER,
+  CORE_USAGE_CATEGORIES,
+  USAGE_CATEGORY_LABEL,
+} = require('./usage-classifier');
+
 function createAdminCommandHandler(deps) {
   const {
     fs,
@@ -543,6 +549,68 @@ function createAdminCommandHandler(deps) {
       const limit = (config.budget && config.budget.daily_limit) || 50000;
       const used = state.budget.tokens_used;
       await bot.sendMessage(chatId, `Budget: ${used}/${limit} tokens (${((used / limit) * 100).toFixed(1)}%)`);
+      return { handled: true, config };
+    }
+
+    if (text === '/usage' || text.startsWith('/usage ')) {
+      const arg = text.slice('/usage'.length).trim() || 'today';
+      const usage = state.usage || {};
+      const daily = usage.daily || {};
+      const categories = usage.categories || {};
+      const limit = (config.budget && config.budget.daily_limit) || 50000;
+      const todayIso = new Date().toISOString().slice(0, 10);
+
+      // Resolve date range
+      let days = 1;
+      if (arg === 'week') days = 7;
+      else if (arg === 'month') days = 30;
+      else if (/^\d+d$/.test(arg)) days = Math.min(90, parseInt(arg, 10));
+
+      const dates = [];
+      for (let i = days - 1; i >= 0; i--) {
+        const d = new Date(`${todayIso}T00:00:00.000Z`);
+        d.setUTCDate(d.getUTCDate() - i);
+        dates.push(d.toISOString().slice(0, 10));
+      }
+
+      // Aggregate tokens by category across the date window
+      const totals = {};
+      let grandTotal = 0;
+      for (const date of dates) {
+        const bucket = daily[date] || {};
+        for (const [key, val] of Object.entries(bucket)) {
+          if (key === 'total') continue;
+          const n = Math.max(0, Math.floor(Number(val) || 0));
+          totals[key] = (totals[key] || 0) + n;
+          grandTotal += n;
+        }
+      }
+      // Fallback: if no daily breakdown yet, use categories totals for today
+      if (grandTotal === 0 && days === 1) {
+        for (const [key, meta] of Object.entries(categories)) {
+          const n = Math.max(0, Math.floor(Number(meta && meta.total) || 0));
+          if (n > 0) { totals[key] = n; grandTotal += n; }
+        }
+      }
+
+      const label = days === 1 ? `今日 (${todayIso})` : `近 ${days} 天`;
+      const budgetPct = limit > 0 ? ((grandTotal / limit) * 100).toFixed(1) : '—';
+      let lines = [`📊 Token 用量 — ${label}`, `合计: ${grandTotal.toLocaleString()} / ${limit.toLocaleString()} tokens (${budgetPct}%)`];
+
+      // Render by canonical order, then extras
+      const rendered = new Set();
+      const orderedKeys = [...USAGE_CATEGORY_ORDER, ...Object.keys(totals).filter(k => !USAGE_CATEGORY_ORDER.includes(k))];
+      for (const key of orderedKeys) {
+        const n = totals[key] || 0;
+        if (n === 0 && !CORE_USAGE_CATEGORIES.includes(key)) continue;
+        const pct = grandTotal > 0 ? ((n / grandTotal) * 100).toFixed(1) : '0.0';
+        const lbl = USAGE_CATEGORY_LABEL[key] || key;
+        const bar = '█'.repeat(Math.round(Number(pct) / 10)).padEnd(10, '░');
+        lines.push(`${lbl}: ${n.toLocaleString()} tokens (${pct}%) ${bar}`);
+        rendered.add(key);
+      }
+
+      await bot.sendMessage(chatId, lines.join('\n'));
       return { handled: true, config };
     }
 

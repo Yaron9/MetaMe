@@ -21,7 +21,7 @@ const LOCK_FILE = path.join(HOME, '.metame', 'distill.lock');
 
 const { hasKey, isLocked, getTier, getWritableKeysForPrompt, estimateTokens, TOKEN_BUDGET } = require('./schema');
 const { loadPending, savePending, upsertPending, getPromotable, removePromoted, expireStale } = require('./pending-traits');
-const { writeBrainFileSafe } = require('./utils');
+const { writeBrainFileSafe, normalizeProjectPath, deriveProjectInfo } = require('./utils');
 
 // Session analytics — local skeleton extraction (zero API cost)
 let sessionAnalytics = null;
@@ -36,6 +36,64 @@ let distillEnv = {};
 try {
   distillEnv = buildDistillEnv();
 } catch { /* providers not configured — use defaults */ }
+
+function selectSignalBatch(lines) {
+  const parsed = [];
+  for (const rawLine of lines) {
+    try {
+      const entry = JSON.parse(rawLine);
+      if (entry && typeof entry === 'object') parsed.push({ rawLine, entry });
+    } catch {
+      // Drop malformed lines; they are non-recoverable noise.
+    }
+  }
+
+  if (parsed.length === 0) {
+    return {
+      batchEntries: [],
+      remainingLines: [],
+      anchorSessionId: null,
+      anchorCwd: null,
+    };
+  }
+
+  let anchorSessionId = null;
+  let anchorCwd = null;
+  for (let i = parsed.length - 1; i >= 0; i--) {
+    const e = parsed[i].entry;
+    if (!e) continue;
+    if (e.session) anchorSessionId = String(e.session);
+    if (e.cwd) anchorCwd = e.cwd;
+    if (anchorSessionId || anchorCwd) break;
+  }
+  const normalizedAnchorCwd = normalizeProjectPath(anchorCwd);
+
+  const batchEntries = [];
+  const remainingLines = [];
+  for (const row of parsed) {
+    const e = row.entry;
+    const rowSessionId = e.session ? String(e.session) : null;
+    const rowCwd = normalizeProjectPath(e.cwd);
+
+    let inBatch = true;
+    if (anchorSessionId) {
+      // Primary binding by session id; fallback to cwd for legacy signals without session.
+      inBatch = rowSessionId === anchorSessionId || (!rowSessionId && !!normalizedAnchorCwd && rowCwd === normalizedAnchorCwd);
+    } else if (normalizedAnchorCwd) {
+      inBatch = rowCwd === normalizedAnchorCwd;
+    }
+
+    if (inBatch) batchEntries.push(e);
+    else remainingLines.push(row.rawLine);
+  }
+
+  return {
+    batchEntries,
+    remainingLines,
+    anchorSessionId,
+    anchorCwd: normalizedAnchorCwd,
+  };
+}
 
 /**
  * Main distillation process.
@@ -84,13 +142,21 @@ async function distill() {
     }
   }
 
+  let remainingSignalLines = lines;
+  let ackSignals = false;
+  const finalize = () => cleanup({ ack: ackSignals, remainingLines: remainingSignalLines });
+
   try {
     // 3. Parse signals (preserve confidence + type from signal-capture)
+    const batch = selectSignalBatch(lines);
+    remainingSignalLines = batch.remainingLines;
+    const signalAnchorSessionId = batch.anchorSessionId;
+    const signalProjectInfo = deriveProjectInfo(batch.anchorCwd);
+
     const signals = [];
     let highConfidenceCount = 0;
-    for (const line of lines) {
+    for (const entry of batch.batchEntries) {
       try {
-        const entry = JSON.parse(line);
         if (entry.prompt) {
           signals.push({ text: entry.prompt, type: entry.type || 'implicit' });
           if (entry.confidence === 'high') highConfidenceCount++;
@@ -101,7 +167,8 @@ async function distill() {
     }
 
     if (signals.length === 0) {
-      cleanup();
+      ackSignals = true;
+      finalize();
       return { updated: false, behavior: null, summary: 'No valid signals.' };
     }
 
@@ -111,17 +178,49 @@ async function distill() {
     let sessionSummary = null;
     if (sessionAnalytics) {
       try {
-        const latest = sessionAnalytics.findLatestUnanalyzedSession();
-        if (latest) {
-          skeleton = sessionAnalytics.extractSkeleton(latest.path);
+        let targetSession = null;
+        if (signalAnchorSessionId && typeof sessionAnalytics.findSessionById === 'function') {
+          targetSession = sessionAnalytics.findSessionById(signalAnchorSessionId);
+          if (!targetSession) {
+            console.log(`[distill] signal session ${signalAnchorSessionId.slice(0, 8)} not found — skip session context to avoid cross-session mismatch`);
+          }
+        } else {
+          targetSession = sessionAnalytics.findLatestUnanalyzedSession();
+        }
+        if (targetSession) {
+          skeleton = sessionAnalytics.extractSkeleton(targetSession.path);
           sessionContext = sessionAnalytics.formatForPrompt(skeleton);
           // For long sessions, extract pivot points
-          sessionSummary = sessionAnalytics.summarizeSession(skeleton, latest.path);
+          sessionSummary = sessionAnalytics.summarizeSession(skeleton, targetSession.path);
         }
       } catch (e) {
         console.log(`[distill] session context extraction failed: ${e.message}`);
       }
     }
+
+    // 3c. Recall relevant long-term facts as additional cognition context (read-only).
+    let memorySection = '';
+    try {
+      const memory = require('./memory');
+      const searchFn = memory.searchFactsAsync || memory.searchFacts;
+      const signalTail = signals.slice(-6).map(s => s.text).join(' ').slice(0, 260);
+      const outcomeHint = sessionSummary && sessionSummary.outcome ? ` outcome:${sessionSummary.outcome}` : '';
+      const recallQuery = (signalTail + outcomeHint).trim();
+      if (recallQuery) {
+        const recallProject = (skeleton && skeleton.project) ? skeleton.project : signalProjectInfo.project;
+        const recallScope = (skeleton && skeleton.project_id) ? skeleton.project_id : signalProjectInfo.project_id;
+        const facts = await Promise.resolve(searchFn(recallQuery, {
+          limit: 4,
+          project: recallProject || undefined,
+          scope: recallScope || undefined,
+        }));
+        if (facts && facts.length > 0) {
+          const factLines = facts.map((f, i) => `${i + 1}. [${f.relation}] ${f.value}`).join('\n');
+          memorySection = `\nRECALLED LONG-TERM FACTS (context only, do not restate verbatim):\n${factLines}\n`;
+        }
+      }
+      memory.close();
+    } catch { /* memory optional */ }
 
     // 4. Read current profile
     let currentProfile = '';
@@ -147,7 +246,7 @@ async function distill() {
 
     // Build session context (lower priority — truncate first)
     let sessionSection = sessionContext
-      ? `\nSESSION CONTEXT (what actually happened in the latest coding session):\n${sessionContext}\n`
+      ? `\nSESSION CONTEXT (what happened in the same session/cwd as current signals):\n${sessionContext}\n`
       : '';
 
     if (sessionSummary) {
@@ -163,21 +262,44 @@ async function distill() {
     }
     let goalSection = goalContext ? `\n${goalContext}\n` : '';
 
-    // Allocate remaining budget: user messages get priority over session context
-    const sessionTokens = estimateTokens(sessionSection + goalSection);
-    let budgetForMessages = availableForContent - sessionTokens;
+    // Allocate remaining budget: user messages get priority.
+    // Context priority when tight: memorySection -> sessionSection/goalSection -> user message trimming.
+    const MEMORY_TOKEN_CAP = Math.max(120, Math.floor(availableForContent * 0.35));
+    if (memorySection && estimateTokens(memorySection) > MEMORY_TOKEN_CAP) {
+      let compactFacts = '';
+      try {
+        const lines = memorySection.split('\n').filter(Boolean).slice(0, 4);
+        compactFacts = lines.join('\n').slice(0, 900);
+      } catch { /* keep original if split fails */ }
+      memorySection = compactFacts || memorySection.slice(0, 900);
+    }
 
-    // If not enough room, drop session context first, then trim messages
+    let contextTokens = estimateTokens(sessionSection + goalSection + memorySection);
+    let budgetForMessages = availableForContent - contextTokens;
+
+    // If not enough room, drop memory context first, then session/goal, then trim messages.
+    if (budgetForMessages < 100) {
+      memorySection = '';
+      contextTokens = estimateTokens(sessionSection + goalSection);
+      budgetForMessages = availableForContent - contextTokens;
+    }
     if (budgetForMessages < 100) {
       sessionSection = '';
       goalSection = '';
       budgetForMessages = availableForContent;
     }
 
+    const HARD_SIGNAL_CHAR_CAP = 900;
+    const clampSignalText = (text, maxChars = HARD_SIGNAL_CHAR_CAP) => {
+      const s = String(text || '').trim();
+      if (!s) return '';
+      return s.length > maxChars ? s.slice(0, maxChars) : s;
+    };
+
     // Format signals: tag metacognitive and correction signals so Haiku treats them differently
     const formatSignal = (s, i) => {
       const tag = s.type === 'metacognitive' ? ' [META]' : s.type === 'correction' ? ' [CORRECTION]' : '';
-      return `${i + 1}. "${s.text}"${tag}`;
+      return `${i + 1}. "${clampSignalText(s.text)}"${tag}`;
     };
 
     // Truncate user messages to fit budget (keep most recent, they're more relevant)
@@ -193,7 +315,15 @@ async function distill() {
       userMessages = truncatedSignals.map(formatSignal).join('\n');
     }
 
-    const distillPrompt = `You are a MetaMe cognitive profile distiller. Extract COGNITIVE TRAITS and PREFERENCES — how the user thinks, decides, and communicates. NOT a memory system. Do NOT store facts.
+    // Hard fallback for single-oversized signal: always enforce budget even when only one message remains.
+    if (estimateTokens(userMessages) > budgetForMessages && truncatedSignals.length > 0) {
+      const last = truncatedSignals[truncatedSignals.length - 1];
+      const dynamicCap = Math.max(120, Math.min(HARD_SIGNAL_CHAR_CAP, Math.floor(budgetForMessages * 3)));
+      truncatedSignals = [{ ...last, text: clampSignalText(last.text, dynamicCap) }];
+      userMessages = truncatedSignals.map(formatSignal).join('\n');
+    }
+
+    const distillPrompt = `You are a MetaMe cognitive profile distiller. Extract COGNITIVE TRAITS and PREFERENCES — how the user thinks, decides, and communicates. You are not a fact archiver.
 
 CURRENT PROFILE:
 \`\`\`yaml
@@ -205,7 +335,7 @@ ${writableKeys}
 
 RECENT USER MESSAGES:
 ${userMessages}
-${sessionSection}${goalSection}
+${sessionSection}${goalSection}${memorySection}
 RULES:
 1. Extract ONLY cognitive traits, preferences, behavioral patterns — NOT facts or events.
 2. IGNORE task-specific messages. Only extract what persists across ALL sessions.
@@ -215,6 +345,7 @@ RULES:
 6. Messages tagged [META] are metacognitive signals (self-reflection, strategy shifts, error awareness). These are HIGH VALUE for cognition fields — extract decision_style, error_response, receptive_to_challenge, and behavioral patterns from them.
 7. Add _confidence and _source blocks mapping field keys to confidence level and triggering quote.
 8. NEVER extract agent identity or role definitions. Messages like "你是贾维斯/你的角色是.../you are Jarvis" define the AGENT, not the USER. The profile is about the USER's cognition only.
+9. Recalled long-term facts are context signals only. Use them to support/deny persistent cognition, never copy them as factual output.
 
 BIAS PREVENTION:
 - Single observation = STATE, not TRAIT. T3 cognition needs 3+ observations.
@@ -253,21 +384,24 @@ Do NOT repeat existing unchanged values.`;
 
     // 7. Parse result
     if (!result || result === 'NO_UPDATE') {
-      cleanup();
+      ackSignals = true;
+      finalize();
       return { updated: false, behavior: null, summary: `Analyzed ${signals.length} messages — no persistent insights found.` };
     }
 
     // Extract YAML block from response — require explicit code block, no fallback
     const yamlMatch = result.match(/```yaml\n([\s\S]*?)```/) || result.match(/```\n([\s\S]*?)```/);
     if (!yamlMatch) {
-      cleanup();
-      return { updated: false, behavior: null, summary: `Analyzed ${signals.length} messages — no persistent insights found.` };
+      ackSignals = false;
+      finalize();
+      return { updated: false, behavior: null, summary: 'Distiller returned malformed output. Signals preserved for retry.' };
     }
     const yamlContent = yamlMatch[1].trim();
 
     if (!yamlContent) {
-      cleanup();
-      return { updated: false, behavior: null, summary: 'Distiller returned empty result.' };
+      ackSignals = false;
+      finalize();
+      return { updated: false, behavior: null, summary: 'Distiller returned empty result. Signals preserved for retry.' };
     }
 
     // 8. Validate against schema + merge into profile
@@ -275,8 +409,9 @@ Do NOT repeat existing unchanged values.`;
       const yaml = require('js-yaml');
       const updates = yaml.load(yamlContent);
       if (!updates || typeof updates !== 'object') {
-        cleanup();
-        return { updated: false, behavior: null, summary: 'Distiller returned invalid data.' };
+        ackSignals = false;
+        finalize();
+        return { updated: false, behavior: null, summary: 'Distiller returned invalid data. Signals preserved for retry.' };
       }
 
       // Extract _behavior block before filtering (it's not a profile field)
@@ -286,13 +421,15 @@ Do NOT repeat existing unchanged values.`;
       // Schema whitelist filter: drop any keys not in schema or locked
       const filtered = filterBySchema(updates);
       if (Object.keys(filtered).length === 0 && !behavior) {
-        cleanup();
+        ackSignals = true;
+        finalize();
         return { updated: false, behavior: null, summary: `Analyzed ${signals.length} messages — all extracted fields rejected by schema.` };
       }
 
       // If only behavior detected but no profile updates
       if (Object.keys(filtered).length === 0 && behavior) {
-        cleanup();
+        ackSignals = true;
+        finalize();
         if (skeleton && sessionAnalytics) {
           try { sessionAnalytics.markAnalyzed(skeleton.session_id); } catch { }
         }
@@ -356,7 +493,8 @@ Do NOT repeat existing unchanged values.`;
           const alert = { ts: new Date().toISOString(), type: 'budget_exceeded', tokens, budget: TOKEN_BUDGET };
           fs.appendFileSync(alertFile, JSON.stringify(alert) + '\n', 'utf8');
         } catch { /* non-fatal */ }
-        cleanup();
+        ackSignals = true;
+        finalize();
         return { updated: false, behavior, signalCount: signals.length, summary: `Profile too large (${tokens} tokens > ${TOKEN_BUDGET}). Write rejected to prevent bloat.` };
       }
 
@@ -367,7 +505,8 @@ Do NOT repeat existing unchanged values.`;
         try { sessionAnalytics.markAnalyzed(skeleton.session_id); } catch { }
       }
 
-      cleanup();
+      ackSignals = true;
+      finalize();
       return {
         updated: true,
         behavior,
@@ -378,13 +517,15 @@ Do NOT repeat existing unchanged values.`;
       };
 
     } catch (err) {
-      cleanup();
-      return { updated: false, behavior: null, summary: `Profile merge failed: ${err.message}` };
+      ackSignals = false;
+      finalize();
+      return { updated: false, behavior: null, summary: `Profile merge failed: ${err.message}. Signals preserved for retry.` };
     }
 
   } catch (err) {
-    cleanup();
-    return { updated: false, behavior: null, summary: `Distillation error: ${err.message}` };
+    ackSignals = false;
+    finalize();
+    return { updated: false, behavior: null, summary: `Distillation error: ${err.message}. Signals preserved for retry.` };
   }
 }
 
@@ -606,10 +747,19 @@ function truncateArrays(obj) {
 
 
 /**
- * Clean up: remove buffer and lock
+ * Clean up: when ack=true, commit consumed buffer state; otherwise keep buffer intact.
+ * Always releases lock.
  */
-function cleanup() {
-  try { fs.unlinkSync(BUFFER_FILE); } catch { }
+function cleanup({ ack = false, remainingLines = null } = {}) {
+  try {
+    if (ack) {
+      if (Array.isArray(remainingLines) && remainingLines.length > 0) {
+        fs.writeFileSync(BUFFER_FILE, remainingLines.join('\n') + '\n', 'utf8');
+      } else {
+        fs.unlinkSync(BUFFER_FILE);
+      }
+    }
+  } catch { /* non-fatal */ }
   try { fs.unlinkSync(LOCK_FILE); } catch { }
 }
 

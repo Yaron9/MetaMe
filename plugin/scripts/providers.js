@@ -217,7 +217,7 @@ function listFormatted() {
  */
 function callHaiku(input, extraEnv, timeout) {
   const { execFile } = require('child_process');
-  const env = { ...process.env, ...extraEnv };
+  const env = { ...process.env, ...extraEnv, METAME_INTERNAL_PROMPT: '1' };
   delete env.CLAUDECODE;
   return new Promise((resolve, reject) => {
     const proc = execFile(
