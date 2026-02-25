@@ -30,7 +30,7 @@ if (!fs.existsSync(METAME_DIR)) {
 // Auto-deploy bundled scripts to ~/.metame/
 // IMPORTANT: daemon.yaml is USER CONFIG — never overwrite it. Only daemon-default.yaml (template) is synced.
 const scriptsDir = path.join(__dirname, 'scripts');
-const BUNDLED_BASE_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js', 'skill-evolution.js', 'memory.js', 'memory-extract.js', 'memory-search.js', 'qmd-client.js', 'session-summarize.js', 'check-macos-control-capabilities.sh'];
+const BUNDLED_BASE_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js', 'skill-evolution.js', 'memory.js', 'memory-extract.js', 'memory-search.js', 'qmd-client.js', 'session-summarize.js', 'check-macos-control-capabilities.sh', 'usage-classifier.js', 'task-board.js'];
 const DAEMON_MODULE_SCRIPTS = (() => {
   try {
     return fs.readdirSync(scriptsDir).filter((f) => /^daemon-[\w-]+\.js$/.test(f));
