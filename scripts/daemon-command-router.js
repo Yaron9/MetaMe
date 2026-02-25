@@ -544,6 +544,7 @@ function createCommandRouter(deps) {
         '/quit — 结束会话，重新加载 MCP/配置',
         '',
         `⚙️ /model [${currentModel}] /provider [${currentProvider}] /status /tasks /run /budget /reload`,
+        '🧩 /dispatch task <agent> <目标> · /task · /task <id>',
         '🧠 /memory — 记忆统计 · /memory <关键词> — 搜索事实',
         '🧬 /skill-evo — 查看/处理技能演化队列',
         `🔧 /doctor /fix /reset /mac /sh <cmd> /nosleep [${getNoSleepProcess() ? 'ON' : 'OFF'}]`,
