@@ -112,7 +112,7 @@ function createSessionStore(deps) {
       if (!line) continue;
       try {
         const d = JSON.parse(line);
-        if (d.type === 'user' && d.message && d.userType === 'external') {
+        if (d.type === 'user' && d.message && d.userType !== 'internal') {
           const content = d.message.content;
           let raw = typeof content === 'string' ? content
             : Array.isArray(content) ? (content.find(c => c.type === 'text') || {}).text || '' : '';
@@ -197,7 +197,7 @@ function createSessionStore(deps) {
                 if (!line) continue;
                 try {
                   const d = JSON.parse(line);
-                  if (d.type === 'user' && d.message && d.userType === 'external') {
+                  if (d.type === 'user' && d.message && d.userType !== 'internal') {
                     const content = d.message.content;
                     let raw = '';
                     if (typeof content === 'string') raw = content;
@@ -335,12 +335,14 @@ function createSessionStore(deps) {
 
     // [M2] 转义 markdown 特殊字符，防止用户历史消息破坏渲染
     const escapeMd = (t) => t.replace(/[_*`\\]/g, '\\$&');
+    // fallback to firstPrompt when lastUser not found in tail
+    const snippetRaw = s.lastUser || (s.firstPrompt || '').replace(/<[^>]+>/g, '').replace(/\[System hints[\s\S]*/i, '').trim().slice(0, 80);
     let line = `${index}. ${title}${title.length >= 50 ? '..' : ''}`;  // [M4] title 已有 sessionId 兜底，不会为空
     if (tags.length) line += `  ${tags.map(t => `#${t}`).join(' ')}`;
     line += `\n   📁${proj} · ${ago}`;
-    if (s.lastUser) {
-      const snippet = escapeMd(s.lastUser.replace(/\n/g, ' ').slice(0, 60));
-      line += `\n   💬 ${snippet}${s.lastUser.length > 60 ? '…' : ''}`;
+    if (snippetRaw && snippetRaw.length > 2) {
+      const snippet = escapeMd(snippetRaw.replace(/\n/g, ' ').slice(0, 60));
+      line += `\n   💬 ${snippet}${snippetRaw.length > 60 ? '…' : ''}`;
     }
     line += `\n   /resume ${shortId}`;
     return line;
@@ -360,11 +362,12 @@ function createSessionStore(deps) {
       const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 4);
       // [M2] 转义 markdown 特殊字符；[M4] title 已有 sessionId 兜底
       const escapeMd = (t) => t.replace(/[_*`\\]/g, '\\$&');
+      const snippetRaw = s.lastUser || (s.firstPrompt || '').replace(/<[^>]+>/g, '').replace(/\[System hints[\s\S]*/i, '').trim().slice(0, 80);
       let desc = `**${i + 1}. ${title}**\n📁${proj} · ${ago}`;
       if (tags.length) desc += `\n${tags.map(t => `\`${t}\``).join(' ')}`;
-      if (s.lastUser) {
-        const snippet = escapeMd(s.lastUser.replace(/\n/g, ' ').slice(0, 60));
-        desc += `\n💬 ${snippet}${s.lastUser.length > 60 ? '…' : ''}`;
+      if (snippetRaw && snippetRaw.length > 2) {
+        const snippet = escapeMd(snippetRaw.replace(/\n/g, ' ').slice(0, 60));
+        desc += `\n💬 ${snippet}${snippetRaw.length > 60 ? '…' : ''}`;
       }
       elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
       elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Switch #${shortId}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
@@ -454,7 +457,7 @@ function createSessionStore(deps) {
       const sessionFile = findSessionFile(sessionId);
       if (!sessionFile) return null;
       const stat = fs.statSync(sessionFile);
-      const tailSize = Math.min(16384, stat.size);
+      const tailSize = Math.min(262144, stat.size); // 256KB for better coverage of tool-heavy sessions
       const buf = Buffer.alloc(tailSize);
       const fd = fs.openSync(sessionFile, 'r');
       try {
