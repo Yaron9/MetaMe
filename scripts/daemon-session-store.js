@@ -106,6 +106,19 @@ function createSessionStore(deps) {
 
   function invalidateSessionCache() { _sessionCache = null; }
 
+  // 监听 ~/.claude/projects 目录，手机端新建 session 后桌面端无需重启即可感知
+  function watchSessionFiles() {
+    if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return;
+    try {
+      fs.watch(CLAUDE_PROJECTS_DIR, { recursive: true }, (evt, filename) => {
+        if (filename && filename.endsWith('.jsonl')) invalidateSessionCache();
+      });
+      log('INFO', '[session-store] fs.watch active on ' + CLAUDE_PROJECTS_DIR);
+    } catch (e) {
+      log('WARN', '[session-store] fs.watch failed, fallback to TTL cache: ' + e.message);
+    }
+  }
+
   // [M3] 共享辅助：从 reversed JSONL 行数组中提取最后一条外部用户消息（统一规则）
   function extractLastUserFromLines(lines) {
     for (const line of lines) {
@@ -211,9 +224,9 @@ function createSessionStore(deps) {
                 } catch { /* skip line */ }
               }
             }
-            // 从尾部读取：customTitle + lastUser
+            // 从尾部读取：customTitle + lastUser（256KB 覆盖 tool-heavy session）
             const stat = fs.fstatSync(fd);
-            const tailSize = Math.min(8192, stat.size);
+            const tailSize = Math.min(262144, stat.size);
             const tailBuf = Buffer.alloc(tailSize);
             fs.readSync(fd, tailBuf, 0, tailSize, stat.size - tailSize);
             const tailLines = tailBuf.toString('utf8').split('\n').reverse();
@@ -503,6 +516,7 @@ function createSessionStore(deps) {
     findSessionFile,
     clearSessionFileCache,
     truncateSessionToCheckpoint,
+    watchSessionFiles,
     listRecentSessions,
     loadSessionTags,
     getSessionFileMtime,
