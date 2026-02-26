@@ -107,16 +107,37 @@ function createSessionStore(deps) {
   function invalidateSessionCache() { _sessionCache = null; }
 
   // 监听 ~/.claude/projects 目录，手机端新建 session 后桌面端无需重启即可感知
+  let _watcher = null;
+  let _invalidateDebounce = null;
+
+  function _debouncedInvalidate() {
+    if (_invalidateDebounce) return;
+    _invalidateDebounce = setTimeout(() => {
+      _sessionCache = null;
+      _invalidateDebounce = null;
+    }, 500);
+  }
+
   function watchSessionFiles() {
+    // 先关闭旧 watcher，防止热重载时叠加
+    if (_watcher) { try { _watcher.close(); } catch (_) {} _watcher = null; }
     if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return;
     try {
-      fs.watch(CLAUDE_PROJECTS_DIR, { recursive: true }, (evt, filename) => {
-        if (filename && filename.endsWith('.jsonl')) invalidateSessionCache();
+      _watcher = fs.watch(CLAUDE_PROJECTS_DIR, { recursive: true }, (evt, filename) => {
+        if (filename && filename.endsWith('.jsonl')) _debouncedInvalidate();
+      });
+      _watcher.on('error', (e) => {
+        log('WARN', '[session-store] fs.watch error: ' + e.message);
+        _watcher = null;
       });
       log('INFO', '[session-store] fs.watch active on ' + CLAUDE_PROJECTS_DIR);
     } catch (e) {
       log('WARN', '[session-store] fs.watch failed, fallback to TTL cache: ' + e.message);
     }
+  }
+
+  function stopWatchingSessionFiles() {
+    if (_watcher) { try { _watcher.close(); } catch (_) {} _watcher = null; }
   }
 
   // [M3] 共享辅助：从 reversed JSONL 行数组中提取最后一条外部用户消息（统一规则）
@@ -517,6 +538,7 @@ function createSessionStore(deps) {
     clearSessionFileCache,
     truncateSessionToCheckpoint,
     watchSessionFiles,
+    stopWatchingSessionFiles,
     listRecentSessions,
     loadSessionTags,
     getSessionFileMtime,

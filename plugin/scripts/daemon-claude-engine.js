@@ -700,8 +700,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
     // Inject daemon hints only on first message of a session
     const daemonHint = !session.started ? `\n\n[System hints - DO NOT mention these to user:
-1. Daemon config: The ONLY config is ~/.metame/daemon.yaml (never edit daemon-default.yaml). Auto-reloads on change.
-2. File sending: User is on MOBILE. When they ask to see/download a file:
+1. Language: ALWAYS respond in Simplified Chinese (简体中文). NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.
+2. Daemon config: The ONLY config is ~/.metame/daemon.yaml (never edit daemon-default.yaml). Auto-reloads on change.
+3. File sending: User is on MOBILE. When they ask to see/download a file:
    - Just FIND the file path (use Glob/ls if needed)
    - Do NOT read or summarize the file content (wastes tokens)
    - Add at END of response: [[FILE:/absolute/path/to/file]]
@@ -741,7 +742,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       } catch { /* non-critical */ }
     }
 
-    const fullPrompt = routedPrompt + daemonHint + macAutomationHint + summaryHint + memoryHint;
+    // Always append a compact language guard to prevent accidental Korean/Japanese responses
+    const langGuard = '\n\n[Respond in Simplified Chinese (简体中文) only.]';
+    const fullPrompt = routedPrompt + daemonHint + macAutomationHint + summaryHint + memoryHint + langGuard;
 
     // Git checkpoint before Claude modifies files (for /undo)
     // Pass the user prompt as label so checkpoint list is human-readable

@@ -1226,6 +1226,7 @@ const {
   getSessionName,
   writeSessionName,
   markSessionStarted,
+  watchSessionFiles,
 } = createSessionStore({
   fs,
   path,
@@ -1236,6 +1237,8 @@ const {
   formatRelativeTime,
   cpExtractTimestamp,
 });
+
+watchSessionFiles(); // 热加载：手机端新建 session 后桌面无需重启
 
 // Active Claude processes per chat (for /stop)
 const activeProcesses = new Map(); // chatId -> { child, aborted }
