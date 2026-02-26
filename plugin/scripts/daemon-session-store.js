@@ -375,69 +375,6 @@ function createSessionStore(deps) {
     return '';
   }
 
-  /**
-   * 读取 session 的最近对话上下文：最后一条用户消息 + 最后一条 AI 消息
-   * 用于 /resume 后展示确认信息
-   */
-  function getSessionRecentContext(sessionId) {
-    try {
-      const sessionFile = findSessionFile(sessionId);
-      if (!sessionFile) return null;
-
-      const stat = fs.statSync(sessionFile);
-      const tailSize = Math.min(16384, stat.size);
-      const buf = Buffer.alloc(tailSize);
-      const fd = fs.openSync(sessionFile, 'r');
-      fs.readSync(fd, buf, 0, tailSize, stat.size - tailSize);
-      fs.closeSync(fd);
-
-      const lines = buf.toString('utf8').split('\n').reverse();
-
-      let lastUser = '';
-      let lastAssistant = '';
-
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const d = JSON.parse(line);
-          // 最后一条用户消息
-          if (!lastUser && d.type === 'user' && d.message && d.userType === 'external') {
-            const content = d.message.content;
-            let raw = '';
-            if (typeof content === 'string') raw = content;
-            else if (Array.isArray(content)) {
-              const txt = content.find(c => c.type === 'text');
-              if (txt) raw = txt.text;
-            }
-            raw = raw
-              .replace(/\[System hints[\s\S]*/i, '')
-              .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-              .trim();
-            if (raw.length > 2) lastUser = raw.slice(0, 120);
-          }
-          // 最后一条 AI 文字回复（assistant text）
-          if (!lastAssistant && d.type === 'assistant' && d.message) {
-            const content = d.message.content;
-            if (Array.isArray(content)) {
-              for (const c of content) {
-                if (c.type === 'text' && c.text && c.text.trim().length > 2) {
-                  lastAssistant = c.text.trim().slice(0, 120);
-                  break;
-                }
-              }
-            }
-          }
-          if (lastUser && lastAssistant) break;
-        } catch { /* skip bad line */ }
-      }
-
-      if (!lastUser && !lastAssistant) return null;
-      return { lastUser, lastAssistant };
-    } catch {
-      return null;
-    }
-  }
-
   function writeSessionName(sessionId, cwd, name) {
     void cwd;
     try {
@@ -480,7 +417,6 @@ function createSessionStore(deps) {
     getSessionName,
     writeSessionName,
     markSessionStarted,
-    getSessionRecentContext,
   };
 }
 
