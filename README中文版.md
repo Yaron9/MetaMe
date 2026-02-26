@@ -21,18 +21,22 @@ MetaMe 让 Claude Code 变成一个持久的 AI：记住你的思维方式，7×
 一条命令。不上云。你的机器，你的数据。
 
 ```bash
+# 一键安装（自动处理 Node.js、Claude Code、MetaMe 所有依赖）：
+curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
+
+# 或者手动安装（已有 Node.js ≥ 18）：
 npm install -g metame-cli && metame
 ```
 
 ---
 
-> ### 🚀 v1.4.0 — 分层记忆架构重大升级
+> ### 🚀 v1.4.18 — 多用户权限系统 + 会话预览增强
 >
-> MetaMe 现在拥有**三层记忆系统**，完全在后台自动运行：
-> - **长期事实**：从每次会话中提取关键决策与知识，语义召回
-> - **会话摘要缓存**：间隔 2 小时以上恢复对话时，自动注入上次的工作摘要
-> - **会话自动标签**：每次对话按主题建立索引，为未来的会话路由提供基础
-> - **Unix Socket IPC**：dispatch 延迟从 ~60s 降至 <100ms
+> - **多用户 ACL 权限系统**：角色分级（admin / member / stranger），安全地把 bot 分享给团队成员，用 `/user` 命令动态管理。
+> - **会话上下文预览**：`/resume` 和 `/sessions` 现在显示最近一条消息片段，选会话时一目了然。
+> - **Team Task 协议**：多 Agent 任务看板，跨工作区任务派发与追踪。
+> - **分层记忆架构**：三层记忆（长期事实、会话摘要、会话索引），全部自动后台运行。
+> - **Unix Socket IPC**：dispatch 延迟 <100ms。
 >
 > 零配置，开箱即用。
 
@@ -176,6 +180,10 @@ MetaMe 的技能不是静态配置——它们会生长。
 ## 快速开始
 
 ```bash
+# 一键安装（自动安装 Node.js、Claude Code 和 MetaMe 全部依赖）：
+curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
+
+# 或手动安装（已有 Node.js ≥ 18）：
 npm install -g metame-cli && metame
 ```
 
@@ -211,6 +219,8 @@ npm install -g metame-cli && metame
 | **浏览器自动化** | 内置 Playwright MCP，开箱即用。配合 Skill 实现发布、填表、抓取等自动化。 |
 | **模型中继** | 兼容任何 Anthropic API 中继。GPT-4、DeepSeek、Gemini 随意切换，零文件污染。 |
 | **元认知** | 检测行为模式（决策风格、舒适区、目标偏离），注入镜像观察。零额外 API 成本。 |
+| **多用户 ACL** | 角色分级权限（admin / member / stranger）。把 bot 安全分享给团队成员。`/user` 命令动态管理用户，配置文件热重载。 |
+| **Team Task** | 多 Agent 任务看板，支持跨工作区任务创建、分配和追踪。N-Agent 会话隔离，真正并行协作。 |
 | **应急工具** | `/doctor` 诊断、`/mac` macOS 控制工具、`/sh` 原始 shell、`/fix` 配置恢复、`/undo` 基于 git 的回退。 |
 
 ## 定义你的智能体
@@ -303,6 +313,12 @@ feishu:
 | `/memory` | 记忆统计：事实数量、已标签 session 数、DB 大小 |
 | `/memory <关键词>` | 按关键词搜索长期事实 |
 | `/doctor` | 交互式诊断 |
+| `/user add <open_id>` | 添加用户（仅 admin） |
+| `/user role <open_id> <admin\|member>` | 设置用户角色 |
+| `/user list` | 查看所有已配置用户 |
+| `/user remove <open_id>` | 移除用户 |
+| `/sessions` | 浏览最近会话，显示最后一条消息预览 |
+| `/task` | 团队任务看板——创建、列出、跨 Agent 分配任务 |
 
 ## 工作原理
 
