@@ -230,25 +230,29 @@ function createTaskScheduler(deps) {
     if (!task || !task.memory_log) return;
     try {
       const memory = require('./memory');
-      const nowIso = new Date().toISOString();
-      const projectKey = (task._project && task._project.key) || 'heartbeat';
-      const memoryId = `${task.name}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const summaryText = String(output || '(no output)').trim() || '(no output)';
-      const summary = [
-        `[heartbeat task] ${task.name}`,
-        sessionId ? `session: ${sessionId}` : '',
-        summaryText,
-      ].filter(Boolean).join('\n').slice(0, 8000);
-      const keywords = [task.name, 'heartbeat', 'evolution', nowIso.slice(0, 10)].join(',');
-      memory.saveSession({
-        sessionId: memoryId,
-        project: projectKey,
-        summary,
-        keywords,
-        mood: '',
-        tokenCost: Number(tokenCost) || 0,
-      });
-      memory.close();
+      memory.acquire();
+      try {
+        const nowIso = new Date().toISOString();
+        const projectKey = (task._project && task._project.key) || 'heartbeat';
+        const memoryId = `${task.name}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const summaryText = String(output || '(no output)').trim() || '(no output)';
+        const summary = [
+          `[heartbeat task] ${task.name}`,
+          sessionId ? `session: ${sessionId}` : '',
+          summaryText,
+        ].filter(Boolean).join('\n').slice(0, 8000);
+        const keywords = [task.name, 'heartbeat', 'evolution', nowIso.slice(0, 10)].join(',');
+        memory.saveSession({
+          sessionId: memoryId,
+          project: projectKey,
+          summary,
+          keywords,
+          mood: '',
+          tokenCost: Number(tokenCost) || 0,
+        });
+      } finally {
+        memory.release();
+      }
       log('INFO', `Task ${task.name}: memory_log saved (${memoryId})`);
     } catch (e) {
       log('WARN', `Task ${task.name}: memory_log failed: ${e.message}`);
@@ -495,11 +499,7 @@ function createTaskScheduler(deps) {
       log('WARN', `Budget exceeded, skipping workflow: ${task.name}`);
       return { success: false, error: 'budget_exceeded', output: '' };
     }
-    if (!precheck.pass) {
-      state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'skipped', output_preview: 'Precondition not met' };
-      saveState(state);
-      return { success: true, output: '(skipped)', skipped: true };
-    }
+    // precheck.pass is guaranteed true here — executeTask() already returns early when false
     const steps = task.steps || [];
     if (steps.length === 0) return { success: false, error: 'No steps defined', output: '' };
 

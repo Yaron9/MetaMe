@@ -350,8 +350,8 @@ function createExecCommandHandler(deps) {
       try {
         const result = await runCommand('npm', ['publish', `--otp=${otp}`], { cwd, timeout: 60000 });
         const exitCode = result.code;
-        const output = result.stdout;
-        const stderr = result.stderr;
+        // Merge stdout+stderr: npm may print the success line to either stream depending on version
+        const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
         if (exitCode === 0 && output.includes('+ metame-cli@')) {
           const ver = output.match(/metame-cli@([\d.]+)/);
           await bot.sendMessage(chatId, `✅ Published${ver ? ' v' + ver[1] : ''}!`);
