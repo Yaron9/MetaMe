@@ -1,5 +1,7 @@
 'use strict';
 
+const { resolveUserCtx, classifyCommandAction, handleUserCommand } = require('./daemon-user-acl');
+
 function createCommandRouter(deps) {
   const {
     loadState,
@@ -463,9 +465,24 @@ function createCommandRouter(deps) {
     return false;
   }
 
-  async function handleCommand(bot, chatId, text, config, executeTaskByName, senderId = null, readOnly = false) {
+  async function handleCommand(bot, chatId, text, config, executeTaskByName, senderId = null, userCtxOrReadOnly = false) {
     if (text && !text.startsWith('/chatid') && !text.startsWith('/myid')) log('INFO', `CMD [${String(chatId).slice(-8)}]: ${text.slice(0, 80)}`);
     const state = loadState();
+
+    // ── 兼容旧调用（readOnly: boolean）和新调用（userCtx: object）
+    let userCtx;
+    if (userCtxOrReadOnly && typeof userCtxOrReadOnly === 'object') {
+      userCtx = userCtxOrReadOnly;
+    } else {
+      // 旧调用路径：根据 boolean 生成临时 userCtx
+      const readOnlyFlag = !!userCtxOrReadOnly;
+      userCtx = resolveUserCtx(senderId, config);
+      if (readOnlyFlag && userCtx.isAdmin) {
+        // 旧代码传入 readOnly=true 时强制覆盖为只读
+        userCtx = { ...userCtx, readOnly: true, isAdmin: false, can: () => false };
+      }
+    }
+    const readOnly = userCtx.readOnly;
 
     // --- /chatid: reply with current chatId ---
     if (text === '/chatid') {
@@ -512,6 +529,31 @@ function createCommandRouter(deps) {
     if (adminResult.handled) {
       config = adminResult.config || config;
       return;
+    }
+
+    // ── /user 权限管理命令（仅 admin）────────────────────────────────────────
+    if (text && text.startsWith('/user')) {
+      if (!userCtx.isAdmin) {
+        await bot.sendMessage(chatId, '⚠️ /user 命令需要 admin 权限，请联系管理员。');
+        return;
+      }
+      const userCmdResult = handleUserCommand(text, userCtx);
+      if (userCmdResult.handled) {
+        await (bot.sendMarkdown
+          ? bot.sendMarkdown(chatId, userCmdResult.reply)
+          : bot.sendMessage(chatId, userCmdResult.reply));
+        return;
+      }
+    }
+
+    // ── member 细粒度权限检查（slash 命令）────────────────────────────────────
+    if (!userCtx.isAdmin && text && text.startsWith('/')) {
+      const action = classifyCommandAction(text);
+      if (!userCtx.can(action)) {
+        log('INFO', `ACL blocked [${userCtx.role}/${userCtx.name}] action=${action}: ${text.slice(0, 50)}`);
+        await bot.sendMessage(chatId, `⚠️ 你没有权限执行此操作（需要 ${action} 权限）`);
+        return;
+      }
     }
 
     if (await handleExecCommand({ bot, chatId, text, config, executeTaskByName })) {
