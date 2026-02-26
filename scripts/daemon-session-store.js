@@ -265,20 +265,34 @@ function createSessionStore(deps) {
       .replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F\uFFFD\uD800-\uDFFF]/g, '')
       .replace(/\s+/g, ' ')
       .trim();
+
+    // 优先级：name > summary > tags > firstPrompt > sessionId 前缀
     if (s.customTitle) return sanitize(s.customTitle).slice(0, maxLen);
+
+    if (s.summary) {
+      const t = sanitize(s.summary);
+      if (t.length > 2) return t.slice(0, maxLen);
+    }
+
     const tagEntry = sessionTags && sessionTags[s.sessionId];
     if (tagEntry && tagEntry.name) return sanitize(tagEntry.name).slice(0, maxLen);
+
     if (s.firstPrompt) {
       const clean = s.firstPrompt
         .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-        .replace(/^<[^>]+>.*?<\/[^>]+>\s*/s, '')
-        .replace(/\[System hints[\s\S]*/i, '');
-      const firstLine = clean.split('\n').map(l => l.trim()).find(l => l.length > 2) || '';
+        .replace(/\[System hints[\s\S]*/i, '')
+        .replace(/^[\s\S]*?<\/[^>]+>\s*/s, '') // 剥离 XML 头部标签
+        .trim();
+      // 取第一行非空、有实际内容（非纯符号/空格）的行
+      const firstLine = clean.split('\n')
+        .map(l => l.trim())
+        .find(l => l.length > 4 && /\p{L}/u.test(l)) || '';
       const sanitized = sanitize(firstLine);
       if (sanitized && sanitized.length > 2) return sanitized.slice(0, maxLen);
     }
-    if (s.summary) return sanitize(s.summary).slice(0, maxLen);
-    return '';
+
+    // 最终兜底：显示 session ID 前缀而非空白
+    return s.sessionId ? s.sessionId.slice(0, 8) : '';
   }
 
   function sessionRichLabel(s, index, sessionTags) {
@@ -393,6 +407,56 @@ function createSessionStore(deps) {
     }
   }
 
+  /**
+   * 读取 session 最近一条用户消息 + 最近一条 AI 回复
+   * 用于 /resume 后帮助确认切换到正确 session
+   */
+  function getSessionRecentContext(sessionId) {
+    try {
+      const sessionFile = findSessionFile(sessionId);
+      if (!sessionFile) return null;
+      const stat = fs.statSync(sessionFile);
+      const tailSize = Math.min(16384, stat.size);
+      const buf = Buffer.alloc(tailSize);
+      const fd = fs.openSync(sessionFile, 'r');
+      try {
+        fs.readSync(fd, buf, 0, tailSize, stat.size - tailSize);
+      } finally {
+        fs.closeSync(fd);
+      }
+      const lines = buf.toString('utf8').split('\n').reverse();
+      let lastUser = '';
+      let lastAssistant = '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const d = JSON.parse(line);
+          if (!lastUser && d.type === 'user' && d.message && d.userType === 'external') {
+            const content = d.message.content;
+            let raw = typeof content === 'string' ? content
+              : Array.isArray(content) ? (content.find(c => c.type === 'text') || {}).text || '' : '';
+            raw = raw.replace(/\[System hints[\s\S]*/i, '')
+              .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+            if (raw.length > 2) lastUser = raw.slice(0, 100);
+          }
+          if (!lastAssistant && d.type === 'assistant' && d.message) {
+            const content = d.message.content;
+            if (Array.isArray(content)) {
+              for (const c of content) {
+                if (c.type === 'text' && c.text && c.text.trim().length > 2) {
+                  lastAssistant = c.text.trim().slice(0, 100);
+                  break;
+                }
+              }
+            }
+          }
+          if (lastUser && lastAssistant) break;
+        } catch { /* skip bad line */ }
+      }
+      return (lastUser || lastAssistant) ? { lastUser, lastAssistant } : null;
+    } catch { return null; }
+  }
+
   function markSessionStarted(chatId) {
     const state = loadState();
     if (state.sessions[chatId]) {
@@ -417,6 +481,7 @@ function createSessionStore(deps) {
     getSessionName,
     writeSessionName,
     markSessionStarted,
+    getSessionRecentContext,
   };
 }
 
