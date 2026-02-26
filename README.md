@@ -32,7 +32,7 @@ npm install -g metame-cli && metame
 
 ---
 
-> ### 🚀 v1.4.18 — Multi-User ACL + Session Context Preview
+> ### 🚀 v1.4.19 — Multi-User ACL + Session Context Preview
 >
 > - **Multi-user permission system**: role-based ACL (admin / member / stranger) — share your bots with teammates without giving them full access. Manage users with `/user` commands.
 > - **Session context preview**: `/resume` and `/sessions` now show the last message snippet so you know exactly what to pick up.
