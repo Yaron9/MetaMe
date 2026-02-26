@@ -21,10 +21,10 @@ MetaMe 是一个驻留在你 Mac 上的 AI——记住你的思维方式，7×24
 不上云。你的机器，你的数据。
 
 ```bash
-# 一键安装（自动处理 Node.js、Claude Code、MetaMe 所有依赖）：
+# macOS / Linux / Windows WSL — 同一条命令：
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
 
-# 或者手动安装（已有 Node.js ≥ 18）：
+# 或手动安装（已有 Node.js ≥ 18）：
 npm install -g metame-cli && metame
 ```
 
@@ -193,11 +193,19 @@ MetaMe 的技能不是静态配置——它们会生长。
 
 ## 快速开始
 
+**macOS**
 ```bash
-# 一键安装（自动安装 Node.js、Claude Code 和 MetaMe 全部依赖）：
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
+```
 
-# 或手动安装（已有 Node.js ≥ 18）：
+**Linux / Windows WSL**
+```bash
+curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
+```
+> 同一条命令。脚本自动识别系统，用 apt / dnf / pacman 安装 Node.js。
+
+**已有 Node.js ≥ 18**
+```bash
 npm install -g metame-cli && metame
 ```
 
@@ -208,10 +216,37 @@ npm install -g metame-cli && metame
 | 1. 安装 & 画像 | `metame` | 首次运行：认知访谈 → 生成 `~/.claude_profile.yaml` |
 | 2. 连接手机 | 跟随设置向导 | 填入 Bot Token / 飞书凭证 → `~/.metame/daemon.yaml` |
 | 3. 启动 daemon | `metame start` | 后台 daemon 启动，bot 上线 |
-| 4. 托管到系统 | `metame daemon install-launchd` | 注册为 macOS 系统服务，崩溃自恢复 |
+| 4. 托管到系统 | macOS: `metame daemon install-launchd` · WSL/Linux: 见下方 | 系统级常驻，崩溃自恢复 |
 
 > **托管后意味着什么？**
-> MetaMe 被注册进 macOS 的 `launchd`（系统级任务调度器）。只要电脑不关机，哪怕锁屏、息屏、合盖休眠唤醒，它都会自动在后台运行。定时任务照常触发，手机消息照常收发。
+> MetaMe 注册进系统任务调度器后，只要电脑不关机，哪怕锁屏、息屏、合盖休眠唤醒，它都会自动在后台运行。定时任务照常触发，手机消息照常收发。
+
+**WSL2 / Linux 系统托管（用 systemd）：**
+
+```bash
+# 生成 systemd 服务文件
+cat > ~/.config/systemd/user/metame.service << 'EOF'
+[Unit]
+Description=MetaMe Daemon
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/env metame start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+# 启用并启动
+systemctl --user enable metame
+systemctl --user start metame
+```
+
+> WSL2 需先开启 systemd：在 `/etc/wsl.conf` 加入 `[boot]\nsystemd=true`，然后重启 WSL。
+
+**WSL 不支持的功能：**`/mac` 命令（macOS AppleScript 专属）
 
 **建立你的第一个 Agent：**
 

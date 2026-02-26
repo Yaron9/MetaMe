@@ -20,11 +20,13 @@ MetaMe is an AI that lives on your machine — remembers how you think, stays on
 
 No cloud. Your machine, your data.
 
+**macOS / Linux / Windows WSL — same command:**
 ```bash
-# One-liner (installs Node.js, Claude Code, and MetaMe automatically):
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
+```
 
-# Or if you already have Node.js:
+**Already have Node.js ≥ 18:**
+```bash
 npm install -g metame-cli && metame
 ```
 
@@ -191,11 +193,14 @@ Task fails → skill-scout finds a skill → installs → retries → succeeds
 
 ## Quick Start
 
+**macOS / Linux / Windows WSL:**
 ```bash
-# One-liner installer (handles Node.js, Claude Code, and MetaMe):
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
+```
+> Same command everywhere. The script detects your OS and uses Homebrew (macOS) or apt/dnf/pacman (Linux/WSL) to install Node.js automatically.
 
-# Or manually if you already have Node.js ≥ 18:
+**Already have Node.js ≥ 18:**
+```bash
 npm install -g metame-cli && metame
 ```
 
@@ -206,10 +211,35 @@ npm install -g metame-cli && metame
 | 1. Install & profile | `metame` | First run: cognitive interview → builds `~/.claude_profile.yaml` |
 | 2. Connect phone | Follow the setup wizard | Bot token + app credentials → `~/.metame/daemon.yaml` |
 | 3. Start daemon | `metame start` | Background daemon launches, bot goes online |
-| 4. Register with system | `metame daemon install-launchd` | Registers as a macOS system service, crash recovery included |
+| 4. Register with system | macOS: `metame daemon install-launchd` · WSL/Linux: see below | Always-on, crash recovery |
 
 > **What does system registration mean?**
-> MetaMe gets added to macOS `launchd` — the OS-level task scheduler. As long as your Mac is on (screen locked, lid closed, woken from sleep — all fine), MetaMe runs in the background automatically. Scheduled tasks fire on time. Phone messages are received and responded to. No terminal window needed.
+> Once registered, MetaMe runs in the background automatically — screen locked, lid closed, woken from sleep — as long as the machine is on. Scheduled tasks fire on time. No terminal window needed.
+
+**WSL2 / Linux — register with systemd:**
+
+```bash
+cat > ~/.config/systemd/user/metame.service << 'EOF'
+[Unit]
+Description=MetaMe Daemon
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/env metame start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user enable metame
+systemctl --user start metame
+```
+
+> WSL2 requires systemd enabled first: add `[boot]\nsystemd=true` to `/etc/wsl.conf`, then restart WSL.
+
+> **WSL limitation:** `/mac` commands (macOS AppleScript/JXA automation) are not available.
 
 **Create your first Agent:**
 
