@@ -21,18 +21,22 @@ MetaMe turns Claude Code into a persistent AI that remembers how you think, runs
 One command. No cloud. Your machine, your data.
 
 ```bash
+# One-liner (installs Node.js, Claude Code, and MetaMe automatically):
+curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
+
+# Or if you already have Node.js:
 npm install -g metame-cli && metame
 ```
 
 ---
 
-> ### 🚀 v1.4.0 — Layered Memory Architecture
+> ### 🚀 v1.4.18 — Multi-User ACL + Session Context Preview
 >
-> MetaMe now has a **three-layer memory system** that works completely in the background:
-> - **Long-term facts** extracted from every session, recalled semantically on demand
-> - **Session summary cache** — when you resume after a 2h+ gap, MetaMe injects what you were last working on
-> - **Automatic session tagging** — every conversation is indexed by topic, enabling future session routing
-> - **Unix Socket IPC** — dispatch latency dropped from ~60s to <100ms
+> - **Multi-user permission system**: role-based ACL (admin / member / stranger) — share your bots with teammates without giving them full access. Manage users with `/user` commands.
+> - **Session context preview**: `/resume` and `/sessions` now show the last message snippet so you know exactly what to pick up.
+> - **Team Task protocol**: multi-agent task board for cross-agent collaboration. Agents can dispatch and track tasks across workspaces.
+> - **Layered Memory Architecture**: three-layer memory (long-term facts, session summaries, session index) — all automatic.
+> - **Unix Socket IPC**: dispatch latency <100ms.
 >
 > Zero configuration. It just works.
 
@@ -174,6 +178,10 @@ Task fails → skill-scout finds a skill → installs → retries → succeeds
 ## Quick Start
 
 ```bash
+# One-liner installer (handles Node.js, Claude Code, and MetaMe):
+curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
+
+# Or manually if you already have Node.js ≥ 18:
 npm install -g metame-cli && metame
 ```
 
@@ -209,6 +217,8 @@ npm install -g metame-cli && metame
 | **Browser Automation** | Built-in Playwright MCP. Browser control out of the box for every user. |
 | **Provider Relay** | Route through any Anthropic-compatible API. Use GPT-4, DeepSeek, Gemini — zero config file mutation. |
 | **Metacognition** | Detects behavioral patterns (decision style, comfort zones, goal drift) and injects mirror observations. Zero extra API cost. |
+| **Multi-User ACL** | Role-based permission system (admin / member / stranger). Share bots with teammates safely. Dynamic user management via `/user` commands with hot-reload config. |
+| **Team Task** | Multi-agent task board for cross-agent collaboration. Agents can create, assign, and track tasks across workspaces. N-agent session scoping for parallel team workflows. |
 | **Emergency Tools** | `/doctor` diagnostics, `/mac` macOS control helpers, `/sh` raw shell, `/fix` config restore, `/undo` git-based rollback. |
 
 ## Defining Your Agents
@@ -301,6 +311,12 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 | `/memory` | Memory stats: fact count, session tags, DB size |
 | `/memory <keyword>` | Search long-term facts by keyword |
 | `/doctor` | Interactive diagnostics |
+| `/user add <open_id>` | Add a user (admin only) |
+| `/user role <open_id> <admin\|member>` | Set user role |
+| `/user list` | List all configured users |
+| `/user remove <open_id>` | Remove a user |
+| `/sessions` | Browse recent sessions with last message preview |
+| `/task` | Team task board — create, list, and assign tasks across agents |
 
 ## How It Works
 
