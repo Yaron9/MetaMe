@@ -162,49 +162,60 @@ function createSessionStore(deps) {
       const ENRICH_LIMIT = 20;
       for (let i = 0; i < Math.min(all.length, ENRICH_LIMIT); i++) {
         const s = all[i];
-        if (s.firstPrompt && s.customTitle) continue;
+        if (s.firstPrompt && s.customTitle && s.lastUser) continue;
         try {
           const sessionFile = findSessionFile(s.sessionId);
           if (!sessionFile) continue;
           const fd = fs.openSync(sessionFile, 'r');
-          const headBuf = Buffer.alloc(8192);
-          const headBytes = fs.readSync(fd, headBuf, 0, 8192, 0);
-          const headStr = headBuf.toString('utf8', 0, headBytes);
-          if (!s.firstPrompt) {
-            for (const line of headStr.split('\n')) {
-              if (!line) continue;
-              try {
-                const d = JSON.parse(line);
-                if (d.type === 'user' && d.message && d.userType === 'external') {
-                  const content = d.message.content;
-                  let raw = '';
-                  if (typeof content === 'string') raw = content;
-                  else if (Array.isArray(content)) {
-                    const txt = content.find(c => c.type === 'text');
-                    if (txt) raw = txt.text;
+          try {
+            const headBuf = Buffer.alloc(8192);
+            const headBytes = fs.readSync(fd, headBuf, 0, 8192, 0);
+            const headStr = headBuf.toString('utf8', 0, headBytes);
+            if (!s.firstPrompt) {
+              for (const line of headStr.split('\n')) {
+                if (!line) continue;
+                try {
+                  const d = JSON.parse(line);
+                  if (d.type === 'user' && d.message && d.userType === 'external') {
+                    const content = d.message.content;
+                    let raw = '';
+                    if (typeof content === 'string') raw = content;
+                    else if (Array.isArray(content)) {
+                      const txt = content.find(c => c.type === 'text');
+                      if (txt) raw = txt.text;
+                    }
+                    raw = raw.replace(/\n?\[System hints[\s\S]*/i, '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+                    if (raw && raw.length > 2) { s.firstPrompt = raw.slice(0, 120); break; }
                   }
-                  raw = raw.replace(/\n?\[System hints[\s\S]*/i, '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
-                  if (raw && raw.length > 2) { s.firstPrompt = raw.slice(0, 120); break; }
-                }
-              } catch { /* skip line */ }
+                } catch { /* skip line */ }
+              }
             }
-          }
-          if (!s.customTitle) {
+            // 从尾部读取：customTitle + lastUser（最后一条用户消息）
             const stat = fs.fstatSync(fd);
-            const tailSize = Math.min(4096, stat.size);
+            const tailSize = Math.min(8192, stat.size);
             const tailBuf = Buffer.alloc(tailSize);
             fs.readSync(fd, tailBuf, 0, tailSize, stat.size - tailSize);
-            const tailStr = tailBuf.toString('utf8');
-            const tailLines = tailStr.split('\n').reverse();
+            const tailLines = tailBuf.toString('utf8').split('\n').reverse();
             for (const line of tailLines) {
               if (!line) continue;
               try {
                 const d = JSON.parse(line);
-                if (d.type === 'custom-title' && d.customTitle) { s.customTitle = d.customTitle; break; }
+                if (!s.customTitle && d.type === 'custom-title' && d.customTitle) {
+                  s.customTitle = d.customTitle;
+                }
+                if (!s.lastUser && d.type === 'user' && d.message && d.userType === 'external') {
+                  const content = d.message.content;
+                  let raw = typeof content === 'string' ? content
+                    : Array.isArray(content) ? (content.find(c => c.type === 'text') || {}).text || '' : '';
+                  raw = raw.replace(/\[System hints[\s\S]*/i, '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+                  if (raw.length > 2) s.lastUser = raw.slice(0, 80);
+                }
+                if (s.customTitle && s.lastUser) break;
               } catch { /* skip */ }
             }
+          } finally {
+            fs.closeSync(fd);
           }
-          fs.closeSync(fd);
         } catch { /* non-fatal */ }
       }
 
@@ -310,6 +321,10 @@ function createSessionStore(deps) {
     else line += '(unnamed)';
     if (tags.length) line += `  ${tags.map(t => `#${t}`).join(' ')}`;
     line += `\n   📁${proj} · ${ago}`;
+    if (s.lastUser) {
+      const snippet = s.lastUser.replace(/\n/g, ' ').slice(0, 60);
+      line += `\n   💬 ${snippet}${s.lastUser.length > 60 ? '…' : ''}`;
+    }
     line += `\n   /resume ${shortId}`;
     return line;
   }
@@ -328,6 +343,10 @@ function createSessionStore(deps) {
       const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 4);
       let desc = `**${i + 1}. ${title || '(unnamed)'}**\n📁${proj} · ${ago}`;
       if (tags.length) desc += `\n${tags.map(t => `\`${t}\``).join(' ')}`;
+      if (s.lastUser) {
+        const snippet = s.lastUser.replace(/\n/g, ' ').slice(0, 60);
+        desc += `\n💬 ${snippet}${s.lastUser.length > 60 ? '…' : ''}`;
+      }
       elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
       elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Switch #${shortId}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
     });
