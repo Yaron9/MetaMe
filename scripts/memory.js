@@ -27,8 +27,10 @@ const DB_PATH = path.join(os.homedir(), '.metame', 'memory.db');
 
 // Lazy-init: only open DB when first called
 let _db = null;
+let _refCount = 0;
 
 function getDb() {
+  _refCount++;
   if (_db) return _db;
 
   const dir = path.dirname(DB_PATH);
@@ -698,7 +700,16 @@ function stats() {
  * Close the database connection (for clean shutdown).
  */
 function close() {
+  // Reference-counted close: only close the underlying DB when all callers have released.
+  // This prevents concurrent tasks from closing the shared singleton while others still use it.
+  _refCount = Math.max(0, _refCount - 1);
+  if (_refCount === 0 && _db) { _db.close(); _db = null; }
+}
+
+/** Force-close regardless of ref count. Only call on process exit. */
+function forceClose() {
+  _refCount = 0;
   if (_db) { _db.close(); _db = null; }
 }
 
-module.exports = { saveSession, saveFacts, searchFacts, searchFactsAsync, searchSessions, recentSessions, getSession, stats, close, DB_PATH };
+module.exports = { saveSession, saveFacts, searchFacts, searchFactsAsync, searchSessions, recentSessions, getSession, stats, close, forceClose, DB_PATH };

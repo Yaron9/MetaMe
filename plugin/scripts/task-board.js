@@ -73,9 +73,15 @@ function createTaskBoard(opts = {}) {
         updated_at          TEXT NOT NULL
       )
     `);
-    try { db.exec("ALTER TABLE tasks ADD COLUMN scope_id TEXT NOT NULL DEFAULT ''"); } catch {}
-    try { db.exec("ALTER TABLE tasks ADD COLUMN task_kind TEXT NOT NULL DEFAULT 'team'"); } catch {}
-    try { db.exec("ALTER TABLE tasks ADD COLUMN participants TEXT NOT NULL DEFAULT '[]'"); } catch {}
+    for (const col of [
+      "ALTER TABLE tasks ADD COLUMN scope_id TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE tasks ADD COLUMN task_kind TEXT NOT NULL DEFAULT 'team'",
+      "ALTER TABLE tasks ADD COLUMN participants TEXT NOT NULL DEFAULT '[]'",
+    ]) {
+      try { db.exec(col); } catch (e) {
+        if (!e.message.includes('duplicate column name')) throw e;
+      }
+    }
 
     db.exec(`
       CREATE TABLE IF NOT EXISTS handoffs (

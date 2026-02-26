@@ -16,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { callHaiku, buildDistillEnv } = require('./providers');
+const { writeBrainFileSafe } = require('./utils');
 
 const HOME = os.homedir();
 const SIGNAL_FILE = path.join(HOME, '.metame', 'raw_signals.jsonl');
@@ -35,7 +36,12 @@ async function run() {
       const age = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
       if (age < 300000) { console.log('[self-reflect] Already running.'); return; }
       fs.unlinkSync(LOCK_FILE);
-      lockFd = fs.openSync(LOCK_FILE, 'wx');
+      try {
+        lockFd = fs.openSync(LOCK_FILE, 'wx');
+      } catch {
+        // Another process acquired the lock
+        return;
+      }
       fs.writeSync(lockFd, process.pid.toString());
       fs.closeSync(lockFd);
     } else throw e;
@@ -105,7 +111,8 @@ ${signalText}
     try {
       result = await Promise.race([
         callHaiku(prompt, distillEnv, 60000),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 65000)),
+        // outer safety net in case callHaiku's internal timeout doesn't propagate
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 90000)),
       ]);
     } catch (e) {
       console.log(`[self-reflect] Haiku call failed: ${e.message}`);
@@ -146,7 +153,7 @@ ${signalText}
 
       // Preserve locked lines (simple approach: only update growth section)
       const dumped = yaml.dump(profile, { lineWidth: -1 });
-      fs.writeFileSync(BRAIN_FILE, dumped, 'utf8');
+      await writeBrainFileSafe(dumped);
       console.log(`[self-reflect] ${patterns.length} pattern(s) written to growth.patterns: ${patterns.join(' | ')}`);
     } catch (e) {
       console.log(`[self-reflect] Failed to write profile: ${e.message}`);

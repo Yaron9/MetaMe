@@ -192,8 +192,8 @@ function createExecCommandHandler(deps) {
         const st = loadState();
         st.tasks[taskName] = { last_run: new Date().toISOString(), status: 'success', output_preview: (output || '').slice(0, 200) };
         saveState(st);
-        let reply = output || '(no output)';
-        if (reply.length > 4000) reply = reply.slice(0, 4000) + '\n... (truncated)';
+        const truncated = truncateOutput(output, 4000);
+        const reply = truncated || '(no output)';
         await bot.sendMessage(chatId, `${taskName}\n\n${reply}`);
       }
       return true;
@@ -348,16 +348,10 @@ function createExecCommandHandler(deps) {
       const cwd = session?.cwd || HOME;
       await bot.sendMessage(chatId, `📦 npm publish --otp=${otp} ...`);
       try {
-        const child = spawn('npm', ['publish', `--otp=${otp}`], { cwd, timeout: 60000 });
-        let stdout = '';
-        let stderr = '';
-        child.stdout.on('data', d => { stdout += d; });
-        child.stderr.on('data', d => { stderr += d; });
-        const exitCode = await new Promise((resolve) => {
-          child.on('close', (code) => resolve(code));
-          child.on('error', () => resolve(1));
-        });
-        const output = (stdout + stderr).trim();
+        const result = await runCommand('npm', ['publish', `--otp=${otp}`], { cwd, timeout: 60000 });
+        const exitCode = result.code;
+        const output = result.stdout;
+        const stderr = result.stderr;
         if (exitCode === 0 && output.includes('+ metame-cli@')) {
           const ver = output.match(/metame-cli@([\d.]+)/);
           await bot.sendMessage(chatId, `✅ Published${ver ? ' v' + ver[1] : ''}!`);
