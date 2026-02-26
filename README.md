@@ -223,11 +223,40 @@ npm install -g metame-cli && metame
 
 ## Defining Your Agents
 
-Agent configs live in `~/.metame/daemon.yaml` — local only, never uploaded to npm or Git.
+MetaMe's design philosophy: **one folder = one agent.**
 
-### From your phone (recommended)
+Give an agent a directory, drop a `CLAUDE.md` inside describing its role, and you're done. The folder is the agent — it can be a code project, a blog repo, any workspace you already have.
 
-The easiest way. Open any Telegram/Feishu group and use the `/agent` wizard:
+### Option 1: Just say it (fastest)
+
+No commands needed. Tell the bot what you want in plain language — MetaMe understands intent and acts:
+
+```
+You:  Create an agent for this group, directory ~/projects/assistant
+Bot:  ✅ Agent created and bound
+      Name: assistant
+      Dir: ~/projects/assistant
+
+You:  Change this agent's role to: a writing and content creation assistant
+Bot:  ✅ Role definition updated in CLAUDE.md
+
+You:  Bind an agent to ~/AGI/MyProject
+Bot:  ✅ Agent bound
+      Name: MyProject
+      Dir: ~/AGI/MyProject
+
+You:  List all agents
+Bot:  📋 Agent list
+      🤖 assistant ◀ current
+      Dir: ~/projects/assistant
+      ...
+```
+
+Supported intents: create, bind, unbind, edit role, list — just say it naturally.
+
+### Option 2: Wizard commands
+
+Use `/agent` commands in any Telegram/Feishu group:
 
 | Command | What it does |
 |---------|-------------|
@@ -237,21 +266,7 @@ The easiest way. Open any Telegram/Feishu group and use the `/agent` wizard:
 | `/agent edit` | Update the current agent's role description (rewrites its `CLAUDE.md` section). |
 | `/agent reset` | Remove the current agent's role section. |
 
-Example flow:
-```
-You:     /agent new
-Bot:     Please select a working directory:
-         📁 ~/AGI   📁 ~/projects   📁 ~/Desktop
-You:     ~/AGI/MyProject/NewDir
-Bot:     ✅ 已新建目录：~/AGI/MyProject/NewDir
-         What should we name this agent?
-You:     小美
-Bot:     Describe 小美's role and responsibilities:
-You:     Personal assistant. Manages my calendar, drafts messages, and tracks todos.
-Bot:     ✅ Agent「小美」created. CLAUDE.md updated with role definition.
-```
-
-You can tap a button to pick an existing directory, or type any path directly in chat. If the path doesn't exist, it's created automatically. All entry points (`/agent new` wizard and `/agent bind`) validate that the directory is real before saving.
+You can tap a button to pick an existing directory, or type any path directly in chat. If the path doesn't exist, it's created automatically.
 
 ### From config file (for power users)
 
@@ -316,7 +331,10 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 | `/user list` | List all configured users |
 | `/user remove <open_id>` | Remove a user |
 | `/sessions` | Browse recent sessions with last message preview |
-| `/task` | Team task board — create, list, and assign tasks across agents |
+| `/teamtask create <agent> <goal>` | Create a cross-agent collaboration task |
+| `/teamtask` | List recent TeamTasks (last 10) |
+| `/teamtask <task_id>` | View task detail |
+| `/teamtask resume <task_id>` | Resume a task |
 
 ## How It Works
 
