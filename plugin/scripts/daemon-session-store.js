@@ -106,6 +106,25 @@ function createSessionStore(deps) {
 
   function invalidateSessionCache() { _sessionCache = null; }
 
+  // [M3] 共享辅助：从 reversed JSONL 行数组中提取最后一条外部用户消息（统一规则）
+  function extractLastUserFromLines(lines) {
+    for (const line of lines) {
+      if (!line) continue;
+      try {
+        const d = JSON.parse(line);
+        if (d.type === 'user' && d.message && d.userType === 'external') {
+          const content = d.message.content;
+          let raw = typeof content === 'string' ? content
+            : Array.isArray(content) ? (content.find(c => c.type === 'text') || {}).text || '' : '';
+          raw = raw.replace(/\[System hints[\s\S]*/i, '')
+            .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+          if (raw.length > 2) return raw.slice(0, 80);
+        }
+      } catch { /* skip */ }
+    }
+    return '';
+  }
+
   function scanAllSessions() {
     if (_sessionCache && (Date.now() - _sessionCacheTime < SESSION_CACHE_TTL)) return _sessionCache;
     try {
@@ -162,16 +181,18 @@ function createSessionStore(deps) {
       const ENRICH_LIMIT = 20;
       for (let i = 0; i < Math.min(all.length, ENRICH_LIMIT); i++) {
         const s = all[i];
-        if (s.firstPrompt && s.customTitle && s.lastUser) continue;
+        // [M1] 用 _enriched 标志替代三字段联合判断
+        // customTitle 是可选的，无命名 session 合法值为 undefined，不能作为 skip 条件
+        if (s._enriched) continue;
         try {
           const sessionFile = findSessionFile(s.sessionId);
           if (!sessionFile) continue;
           const fd = fs.openSync(sessionFile, 'r');
           try {
-            const headBuf = Buffer.alloc(8192);
-            const headBytes = fs.readSync(fd, headBuf, 0, 8192, 0);
-            const headStr = headBuf.toString('utf8', 0, headBytes);
             if (!s.firstPrompt) {
+              const headBuf = Buffer.alloc(8192);
+              const headBytes = fs.readSync(fd, headBuf, 0, 8192, 0);
+              const headStr = headBuf.toString('utf8', 0, headBytes);
               for (const line of headStr.split('\n')) {
                 if (!line) continue;
                 try {
@@ -190,32 +211,28 @@ function createSessionStore(deps) {
                 } catch { /* skip line */ }
               }
             }
-            // 从尾部读取：customTitle + lastUser（最后一条用户消息）
+            // 从尾部读取：customTitle + lastUser
             const stat = fs.fstatSync(fd);
             const tailSize = Math.min(8192, stat.size);
             const tailBuf = Buffer.alloc(tailSize);
             fs.readSync(fd, tailBuf, 0, tailSize, stat.size - tailSize);
             const tailLines = tailBuf.toString('utf8').split('\n').reverse();
-            for (const line of tailLines) {
-              if (!line) continue;
-              try {
-                const d = JSON.parse(line);
-                if (!s.customTitle && d.type === 'custom-title' && d.customTitle) {
-                  s.customTitle = d.customTitle;
-                }
-                if (!s.lastUser && d.type === 'user' && d.message && d.userType === 'external') {
-                  const content = d.message.content;
-                  let raw = typeof content === 'string' ? content
-                    : Array.isArray(content) ? (content.find(c => c.type === 'text') || {}).text || '' : '';
-                  raw = raw.replace(/\[System hints[\s\S]*/i, '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
-                  if (raw.length > 2) s.lastUser = raw.slice(0, 80);
-                }
-                if (s.customTitle && s.lastUser) break;
-              } catch { /* skip */ }
+            if (!s.customTitle) {
+              for (const line of tailLines) {
+                if (!line) continue;
+                try {
+                  const d = JSON.parse(line);
+                  if (d.type === 'custom-title' && d.customTitle) { s.customTitle = d.customTitle; break; }
+                } catch { /* skip */ }
+              }
+            }
+            if (!s.lastUser) {
+              s.lastUser = extractLastUserFromLines(tailLines);
             }
           } finally {
             fs.closeSync(fd);
           }
+          s._enriched = true; // [M1] 标记已完成富化，下次跳过
         } catch { /* non-fatal */ }
       }
 
@@ -316,13 +333,13 @@ function createSessionStore(deps) {
     const shortId = s.sessionId.slice(0, 8);
     const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 3);
 
-    let line = `${index}. `;
-    if (title) line += `${title}${title.length >= 50 ? '..' : ''}`;
-    else line += '(unnamed)';
+    // [M2] 转义 markdown 特殊字符，防止用户历史消息破坏渲染
+    const escapeMd = (t) => t.replace(/[_*`\\]/g, '\\$&');
+    let line = `${index}. ${title}${title.length >= 50 ? '..' : ''}`;  // [M4] title 已有 sessionId 兜底，不会为空
     if (tags.length) line += `  ${tags.map(t => `#${t}`).join(' ')}`;
     line += `\n   📁${proj} · ${ago}`;
     if (s.lastUser) {
-      const snippet = s.lastUser.replace(/\n/g, ' ').slice(0, 60);
+      const snippet = escapeMd(s.lastUser.replace(/\n/g, ' ').slice(0, 60));
       line += `\n   💬 ${snippet}${s.lastUser.length > 60 ? '…' : ''}`;
     }
     line += `\n   /resume ${shortId}`;
@@ -341,10 +358,12 @@ function createSessionStore(deps) {
       const ago = formatRelativeTime(new Date(timeMs).toISOString());
       const shortId = s.sessionId.slice(0, 6);
       const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 4);
-      let desc = `**${i + 1}. ${title || '(unnamed)'}**\n📁${proj} · ${ago}`;
+      // [M2] 转义 markdown 特殊字符；[M4] title 已有 sessionId 兜底
+      const escapeMd = (t) => t.replace(/[_*`\\]/g, '\\$&');
+      let desc = `**${i + 1}. ${title}**\n📁${proj} · ${ago}`;
       if (tags.length) desc += `\n${tags.map(t => `\`${t}\``).join(' ')}`;
       if (s.lastUser) {
-        const snippet = s.lastUser.replace(/\n/g, ' ').slice(0, 60);
+        const snippet = escapeMd(s.lastUser.replace(/\n/g, ' ').slice(0, 60));
         desc += `\n💬 ${snippet}${s.lastUser.length > 60 ? '…' : ''}`;
       }
       elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
@@ -444,32 +463,25 @@ function createSessionStore(deps) {
         fs.closeSync(fd);
       }
       const lines = buf.toString('utf8').split('\n').reverse();
-      let lastUser = '';
+      // [M3] 复用共享函数，统一截取逻辑
+      const lastUser = extractLastUserFromLines(lines);
       let lastAssistant = '';
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
           const d = JSON.parse(line);
-          if (!lastUser && d.type === 'user' && d.message && d.userType === 'external') {
-            const content = d.message.content;
-            let raw = typeof content === 'string' ? content
-              : Array.isArray(content) ? (content.find(c => c.type === 'text') || {}).text || '' : '';
-            raw = raw.replace(/\[System hints[\s\S]*/i, '')
-              .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
-            if (raw.length > 2) lastUser = raw.slice(0, 100);
-          }
           if (!lastAssistant && d.type === 'assistant' && d.message) {
             const content = d.message.content;
             if (Array.isArray(content)) {
               for (const c of content) {
                 if (c.type === 'text' && c.text && c.text.trim().length > 2) {
-                  lastAssistant = c.text.trim().slice(0, 100);
+                  lastAssistant = c.text.trim().slice(0, 80);
                   break;
                 }
               }
             }
           }
-          if (lastUser && lastAssistant) break;
+          if (lastAssistant) break;
         } catch { /* skip bad line */ }
       }
       return (lastUser || lastAssistant) ? { lastUser, lastAssistant } : null;
