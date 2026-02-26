@@ -25,6 +25,13 @@
 - 需确认：发布（npm/git push）、核心架构重写、删除功能或数据。
 - 永不做：无备份删除关键数据、覆盖锁定字段、破坏性系统操作。
 
+## 代码目录规则（必读）
+
+- **源文件在 `scripts/`**，`plugin/scripts/` 是分发副本，`~/.metame/` 是运行副本
+- 所有修改必须在 `scripts/` 进行，改完运行 `node index.js` 自动部署到 `~/.metame/`
+- 新增文件同理：在 `scripts/` 创建，`index.js` 会自动扫描 `daemon-*.js` 并部署
+- **绝不直接改 `plugin/scripts/` 或 `~/.metame/`**，重新 sync 会覆盖
+
 ## 项目维护手册入口
 
 项目维护手册见：`METAME_MAINTENANCE.md`
