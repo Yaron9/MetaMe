@@ -14,11 +14,11 @@
   <a href="./README.md">English</a> | <a href="./README中文版.md">中文</a>
 </p>
 
-> **Claude Code that knows you — and works from your phone.**
+> **Your digital twin. Lives on your Mac.**
 
-MetaMe turns Claude Code into a persistent AI that remembers how you think, runs on your Mac 24/7, and takes commands from your phone via Telegram or Feishu.
+MetaMe is an AI that lives on your machine — remembers how you think, stays online 24/7, and takes commands from your phone via Telegram or Feishu. Not in the cloud. In your computer.
 
-One command. No cloud. Your machine, your data.
+No cloud. Your machine, your data.
 
 ```bash
 # One-liner (installs Node.js, Claude Code, and MetaMe automatically):
@@ -155,7 +155,21 @@ Chain skills into multi-step workflows — research → write → publish — fu
           prompt: "Publish it"
 ```
 
-Task options: `interval` (every N seconds/minutes/hours/days), `at` (fixed local `HH:MM`), `days` (optional day filter), `require_idle` (defer when you're active, retry on next heartbeat tick), `precondition` (shell guard — skip if false, zero tokens), `notify` (push result to phone), `model`, `cwd`, `allowedTools`, `timeout`.
+**Task options:**
+
+| Option | Description |
+|--------|-------------|
+| `at` | Fixed-time trigger, e.g. `"09:30"` (local time) |
+| `days` | Day filter, e.g. `"weekdays"`, `[mon, wed, fri]` |
+| `interval` | Interval trigger, e.g. `"4h"`, `"30m"` |
+| `require_idle` | Skip if you're active; retry on next heartbeat tick |
+| `precondition` | Shell guard — skip task if command returns non-zero (zero tokens consumed) |
+| `notify` | Push result to phone when done |
+| `model` | Override model, e.g. `"sonnet"`, `"haiku"` |
+| `cwd` | Working directory for the task |
+| `timeout` | Max run time |
+
+> **Scheduled tasks require system registration.** Run `metame daemon install-launchd` and tasks fire on schedule even with the screen locked or the lid closed — as long as the Mac is on.
 
 ### 5. Skills That Evolve Themselves
 
@@ -192,7 +206,10 @@ npm install -g metame-cli && metame
 | 1. Install & profile | `metame` | First run: cognitive interview → builds `~/.claude_profile.yaml` |
 | 2. Connect phone | Follow the setup wizard | Bot token + app credentials → `~/.metame/daemon.yaml` |
 | 3. Start daemon | `metame start` | Background daemon launches, bot goes online |
-| 4. Auto-start | `metame daemon install-launchd` | Survives reboot + crash recovery |
+| 4. Register with system | `metame daemon install-launchd` | Registers as a macOS system service, crash recovery included |
+
+> **What does system registration mean?**
+> MetaMe gets added to macOS `launchd` — the OS-level task scheduler. As long as your Mac is on (screen locked, lid closed, woken from sleep — all fine), MetaMe runs in the background automatically. Scheduled tasks fire on time. Phone messages are received and responded to. No terminal window needed.
 
 **Create your first Agent:**
 
