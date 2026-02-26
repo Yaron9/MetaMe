@@ -14,11 +14,11 @@
   <a href="./README.md">English</a> | <a href="./README中文版.md">中文</a>
 </p>
 
-> **一个记得你是谁的 Claude Code，还能用手机指挥它干活。**
+> **住在你电脑里的数字分身。**
 
-MetaMe 让 Claude Code 变成一个持久的 AI：记住你的思维方式，7×24 在你的 Mac 上待命，通过 Telegram 或飞书接受手机指令。
+MetaMe 是一个驻留在你 Mac 上的 AI——记住你的思维方式，7×24 待命，通过 Telegram 或飞书随时接受手机指令。它不在云端，它住在你的机器里。
 
-一条命令。不上云。你的机器，你的数据。
+不上云。你的机器，你的数据。
 
 ```bash
 # 一键安装（自动处理 Node.js、Claude Code、MetaMe 所有依赖）：
@@ -155,7 +155,21 @@ heartbeat:
           prompt: "发布文章"
 ```
 
-任务参数：`interval`（按间隔执行）、`at`（本地固定时间 `HH:MM`）、`days`（可选星期过滤），以及 `require_idle`（用户活跃时推迟，并在下一次心跳重试）、`precondition`（shell 守卫，条件不满足直接跳过）、`notify`（完成后推送手机）、`model`、`cwd`、`allowedTools`、`timeout`。
+**任务参数一览：**
+
+| 参数 | 说明 |
+|------|------|
+| `at` | 固定时间触发，如 `"09:30"`（本地时间） |
+| `days` | 星期过滤，如 `"weekdays"`、`[mon, wed, fri]` |
+| `interval` | 按间隔触发，如 `"4h"`、`"30m"` |
+| `require_idle` | 用户活跃时推迟，下次心跳重试 |
+| `precondition` | shell 守卫命令，返回非0时跳过任务（零 token 消耗） |
+| `notify` | 完成后推送结果到手机 |
+| `model` | 指定模型，如 `"sonnet"`、`"haiku"` |
+| `cwd` | 任务运行目录 |
+| `timeout` | 任务超时时间 |
+
+> **定时任务依赖 launchd 常驻**。运行 `metame daemon install-launchd` 后，任务在息屏、锁屏状态下依然按时触发——只要电脑不关机。
 
 ### 5. 会自我进化的技能系统
 
@@ -194,7 +208,10 @@ npm install -g metame-cli && metame
 | 1. 安装 & 画像 | `metame` | 首次运行：认知访谈 → 生成 `~/.claude_profile.yaml` |
 | 2. 连接手机 | 跟随设置向导 | 填入 Bot Token / 飞书凭证 → `~/.metame/daemon.yaml` |
 | 3. 启动 daemon | `metame start` | 后台 daemon 启动，bot 上线 |
-| 4. 开机自启 | `metame daemon install-launchd` | 重启不丢、崩溃自恢复 |
+| 4. 托管到系统 | `metame daemon install-launchd` | 注册为 macOS 系统服务，崩溃自恢复 |
+
+> **托管后意味着什么？**
+> MetaMe 被注册进 macOS 的 `launchd`（系统级任务调度器）。只要电脑不关机，哪怕锁屏、息屏、合盖休眠唤醒，它都会自动在后台运行。定时任务照常触发，手机消息照常收发。
 
 **建立你的第一个 Agent：**
 
