@@ -18,7 +18,6 @@ function createAgentCommandHandler(deps) {
     sessionLabel,
     loadSessionTags,
     sessionRichLabel,
-    getSessionRecentContext,
     pendingBinds,
     pendingAgentFlows,
     doBindAgent,
@@ -250,25 +249,7 @@ function createAgentCommandHandler(deps) {
       saveState(state2);
       const name = fullMatch.customTitle;
       const label = name || (fullMatch.summary || fullMatch.firstPrompt || '').slice(0, 40) || sessionId.slice(0, 8);
-
-      // 读取最近对话上下文，帮助确认切换到正确的 session
-      const ctx = getSessionRecentContext ? getSessionRecentContext(sessionId) : null;
-      let confirmMsg = `✅ 已切换: **${label}**\n📁 ${path.basename(cwd)}`;
-      if (ctx) {
-        if (ctx.lastUser) {
-          const userSnippet = ctx.lastUser.replace(/\n/g, ' ').slice(0, 80);
-          confirmMsg += `\n\n💬 上次你说: _${userSnippet}${ctx.lastUser.length > 80 ? '…' : ''}_`;
-        }
-        if (ctx.lastAssistant) {
-          const aiSnippet = ctx.lastAssistant.replace(/\n/g, ' ').slice(0, 80);
-          confirmMsg += `\n🤖 上次回复: ${aiSnippet}${ctx.lastAssistant.length > 80 ? '…' : ''}`;
-        }
-      }
-      if (bot.sendMarkdown) {
-        await bot.sendMarkdown(chatId, confirmMsg);
-      } else {
-        await bot.sendMessage(chatId, confirmMsg.replace(/[_*`]/g, ''));
-      }
+      await bot.sendMessage(chatId, `Resumed: ${label}\nWorkdir: ${cwd}`);
       return true;
     }
 

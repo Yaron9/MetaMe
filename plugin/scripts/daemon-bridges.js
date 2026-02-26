@@ -1,7 +1,5 @@
 'use strict';
 
-const { resolveUserCtx } = require('./daemon-user-acl');
-
 function createBridgeStarter(deps) {
   const {
     fs,
@@ -171,28 +169,17 @@ function createBridgeStarter(deps) {
           return;
         }
 
-        // ── 用户身份解析（ACL 注入）────────────────────────────────────────
-        const userCtx = resolveUserCtx(senderId, liveCfg);
-        log('INFO', `Feishu: user [${userCtx.name}] role=${userCtx.role} id=${senderId || 'N/A'}`);
-
-        if (!userCtx.isAdmin && !isBindCmd) {
-          if (text && text.startsWith('/') && !text.startsWith('/user whoami') && !text.startsWith('/myid') && !text.startsWith('/chatid')) {
-            // slash 命令需要权限检查，非 admin 一律拦截（具体 action 检查在 router 层）
-            log('INFO', `Feishu: non-admin slash blocked [${userCtx.role}] ${senderId}: ${(text || '').slice(0, 50)}`);
-            // stranger 完全拦截，member 交由 router 细粒度判断
-            if (userCtx.isStranger) {
-              await (bot.sendMarkdown
-                ? bot.sendMarkdown(chatId, '⚠️ 你没有权限执行此操作，请联系管理员。')
-                : bot.sendMessage(chatId, '⚠️ 你没有权限执行此操作，请联系管理员。'));
-              return;
-            }
-          }
-          if (userCtx.isStranger && text && !text.startsWith('/myid') && !text.startsWith('/chatid')) {
-            // stranger 只允许 /myid /chatid，其他进 readOnly 问答
-            log('INFO', `Feishu: stranger query [readOnly] ${senderId}: ${(text || '').slice(0, 50)}`);
-            if (text) await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, senderId, userCtx);
+        const operatorIds = (liveCfg.feishu && liveCfg.feishu.operator_ids) || [];
+        if (operatorIds.length > 0 && senderId && !operatorIds.includes(senderId) && !isBindCmd) {
+          log('INFO', `Feishu: read-only message from non-operator ${senderId} in ${chatId}: ${(text || '').slice(0, 50)}`);
+          if (text && text.startsWith('/')) {
+            await (bot.sendMarkdown ? bot.sendMarkdown(chatId, '⚠️ 该操作需要授权，请联系管理员。') : bot.sendMessage(chatId, '⚠️ 该操作需要授权，请联系管理员。'));
             return;
           }
+          if (text) {
+            await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, senderId, true);
+          }
+          return;
         }
 
         if (fileInfo && fileInfo.fileKey) {
@@ -211,7 +198,7 @@ function createBridgeStarter(deps) {
               ? `User uploaded a file to the project: ${destPath}\nUser says: "${text}"`
               : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
 
-            await handleCommand(bot, chatId, prompt, liveCfg, executeTaskByName, senderId, userCtx);
+            await handleCommand(bot, chatId, prompt, liveCfg, executeTaskByName);
           } catch (err) {
             log('ERROR', `Feishu file download failed: ${err.message}`);
             await bot.sendMessage(chatId, `❌ Download failed: ${err.message}`);
@@ -231,7 +218,7 @@ function createBridgeStarter(deps) {
               log('INFO', `Session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
             }
           }
-          await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, senderId, userCtx);
+          await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, senderId);
         }
       });
 
