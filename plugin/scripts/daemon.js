@@ -1748,7 +1748,9 @@ async function main() {
     setConfig: (next) => { config = next; },
     getHeartbeatTimer: () => heartbeatTimer,
     setHeartbeatTimer: (next) => { heartbeatTimer = next; },
-    onRestartRequested: () => process.exit(0),
+    onRestartRequested: () => {
+      notifyActiveUsers('代码热更新').catch(() => {}).finally(() => process.exit(0));
+    },
   });
   // Expose reloadConfig to handleCommand via closure
   global._metameReload = runtimeWatchers.reloadConfig;
@@ -1762,9 +1764,26 @@ async function main() {
   await sleep(1500); // Let polling settle
   await adminNotifyFn('✅ Daemon ready.').catch(() => { });
 
+  // Notify active users before restart/shutdown
+  async function notifyActiveUsers(reason) {
+    if (activeProcesses.size === 0) return;
+    const bots = [];
+    if (feishuBridge && feishuBridge.bot) bots.push(feishuBridge.bot);
+    if (telegramBridge && telegramBridge.bot) bots.push(telegramBridge.bot);
+    if (bots.length === 0) return;
+    const notifs = [];
+    for (const [cid] of activeProcesses) {
+      for (const bot of bots) {
+        notifs.push(bot.sendMessage(cid, `⚠️ 系统正在重启（${reason}），任务已中断，请重新发送指令。`).catch(() => {}));
+      }
+    }
+    await Promise.race([Promise.all(notifs), new Promise(r => setTimeout(r, 3000))]);
+  }
+
   // Graceful shutdown
-  const shutdown = () => {
+  const shutdown = async () => {
     log('INFO', 'Daemon shutting down...');
+    await notifyActiveUsers('关闭').catch(() => {});
     runtimeWatchers.stop();
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (dispatchSocket) try { dispatchSocket.close(); } catch { }
@@ -1787,8 +1806,8 @@ async function main() {
     process.exit(0);
   };
 
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', () => { shutdown().catch(() => process.exit(0)); });
+  process.on('SIGINT', () => { shutdown().catch(() => process.exit(0)); });
 
   // Keep alive
   log('INFO', 'Daemon running. Send SIGTERM to stop.');
