@@ -755,7 +755,14 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
    - Do NOT read or summarize the file content (wastes tokens)
    - Add at END of response: [[FILE:/absolute/path/to/file]]
    - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
-   - Multiple files: use multiple [[FILE:...]] tags${zdpHint ? '\n4. Explanation depth:\n' + zdpHint : ''}]` : '';
+   - Multiple files: use multiple [[FILE:...]] tags${zdpHint ? '\n4. Explanation depth:\n' + zdpHint : ''}
+5. Knowledge retrieval: When you need context about a specific topic, past decisions, or lessons, call:
+   node ~/.metame/memory-search.js "关键词1" "keyword2"
+   Results include facts (entity/relation/value) and session summaries. Use before answering complex questions about MetaMe architecture or past decisions.
+6. Active memory: After confirming a new insight, bug root cause, or user preference, persist it with:
+   node ~/.metame/memory-write.js "Entity.sub" "relation_type" "value (20-300 chars)"
+   Valid relations: tech_decision, bug_lesson, arch_convention, config_fact, config_change, user_pref, workflow_rule, project_milestone
+   Only write verified facts. Do not write speculative or process-description entries.]` : '';
 
     const routedPrompt = skill ? `/${skill} ${prompt}` : prompt;
 
@@ -768,7 +775,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 2. Read/query actions can execute directly.
 3. Before any side-effect action (send email, create/delete/modify calendar event, delete/move files, app quit, system sleep), first show a short execution preview and require explicit user confirmation.
 4. Keep output concise: success/failure + key result only.
-5. If permission is missing, guide user to run /mac perms open then retry.]`;
+5. If permission is missing, guide user to run /mac perms open then retry.
+6. Before executing high-risk or non-obvious Bash commands (rm, kill, git reset, overwrite configs), prepend a single-line [Why] explanation. Skip for routine commands (ls, cat, grep).]`;
     }
 
     // P2-B: inject session summary when resuming after a 2h+ gap
