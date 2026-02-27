@@ -636,15 +636,6 @@ function strategicMerge(profile, updates, lockedKeys, pendingTraits, confidenceM
         break;
       }
 
-      case 'T4':
-        setNested(result, key, value);
-
-        // Auto-set focus_since when focus changes
-        if (key === 'context.focus') {
-          setNested(result, 'context.focus_since', new Date().toISOString().slice(0, 10));
-        }
-        break;
-
       case 'T5':
         setNested(result, key, value);
         break;

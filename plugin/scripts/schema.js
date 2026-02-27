@@ -11,8 +11,11 @@
  *   T1 — Identity (LOCKED, never auto-modify)
  *   T2 — Core Values (LOCKED, deep personality)
  *   T3 — Preferences (auto-writable, needs confidence)
- *   T4 — Context (free overwrite, current state)
  *   T5 — Evolution (system-managed, strict limits)
+ *
+ * NOTE: T4 (Context/Status) was intentionally removed. Work state (focus,
+ * active_projects, blockers) belongs in ~/.metame/memory/NOW.md (task
+ * whiteboard), not in the cognitive profile. This prevents role pollution.
  */
 
 const SCHEMA = {
@@ -58,15 +61,6 @@ const SCHEMA = {
     maxKeys: 20,
     description: 'Per-domain skill level for ZPD-based explanation depth'
   },
-
-  // === T4: Context ===
-  'context.focus': { tier: 'T4', type: 'string', maxChars: 80 },
-  'context.focus_since': { tier: 'T4', type: 'string' },
-  'context.active_projects': { tier: 'T4', type: 'array', maxItems: 5 },
-  'context.blockers': { tier: 'T4', type: 'array', maxItems: 3 },
-  'context.energy': { tier: 'T4', type: 'enum', values: ['high', 'medium', 'low', null] },
-  'status.focus': { tier: 'T4', type: 'string', maxChars: 80 },
-  'status.language': { tier: 'T4', type: 'string' },
 
   // === T5: Evolution (system-managed) ===
   'evolution.last_distill': { tier: 'T5', type: 'string' },
