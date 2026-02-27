@@ -1,3 +1,7 @@
+<!-- METAME:START -->
+
+[MetaMe reflection: 这是第14次session。如果session自然结束，可以附加一句：🪞 一个词形容这次session的感受？ 只在session即将结束时说一次。如果用户没回应就不要追问。]
+<!-- METAME:END -->
 ---
 
 # JARVIS — 系统级 AI 总管

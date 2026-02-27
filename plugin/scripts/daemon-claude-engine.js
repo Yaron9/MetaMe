@@ -103,7 +103,7 @@ function createClaudeEngine(deps) {
       const existsInCwd = recentInCwd.some(s => s.sessionId === safeSessionId);
       return cacheSessionCwdValidation(cacheKey, existsInCwd);
     } catch {
-      // Conservative fallback: if validation infra fails, avoid false positives by preserving current session.
+      // Conservative fallback: if validation infra fails, avoid false negatives by preserving current session.
       return cacheSessionCwdValidation(cacheKey, true);
     }
   }
@@ -512,6 +512,23 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
    * Shared ask logic — full Claude Code session (stateful, with tools)
    * Now uses spawn (async) instead of execSync to allow parallel requests.
    */
+
+  /**
+   * Reset active provider back to anthropic/opus and reload config.
+   * Returns the freshly loaded config so callers can reassign their local variable.
+   */
+  function fallbackToDefaultProvider(reason) {
+    log('WARN', `Falling back to anthropic/opus — reason: ${reason}`);
+    if (providerMod && providerMod.getActiveName() !== 'anthropic') {
+      providerMod.setActive('anthropic');
+    }
+    const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
+    if (!cfg.daemon) cfg.daemon = {};
+    cfg.daemon.model = 'opus';
+    writeConfigSafe(cfg);
+    return loadConfig();
+  }
+
   async function askClaude(bot, chatId, prompt, config, readOnly = false) {
     log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
     // Track interaction time for idle/sleep detection
@@ -819,14 +836,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const builtinModelsCheck = ['sonnet', 'opus', 'haiku'];
       const looksLikeError = output.length < 300 && /\b(not found|invalid model|unauthorized|401|403|404|error|failed)\b/i.test(output);
       if (looksLikeError && (activeProvCheck !== 'anthropic' || !builtinModelsCheck.includes(model))) {
-        log('WARN', `Custom provider/model may have failed (${activeProvCheck}/${model}), output: ${output.slice(0, 200)}`);
         try {
-          if (providerMod && activeProvCheck !== 'anthropic') providerMod.setActive('anthropic');
-          const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
-          if (!cfg.daemon) cfg.daemon = {};
-          cfg.daemon.model = 'opus';
-          writeConfigSafe(cfg);
-          config = loadConfig();
+          config = fallbackToDefaultProvider(`output looks like error for ${activeProvCheck}/${model}`);
           await bot.sendMessage(chatId, `⚠️ ${activeProvCheck}/${model} 疑似失败，已回退到 anthropic/opus\n输出: ${output.slice(0, 150)}`);
         } catch (fbErr) {
           log('ERROR', `Fallback failed: ${fbErr.message}`);
@@ -925,14 +936,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         const activeProv = providerMod ? providerMod.getActiveName() : 'anthropic';
         const builtinModels = ['sonnet', 'opus', 'haiku'];
         if (activeProv !== 'anthropic' || !builtinModels.includes(model)) {
-          log('WARN', `Custom provider/model failed (${activeProv}/${model}), falling back to anthropic/opus`);
           try {
-            if (providerMod && activeProv !== 'anthropic') providerMod.setActive('anthropic');
-            const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
-            if (!cfg.daemon) cfg.daemon = {};
-            cfg.daemon.model = 'opus';
-            writeConfigSafe(cfg);
-            config = loadConfig();
+            config = fallbackToDefaultProvider(`${activeProv}/${model} error: ${errMsg.slice(0, 100)}`);
             await bot.sendMessage(chatId, `⚠️ ${activeProv}/${model} 失败，已回退到 anthropic/opus\n原因: ${errMsg.slice(0, 100)}`);
           } catch (fallbackErr) {
             log('ERROR', `Fallback failed: ${fallbackErr.message}`);
@@ -944,8 +949,6 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         return { ok: false, error: errMsg };
       }
     }
-
-    return { ok: true };
   }
 
   return {
