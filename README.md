@@ -243,11 +243,11 @@ systemctl --user start metame
 
 **Create your first Agent:**
 
-1. Create a group chat in Telegram/Feishu, add your bot
-2. Send `/agent bind <name>` in the group (e.g. `/agent bind personal`)
-3. Pick a working directory from the buttons, or type a path directly — non-existent directories are created automatically → done
+1. In any existing group, say: `Create an agent, directory ~/xxx, responsible for xxx`
+2. Bot replies: ✅ Agent created — **send `/activate` in your new group to bind it**
+3. Create a new group, add the bot, send `/activate` → binding complete
 
-> Want more Agents? Repeat: new group → add bot → `/agent bind <name>`. Each group = independent AI workspace.
+> Want more Agents? Repeat: create in any group → new target group → `/activate`. Each group = independent AI workspace.
 
 ---
 
@@ -274,23 +274,26 @@ MetaMe's design philosophy: **one folder = one agent.**
 
 Give an agent a directory, drop a `CLAUDE.md` inside describing its role, and you're done. The folder is the agent — it can be a code project, a blog repo, any workspace you already have.
 
-### Option 1: Just say it (fastest)
+### Option 1: Just say it (recommended)
 
-No commands needed. Tell the bot what you want in plain language — MetaMe understands intent and acts:
+No commands needed. Tell the bot what you want in plain language. **The agent is created without binding to the current group** — send `/activate` in your new target group to complete the binding:
 
 ```
-You:  Create an agent for this group, directory ~/projects/assistant
-Bot:  ✅ Agent created and bound
-      Name: assistant
+You:  Create an agent, directory ~/projects/assistant, responsible for writing and content
+Bot:  ✅ Agent「assistant」created
+      Dir: ~/projects/assistant
+      📝 CLAUDE.md written
+
+      Next: send /activate in your new group to bind
+
+── In the new group ──
+
+You:  /activate
+Bot:  🤖 assistant bound
       Dir: ~/projects/assistant
 
-You:  Change this agent's role to: a writing and content creation assistant
+You:  Change this agent's role to: focused on Python backend development
 Bot:  ✅ Role definition updated in CLAUDE.md
-
-You:  Bind an agent to ~/AGI/MyProject
-Bot:  ✅ Agent bound
-      Name: MyProject
-      Dir: ~/AGI/MyProject
 
 You:  List all agents
 Bot:  📋 Agent list
@@ -299,21 +302,22 @@ Bot:  📋 Agent list
       ...
 ```
 
-Supported intents: create, bind, unbind, edit role, list — just say it naturally.
+Supported intents: create, bind (`/agent bind`), unbind, edit role, list — just say it naturally.
 
-### Option 2: Wizard commands
+### Option 2: Commands
 
 Use `/agent` commands in any Telegram/Feishu group:
 
 | Command | What it does |
 |---------|-------------|
-| `/agent new` | Step-by-step wizard: pick a directory → name the agent → describe its role. MetaMe writes the role into `CLAUDE.md` automatically. You can also type a path directly in chat — if it doesn't exist, MetaMe creates it for you. |
-| `/agent bind <name> [dir]` | Quick bind: register this group as a named agent, optionally set working directory. |
+| `/activate` | In a new group, sends this to auto-bind the most recently created pending agent. |
+| `/agent bind <name> [dir]` | Manual bind: register this group as a named agent. Works anytime — no need to recreate if agent already exists. |
 | `/agent list` | Show all configured agents. |
 | `/agent edit` | Update the current agent's role description (rewrites its `CLAUDE.md` section). |
+| `/agent unbind` | Remove this group's agent binding. |
 | `/agent reset` | Remove the current agent's role section. |
 
-You can tap a button to pick an existing directory, or type any path directly in chat. If the path doesn't exist, it's created automatically.
+> **Binding protection**: Each group can only be bound to one agent. Existing bindings cannot be overwritten without explicit `force:true`.
 
 ### From config file (for power users)
 
@@ -367,7 +371,8 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 | `/undo <hash>` | Roll back to a specific git checkpoint |
 | `/list` | Browse & download project files |
 | `/model` | Switch model (sonnet/opus/haiku) |
-| `/agent bind <name> [dir]` | Register group as dedicated agent |
+| `/activate` | Activate and bind the most recently created pending agent in a new group |
+| `/agent bind <name> [dir]` | Manually register group as dedicated agent |
 | `/mac` | macOS control helper: permissions check/open + AppleScript/JXA execution |
 | `/sh <cmd>` | Raw shell — bypasses Claude |
 | `/memory` | Memory stats: fact count, session tags, DB size |
@@ -416,7 +421,7 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 ## Security
 
 - All data stays on your machine. No cloud, no telemetry.
-- `allowed_chat_ids` whitelist — unauthorized users get a one-step `/agent bind` guide instead of silent rejection.
+- `allowed_chat_ids` whitelist — new groups get a smart prompt: if a pending agent activation exists, they're guided to send `/activate`; otherwise they receive setup instructions.
 - `operator_ids` for shared groups — non-operators get read-only mode.
 - `~/.metame/` directory is mode 700.
 - Bot tokens stored locally, never transmitted.

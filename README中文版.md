@@ -250,11 +250,11 @@ systemctl --user start metame
 
 **建立你的第一个 Agent：**
 
-1. 在 Telegram/飞书创建一个群聊，把 bot 拉进去
-2. 在群里发 `/agent bind <名称>`（如 `/agent bind personal`）
-3. 点按钮选工作目录，或直接输入路径——不存在的目录会自动创建 → 完成
+1. 在任意已有群聊中，用自然语言说：`创建一个 Agent，目录是 ~/xxx，负责xxx`
+2. Bot 回复：✅ Agent 已创建，**在新群里发送 `/activate` 完成绑定**
+3. 新建群聊，把 bot 拉进去，发送 `/activate` → 自动绑定完成
 
-> 想要更多 Agent？重复以上流程即可：新建群 → 加 bot → `/agent bind <名称>`。每个群 = 独立 AI 工作区。
+> 想要更多 Agent？重复以上流程：在任意群创建 → 新建目标群 → 发 `/activate`。每个群 = 独立 AI 工作区。
 
 ---
 
@@ -281,23 +281,26 @@ MetaMe 的设计哲学：**一个文件夹 = 一个智能体**。
 
 给智能体一个目录，在里面放一个 `CLAUDE.md` 写清楚它的角色和职责，就完了。文件夹是什么，它就是什么——可以是你的代码项目、博客仓库、任何工作区。
 
-### 方式一：直接说话（最快）
+### 方式一：直接说话（推荐）
 
-不需要任何命令，直接用自然语言告诉 bot 你想要什么——MetaMe 自动识别意图并执行：
+不需要任何命令，直接用自然语言告诉 bot 你想要什么——MetaMe 自动识别意图并执行。**Agent 创建后不会绑定当前群，而是等你在目标新群发 `/activate` 完成绑定**：
 
 ```
-你：  给这个群创建一个 Agent，目录是 ~/projects/assistant
-Bot： ✅ Agent 已创建并绑定
-      名称: assistant
+你：  创建一个 Agent，目录是 ~/projects/assistant，负责写作和内容创作
+Bot： ✅ Agent「assistant」已创建
+      目录: ~/projects/assistant
+      📝 已写入 CLAUDE.md
+
+      下一步：在新群里发送 /activate 完成绑定
+
+── 在新群聊里 ──
+
+你：  /activate
+Bot： 🤖 assistant 绑定成功
       目录: ~/projects/assistant
 
-你：  把这个 Agent 的角色改成：负责写作和内容创作的助手
+你：  把这个 Agent 的角色改成：专注 Python 后端开发
 Bot： ✅ 角色定义已更新到 CLAUDE.md
-
-你：  绑定一个 Agent 到 ~/AGI/MyProject
-Bot： ✅ 已绑定 Agent
-      名称: MyProject
-      目录: ~/AGI/MyProject
 
 你：  列出所有 Agent
 Bot： 📋 当前 Agent 列表
@@ -306,21 +309,22 @@ Bot： 📋 当前 Agent 列表
       ...
 ```
 
-支持的自然语言意图：创建、绑定、解绑、修改角色、列出——直接说就行，无需记命令。
+支持的自然语言意图：创建、绑定（`/agent bind`）、解绑、修改角色、列出——直接说就行，无需记命令。
 
-### 方式二：向导命令
+### 方式二：命令行
 
 在任意 Telegram/飞书群里用 `/agent` 命令：
 
 | 命令 | 作用 |
 |------|------|
-| `/agent new` | 分步向导：选目录 → 命名 → 描述角色。MetaMe 自动把角色写进 `CLAUDE.md`。也可以直接在聊天里输入路径——目录不存在时自动创建。 |
-| `/agent bind <名称> [目录]` | 快速绑定：把当前群注册为指定名称的 Agent，可选设置工作目录。 |
+| `/activate` | 在新群里发送此命令，自动绑定到最近创建的待激活 Agent。 |
+| `/agent bind <名称> [目录]` | 手动绑定：把当前群注册为指定名称的 Agent，可选设置工作目录。Agent 已存在时直接绑定，无需重建。 |
 | `/agent list` | 查看所有已配置的 Agent。 |
 | `/agent edit` | 修改当前 Agent 的角色描述（重写 `CLAUDE.md` 对应章节）。 |
+| `/agent unbind` | 解除当前群绑定。 |
 | `/agent reset` | 删除当前 Agent 的角色 section。 |
 
-可以点按钮选择已有目录，也可以直接在聊天里输入路径——目录不存在时自动创建（`✅ 已新建目录`），已存在则显示 `✓ 已选择目录`。
+> **绑定保护**：每个群只能绑定一个 Agent。已有绑定时，任何人都无法覆盖（需显式 `force:true`）。
 
 ### 配置文件方式（进阶）
 
@@ -374,7 +378,8 @@ feishu:
 | `/undo <hash>` | 回退到指定 git checkpoint |
 | `/list` | 浏览和下载项目文件 |
 | `/model` | 切换模型（sonnet/opus/haiku） |
-| `/agent bind <名称> [目录]` | 将群注册为专属 Agent |
+| `/activate` | 在新群里激活并绑定最近创建的 Agent |
+| `/agent bind <名称> [目录]` | 手动将群注册为专属 Agent |
 | `/mac` | macOS 控制助手：权限检查/跳转 + AppleScript/JXA 执行 |
 | `/sh <命令>` | 原始 shell——绕过 Claude |
 | `/memory` | 记忆统计：事实数量、已标签 session 数、DB 大小 |
@@ -423,7 +428,7 @@ feishu:
 ## 安全
 
 - 所有数据留在你的电脑。不上云，无遥测。
-- `allowed_chat_ids` 白名单——未授权用户收到 `/agent bind` 引导提示，而非静默忽略。
+- `allowed_chat_ids` 白名单——新群收到智能提示：若有待激活的 Agent，引导发 `/activate`；否则提示配置说明，不再静默拒绝。
 - `operator_ids` 共享群权限——非 operator 只读模式。
 - `~/.metame/` 目录权限 700。
 - Bot token 仅存本地，不外传。
