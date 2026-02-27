@@ -755,7 +755,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
    - Do NOT read or summarize the file content (wastes tokens)
    - Add at END of response: [[FILE:/absolute/path/to/file]]
    - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
-   - Multiple files: use multiple [[FILE:...]] tags${zdpHint}]` : '';
+   - Multiple files: use multiple [[FILE:...]] tags${zdpHint ? '\n4. Explanation depth:\n' + zdpHint : ''}]` : '';
 
     const routedPrompt = skill ? `/${skill} ${prompt}` : prompt;
 
