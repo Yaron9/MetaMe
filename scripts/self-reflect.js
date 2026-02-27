@@ -90,7 +90,11 @@ Only output the JSON object, no explanation.`;
   }
 
   // Sanitize slug: only lowercase alphanumeric and hyphens
-  const slug = lesson.slug.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  const slug = (lesson.slug || '').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  if (!slug) {
+    console.log('[self-reflect] generateLessons: empty slug, skipping');
+    return 0;
+  }
 
   // Prevent duplicates: skip if any existing file already uses this slug
   const existing = fs.readdirSync(lessonsDir).filter(f => f.endsWith(`-${slug}.md`));
@@ -227,6 +231,16 @@ ${signalText}
       return;
     }
 
+    // === Generate lessons/ from correction signals (independent of patterns result) ===
+    try {
+      const lessonsCount = await generateLessons(recentSignals, LESSONS_DIR);
+      if (lessonsCount > 0) {
+        console.log(`[self-reflect] Generated ${lessonsCount} lesson(s) in ${LESSONS_DIR}`);
+      }
+    } catch (e) {
+      console.log(`[self-reflect] generateLessons failed (non-fatal): ${e.message}`);
+    }
+
     if (patterns.length === 0) {
       console.log('[self-reflect] No patterns found this week.');
       return;
@@ -252,16 +266,6 @@ ${signalText}
       console.log(`[self-reflect] ${patterns.length} pattern(s) written to growth.patterns: ${patterns.join(' | ')}`);
     } catch (e) {
       console.log(`[self-reflect] Failed to write profile: ${e.message}`);
-    }
-
-    // === Generate lessons/ from correction signals ===
-    try {
-      const lessonsCount = await generateLessons(recentSignals, LESSONS_DIR);
-      if (lessonsCount > 0) {
-        console.log(`[self-reflect] Generated ${lessonsCount} lesson(s) in ${LESSONS_DIR}`);
-      }
-    } catch (e) {
-      console.log(`[self-reflect] generateLessons failed (non-fatal): ${e.message}`);
     }
 
   } finally {
