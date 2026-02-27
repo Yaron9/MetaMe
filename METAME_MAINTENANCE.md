@@ -31,7 +31,7 @@ scripts/
   telegram-adapter.js         ← Telegram bot (轮询)
   distill.js                  ← 认知蒸馏 (Haiku, 信号→Profile)
   signal-capture.js           ← 用户消息捕获 hook (3层过滤)
-  schema.js                   ← Profile schema (43字段, 5层级, 800token)
+  schema.js                   ← Profile schema (36字段, 4层级, 800token)
   memory.js                   ← 记忆数据库 (SQLite+FTS5, QMD向量检索)
   memory-extract.js           ← 事实提取 (独立心跳任务, Haiku)
   session-analytics.js        ← 会话骨架提取 (本地零API)
@@ -60,10 +60,10 @@ install.sh / install.ps1      ← 一键安装脚本
    - 输入截断：4000 token 预算，优先级 profile > 消息 > session context
    - `[META]` 标记的元认知信号对认知字段有高权重
    - Haiku 输出 YAML profile 更新 + `_behavior` 行为快照
-   - Schema 白名单过滤 + Tier 分级写入（T3 需累积，T4/T5 直写）
+   - Schema 白名单过滤 + Tier 分级写入（T3 需累积，T5 直写）
    - 每 5 次蒸馏触发 `detectPatterns()` 分析行为模式
 
-3. `schema.js` 定义 43 个字段（T1×2, T2×7, T3×16, T4×7, T5×11），800 token 预算
+3. `schema.js` 定义 36 个字段（T1×2, T2×7, T3×16, T5×11），800 token 预算（T4 已移除，工作状态写 NOW.md）
 
 ### 记忆系统 (memory.js + memory-extract.js)
 
@@ -140,7 +140,7 @@ V1 必须用于 `card.action.trigger` 回调（按钮点击）。V2 支持更丰
 - **新用户引导**：PROTOCOL_ONBOARDING 直接注入 CLAUDE.md（Genesis 采访 + Setup 向导）
 - **手机权限**：`dangerously_skip_permissions: true` — 安全靠 `allowed_chat_ids` 白名单
 - **飞书白名单**：空列表 = deny all（不是 allow all!）
-- **Profile 预算**：800 token，43 字段，5 层级（T1 锁定 → T5 系统管理）
+- **Profile 预算**：800 token，36 字段，4 层级（T1 锁定 → T5 系统管理；T4 已移除）
 - **认知 vs 记忆**：认知系统提取偏好/特质（distill.js），记忆系统提取事实（memory-extract.js），独立运行
 
 ## ⛔ 危险操作

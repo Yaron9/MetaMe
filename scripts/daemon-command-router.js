@@ -24,8 +24,18 @@ function createCommandRouter(deps) {
     log,
     agentTools,
     pendingAgentFlows,
+    pendingActivations,
     agentFlowTtlMs,
   } = deps;
+
+  function storePendingActivation(agentKey, agentName, cwd, createdByChatId) {
+    if (!pendingActivations) return;
+    pendingActivations.set(agentKey, {
+      agentKey, agentName, cwd,
+      createdByChatId: String(createdByChatId),
+      createdAt: Date.now(),
+    });
+  }
 
   function resolveFlowTtlMs() {
     const raw = typeof agentFlowTtlMs === 'function' ? agentFlowTtlMs() : agentFlowTtlMs;
@@ -426,7 +436,7 @@ function createCommandRouter(deps) {
     if (wantsCreate) {
       if (!workspaceDir) {
         await bot.sendMessage(chatId, [
-          '我可以帮你创建并绑定 Agent，还差一个工作目录。',
+          '我可以帮你创建 Agent，还差一个工作目录。',
           '例如：`给这个群创建一个 Agent，目录是 ~/projects/foo`',
           '也可以直接回我一个路径（`~/`、`/`、`./`、`../` 开头都行）。',
         ].join('\n'));
@@ -434,15 +444,19 @@ function createCommandRouter(deps) {
       }
       const agentName = deriveAgentName(input, workspaceDir);
       const roleDelta = deriveCreateRoleDelta(input);
-      const res = await agentTools.createNewWorkspaceAgent(agentName, workspaceDir, roleDelta, chatId);
+      // Always skip binding creating chat — new group activates via /activate
+      const res = await agentTools.createNewWorkspaceAgent(agentName, workspaceDir, roleDelta, chatId, { skipChatBinding: true });
       if (!res.ok) {
         await bot.sendMessage(chatId, `❌ 创建 Agent 失败: ${res.error}`);
         return true;
       }
       const data = res.data || {};
       const projName = projectNameFromResult(data, agentName);
-      if (data.cwd) attachOrCreateSession(chatId, normalizeCwd(data.cwd), projName);
-      await bot.sendMessage(chatId, `✅ Agent 已创建并绑定\n名称: ${projName}\n目录: ${data.cwd || '（未知）'}`);
+      if (data.projectKey) storePendingActivation(data.projectKey, projName, data.cwd, chatId);
+      await bot.sendMessage(chatId,
+        `✅ Agent「${projName}」已创建\n目录: ${data.cwd || '（未知）'}\n\n` +
+        `**下一步**: 在新群里发送 \`/activate\` 完成绑定（30分钟内有效）`
+      );
       return true;
     }
 
