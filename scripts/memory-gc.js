@@ -148,6 +148,7 @@ function run() {
       AND superseded_by IS NULL
       AND (conflict_status IS NULL OR conflict_status = 'OK')
       AND relation NOT IN (${protectedPlaceholders})
+      AND source_type != 'manual'
     `);
     const candidateCount = countCandidatesStmt.get(...PROTECTED_RELATIONS).cnt;
 
@@ -163,7 +164,7 @@ function run() {
       AND search_count < ${MIN_SEARCH_COUNT}
       AND superseded_by IS NULL
       AND (conflict_status IS NULL OR conflict_status = 'OK')
-      AND relation IN (${protectedPlaceholders})
+      AND (relation IN (${protectedPlaceholders}) OR source_type = 'manual')
     `);
     const protectedCount = countProtectedStmt.get(...PROTECTED_RELATIONS).cnt;
 
@@ -188,6 +189,7 @@ function run() {
           AND superseded_by IS NULL
           AND (conflict_status IS NULL OR conflict_status = 'OK')
           AND relation NOT IN (${protectedPlaceholders})
+          AND source_type != 'manual'
         `);
 
         const result = updateStmt.run(...PROTECTED_RELATIONS);
