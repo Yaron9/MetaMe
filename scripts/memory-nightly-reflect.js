@@ -1,0 +1,298 @@
+#!/usr/bin/env node
+
+/**
+ * memory-nightly-reflect.js — Nightly Hot-Fact Distillation
+ *
+ * Reads "hot zone" facts from memory.db (search_count >= 3, last 7 days),
+ * calls Haiku to distill high-level patterns, and writes results to:
+ *   - ~/.metame/memory/decisions/YYYY-MM-DD-reflect.md  (strategic/architectural)
+ *   - ~/.metame/memory/lessons/YYYY-MM-DD-reflect.md    (operational SOPs)
+ *
+ * Designed to run nightly at 01:00 via daemon.yaml scheduler (require_idle).
+ */
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+const HOME = os.homedir();
+const METAME_DIR = path.join(HOME, '.metame');
+const DB_PATH = path.join(METAME_DIR, 'memory.db');
+const LOCK_FILE = path.join(METAME_DIR, 'memory-nightly-reflect.lock');
+const REFLECT_LOG_FILE = path.join(METAME_DIR, 'memory_reflect_log.jsonl');
+
+const MEMORY_DIR = path.join(HOME, '.metame', 'memory');
+const DECISIONS_DIR = path.join(MEMORY_DIR, 'decisions');
+const LESSONS_DIR = path.join(MEMORY_DIR, 'lessons');
+
+// Hot zone thresholds
+const MIN_SEARCH_COUNT = 3;
+const WINDOW_DAYS = 7;
+const MAX_FACTS = 20;
+const LOCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+// Ensure output directories exist at startup
+[MEMORY_DIR, DECISIONS_DIR, LESSONS_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
+
+/**
+ * Load callHaiku + buildDistillEnv from deployed path, fallback to scripts dir.
+ */
+function loadHelper(name) {
+  const candidates = [
+    path.join(HOME, '.metame', name),
+    path.join(__dirname, name),
+  ];
+  for (const p of candidates) {
+    try { return require(p); } catch {}
+  }
+  throw new Error(`Cannot load ${name}`);
+}
+
+/**
+ * Acquire atomic lock using O_EXCL — prevents concurrent runs.
+ */
+function acquireLock() {
+  try {
+    const fd = fs.openSync(LOCK_FILE, 'wx');
+    fs.writeSync(fd, process.pid.toString());
+    fs.closeSync(fd);
+    return true;
+  } catch (e) {
+    if (e.code === 'EEXIST') {
+      try {
+        const lockAge = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
+        if (lockAge < LOCK_TIMEOUT_MS) {
+          console.log('[NIGHTLY-REFLECT] Already running (lock held), skipping.');
+          return false;
+        }
+        // Stale lock — remove and re-acquire
+        fs.unlinkSync(LOCK_FILE);
+        const fd = fs.openSync(LOCK_FILE, 'wx');
+        fs.writeSync(fd, process.pid.toString());
+        fs.closeSync(fd);
+        return true;
+      } catch {
+        console.log('[NIGHTLY-REFLECT] Could not acquire lock, skipping.');
+        return false;
+      }
+    }
+    throw e;
+  }
+}
+
+/**
+ * Release the atomic lock.
+ */
+function releaseLock() {
+  try { fs.unlinkSync(LOCK_FILE); } catch { /* non-fatal */ }
+}
+
+/**
+ * Append a run record to the audit log.
+ */
+function writeReflectLog(record) {
+  const line = JSON.stringify({ ts: new Date().toISOString(), ...record }) + '\n';
+  try {
+    fs.mkdirSync(path.dirname(REFLECT_LOG_FILE), { recursive: true });
+    fs.appendFileSync(REFLECT_LOG_FILE, line, 'utf8');
+  } catch (e) {
+    console.log(`[NIGHTLY-REFLECT] Warning: could not write reflect log: ${e.message}`);
+  }
+}
+
+/**
+ * Query hot zone facts from memory.db.
+ * Returns array of plain objects.
+ */
+function queryHotFacts(db) {
+  const stmt = db.prepare(`
+    SELECT entity, relation, value, confidence, search_count, created_at
+    FROM facts
+    WHERE search_count >= ${MIN_SEARCH_COUNT}
+      AND created_at >= datetime('now', '-${WINDOW_DAYS} days')
+      AND superseded_by IS NULL
+      AND (conflict_status IS NULL OR conflict_status = 'OK')
+      AND relation != 'project_milestone'
+    ORDER BY search_count DESC, created_at DESC
+    LIMIT ${MAX_FACTS}
+  `);
+  return stmt.all();
+}
+
+/**
+ * Write a reflect Markdown file with frontmatter.
+ */
+function writeReflectFile(filePath, entries, factsCount, sourceType) {
+  const today = new Date().toISOString().slice(0, 10);
+  const sections = entries
+    .map(e => `## ${e.title}\n\n${e.content}`)
+    .join('\n\n---\n\n');
+
+  const content = `---
+date: ${today}
+source: nightly-reflect
+type: ${sourceType}
+facts_analyzed: ${factsCount}
+---
+
+${sections}
+`;
+  fs.writeFileSync(filePath, content, 'utf8');
+}
+
+/**
+ * Main nightly reflect run.
+ */
+async function run() {
+  console.log('[NIGHTLY-REFLECT] Starting nightly reflect run...');
+
+  if (!fs.existsSync(DB_PATH)) {
+    console.log('[NIGHTLY-REFLECT] memory.db not found, skipping.');
+    return;
+  }
+
+  if (!acquireLock()) return;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const decisionFile = path.join(DECISIONS_DIR, `${today}-reflect.md`);
+  const lessonFile = path.join(LESSONS_DIR, `${today}-reflect.md`);
+
+  // Prevent duplicate runs for the same day
+  if (fs.existsSync(decisionFile) || fs.existsSync(lessonFile)) {
+    console.log('[NIGHTLY-REFLECT] Already ran today, skipping.');
+    releaseLock();
+    return;
+  }
+
+  let db;
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    db = new DatabaseSync(DB_PATH);
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('PRAGMA busy_timeout = 5000');
+
+    const hotFacts = queryHotFacts(db);
+    console.log(`[NIGHTLY-REFLECT] Found ${hotFacts.length} hot-zone facts.`);
+
+    if (hotFacts.length < 3) {
+      console.log('[NIGHTLY-REFLECT] Insufficient hot facts (< 3), skipping distillation.');
+      writeReflectLog({ status: 'skipped', reason: 'insufficient_facts', facts_found: hotFacts.length });
+      return;
+    }
+
+    // Load Haiku helper from providers.js (callHaiku lives there)
+    let callHaiku, buildDistillEnv;
+    try {
+      ({ callHaiku, buildDistillEnv } = loadHelper('providers.js'));
+    } catch (e) {
+      throw new Error(`Cannot load Haiku helper from providers.js: ${e.message}`);
+    }
+
+    let distillEnv = {};
+    try { distillEnv = buildDistillEnv(); } catch {}
+
+    const factsJson = JSON.stringify(
+      hotFacts.map(f => ({
+        entity: f.entity,
+        relation: f.relation,
+        value: f.value,
+        confidence: f.confidence,
+        search_count: f.search_count,
+      })),
+      null,
+      2
+    );
+
+    const prompt = `You are extracting high-level patterns from an AI assistant's recent memory facts.
+
+Recent high-frequency facts (JSON):
+${factsJson}
+
+Analyze and output a JSON object:
+{
+  "decisions": [{"title": "中文标题", "content": "## 背景\\n...\\n## 结论\\n..."}],
+  "lessons": [{"title": "中文标题", "content": "## 问题\\n...\\n## 操作手册\\n1. ..."}]
+}
+
+Rules:
+- decisions: strategic/architectural insights (why we chose X over Y)
+- lessons: operational SOPs (how to do X correctly)
+- Each array can be empty if no pattern found
+- content in 中文, 100-250 chars each
+- Output ONLY the JSON object`;
+
+    console.log('[NIGHTLY-REFLECT] Calling Haiku for distillation...');
+    let raw;
+    try {
+      raw = await Promise.race([
+        callHaiku(prompt, distillEnv, 90000),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 95000)),
+      ]);
+    } catch (e) {
+      console.log(`[NIGHTLY-REFLECT] Haiku call failed: ${e.message}`);
+      writeReflectLog({ status: 'error', reason: 'haiku_failed', error: e.message, facts_found: hotFacts.length });
+      return;
+    }
+
+    // Parse Haiku response
+    let parsed;
+    try {
+      const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      parsed = JSON.parse(cleaned);
+    } catch (e) {
+      console.log(`[NIGHTLY-REFLECT] Failed to parse Haiku output: ${e.message}`);
+      writeReflectLog({ status: 'error', reason: 'parse_failed', facts_found: hotFacts.length });
+      return;
+    }
+
+    const decisions = Array.isArray(parsed.decisions) ? parsed.decisions.filter(d => d.title && d.content) : [];
+    const lessons = Array.isArray(parsed.lessons) ? parsed.lessons.filter(l => l.title && l.content) : [];
+
+    console.log(`[NIGHTLY-REFLECT] Distilled: ${decisions.length} decision(s), ${lessons.length} lesson(s).`);
+
+    // Write decisions file (even if empty array — record the run)
+    if (decisions.length > 0) {
+      writeReflectFile(decisionFile, decisions, hotFacts.length, 'decisions');
+      console.log(`[NIGHTLY-REFLECT] Decisions written: ${decisionFile}`);
+    }
+
+    // Write lessons file
+    if (lessons.length > 0) {
+      writeReflectFile(lessonFile, lessons, hotFacts.length, 'lessons');
+      console.log(`[NIGHTLY-REFLECT] Lessons written: ${lessonFile}`);
+    }
+
+    // Write audit log
+    writeReflectLog({
+      status: 'success',
+      facts_analyzed: hotFacts.length,
+      decisions_written: decisions.length,
+      lessons_written: lessons.length,
+      decision_file: decisions.length > 0 ? decisionFile : null,
+      lesson_file: lessons.length > 0 ? lessonFile : null,
+    });
+
+    console.log('[NIGHTLY-REFLECT] Run complete.');
+
+  } catch (e) {
+    console.error(`[NIGHTLY-REFLECT] Fatal error: ${e.message}`);
+    writeReflectLog({ status: 'error', reason: 'fatal', error: e.message });
+    process.exitCode = 1;
+  } finally {
+    try { if (db) db.close(); } catch { /* non-fatal */ }
+    releaseLock();
+  }
+}
+
+if (require.main === module) {
+  run().then(() => {
+    console.log('✅ nightly-reflect complete');
+  }).catch(e => {
+    console.error(`[NIGHTLY-REFLECT] Fatal: ${e.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { run };
