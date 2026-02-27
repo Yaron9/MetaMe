@@ -1,0 +1,4 @@
+interface:
+  display_name: "macOS Local Orchestrator"
+  short_description: "Use local Bash/AppleScript to automate Mac tasks safely"
+  default_prompt: "Use this skill to automate macOS with local scripts and confirmation for side effects."

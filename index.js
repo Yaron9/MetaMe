@@ -78,6 +78,44 @@ if (scriptsUpdated) {
   console.log('📦 Scripts synced to ~/.metame/ — daemon will auto-restart when idle.');
 }
 
+// ---------------------------------------------------------
+// Deploy bundled skills to ~/.claude/skills/
+// Only installs if not already present — never overwrites user customizations.
+// ---------------------------------------------------------
+const CLAUDE_SKILLS_DIR = path.join(HOME_DIR, '.claude', 'skills');
+const bundledSkillsDir = path.join(__dirname, 'skills');
+if (fs.existsSync(bundledSkillsDir)) {
+  try {
+    if (!fs.existsSync(CLAUDE_SKILLS_DIR)) {
+      fs.mkdirSync(CLAUDE_SKILLS_DIR, { recursive: true });
+    }
+    const skillsInstalled = [];
+    for (const skillName of fs.readdirSync(bundledSkillsDir)) {
+      const srcSkill = path.join(bundledSkillsDir, skillName);
+      const destSkill = path.join(CLAUDE_SKILLS_DIR, skillName);
+      if (!fs.statSync(srcSkill).isDirectory()) continue;
+      if (fs.existsSync(destSkill)) continue; // already installed, respect user's version
+      // Copy skill directory recursively
+      const copyDir = (src, dest) => {
+        fs.mkdirSync(dest, { recursive: true });
+        for (const entry of fs.readdirSync(src)) {
+          const s = path.join(src, entry);
+          const d = path.join(dest, entry);
+          if (fs.statSync(s).isDirectory()) copyDir(s, d);
+          else fs.copyFileSync(s, d);
+        }
+      };
+      copyDir(srcSkill, destSkill);
+      skillsInstalled.push(skillName);
+    }
+    if (skillsInstalled.length > 0) {
+      console.log(`🧠 Skills installed: ${skillsInstalled.join(', ')}`);
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
 // Load daemon config for local launch flags
 let daemonCfg = {};
 try {

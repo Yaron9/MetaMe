@@ -104,8 +104,14 @@ function setupRuntimeWatchers(deps) {
         log('INFO', `daemon.js changed on disk — deferring restart (${activeProcesses.size} active task(s))`);
         pendingRestart = true;
       } else {
-        log('INFO', 'daemon.js changed on disk — exiting for restart...');
-        onRestartRequested();
+        // Even with no active processes, wait 5s for any in-flight cleanup
+        // (sendCard/sendMarkdown may still be running after activeProcesses.delete)
+        log('INFO', 'daemon.js changed on disk — no active tasks, restarting in 5s...');
+        if (deferredRestartTimer) clearTimeout(deferredRestartTimer);
+        deferredRestartTimer = setTimeout(() => {
+          log('INFO', 'daemon.js changed on disk — exiting for restart...');
+          onRestartRequested();
+        }, 5000);
       }
     }, 2000);
   });
