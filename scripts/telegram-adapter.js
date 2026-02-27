@@ -122,19 +122,21 @@ function createBot(token) {
      * @param {string} markdown - Markdown text
      */
     async sendMarkdown(chatId, markdown) {
-      const chunks = splitMessage(markdown, 4096);
+      // Convert first, then split — avoids mid-token cuts and length underestimation
+      const converted = toTelegramMarkdownV2(markdown);
+      const chunks = splitMessage(converted, 4096);
       for (const chunk of chunks) {
         try {
           await apiRequest(token, 'sendMessage', {
             chat_id: chatId,
             text: chunk,
-            parse_mode: 'Markdown',
+            parse_mode: 'MarkdownV2',
           });
         } catch {
-          // Fallback to plain text if markdown parsing fails
+          // Fallback: send stripped plain text
           await apiRequest(token, 'sendMessage', {
             chat_id: chatId,
-            text: chunk,
+            text: stripMarkdown(markdown).slice(0, 4096),
           });
         }
       }
@@ -179,11 +181,21 @@ function createBot(token) {
      * @param {string} text
      */
     async editMessage(chatId, messageId, text) {
-      await apiRequest(token, 'editMessageText', {
-        chat_id: chatId,
-        message_id: messageId,
-        text: text.slice(0, 4096),
-      });
+      const converted = toTelegramMarkdownV2(text).slice(0, 4096);
+      try {
+        await apiRequest(token, 'editMessageText', {
+          chat_id: chatId,
+          message_id: messageId,
+          text: converted,
+          parse_mode: 'MarkdownV2',
+        });
+      } catch {
+        await apiRequest(token, 'editMessageText', {
+          chat_id: chatId,
+          message_id: messageId,
+          text: stripMarkdown(text).slice(0, 4096),
+        });
+      }
     },
 
     /**
@@ -334,6 +346,62 @@ function splitMessage(text, maxLen) {
     remaining = remaining.slice(splitIdx);
   }
   return chunks;
+}
+
+/**
+ * Convert standard Markdown to Telegram MarkdownV2 format.
+ *
+ * Mapping:  **bold** → *bold*,  *italic* → _italic_,  # Heading → *Heading*
+ * All MarkdownV2 special chars in plain text are escaped with backslash.
+ */
+function toTelegramMarkdownV2(md) {
+  const escapePlain = s => s.replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
+
+  // Order matters: code blocks → inline code → bold (before italic) → links → headings → blockquotes
+  // Note: bold uses [\s\S]+? to allow * inside; _italic_ only matches boundary underscores
+  //   (_[^_\n]+_ would match snake_case — use word-boundary aware pattern instead)
+  const pattern = /```(?:\w*\n?)?([\s\S]*?)```|`([^`\n]+)`|\*\*([\s\S]+?)\*\*|\*([^*\n]+)\*|(?<!\w)_([^_\n]+)_(?!\w)|\[([^\]]+)\]\(([^)\s]+)\)|^(#{1,6}) (.+)$|^(>.+(?:\n>.*)*)$/mg;
+
+  let out = '';
+  let last = 0;
+  let m;
+
+  while ((m = pattern.exec(md)) !== null) {
+    if (m.index > last) out += escapePlain(md.slice(last, m.index));
+
+    if      (m[1] !== undefined) out += '```' + m[1].replace(/[`\\]/g, '\\$&') + '```';
+    else if (m[2] !== undefined) out += '`'   + m[2].replace(/[`\\]/g, '\\$&') + '`';
+    else if (m[3] !== undefined) out += '*'   + toTelegramMarkdownV2(m[3]) + '*';
+    else if (m[4] !== undefined) out += '_'   + toTelegramMarkdownV2(m[4]) + '_';
+    else if (m[5] !== undefined) out += '_'   + toTelegramMarkdownV2(m[5]) + '_';
+    else if (m[6] !== undefined) out += '[' + toTelegramMarkdownV2(m[6]) + '](' + m[7].replace(/[()\\]/g, '\\$&') + ')';
+    else if (m[9] !== undefined) out += '*' + escapePlain(m[9]) + '*';
+    else if (m[10] !== undefined) {
+      // > blockquote — prefix each line with TG quote syntax
+      const lines = m[10].split('\n').map(l => '>' + escapePlain(l.replace(/^>\s?/, '')));
+      out += lines.join('\n');
+    }
+
+    last = m.index + m[0].length;
+  }
+
+  if (last < md.length) out += escapePlain(md.slice(last));
+  return out;
+}
+
+/**
+ * Strip all Markdown formatting, returning plain text.
+ * Used as fallback when MarkdownV2 rendering fails.
+ */
+function stripMarkdown(md) {
+  return md
+    .replace(/```[\s\S]*?```/g, m => m.replace(/^```\w*\n?/, '').replace(/```$/, ''))
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*\n]+)\*/g, '$1')
+    .replace(/_([^_\n]+)_/g, '$1')
+    .replace(/^#{1,6} (.+)$/mg, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
 }
 
 module.exports = { createBot };

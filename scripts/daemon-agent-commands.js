@@ -21,6 +21,7 @@ function createAgentCommandHandler(deps) {
     getSessionRecentContext,
     pendingBinds,
     pendingAgentFlows,
+    pendingActivations,
     doBindAgent,
     mergeAgentRole,
     agentTools,
@@ -28,6 +29,30 @@ function createAgentCommandHandler(deps) {
     agentFlowTtlMs,
     agentBindTtlMs,
   } = deps;
+
+  // Pending activations have no TTL — they persist until consumed.
+  // The creating chatId is stored to prevent self-activation.
+
+  function storePendingActivation(agentKey, agentName, cwd, createdByChatId) {
+    if (!pendingActivations) return;
+    pendingActivations.set(agentKey, {
+      agentKey, agentName, cwd,
+      createdByChatId: String(createdByChatId),
+      createdAt: Date.now(),
+    });
+  }
+
+  // Returns the latest pending activation, excluding the creating chat
+  function getLatestActivationForChat(chatId) {
+    if (!pendingActivations || pendingActivations.size === 0) return null;
+    const cid = String(chatId);
+    let latest = null;
+    for (const rec of pendingActivations.values()) {
+      if (rec.createdByChatId === cid) continue; // creating chat cannot self-activate
+      if (!latest || rec.createdAt > latest.createdAt) latest = rec;
+    }
+    return latest;
+  }
 
   function resolveTtl(valueOrGetter, fallbackMs) {
     const raw = typeof valueOrGetter === 'function' ? valueOrGetter() : valueOrGetter;
@@ -136,9 +161,15 @@ function createAgentCommandHandler(deps) {
     return { ok: true, data: legacy };
   }
 
-  async function createAgentViaUnifiedApi(chatId, name, dir, roleDesc) {
+  async function createAgentViaUnifiedApi(chatId, name, dir, roleDesc, opts = {}) {
+    // Default: skip binding the creating chat — let the target group activate via /activate
+    const { skipChatBinding = true } = opts;
     if (agentTools && typeof agentTools.createNewWorkspaceAgent === 'function') {
-      return agentTools.createNewWorkspaceAgent(name, dir, roleDesc, chatId);
+      const res = await agentTools.createNewWorkspaceAgent(name, dir, roleDesc, chatId, { skipChatBinding });
+      if (res.ok && skipChatBinding && res.data && res.data.projectKey) {
+        storePendingActivation(res.data.projectKey, name, res.data.cwd, chatId);
+      }
+      return res;
     }
     const bound = await doBindAgent({ sendMessage: async () => {} }, chatId, name, dir);
     if (!bound || bound.ok === false) {
@@ -272,40 +303,7 @@ function createAgentCommandHandler(deps) {
       return true;
     }
 
-    // /agent new wizard state machine (kept for command compatibility)
-    {
-      const flow = getFreshFlow(String(chatId));
-      if (flow && flow.step === 'name' && text && !text.startsWith('/')) {
-        flow.name = text.trim();
-        flow.step = 'desc';
-        setFlow(String(chatId), flow);
-        await bot.sendMessage(chatId, `好的，Agent 名称是「${flow.name}」\n\n请描述这个 Agent 的角色和职责（用自然语言）：`);
-        return true;
-      }
-      if (flow && flow.step === 'desc' && text && !text.startsWith('/')) {
-        pendingAgentFlows.delete(String(chatId));
-        const { dir, name } = flow;
-        const description = text.trim();
-        await bot.sendMessage(chatId, `⏳ 正在配置 Agent「${name}」，稍等...`);
-        const created = await createAgentViaUnifiedApi(chatId, name, dir, description);
-        if (!created.ok) {
-          await bot.sendMessage(chatId, `❌ 创建 Agent 失败: ${created.error}`);
-          return true;
-        }
-        if (created.data && created.data.cwd && typeof attachOrCreateSession === 'function') {
-          attachOrCreateSession(chatId, normalizeCwd(created.data.cwd), name || '');
-        }
-        const roleInfo = created.data.role || {};
-        if (roleInfo.skipped) {
-          await bot.sendMessage(chatId, '✅ Agent 创建成功');
-        } else if (roleInfo.created) {
-          await bot.sendMessage(chatId, '📝 已创建 CLAUDE.md 并写入角色定义');
-        } else {
-          await bot.sendMessage(chatId, '📝 已将角色定义合并进现有 CLAUDE.md');
-        }
-        return true;
-      }
-    }
+    // wizard state machine removed — use natural language to create agents
 
     // /agent edit wait-input flow (kept for command compatibility)
     {
@@ -355,7 +353,7 @@ function createAgentCommandHandler(deps) {
         }
         const agents = res.data.agents || [];
         if (agents.length === 0) {
-          await bot.sendMessage(chatId, '暂无已配置的 Agent。\n使用 /agent new 创建，或 /agent bind <名称> 绑定目录。');
+          await bot.sendMessage(chatId, '暂无已配置的 Agent。\n用自然语言说"创建一个agent，目录是~/xxx"，或 /agent bind <名称> <目录>。');
           return true;
         }
         const lines = ['📋 已配置的 Agent：', ''];
@@ -373,19 +371,12 @@ function createAgentCommandHandler(deps) {
         return true;
       }
 
-      // /agent new (wizard)
-      if (agentSub === 'new') {
-        setFlow(String(chatId), { step: 'dir' });
-        await sendBrowse(bot, chatId, 'agent-new', HOME, '步骤1/3：选择这个 Agent 的工作目录');
-        return true;
-      }
-
       // /agent edit [描述]
       if (agentSub === 'edit') {
         const cfg = loadConfig();
         const { boundProj } = getBoundProject(chatId, cfg);
         if (!boundProj || !boundProj.cwd) {
-          await bot.sendMessage(chatId, '❌ 当前群未绑定 Agent，请先使用 /agent bind 或 /agent new');
+          await bot.sendMessage(chatId, '❌ 当前群未绑定 Agent，请先用自然语言创建 Agent 或 /agent bind <名称> <目录>');
           return true;
         }
         const cwd = normalizeCwd(boundProj.cwd);
@@ -432,7 +423,7 @@ function createAgentCommandHandler(deps) {
         const cfg = loadConfig();
         const { boundProj } = getBoundProject(chatId, cfg);
         if (!boundProj || !boundProj.cwd) {
-          await bot.sendMessage(chatId, '❌ 当前群未绑定 Agent，请先使用 /agent bind 或 /agent new');
+          await bot.sendMessage(chatId, '❌ 当前群未绑定 Agent，请先用自然语言创建 Agent 或 /agent bind <名称> <目录>');
           return true;
         }
         const cwd = normalizeCwd(boundProj.cwd);
@@ -457,7 +448,7 @@ function createAgentCommandHandler(deps) {
         const projects = config.projects || {};
         const entries = Object.entries(projects).filter(([, p]) => p.cwd);
         if (entries.length === 0) {
-          await bot.sendMessage(chatId, '暂无已配置的 Agent。\n使用 /agent new 新建，或 /agent bind <名称> 绑定目录。');
+          await bot.sendMessage(chatId, '暂无已配置的 Agent。\n用自然语言说"创建一个agent，目录是~/xxx"，或 /agent bind <名称> <目录>。');
           return true;
         }
         const currentSession = getSession(chatId);
@@ -472,6 +463,41 @@ function createAgentCommandHandler(deps) {
       }
     }
 
+    // /activate — bind this unbound chat to the most recently created pending agent
+    if (text === '/activate' || text.startsWith('/activate ')) {
+      const cfg = loadConfig();
+      const { boundKey } = getBoundProject(chatId, cfg);
+      if (boundKey) {
+        await bot.sendMessage(chatId, `此群已绑定到「${boundKey}」，无需激活。如需更换请先 /agent unbind`);
+        return true;
+      }
+      const activation = getLatestActivationForChat(chatId);
+      if (!activation) {
+        // Check if this chat was the creator (self-activate attempt)
+        if (pendingActivations) {
+          for (const rec of pendingActivations.values()) {
+            if (rec.createdByChatId === String(chatId)) {
+              await bot.sendMessage(chatId,
+                `❌ 不能在创建来源群激活。\n请在你新建的目标群里发送 \`/activate\`\n\n` +
+                `或在任意群用: \`/agent bind ${rec.agentName} ${rec.cwd}\``
+              );
+              return true;
+            }
+          }
+        }
+        // No pending activation at all — guide to manual bind
+        await bot.sendMessage(chatId,
+          '没有待激活的 Agent。\n\n如果已创建过 Agent，直接用:\n`/agent bind <名称> <目录>`\n即可绑定，不需要重新创建。'
+        );
+        return true;
+      }
+      const bindRes = await bindViaUnifiedApi(bot, chatId, activation.agentName, activation.cwd);
+      if (bindRes.ok) {
+        pendingActivations && pendingActivations.delete(activation.agentKey);
+      }
+      return true;
+    }
+
     // /agent-bind-dir <path>: internal callback for bind picker
     if (text.startsWith('/agent-bind-dir ')) {
       const dirPath = expandPath(text.slice(16).trim());
@@ -482,22 +508,6 @@ function createAgentCommandHandler(deps) {
       }
       pendingBinds.delete(String(chatId));
       await bindViaUnifiedApi(bot, chatId, agentName, dirPath);
-      return true;
-    }
-
-    // /agent-dir <path>: internal callback for /agent new wizard
-    if (text.startsWith('/agent-dir ')) {
-      const dirPath = expandPath(text.slice(11).trim());
-      const flow = getFreshFlow(String(chatId));
-      if (!flow || flow.step !== 'dir') {
-        await bot.sendMessage(chatId, '❌ 没有待完成的 /agent new，请重新发送 /agent new');
-        return true;
-      }
-      flow.dir = dirPath;
-      flow.step = 'name';
-      setFlow(String(chatId), flow);
-      const displayPath = dirPath.replace(HOME, '~');
-      await bot.sendMessage(chatId, `✓ 已选择目录：${displayPath}\n\n步骤2/3：给这个 Agent 起个名字？`);
       return true;
     }
 

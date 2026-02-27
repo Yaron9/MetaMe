@@ -1352,6 +1352,11 @@ const pendingBinds = new Map(); // chatId -> agentName
 // chatId -> { step: 'dir'|'name'|'desc', dir: string, name: string }
 const pendingAgentFlows = new Map();
 
+// Pending activation: after creating an agent with skipChatBinding=true,
+// store here so any new unbound group can activate it with /activate
+// { agentKey, agentName, cwd, createdAt }
+const pendingActivations = new Map(); // key: agentKey -> activation record
+
 const { handleAdminCommand } = createAdminCommandHandler({
   fs,
   yaml,
@@ -1492,6 +1497,7 @@ const { handleAgentCommand } = createAgentCommandHandler({
   getSessionRecentContext,
   pendingBinds,
   pendingAgentFlows,
+  pendingActivations,
   doBindAgent,
   mergeAgentRole,
   agentTools,
@@ -1569,6 +1575,7 @@ const { handleCommand } = createCommandRouter({
   log,
   agentTools,
   pendingAgentFlows,
+  pendingActivations,
   agentFlowTtlMs: getAgentFlowTtlMs,
 });
 
@@ -1589,6 +1596,7 @@ const { startTelegramBridge, startFeishuBridge } = createBridgeStarter({
   saveState,
   getSession,
   handleCommand,
+  pendingActivations,
 });
 
 const { killExistingDaemon, writePid, cleanPid } = createPidManager({
