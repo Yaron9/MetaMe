@@ -179,6 +179,7 @@ async function run() {
     if (hotFacts.length < 3) {
       console.log('[NIGHTLY-REFLECT] Insufficient hot facts (< 3), skipping distillation.');
       writeReflectLog({ status: 'skipped', reason: 'insufficient_facts', facts_found: hotFacts.length });
+      releaseLock();
       return;
     }
 

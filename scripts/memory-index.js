@@ -98,4 +98,6 @@ function run() {
   console.log(`[MEMORY-INDEX] Updated INDEX.md (${files.length} file(s)) → ${INDEX_FILE}`);
 }
 
-run();
+if (require.main === module) {
+  run();
+}
