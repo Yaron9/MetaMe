@@ -113,8 +113,8 @@ function setupRuntimeWatchers(deps) {
   activeProcesses.delete = function (key) {
     const result = origDelete(key);
     if (pendingRestart && activeProcesses.size === 0) {
-      log('INFO', 'All tasks completed — executing deferred restart...');
-      setTimeout(onRestartRequested, 500);
+      log('INFO', 'All tasks completed — executing deferred restart in 8s...');
+      setTimeout(onRestartRequested, 8000); // 给 sendMessage/deleteMessage 等 cleanup 留出足够时间
     }
     return result;
   };

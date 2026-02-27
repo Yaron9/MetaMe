@@ -769,7 +769,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const taskRules = isTaskIntent(prompt) ? `
 3. Knowledge retrieval: When you need context about a specific topic, past decisions, or lessons, call:
    node ~/.metame/memory-search.js "关键词1" "keyword2"
-   Results include facts (entity/relation/value) and session summaries. Use before answering complex questions about MetaMe architecture or past decisions.
+   Also read ~/.metame/memory/INDEX.md to discover available long-form lesson/decision docs, then read specific files as needed.
+   Use these before answering complex questions about MetaMe architecture or past decisions.
 4. Active memory: After confirming a new insight, bug root cause, or user preference, persist it with:
    node ~/.metame/memory-write.js "Entity.sub" "relation_type" "value (20-300 chars)"
    Valid relations: tech_decision, bug_lesson, arch_convention, config_fact, config_change, user_pref, workflow_rule, project_milestone
