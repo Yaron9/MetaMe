@@ -167,7 +167,7 @@ function main() {
   if (typeof memory.acquire === 'function') memory.acquire();
   try {
     const result = memory.saveFacts(sessionId, project, [
-      { entity, relation, value, confidence, tags },
+      { entity, relation, value, confidence, tags, source_type: 'manual' },
     ]);
 
     if (result.saved > 0) {
