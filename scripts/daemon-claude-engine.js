@@ -689,7 +689,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       // 1. Inject recent session memories ONLY on first message of a session
       if (!session.started) {
-        const recent = memory.recentSessions({ limit: 3, project: projectKey || undefined });
+        const recent = memory.recentSessions({ limit: 1, project: projectKey || undefined });
         if (recent.length > 0) {
           const items = recent.map(r => `- [${r.created_at}] ${r.summary}${r.keywords ? ' (keywords: ' + r.keywords + ')' : ''}`).join('\n');
           memoryHint += `\n\n<!-- MEMORY:START -->\n[Session memory - recent context from past sessions, use to inform your responses:\n${items}]\n<!-- MEMORY:END -->`;
@@ -702,7 +702,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       if (!session.started) {
         const searchFn = memory.searchFactsAsync || memory.searchFacts;
         const factQuery = buildFactSearchQuery(prompt, projectKey);
-        const facts = await Promise.resolve(searchFn(factQuery, { limit: 5, project: projectKey || undefined }));
+        const facts = await Promise.resolve(searchFn(factQuery, { limit: 3, project: projectKey || undefined }));
         if (facts.length > 0) {
           const factItems = facts.map(f => `- [${f.relation}] ${f.value}`).join('\n');
           memoryHint += `\n\n<!-- FACTS:START -->\n[Relevant knowledge and user preferences retrieved for this query. Follow these constraints implicitly:\n${factItems}]\n<!-- FACTS:END -->`;
