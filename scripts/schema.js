@@ -49,6 +49,16 @@ const SCHEMA = {
   'cognition.metacognition.receptive_to_challenge': { tier: 'T3', type: 'enum', values: ['yes', 'sometimes', 'no'] },
   'cognition.metacognition.error_response': { tier: 'T3', type: 'enum', values: ['quick_pivot', 'root_cause_first', 'seek_help', 'retry_same'] },
 
+  // === T3c: User Competence Map (ZPD scaffolding) ===
+  'user_competence_map': {
+    tier: 'T3',
+    type: 'map',         // dynamic key-value, keys are domain names
+    valueType: 'enum',
+    values: ['beginner', 'intermediate', 'expert'],
+    maxKeys: 20,
+    description: 'Per-domain skill level for ZPD-based explanation depth'
+  },
+
   // === T4: Context ===
   'context.focus': { tier: 'T4', type: 'string', maxChars: 80 },
   'context.focus_since': { tier: 'T4', type: 'string' },
