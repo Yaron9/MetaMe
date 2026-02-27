@@ -1749,7 +1749,8 @@ async function main() {
     getHeartbeatTimer: () => heartbeatTimer,
     setHeartbeatTimer: (next) => { heartbeatTimer = next; },
     onRestartRequested: () => {
-      notifyActiveUsers('代码热更新').catch(() => {}).finally(() => process.exit(0));
+      // Reuse full shutdown logic (kill child processes, clean PID, stop bridges)
+      shutdown().catch(() => process.exit(0));
     },
   });
   // Expose reloadConfig to handleCommand via closure
