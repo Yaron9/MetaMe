@@ -13,7 +13,7 @@
 'use strict';
 
 const path = require('path');
-const os   = require('os');
+const os = require('os');
 
 // ── Legal relation types ──────────────────────────────────────────────────────
 const VALID_RELATIONS = new Set([
@@ -120,7 +120,7 @@ function resolveMemory() {
     path.join(__dirname, 'memory.js'),
   ];
   for (const p of candidates) {
-    try { require.resolve(p); return p; } catch {}
+    try { require.resolve(p); return p; } catch { }
   }
   return null;
 }
@@ -136,9 +136,9 @@ function main() {
 
   const [entity, relation, value] = positional;
   const confidence = opts.confidence || 'medium';
-  const project    = opts.project    || inferProject(process.cwd());
-  const tagsRaw    = opts.tags       || '';
-  const tags       = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean).slice(0, 3) : [];
+  const project = opts.project || process.env.METAME_PROJECT || inferProject(process.cwd());
+  const tagsRaw = opts.tags || '';
+  const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean).slice(0, 3) : [];
 
   // Validate
   const errors = [
@@ -185,7 +185,7 @@ function main() {
     console.error('错误: 写入失败 —', err.message);
     process.exit(1);
   } finally {
-    try { if (typeof memory.release === 'function') memory.release(); } catch {}
+    try { if (typeof memory.release === 'function') memory.release(); } catch { }
   }
 }
 
