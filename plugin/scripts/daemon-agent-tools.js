@@ -37,7 +37,7 @@ function createAgentTools(deps) {
     if (!cfg[adapterKey].chat_agent_map) cfg[adapterKey].chat_agent_map = {};
   }
 
-  async function bindAgentToChat(chatId, agentName, workspaceDir) {
+  async function bindAgentToChat(chatId, agentName, workspaceDir, { force = false } = {}) {
     try {
       const safeName = sanitizeText(agentName, 120);
       if (!safeName) return { ok: false, error: 'agentName is required' };
@@ -62,6 +62,16 @@ function createAgentTools(deps) {
       }
       if (!fs.statSync(resolvedDir).isDirectory()) {
         return { ok: false, error: `workspaceDir is not a directory: ${resolvedDir}` };
+      }
+
+      // Overwrite protection: reject if chat is already bound to a different agent
+      const existingKey = cfg[adapterKey].chat_agent_map[String(chatId)];
+      if (existingKey && existingKey !== projectKey && !force) {
+        return {
+          ok: false,
+          error: `此群已绑定到 "${existingKey}"，如需覆盖请使用 force:true`,
+          data: { existingKey },
+        };
       }
 
       const idVal = typeof chatId === 'number' ? chatId : String(chatId);
@@ -165,30 +175,57 @@ ${safeDelta}
     }
   }
 
-  async function createNewWorkspaceAgent(agentName, workspaceDir, roleDescription, chatId) {
-    const bindResult = await bindAgentToChat(chatId, agentName, workspaceDir);
-    if (!bindResult.ok) return bindResult;
+  async function createNewWorkspaceAgent(agentName, workspaceDir, roleDescription, chatId, { skipChatBinding = false } = {}) {
+    let bindData;
+
+    if (skipChatBinding) {
+      // Create the project entry without touching chat_agent_map
+      const safeName = sanitizeText(agentName, 120);
+      if (!safeName) return { ok: false, error: 'agentName is required' };
+      const resolvedDir = resolveWorkspaceDir(workspaceDir);
+      if (!resolvedDir) return { ok: false, error: 'workspaceDir is required' };
+      if (!fs.existsSync(resolvedDir) || !fs.statSync(resolvedDir).isDirectory()) {
+        return { ok: false, error: `workspaceDir not found or not a directory: ${resolvedDir}` };
+      }
+      const cfg = loadConfig();
+      if (!cfg.projects) cfg.projects = {};
+      const projectKey = toProjectKey(safeName, chatId);
+      const existed = !!cfg.projects[projectKey];
+      if (!existed) {
+        cfg.projects[projectKey] = { name: safeName, cwd: resolvedDir, nicknames: [safeName] };
+        writeConfigSafe(cfg);
+        backupConfig();
+      }
+      bindData = {
+        projectKey,
+        cwd: resolvedDir,
+        isNewProject: !existed,
+        chatId: null,      // not bound to any chat
+        project: cfg.projects[projectKey],
+      };
+    } else {
+      const bindResult = await bindAgentToChat(chatId, agentName, workspaceDir);
+      if (!bindResult.ok) return bindResult;
+      bindData = bindResult.data;
+    }
 
     const roleText = sanitizeText(roleDescription, 1200);
     if (!roleText) {
-      return { ok: true, data: { ...bindResult.data, role: { skipped: true } } };
+      return { ok: true, data: { ...bindData, role: { skipped: true } } };
     }
 
-    const roleResult = await editAgentRoleDefinition(bindResult.data.cwd, roleText);
+    const roleResult = await editAgentRoleDefinition(bindData.cwd, roleText);
     if (!roleResult.ok) {
       return {
         ok: false,
-        error: `agent bound but role update failed: ${roleResult.error}`,
-        data: { ...bindResult.data, roleError: roleResult.error },
+        error: `agent created but role update failed: ${roleResult.error}`,
+        data: { ...bindData, roleError: roleResult.error },
       };
     }
 
     return {
       ok: true,
-      data: {
-        ...bindResult.data,
-        role: roleResult.data,
-      },
+      data: { ...bindData, role: roleResult.data },
     };
   }
 

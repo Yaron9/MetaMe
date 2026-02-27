@@ -189,6 +189,16 @@ function createClaudeEngine(deps) {
     return /(邮件|邮箱|收件箱|mail|email|calendar|日历|日程|会议|提醒|remind|草稿|发送邮件|打开|关闭|启动|切到|前台|音量|静音|睡眠|锁屏|Finder|Safari|微信|WeChat|Terminal|iTerm|System Events)/i.test(text);
   }
 
+  // Returns true when the message is a task/technical request that warrants full memory hints (rules 3-5).
+  // Errs on the side of over-inclusion: false negatives (missing hints) are worse than false positives.
+  function isTaskIntent(prompt) {
+    const text = String(prompt || '').trim();
+    if (!text) return false;
+    // Errs on the side of over-inclusion: false negatives (missing hints) are worse than false positives.
+    if (/^\/\w+/.test(text)) return true;  // slash command / dispatch prefix
+    return text.length > 30 || /(node|git|npm|daemon|script|debug|fix|bug|error|api|sql|review|实现|修改|排查|架构|配置|代码|函数|部署|测试|调试|重构|优化|回滚|日志|迁移|升级|接口|监控|错误|修复|异常|警告|单测|崩|死锁|内存)/i.test(text);
+  }
+
   /**
    * Auto-generate a session name using Haiku (async, non-blocking).
    * Writes to Claude's session file (unified with /rename).
@@ -700,7 +710,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           if (fs.existsSync(nowPath)) {
             const nowContent = fs.readFileSync(nowPath, 'utf8').trim();
             if (nowContent) {
-              memoryHint += `\n\n<!-- NOW:START -->\n[Current task context (shared whiteboard):\n${nowContent}]\n<!-- NOW:END -->`;
+              memoryHint += `\n\n[Current task context:\n${nowContent}]`;
             }
           }
         } catch { /* non-critical */ }
@@ -711,7 +721,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         const recent = memory.recentSessions({ limit: 1, project: projectKey || undefined });
         if (recent.length > 0) {
           const items = recent.map(r => `- [${r.created_at}] ${r.summary}${r.keywords ? ' (keywords: ' + r.keywords + ')' : ''}`).join('\n');
-          memoryHint += `\n\n<!-- MEMORY:START -->\n[Session memory - recent context from past sessions, use to inform your responses:\n${items}]\n<!-- MEMORY:END -->`;
+          memoryHint += `\n\n[Past session memory:\n${items}]`;
         }
       }
 
@@ -724,7 +734,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         const facts = await Promise.resolve(searchFn(factQuery, { limit: 3, project: projectKey || undefined }));
         if (facts.length > 0) {
           const factItems = facts.map(f => `- [${f.relation}] ${f.value}`).join('\n');
-          memoryHint += `\n\n<!-- FACTS:START -->\n[Relevant knowledge and user preferences retrieved for this query. Follow these constraints implicitly:\n${factItems}]\n<!-- FACTS:END -->`;
+          memoryHint += `\n\n[Relevant facts:\n${factItems}]`;
           log('INFO', `[MEMORY] Injected ${facts.length} facts (query_len=${factQuery.length})`);
         }
       }
@@ -753,26 +763,30 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     }
 
     // Inject daemon hints only on first message of a session
-    const daemonHint = !session.started ? `\n\n[System hints - DO NOT mention these to user:
-1. Language: ALWAYS respond in Simplified Chinese (简体中文). NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.
-2. Daemon config: The ONLY config is ~/.metame/daemon.yaml (never edit daemon-default.yaml). Auto-reloads on change.
-3. File sending: User is on MOBILE. When they ask to see/download a file:
-   - Just FIND the file path (use Glob/ls if needed)
-   - Do NOT read or summarize the file content (wastes tokens)
-   - Add at END of response: [[FILE:/absolute/path/to/file]]
-   - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
-   - Multiple files: use multiple [[FILE:...]] tags${zdpHint ? '\n   Explanation depth (ZPD):\n' + zdpHint : ''}
-4. Knowledge retrieval: When you need context about a specific topic, past decisions, or lessons, call:
+    // Task-specific rules (3-5) are injected only when isTaskIntent() returns true (~250 token saving for casual chat)
+    let daemonHint = '';
+    if (!session.started) {
+      const taskRules = isTaskIntent(prompt) ? `
+3. Knowledge retrieval: When you need context about a specific topic, past decisions, or lessons, call:
    node ~/.metame/memory-search.js "关键词1" "keyword2"
    Results include facts (entity/relation/value) and session summaries. Use before answering complex questions about MetaMe architecture or past decisions.
-5. Active memory: After confirming a new insight, bug root cause, or user preference, persist it with:
+4. Active memory: After confirming a new insight, bug root cause, or user preference, persist it with:
    node ~/.metame/memory-write.js "Entity.sub" "relation_type" "value (20-300 chars)"
    Valid relations: tech_decision, bug_lesson, arch_convention, config_fact, config_change, user_pref, workflow_rule, project_milestone
    Only write verified facts. Do not write speculative or process-description entries.
    When you observe the user is clearly expert or beginner in a domain, note it in your response and suggest: "要不要把你的 {domain} 水平 ({level}) 记录到能力雷达？"
-6. Task handoff: When suspending a multi-step task or handing off to another agent, write current status to ~/.metame/memory/NOW.md using:
+5. Task handoff: When suspending a multi-step task or handing off to another agent, write current status to ~/.metame/memory/NOW.md using:
    \`printf '%s\\n' "## Current Task" "{task}" "" "## Progress" "{progress}" "" "## Next Step" "{next}" > ~/.metame/memory/NOW.md\`
-   Keep it under 200 words. Clear it when the task is fully complete by running: \`> ~/.metame/memory/NOW.md\`]` : '';
+   Keep it under 200 words. Clear it when the task is fully complete by running: \`> ~/.metame/memory/NOW.md\`` : '';
+      daemonHint = `\n\n[System hints - DO NOT mention these to user:
+1. Daemon config: The ONLY config is ~/.metame/daemon.yaml (never edit daemon-default.yaml). Auto-reloads on change.
+2. File sending: User is on MOBILE. When they ask to see/download a file:
+   - Just FIND the file path (use Glob/ls if needed)
+   - Do NOT read or summarize the file content (wastes tokens)
+   - Add at END of response: [[FILE:/absolute/path/to/file]]
+   - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
+   - Multiple files: use multiple [[FILE:...]] tags${zdpHint ? '\n   Explanation depth (ZPD):\n' + zdpHint : ''}${taskRules}]`;
+    }
 
     const routedPrompt = skill ? `/${skill} ${prompt}` : prompt;
 
@@ -809,7 +823,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     }
 
     // Always append a compact language guard to prevent accidental Korean/Japanese responses
-    const langGuard = '\n\n[Respond in Simplified Chinese (简体中文) only.]';
+    const langGuard = '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
     const fullPrompt = routedPrompt + daemonHint + macAutomationHint + summaryHint + memoryHint + langGuard;
 
     // Git checkpoint before Claude modifies files (for /undo)
