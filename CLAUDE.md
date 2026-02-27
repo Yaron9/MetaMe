@@ -36,6 +36,14 @@
 - 新增文件同理：在 `scripts/` 创建，`index.js` 会自动扫描 `daemon-*.js` 并部署
 - **绝不直接改 `plugin/scripts/` 或 `~/.metame/`**，重新 sync 会覆盖
 
+## 代码质量红线（必须遵守）
+
+- **修改 `scripts/daemon*.js` 后，必须运行 `npx eslint scripts/daemon*.js`**，零错误才能部署
+- 函数内引用变量前，确认变量在当前作用域内（参数、闭包、模块级），不要引用其他函数的局部变量
+- 从 deps 解构使用的函数，必须同时在调用处（daemon.js）的 deps 对象中传入
+- 关键 `await` 调用（spawn、网络请求）必须用 try/catch 包裹，catch 中清理资源（timer、statusMsg）并通知用户
+- `if/else` 分支中定义的 `const/let` 变量不能在另一个分支使用，需提升到共同作用域
+
 ## 项目维护手册入口
 
 项目维护手册见：`METAME_MAINTENANCE.md`

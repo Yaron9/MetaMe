@@ -89,12 +89,13 @@ function createFileBrowser(deps) {
         : mode === 'agent-new' ? '/agent-dir'
         : '/cd';
 
+      const PAGE_SIZE = 10;
+      const totalPages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE));
+      const safePage = Math.max(0, Math.min(page, totalPages - 1));
+      const start = safePage * PAGE_SIZE;
+      const pageSubdirs = entries.slice(start, start + PAGE_SIZE);
+
       if (bot.sendButtons) {
-        const PAGE_SIZE = 10;
-        const totalPages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE));
-        const safePage = Math.max(0, Math.min(page, totalPages - 1));
-        const start = safePage * PAGE_SIZE;
-        const pageSubdirs = entries.slice(start, start + PAGE_SIZE);
         const buttons = [];
         buttons.push([{ text: `✓ 选择「${displayPath}」`, callback_data: `${cmd} ${shortenPath(dirPath)}` }]);
         for (const name of pageSubdirs) {

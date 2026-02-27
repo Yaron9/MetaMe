@@ -248,11 +248,11 @@ function restoreConfig() {
       }
     }
     writeConfigSafe(bakCfg);
-    config = loadConfig();
+    config = loadConfig(); // eslint-disable-line no-undef -- config is declared in main() closure
     return true;
   } catch {
     fs.copyFileSync(bak, CONFIG_FILE);
-    config = loadConfig();
+    config = loadConfig(); // eslint-disable-line no-undef
     return true;
   }
 }
@@ -1376,6 +1376,10 @@ const { handleAdminCommand } = createAdminCommandHandler({
   skillEvolution,
   taskBoard,
   taskEnvelope,
+  getActiveProcesses: () => activeProcesses,
+  getMessageQueue: () => messageQueue,
+  loadState,
+  saveState,
 });
 
 const { handleSessionCommand } = createSessionCommandHandler({

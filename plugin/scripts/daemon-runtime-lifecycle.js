@@ -109,6 +109,12 @@ function setupRuntimeWatchers(deps) {
         log('INFO', 'daemon.js changed on disk — no active tasks, restarting in 5s...');
         if (deferredRestartTimer) clearTimeout(deferredRestartTimer);
         deferredRestartTimer = setTimeout(() => {
+          if (activeProcesses.size > 0) {
+            log('INFO', `Deferred restart cancelled — ${activeProcesses.size} task(s) started during grace period`);
+            deferredRestartTimer = null;
+            pendingRestart = true;
+            return;
+          }
           log('INFO', 'daemon.js changed on disk — exiting for restart...');
           onRestartRequested();
         }, 5000);
