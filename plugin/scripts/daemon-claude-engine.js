@@ -237,6 +237,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           ...getActiveProviderEnv(),
           CLAUDECODE: undefined,
           METAME_INTERNAL_PROMPT: '1',
+          METAME_PROJECT: projectKey || ''
         },
       });
 
@@ -310,7 +311,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
         detached: true, // Create new process group so killing -pid kills all sub-agents too
-        env: { ...process.env, ...getActiveProviderEnv(), CLAUDECODE: undefined },
+        env: {
+          ...process.env,
+          ...getActiveProviderEnv(),
+          CLAUDECODE: undefined,
+          METAME_PROJECT: projectKey || ''
+        },
       });
 
       // Track active process for /stop
