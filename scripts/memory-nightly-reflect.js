@@ -5,8 +5,8 @@
  *
  * Reads "hot zone" facts from memory.db (search_count >= 3, last 7 days),
  * calls Haiku to distill high-level patterns, and writes results to:
- *   - ~/.metame/memory/decisions/YYYY-MM-DD-reflect.md  (strategic/architectural)
- *   - ~/.metame/memory/lessons/YYYY-MM-DD-reflect.md    (operational SOPs)
+ *   - ~/.metame/memory/decisions/YYYY-MM-DD-nightly-reflect.md  (strategic/architectural)
+ *   - ~/.metame/memory/lessons/YYYY-MM-DD-nightly-reflect.md    (operational SOPs)
  *
  * Designed to run nightly at 01:00 via daemon.yaml scheduler (require_idle).
  */
@@ -156,8 +156,8 @@ async function run() {
   if (!acquireLock()) return;
 
   const today = new Date().toISOString().slice(0, 10);
-  const decisionFile = path.join(DECISIONS_DIR, `${today}-reflect.md`);
-  const lessonFile = path.join(LESSONS_DIR, `${today}-reflect.md`);
+  const decisionFile = path.join(DECISIONS_DIR, `${today}-nightly-reflect.md`);
+  const lessonFile = path.join(LESSONS_DIR, `${today}-nightly-reflect.md`);
 
   // Prevent duplicate runs for the same day
   if (fs.existsSync(decisionFile) || fs.existsSync(lessonFile)) {

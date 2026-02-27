@@ -272,7 +272,7 @@ function saveFacts(sessionId, project, facts, { scope = null } = {}) {
 
   const insert = db.prepare(`
     INSERT INTO facts (id, entity, relation, value, confidence, source_type, source_id, project, scope, tags, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, 'session', ?, ?, ?, ?, datetime('now'), datetime('now'))
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
     ON CONFLICT(id) DO NOTHING
   `);
 
@@ -300,8 +300,9 @@ function saveFacts(sessionId, project, facts, { scope = null } = {}) {
     const id = `f-${sessionId.slice(0, 8)}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const tags = JSON.stringify(Array.isArray(f.tags) ? f.tags.slice(0, 3) : []);
     try {
+      const sourceType = f.source_type || 'session';
       insert.run(id, f.entity, f.relation, f.value.slice(0, 300),
-        f.confidence || 'medium', sessionId, normalizedProject, normalizedScope, tags);
+        f.confidence || 'medium', sourceType, sessionId, normalizedProject, normalizedScope, tags);
       batchDedup.add(dedupKey);
       savedFacts.push({ id, entity: f.entity, relation: f.relation, value: f.value,
         project: normalizedProject, scope: normalizedScope, tags: f.tags || [], created_at: new Date().toISOString() });
@@ -527,7 +528,8 @@ async function searchFactsAsync(query, { limit = 5, project = null, scope = null
         const placeholders = ids.map(() => '?').join(',');
         let rows = db.prepare(
           `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
-           FROM facts WHERE id IN (${placeholders}) AND superseded_by IS NULL`
+           FROM facts WHERE id IN (${placeholders}) AND superseded_by IS NULL
+           AND (conflict_status IS NULL OR conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))`
         ).all(...ids);
 
         // Apply project/scope filter
@@ -577,6 +579,7 @@ function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
         WHERE facts_fts MATCH ?
           AND ((f.scope = ? OR f.scope = '*') OR (f.scope IS NULL AND (f.project = ? OR f.project = '*')))
           AND f.superseded_by IS NULL
+          AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
         ORDER BY rank LIMIT ?
       `;
       params = [sanitized, scope, project, limit];
@@ -585,6 +588,7 @@ function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
         SELECT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at, rank
         FROM facts_fts fts JOIN facts f ON f.rowid = fts.rowid
         WHERE facts_fts MATCH ? AND (f.scope = ? OR f.scope = '*') AND f.superseded_by IS NULL
+          AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
         ORDER BY rank LIMIT ?
       `;
       params = [sanitized, scope, limit];
@@ -593,6 +597,7 @@ function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
         SELECT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at, rank
         FROM facts_fts fts JOIN facts f ON f.rowid = fts.rowid
         WHERE facts_fts MATCH ? AND (f.project = ? OR f.project = '*') AND f.superseded_by IS NULL
+          AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
         ORDER BY rank LIMIT ?
       `;
       params = [sanitized, project, limit];
@@ -601,6 +606,7 @@ function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
         SELECT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at, rank
         FROM facts_fts fts JOIN facts f ON f.rowid = fts.rowid
         WHERE facts_fts MATCH ? AND f.superseded_by IS NULL
+          AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
         ORDER BY rank LIMIT ?
       `;
       params = [sanitized, limit];
@@ -619,20 +625,24 @@ function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
        FROM facts WHERE (entity LIKE ? OR value LIKE ? OR tags LIKE ?)
        AND ((scope = ? OR scope = '*') OR (scope IS NULL AND (project = ? OR project = '*')))
        AND superseded_by IS NULL
+       AND (conflict_status IS NULL OR conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
        ORDER BY created_at DESC LIMIT ?`
     : scope
       ? `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
        FROM facts WHERE (entity LIKE ? OR value LIKE ? OR tags LIKE ?)
        AND (scope = ? OR scope = '*') AND superseded_by IS NULL
+       AND (conflict_status IS NULL OR conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
        ORDER BY created_at DESC LIMIT ?`
       : project
         ? `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
        FROM facts WHERE (entity LIKE ? OR value LIKE ? OR tags LIKE ?)
        AND (project = ? OR project = '*') AND superseded_by IS NULL
+       AND (conflict_status IS NULL OR conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
        ORDER BY created_at DESC LIMIT ?`
         : `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
        FROM facts WHERE (entity LIKE ? OR value LIKE ? OR tags LIKE ?)
        AND superseded_by IS NULL
+       AND (conflict_status IS NULL OR conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
        ORDER BY created_at DESC LIMIT ?`;
   const likeResults = scope && project
     ? db.prepare(likeSql).all(like, like, like, scope, project, limit)

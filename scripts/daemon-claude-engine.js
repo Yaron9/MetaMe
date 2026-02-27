@@ -237,6 +237,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           ...getActiveProviderEnv(),
           CLAUDECODE: undefined,
           METAME_INTERNAL_PROMPT: '1',
+          METAME_PROJECT: projectKey || ''
         },
       });
 
@@ -310,7 +311,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
         detached: true, // Create new process group so killing -pid kills all sub-agents too
-        env: { ...process.env, ...getActiveProviderEnv(), CLAUDECODE: undefined },
+        env: {
+          ...process.env,
+          ...getActiveProviderEnv(),
+          CLAUDECODE: undefined,
+          METAME_PROJECT: projectKey || ''
+        },
       });
 
       // Track active process for /stop
@@ -755,14 +761,18 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
    - Do NOT read or summarize the file content (wastes tokens)
    - Add at END of response: [[FILE:/absolute/path/to/file]]
    - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
-   - Multiple files: use multiple [[FILE:...]] tags${zdpHint ? '\n4. Explanation depth:\n' + zdpHint : ''}
-5. Knowledge retrieval: When you need context about a specific topic, past decisions, or lessons, call:
+   - Multiple files: use multiple [[FILE:...]] tags${zdpHint ? '\n   Explanation depth (ZPD):\n' + zdpHint : ''}
+4. Knowledge retrieval: When you need context about a specific topic, past decisions, or lessons, call:
    node ~/.metame/memory-search.js "关键词1" "keyword2"
    Results include facts (entity/relation/value) and session summaries. Use before answering complex questions about MetaMe architecture or past decisions.
-6. Active memory: After confirming a new insight, bug root cause, or user preference, persist it with:
+5. Active memory: After confirming a new insight, bug root cause, or user preference, persist it with:
    node ~/.metame/memory-write.js "Entity.sub" "relation_type" "value (20-300 chars)"
    Valid relations: tech_decision, bug_lesson, arch_convention, config_fact, config_change, user_pref, workflow_rule, project_milestone
-   Only write verified facts. Do not write speculative or process-description entries.]` : '';
+   Only write verified facts. Do not write speculative or process-description entries.
+   When you observe the user is clearly expert or beginner in a domain, note it in your response and suggest: "要不要把你的 {domain} 水平 ({level}) 记录到能力雷达？"
+6. Task handoff: When suspending a multi-step task or handing off to another agent, write current status to ~/.metame/memory/NOW.md using:
+   \`printf '%s\\n' "## Current Task" "{task}" "" "## Progress" "{progress}" "" "## Next Step" "{next}" > ~/.metame/memory/NOW.md\`
+   Keep it under 200 words. Clear it when the task is fully complete by running: \`> ~/.metame/memory/NOW.md\`]` : '';
 
     const routedPrompt = skill ? `/${skill} ${prompt}` : prompt;
 
