@@ -102,7 +102,13 @@ function createAdminCommandHandler(deps) {
         if (fs.existsSync(BRAIN_FILE)) {
           const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
           if (doc.identity) msg += `\nProfile: ${doc.identity.nickname || 'unknown'}`;
-          if (doc.context && doc.context.focus) msg += `\nFocus: ${doc.context.focus}`;
+          const nowPath = require('path').join(require('os').homedir(), '.metame', 'memory', 'NOW.md');
+          try {
+            if (fs.existsSync(nowPath)) {
+              const nowContent = fs.readFileSync(nowPath, 'utf8').trim().split('\n')[0];
+              if (nowContent) msg += `\nNOW: ${nowContent.slice(0, 80)}`;
+            }
+          } catch { /* ignore */ }
         }
       } catch { /* ignore */ }
       await bot.sendMessage(chatId, msg);

@@ -576,17 +576,16 @@ function findSessionById(sessionId) {
  * Read declared goals from the user's profile.
  * Returns a compact string like "DECLARED_GOALS: focus1 | focus2" (~11 tokens).
  */
-function formatGoalContext(profilePath) {
+function formatGoalContext(_profilePath) {
+  // Work state now lives in NOW.md (task whiteboard), not in the profile.
   try {
-    const yaml = require('js-yaml');
-    const profile = yaml.load(fs.readFileSync(profilePath, 'utf8')) || {};
-    const goals = [];
-    if (profile.status && profile.status.focus) goals.push(profile.status.focus);
-    if (profile.context && profile.context.focus && profile.context.focus !== (profile.status && profile.status.focus)) {
-      goals.push(profile.context.focus);
-    }
-    if (goals.length === 0) return '';
-    return `DECLARED_GOALS: ${goals.join(' | ')}`;
+    const nowPath = path.join(HOME, '.metame', 'memory', 'NOW.md');
+    if (!fs.existsSync(nowPath)) return '';
+    const content = fs.readFileSync(nowPath, 'utf8').trim();
+    if (!content) return '';
+    // Truncate to avoid bloating prompts
+    const truncated = content.length > 300 ? content.slice(0, 300) + '…' : content;
+    return `CURRENT_TASK:\n${truncated}`;
   } catch { return ''; }
 }
 
