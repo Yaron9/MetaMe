@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const { classifyTaskUsage } = require('./usage-classifier');
 
 const WEEKDAY_INDEX = Object.freeze({
@@ -229,25 +230,29 @@ function createTaskScheduler(deps) {
     if (!task || !task.memory_log) return;
     try {
       const memory = require('./memory');
-      const nowIso = new Date().toISOString();
-      const projectKey = (task._project && task._project.key) || 'heartbeat';
-      const memoryId = `${task.name}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const summaryText = String(output || '(no output)').trim() || '(no output)';
-      const summary = [
-        `[heartbeat task] ${task.name}`,
-        sessionId ? `session: ${sessionId}` : '',
-        summaryText,
-      ].filter(Boolean).join('\n').slice(0, 8000);
-      const keywords = [task.name, 'heartbeat', 'evolution', nowIso.slice(0, 10)].join(',');
-      memory.saveSession({
-        sessionId: memoryId,
-        project: projectKey,
-        summary,
-        keywords,
-        mood: '',
-        tokenCost: Number(tokenCost) || 0,
-      });
-      memory.close();
+      memory.acquire();
+      try {
+        const nowIso = new Date().toISOString();
+        const projectKey = (task._project && task._project.key) || 'heartbeat';
+        const memoryId = `${task.name}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const summaryText = String(output || '(no output)').trim() || '(no output)';
+        const summary = [
+          `[heartbeat task] ${task.name}`,
+          sessionId ? `session: ${sessionId}` : '',
+          summaryText,
+        ].filter(Boolean).join('\n').slice(0, 8000);
+        const keywords = [task.name, 'heartbeat', 'evolution', nowIso.slice(0, 10)].join(',');
+        memory.saveSession({
+          sessionId: memoryId,
+          project: projectKey,
+          summary,
+          keywords,
+          mood: '',
+          tokenCost: Number(tokenCost) || 0,
+        });
+      } finally {
+        memory.release();
+      }
       log('INFO', `Task ${task.name}: memory_log saved (${memoryId})`);
     } catch (e) {
       log('WARN', `Task ${task.name}: memory_log failed: ${e.message}`);
@@ -281,7 +286,7 @@ function createTaskScheduler(deps) {
 
     // Workflow tasks: multi-step skill chain via --resume session
     if (task.type === 'workflow') {
-      return executeWorkflow(task, config);
+      return executeWorkflow(task, config, precheck);
     }
 
     // Script tasks: run a local script directly (e.g. distill.js), no claude -p
@@ -488,18 +493,13 @@ function createTaskScheduler(deps) {
 
   // parseInterval — imported from ./utils
 
-  function executeWorkflow(task, config) {
+  function executeWorkflow(task, config, precheck) {
     const state = loadState();
     if (!checkBudget(config, state)) {
       log('WARN', `Budget exceeded, skipping workflow: ${task.name}`);
       return { success: false, error: 'budget_exceeded', output: '' };
     }
-    const precheck = checkPrecondition(task);
-    if (!precheck.pass) {
-      state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'skipped', output_preview: 'Precondition not met' };
-      saveState(state);
-      return { success: true, output: '(skipped)', skipped: true };
-    }
+    // precheck.pass is guaranteed true here — executeTask() already returns early when false
     const steps = task.steps || [];
     if (steps.length === 0) return { success: false, error: 'No steps defined', output: '' };
 
@@ -518,6 +518,7 @@ function createTaskScheduler(deps) {
 
     log('INFO', `Workflow ${task.name}: ${steps.length} steps, session ${sessionId.slice(0, 8)}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''}`);
 
+    let loopState = loadState();
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
       let prompt = (step.skill ? `/${step.skill} ` : '') + (step.prompt || '');
@@ -546,19 +547,19 @@ function createTaskScheduler(deps) {
         totalTokens += tk;
         outputs.push({ step: i + 1, skill: step.skill || null, output: output.slice(0, 500), tokens: tk });
         log('INFO', `Workflow ${task.name} step ${i + 1} done (${tk} tokens)`);
-        if (!checkBudget(config, loadState())) { log('WARN', 'Budget exceeded mid-workflow'); break; }
+        if (!checkBudget(config, loopState)) { log('WARN', 'Budget exceeded mid-workflow'); break; }
       } catch (e) {
         log('ERROR', `Workflow ${task.name} step ${i + 1} failed: ${e.message.slice(0, 200)}`);
         outputs.push({ step: i + 1, skill: step.skill || null, error: e.message.slice(0, 200) });
         if (!step.optional) {
-          recordTokens(loadState(), totalTokens, { category: classifyTaskUsage(task) });
+          recordTokens(loopState, totalTokens, { category: classifyTaskUsage(task) });
           state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: `Step ${i + 1} failed`, steps_completed: i, steps_total: steps.length };
           saveState(state);
           return { success: false, error: `Step ${i + 1} failed`, output: outputs.map(o => `Step ${o.step}: ${o.error ? 'FAILED' : 'OK'}`).join('\n'), tokens: totalTokens };
         }
       }
     }
-    recordTokens(loadState(), totalTokens, { category: classifyTaskUsage(task) });
+    recordTokens(loopState, totalTokens, { category: classifyTaskUsage(task) });
     const lastOk = [...outputs].reverse().find(o => !o.error);
     state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'success', output_preview: (lastOk ? lastOk.output : '').slice(0, 200), steps_completed: outputs.filter(o => !o.error).length, steps_total: steps.length };
     saveState(state);

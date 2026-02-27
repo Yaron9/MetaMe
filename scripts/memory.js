@@ -25,8 +25,17 @@ const fs = require('fs');
 
 const DB_PATH = path.join(os.homedir(), '.metame', 'memory.db');
 
+/** Minimal structured logger. level: 'INFO' | 'WARN' | 'ERROR' */
+function log(level, msg) {
+  const ts = new Date().toISOString();
+  process.stderr.write(`${ts} [${level}] ${msg}\n`);
+}
+
 // Lazy-init: only open DB when first called
 let _db = null;
+// Counts external callers that have called acquire() but not yet release().
+// Internal helpers (getDb, _trackSearch, etc.) do NOT affect this counter.
+let _refCount = 0;
 
 function getDb() {
   if (_db) return _db;
@@ -164,6 +173,9 @@ function getDb() {
   // One-time migration: copy recall_count → search_count for existing rows
   try { _db.exec('UPDATE facts SET search_count = recall_count WHERE recall_count > 0 AND search_count = 0'); } catch {}
 
+  // conflict_status: 'OK' (default) | 'CONFLICT' — set by _detectConflict for non-stateful relations
+  try { _db.exec("ALTER TABLE facts ADD COLUMN conflict_status TEXT NOT NULL DEFAULT 'OK'"); } catch {}
+
   return _db;
 }
 
@@ -267,6 +279,7 @@ function saveFacts(sessionId, project, facts, { scope = null } = {}) {
   let saved = 0;
   let skipped = 0;
   let superseded = 0;
+  let conflicts = 0;
   const savedFacts = [];
   const batchDedup = new Set();
 
@@ -328,6 +341,20 @@ function saveFacts(sessionId, project, facts, { scope = null } = {}) {
         if (changes > 0) {
           _logSupersede(toSupersede, id, f.entity, f.relation, f.value, sessionId);
         }
+      } else {
+        // Conflict detection for non-stateful relations
+        let whereSql = '';
+        let filterParams = [];
+        if (normalizedScope === '*') {
+          whereSql = `((scope = '*') OR (scope IS NULL AND project = '*'))`;
+        } else if (normalizedScope) {
+          whereSql = `((scope = ?) OR (scope IS NULL AND project = ?))`;
+          filterParams = [normalizedScope, normalizedProject];
+        } else {
+          whereSql = `(project IN (?, '*'))`;
+          filterParams = [normalizedProject];
+        }
+        conflicts += _detectConflict(db, f, id, whereSql, filterParams, sessionId);
       }
     } catch { skipped++; }
   }
@@ -339,7 +366,9 @@ function saveFacts(sessionId, project, facts, { scope = null } = {}) {
     if (qmdClient) qmdClient.upsertFacts(savedFacts);
   }
 
-  return { saved, skipped, superseded };
+  if (conflicts > 0) log('WARN', `[MEMORY] ${conflicts} conflict(s) detected`);
+
+  return { saved, skipped, superseded, conflicts };
 }
 
 /**
@@ -361,6 +390,7 @@ function _trackSearch(ids) {
 }
 
 const SUPERSEDE_LOG = path.join(os.homedir(), '.metame', 'memory_supersede_log.jsonl');
+const CONFLICT_LOG  = path.join(os.homedir(), '.metame', 'memory_conflict_log.jsonl');
 
 /**
  * Append supersede operations to audit log (append-only, never mutated).
@@ -381,6 +411,77 @@ function _logSupersede(oldFacts, newId, entity, relation, newValue, sessionId) {
     };
     fs.appendFileSync(SUPERSEDE_LOG, JSON.stringify(entry) + '\n', 'utf8');
   } catch { /* non-fatal */ }
+}
+
+/**
+ * Detect value conflicts for non-stateful facts.
+ *
+ * When a new fact (entity, relation) already has an active record whose value
+ * differs significantly from the incoming value, both are flagged CONFLICT.
+ * "Significant difference" = trimmed values are not equal AND neither contains
+ * the other as a substring (handles minor rewording and prefix matches).
+ *
+ * @param {object} db            - DatabaseSync instance
+ * @param {object} fact          - The newly-inserted fact { entity, relation, value }
+ * @param {string} newId         - Row ID of the newly-inserted fact
+ * @param {string} whereSql      - Scope WHERE clause (reused from saveFacts)
+ * @param {Array}  filterParams  - Bind params for whereSql
+ * @param {string} sessionId     - Source session ID (for audit log)
+ * @returns {number} Number of conflicts detected (0 or more)
+ */
+function _detectConflict(db, fact, newId, whereSql, filterParams, sessionId) {
+  try {
+    const existing = db.prepare(
+      `SELECT id, value FROM facts
+       WHERE entity = ? AND relation = ? AND id != ? AND superseded_by IS NULL
+         AND (conflict_status IS NULL OR conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
+         AND ${whereSql}`
+    ).all(fact.entity, fact.relation, newId, ...filterParams);
+
+    if (existing.length === 0) return 0;
+
+    const newVal = fact.value.trim();
+    let conflictCount = 0;
+
+    const conflicting = [];
+    for (const row of existing) {
+      const oldVal = row.value.trim();
+      // Skip if values are equivalent or one contains the other
+      if (oldVal === newVal) continue;
+      if (oldVal.includes(newVal) || newVal.includes(oldVal)) continue;
+
+      // Mark existing record as CONFLICT
+      db.prepare(
+        `UPDATE facts SET conflict_status = 'CONFLICT', updated_at = datetime('now') WHERE id = ?`
+      ).run(row.id);
+
+      conflicting.push({ id: row.id, value: row.value.slice(0, 80) });
+      conflictCount++;
+    }
+
+    if (conflictCount > 0) {
+      // Mark the new fact as CONFLICT too
+      db.prepare(
+        `UPDATE facts SET conflict_status = 'CONFLICT', updated_at = datetime('now') WHERE id = ?`
+      ).run(newId);
+
+      // Audit log (append-only, never mutated)
+      try {
+        const entry = {
+          ts: new Date().toISOString(),
+          entity: fact.entity,
+          relation: fact.relation,
+          new_id: newId,
+          new_value: fact.value.slice(0, 80),
+          session_id: sessionId,
+          conflicting,
+        };
+        fs.appendFileSync(CONFLICT_LOG, JSON.stringify(entry) + '\n', 'utf8');
+      } catch { /* non-fatal */ }
+    }
+
+    return conflictCount;
+  } catch { return 0; }
 }
 
 /**
@@ -697,8 +798,35 @@ function stats() {
 /**
  * Close the database connection (for clean shutdown).
  */
-function close() {
+/**
+ * Acquire a reference. Call once per logical "session" (e.g. per task run).
+ * Ensures DB is open and increments the ref count.
+ * Must be paired with a matching release() call.
+ */
+function acquire() {
+  _refCount++;
+  getDb(); // ensure DB is initialised
+}
+
+/**
+ * Release a reference. When the last caller releases, the DB is closed.
+ * Safe to call even if acquire() was never called (no-op when _refCount <= 0).
+ */
+function release() {
+  if (_refCount > 0) _refCount--;
+  if (_refCount === 0 && _db) { _db.close(); _db = null; }
+}
+
+/**
+ * Backwards-compatible alias. Equivalent to release().
+ * External callers that previously called close() continue to work correctly.
+ */
+function close() { release(); }
+
+/** Force-close regardless of ref count. Only call on process exit. */
+function forceClose() {
+  _refCount = 0;
   if (_db) { _db.close(); _db = null; }
 }
 
-module.exports = { saveSession, saveFacts, searchFacts, searchFactsAsync, searchSessions, recentSessions, getSession, stats, close, DB_PATH };
+module.exports = { saveSession, saveFacts, searchFacts, searchFactsAsync, searchSessions, recentSessions, getSession, stats, acquire, release, close, forceClose, DB_PATH };
