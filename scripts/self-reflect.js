@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 
 /**
- * self-reflect.js — Weekly Self-Reflection Task
+ * self-reflect.js — Daily Self-Reflection Task
  *
  * Scans correction/metacognitive signals from the past 7 days,
  * aggregates "where did the AI get it wrong", and writes a brief
  * self-critique pattern into growth.patterns in ~/.claude_profile.yaml.
  *
- * Heartbeat: weekly, require_idle, non-blocking.
+ * Also distills correction signals into lessons/ SOP markdown files.
+ *
+ * Heartbeat: nightly at 23:00, require_idle, non-blocking.
  */
 
 'use strict';
@@ -22,7 +24,100 @@ const HOME = os.homedir();
 const SIGNAL_FILE = path.join(HOME, '.metame', 'raw_signals.jsonl');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const LOCK_FILE = path.join(HOME, '.metame', 'self-reflect.lock');
+const LESSONS_DIR = path.join(HOME, '.metame', 'memory', 'lessons');
 const WINDOW_DAYS = 7;
+
+/**
+ * Distill correction signals into reusable SOP markdown files.
+ * Each run produces at most one lesson file per unique slug.
+ * Returns the number of lesson files actually written.
+ *
+ * @param {Array} signals - all recent signals (will filter to 'correction' type internally)
+ * @param {string} lessonsDir - absolute path where lesson .md files are written
+ */
+async function generateLessons(signals, lessonsDir) {
+  // Only process correction signals that carry explicit feedback
+  const corrections = signals.filter(s => s.type === 'correction' && s.feedback);
+  if (corrections.length < 2) {
+    console.log(`[self-reflect] Only ${corrections.length} correction signal(s) with feedback, skipping lessons.`);
+    return 0;
+  }
+
+  fs.mkdirSync(lessonsDir, { recursive: true });
+
+  const correctionText = corrections
+    .slice(-15) // cap to avoid prompt bloat
+    .map(c => `- Prompt: ${(c.prompt || '').slice(0, 100)}\n  Feedback: ${(c.feedback || '').slice(0, 150)}`)
+    .join('\n');
+
+  const prompt = `You are distilling correction signals into a reusable SOP for an AI assistant.
+
+Corrections (JSON):
+${correctionText}
+
+Generate ONE actionable lesson in this JSON format:
+{
+  "title": "简短标题（中文，10字以内）",
+  "slug": "kebab-case-english-slug",
+  "content": "## 问题\\n...\\n## 根因\\n...\\n## 操作手册\\n1. ...\\n2. ...\\n3. ..."
+}
+
+Rules: content must be in 中文, concrete and actionable, 100-300 chars total.
+Only output the JSON object, no explanation.`;
+
+  let distillEnv = {};
+  try { distillEnv = buildDistillEnv(); } catch {}
+
+  let result;
+  try {
+    result = await Promise.race([
+      callHaiku(prompt, distillEnv, 60000),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 90000)),
+    ]);
+  } catch (e) {
+    console.log(`[self-reflect] generateLessons Haiku call failed: ${e.message}`);
+    return 0;
+  }
+
+  let lesson;
+  try {
+    const cleaned = result.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    lesson = JSON.parse(cleaned);
+    if (!lesson.title || !lesson.slug || !lesson.content) throw new Error('missing fields');
+  } catch (e) {
+    console.log(`[self-reflect] Failed to parse lesson JSON: ${e.message}`);
+    return 0;
+  }
+
+  // Sanitize slug: only lowercase alphanumeric and hyphens
+  const slug = lesson.slug.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+
+  // Prevent duplicates: skip if any existing file already uses this slug
+  const existing = fs.readdirSync(lessonsDir).filter(f => f.endsWith(`-${slug}.md`));
+  if (existing.length > 0) {
+    console.log(`[self-reflect] Lesson '${slug}' already exists (${existing[0]}), skipping.`);
+    return 0;
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const filename = `${today}-${slug}.md`;
+  const filepath = path.join(lessonsDir, filename);
+
+  const fileContent = `---
+date: ${today}
+source: self-reflect
+corrections: ${corrections.length}
+---
+
+# ${lesson.title}
+
+${lesson.content}
+`;
+
+  fs.writeFileSync(filepath, fileContent, 'utf8');
+  console.log(`[self-reflect] Lesson written: ${filepath}`);
+  return 1;
+}
 
 async function run() {
   // Atomic lock
@@ -157,6 +252,16 @@ ${signalText}
       console.log(`[self-reflect] ${patterns.length} pattern(s) written to growth.patterns: ${patterns.join(' | ')}`);
     } catch (e) {
       console.log(`[self-reflect] Failed to write profile: ${e.message}`);
+    }
+
+    // === Generate lessons/ from correction signals ===
+    try {
+      const lessonsCount = await generateLessons(recentSignals, LESSONS_DIR);
+      if (lessonsCount > 0) {
+        console.log(`[self-reflect] Generated ${lessonsCount} lesson(s) in ${LESSONS_DIR}`);
+      }
+    } catch (e) {
+      console.log(`[self-reflect] generateLessons failed (non-fatal): ${e.message}`);
     }
 
   } finally {
