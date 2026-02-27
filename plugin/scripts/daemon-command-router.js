@@ -28,15 +28,6 @@ function createCommandRouter(deps) {
     agentFlowTtlMs,
   } = deps;
 
-  function storePendingActivation(agentKey, agentName, cwd, createdByChatId) {
-    if (!pendingActivations) return;
-    pendingActivations.set(agentKey, {
-      agentKey, agentName, cwd,
-      createdByChatId: String(createdByChatId),
-      createdAt: Date.now(),
-    });
-  }
-
   function resolveFlowTtlMs() {
     const raw = typeof agentFlowTtlMs === 'function' ? agentFlowTtlMs() : agentFlowTtlMs;
     const num = Number(raw);
@@ -452,7 +443,12 @@ function createCommandRouter(deps) {
       }
       const data = res.data || {};
       const projName = projectNameFromResult(data, agentName);
-      if (data.projectKey) storePendingActivation(data.projectKey, projName, data.cwd, chatId);
+      if (data.projectKey && pendingActivations) {
+        pendingActivations.set(data.projectKey, {
+          agentKey: data.projectKey, agentName: projName, cwd: data.cwd,
+          createdByChatId: String(chatId), createdAt: Date.now(),
+        });
+      }
       await bot.sendMessage(chatId,
         `✅ Agent「${projName}」已创建\n目录: ${data.cwd || '（未知）'}\n\n` +
         `**下一步**: 在新群里发送 \`/activate\` 完成绑定（30分钟内有效）`

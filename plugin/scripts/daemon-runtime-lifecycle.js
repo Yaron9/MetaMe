@@ -93,6 +93,7 @@ function setupRuntimeWatchers(deps) {
   const startTime = Date.now();
   let restartDebounce = null;
   let pendingRestart = false;
+  let deferredRestartTimer = null; // guard: prevent duplicate deferred restart timers
 
   fs.watchFile(daemonScript, { interval: 3000 }, (curr, prev) => {
     if (curr.mtimeMs === prev.mtimeMs) return;
@@ -112,9 +113,9 @@ function setupRuntimeWatchers(deps) {
   const origDelete = activeProcesses.delete.bind(activeProcesses);
   activeProcesses.delete = function (key) {
     const result = origDelete(key);
-    if (pendingRestart && activeProcesses.size === 0) {
+    if (pendingRestart && activeProcesses.size === 0 && !deferredRestartTimer) {
       log('INFO', 'All tasks completed — executing deferred restart in 8s...');
-      setTimeout(onRestartRequested, 8000); // 给 sendMessage/deleteMessage 等 cleanup 留出足够时间
+      deferredRestartTimer = setTimeout(onRestartRequested, 8000); // 给 sendMessage/deleteMessage 等 cleanup 留出足够时间
     }
     return result;
   };
@@ -124,6 +125,7 @@ function setupRuntimeWatchers(deps) {
     fs.unwatchFile(daemonScript);
     if (reloadDebounce) clearTimeout(reloadDebounce);
     if (restartDebounce) clearTimeout(restartDebounce);
+    if (deferredRestartTimer) clearTimeout(deferredRestartTimer);
     activeProcesses.delete = origDelete;
   }
 
