@@ -7,7 +7,7 @@
  * with conflict_status = 'ARCHIVED' (soft delete, fully auditable).
  *
  * GC criteria (ALL must be true):
- *   1. last_searched_at < 30 days ago, OR last_searched_at IS NULL and created_at < 30 days ago
+ *   1. last_searched_at older than 30 days (i.e. datetime < now-30d), OR NULL and created_at also older than 30 days
  *   2. search_count < 3
  *   3. superseded_by IS NULL          (already-superseded facts excluded)
  *   4. conflict_status IS NULL OR conflict_status = 'OK'  (skip CONFLICT/ARCHIVED)
@@ -32,7 +32,7 @@ const LOCK_FILE = path.join(METAME_DIR, 'memory-gc.lock');
 const GC_LOG_FILE = path.join(METAME_DIR, 'memory_gc_log.jsonl');
 
 // Relations that are permanently protected from archival
-const PROTECTED_RELATIONS = ['user_pref', 'workflow_rule', 'arch_convention'];
+const PROTECTED_RELATIONS = ['user_pref', 'workflow_rule', 'arch_convention', 'config_fact'];
 
 // GC threshold: facts older than this many days are candidates
 const STALE_DAYS = 30;
@@ -171,32 +171,39 @@ function run() {
 
     let archivedCount = 0;
 
-    if (candidateCount > 0) {
-      // ── EXECUTE: archive the candidates ──
-      const updateStmt = db.prepare(`
-        UPDATE facts
-        SET conflict_status = 'ARCHIVED',
-            updated_at = datetime('now')
-        WHERE (
-          (last_searched_at IS NOT NULL AND last_searched_at < datetime('now', '-${STALE_DAYS} days'))
-          OR
-          (last_searched_at IS NULL AND created_at < datetime('now', '-${STALE_DAYS} days'))
-        )
-        AND search_count < ${MIN_SEARCH_COUNT}
-        AND superseded_by IS NULL
-        AND (conflict_status IS NULL OR conflict_status = 'OK')
-        AND relation NOT IN (${protectedPlaceholders})
-      `);
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      if (candidateCount > 0) {
+        // ── EXECUTE: archive the candidates ──
+        const updateStmt = db.prepare(`
+          UPDATE facts
+          SET conflict_status = 'ARCHIVED',
+              updated_at = datetime('now')
+          WHERE (
+            (last_searched_at IS NOT NULL AND last_searched_at < datetime('now', '-${STALE_DAYS} days'))
+            OR
+            (last_searched_at IS NULL AND created_at < datetime('now', '-${STALE_DAYS} days'))
+          )
+          AND search_count < ${MIN_SEARCH_COUNT}
+          AND superseded_by IS NULL
+          AND (conflict_status IS NULL OR conflict_status = 'OK')
+          AND relation NOT IN (${protectedPlaceholders})
+        `);
 
-      const result = updateStmt.run(...PROTECTED_RELATIONS);
-      archivedCount = result.changes;
+        const result = updateStmt.run(...PROTECTED_RELATIONS);
+        archivedCount = result.changes;
 
-      console.log(`[MEMORY-GC] Archived ${archivedCount} facts → conflict_status = 'ARCHIVED'`);
-    } else {
-      console.log('[MEMORY-GC] No candidates to archive.');
+        console.log(`[MEMORY-GC] Archived ${archivedCount} facts → conflict_status = 'ARCHIVED'`);
+      } else {
+        console.log('[MEMORY-GC] No candidates to archive.');
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      try { db.exec('ROLLBACK'); } catch {}
+      throw e;
     }
 
-    // Run VACUUM to reclaim space (only if we archived something)
+    // Run VACUUM to reclaim space (only if we archived something) — outside transaction
     if (archivedCount > 0) {
       try {
         db.exec('VACUUM');

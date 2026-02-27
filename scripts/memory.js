@@ -434,6 +434,7 @@ function _detectConflict(db, fact, newId, whereSql, filterParams, sessionId) {
     const existing = db.prepare(
       `SELECT id, value FROM facts
        WHERE entity = ? AND relation = ? AND id != ? AND superseded_by IS NULL
+         AND (conflict_status IS NULL OR conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
          AND ${whereSql}`
     ).all(fact.entity, fact.relation, newId, ...filterParams);
 

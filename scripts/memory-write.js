@@ -164,7 +164,7 @@ function main() {
   const memory = require(memoryPath);
   const sessionId = 'manual-' + Date.now();
 
-  memory.acquire();
+  if (typeof memory.acquire === 'function') memory.acquire();
   try {
     const result = memory.saveFacts(sessionId, project, [
       { entity, relation, value, confidence, tags },
@@ -185,7 +185,7 @@ function main() {
     console.error('错误: 写入失败 —', err.message);
     process.exit(1);
   } finally {
-    try { memory.release(); } catch {}
+    try { if (typeof memory.release === 'function') memory.release(); } catch {}
   }
 }
 
