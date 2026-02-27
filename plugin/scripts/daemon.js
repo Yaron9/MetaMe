@@ -1376,6 +1376,8 @@ const { handleAdminCommand } = createAdminCommandHandler({
   skillEvolution,
   taskBoard,
   taskEnvelope,
+  getActiveProcesses: () => activeProcesses,
+  getMessageQueue: () => messageQueue,
 });
 
 const { handleSessionCommand } = createSessionCommandHandler({

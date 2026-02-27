@@ -26,6 +26,8 @@ function createAdminCommandHandler(deps) {
     skillEvolution,
     taskBoard,
     taskEnvelope,
+    getActiveProcesses,
+    getMessageQueue,
   } = deps;
 
   function resolveProjectKey(targetName, projects) {
@@ -645,6 +647,36 @@ function createAdminCommandHandler(deps) {
       return { handled: true, config };
     }
 
+    // /recover — kill all stuck tasks and reset message queues
+    if (text === '/recover') {
+      const activeProcesses = getActiveProcesses ? getActiveProcesses() : null;
+      const messageQueue = getMessageQueue ? getMessageQueue() : null;
+      if (!activeProcesses) {
+        await bot.sendMessage(chatId, '❌ 无法访问任务状态');
+        return { handled: true, config };
+      }
+      const stuckChatIds = [...activeProcesses.keys()];
+      let killed = 0;
+      for (const cid of stuckChatIds) {
+        const proc = activeProcesses.get(cid);
+        if (proc && proc.child) {
+          try { process.kill(-proc.child.pid, 'SIGKILL'); } catch { try { proc.child.kill('SIGKILL'); } catch { } }
+          killed++;
+        }
+        activeProcesses.delete(cid);
+        if (messageQueue && messageQueue.has(cid)) {
+          const q = messageQueue.get(cid);
+          if (q && q.timer) clearTimeout(q.timer);
+          messageQueue.delete(cid);
+        }
+      }
+      const summary = killed > 0
+        ? `✅ 已重置 ${killed} 个卡住的任务，可重新发送消息。`
+        : '✅ 当前没有卡住的任务。';
+      await bot.sendMessage(chatId, summary);
+      return { handled: true, config };
+    }
+
     // /doctor — diagnostics; /fix — restore backup; /reset — reset model to sonnet
     if (text === '/fix') {
       if (restoreConfig()) {
@@ -702,15 +734,28 @@ function createAdminCommandHandler(deps) {
       const hasBak = fs.existsSync(bakFile);
       checks.push(hasBak ? '✅ 有备份' : '⚠️ 无备份');
 
+      // Check for stuck tasks
+      const activeProcesses = getActiveProcesses ? getActiveProcesses() : null;
+      let hasStuck = false;
+      if (activeProcesses && activeProcesses.size > 0) {
+        const stuckList = [...activeProcesses.keys()].map(cid => cid.slice(-8)).join(', ');
+        checks.push(`⚠️ 有 ${activeProcesses.size} 个任务正在运行 (${stuckList})`);
+        hasStuck = true;
+        issues++;
+      } else {
+        checks.push('✅ 无卡住任务');
+      }
+
       let msg = `🏥 诊断\n${checks.join('\n')}`;
       if (issues > 0) {
         if (bot.sendButtons) {
           const buttons = [];
-          if (hasBak) buttons.push([{ text: '🔧 恢复备份', callback_data: '/fix' }]);
-          buttons.push([{ text: '🔄 重置opus', callback_data: '/reset' }]);
+          if (hasStuck) buttons.push([{ text: '🔧 一键重置卡住任务', callback_data: '/recover' }]);
+          if (hasBak) buttons.push([{ text: '📦 恢复配置备份', callback_data: '/fix' }]);
+          buttons.push([{ text: '🔄 重置模型 opus', callback_data: '/reset' }]);
           await bot.sendButtons(chatId, msg, buttons);
         } else {
-          msg += '\n/fix 恢复备份 /reset 重置opus';
+          msg += '\n/recover 重置卡住任务 /fix 恢复备份 /reset 重置opus';
           await bot.sendMessage(chatId, msg);
         }
       } else {
