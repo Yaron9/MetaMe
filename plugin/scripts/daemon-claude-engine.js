@@ -687,6 +687,19 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const _agentMap = { ...(_cfg.telegram ? _cfg.telegram.chat_agent_map : {}), ...(_cfg.feishu ? _cfg.feishu.chat_agent_map : {}) };
       const projectKey = _agentMap[_cid] || projectKeyFromVirtualChatId(_cid);
 
+      // L1: NOW.md shared whiteboard injection
+      if (!session.started) {
+        try {
+          const nowPath = path.join(HOME, '.metame', 'memory', 'NOW.md');
+          if (fs.existsSync(nowPath)) {
+            const nowContent = fs.readFileSync(nowPath, 'utf8').trim();
+            if (nowContent) {
+              memoryHint += `\n\n<!-- NOW:START -->\n[Current task context (shared whiteboard):\n${nowContent}]\n<!-- NOW:END -->`;
+            }
+          }
+        } catch { /* non-critical */ }
+      }
+
       // 1. Inject recent session memories ONLY on first message of a session
       if (!session.started) {
         const recent = memory.recentSessions({ limit: 1, project: projectKey || undefined });
