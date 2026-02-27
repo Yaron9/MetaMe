@@ -28,6 +28,8 @@ function createAdminCommandHandler(deps) {
     taskEnvelope,
     getActiveProcesses,
     getMessageQueue,
+    loadState,
+    saveState,
   } = deps;
 
   function resolveProjectKey(targetName, projects) {
@@ -660,7 +662,7 @@ function createAdminCommandHandler(deps) {
       for (const cid of stuckChatIds) {
         const proc = activeProcesses.get(cid);
         if (proc && proc.child) {
-          try { process.kill(-proc.child.pid, 'SIGKILL'); } catch { try { proc.child.kill('SIGKILL'); } catch { } }
+          try { process.kill(-proc.child.pid, 'SIGTERM'); } catch { try { proc.child.kill('SIGTERM'); } catch { } }
           killed++;
         }
         activeProcesses.delete(cid);
@@ -669,6 +671,27 @@ function createAdminCommandHandler(deps) {
           if (q && q.timer) clearTimeout(q.timer);
           messageQueue.delete(cid);
         }
+      }
+      // Clear stale sessions (started: false = never completed first message, likely locked)
+      try {
+        const state = loadState();
+        let cleared = 0;
+        for (const [cid, sess] of Object.entries(state.sessions || {})) {
+          if (sess && !sess.started) {
+            delete state.sessions[cid];
+            cleared++;
+          }
+        }
+        if (cleared > 0) saveState(state);
+      } catch { /* non-critical */ }
+      // SIGKILL stragglers after 3s grace period
+      if (killed > 0) {
+        setTimeout(() => {
+          for (const cid of stuckChatIds) {
+            // proc references are stale but child.pid is still valid for cleanup
+            try { const proc = activeProcesses.get(cid); if (proc && proc.child) process.kill(-proc.child.pid, 'SIGKILL'); } catch { }
+          }
+        }, 3000);
       }
       const summary = killed > 0
         ? `✅ 已重置 ${killed} 个卡住的任务，可重新发送消息。`
@@ -734,16 +757,24 @@ function createAdminCommandHandler(deps) {
       const hasBak = fs.existsSync(bakFile);
       checks.push(hasBak ? '✅ 有备份' : '⚠️ 无备份');
 
-      // Check for stuck tasks
+      // Check for stuck tasks (only flag tasks running > 10 minutes as suspicious)
       const activeProcesses = getActiveProcesses ? getActiveProcesses() : null;
       let hasStuck = false;
       if (activeProcesses && activeProcesses.size > 0) {
-        const stuckList = [...activeProcesses.keys()].map(cid => cid.slice(-8)).join(', ');
-        checks.push(`⚠️ 有 ${activeProcesses.size} 个任务正在运行 (${stuckList})`);
-        hasStuck = true;
-        issues++;
+        const now = Date.now();
+        const stuckThreshold = 10 * 60 * 1000; // 10 minutes
+        const entries = [...activeProcesses.entries()];
+        const stuckEntries = entries.filter(([, proc]) => proc && proc.startedAt && (now - proc.startedAt) > stuckThreshold);
+        if (stuckEntries.length > 0) {
+          const stuckList = stuckEntries.map(([cid, proc]) => `${cid.slice(-8)}(${Math.round((now - proc.startedAt) / 60000)}min)`).join(', ');
+          checks.push(`⚠️ ${stuckEntries.length} 个任务疑似卡住 (${stuckList})`);
+          hasStuck = true;
+          issues++;
+        } else {
+          checks.push(`✅ ${entries.length} 个任务正常运行中`);
+        }
       } else {
-        checks.push('✅ 无卡住任务');
+        checks.push('✅ 无运行中任务');
       }
 
       let msg = `🏥 诊断\n${checks.join('\n')}`;

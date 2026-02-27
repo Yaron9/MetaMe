@@ -237,7 +237,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
    * Spawn claude as async child process (non-blocking).
    * Returns { output, error } after process exits.
    */
-  function spawnClaudeAsync(args, input, cwd, timeoutMs = 300000) {
+  function spawnClaudeAsync(args, input, cwd, timeoutMs = 300000, metameProject = '') {
     return new Promise((resolve) => {
       const child = spawn(CLAUDE_BIN, args, {
         cwd,
@@ -247,7 +247,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           ...getActiveProviderEnv(),
           CLAUDECODE: undefined,
           METAME_INTERNAL_PROMPT: '1',
-          METAME_PROJECT: projectKey || ''
+          METAME_PROJECT: metameProject || ''
         },
       });
 
@@ -312,7 +312,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
    * Calls onStatus callback when tool usage is detected.
    * Returns { output, error } after process exits.
    */
-  function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, chatId = null) {
+  function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, chatId = null, metameProject = '') {
     return new Promise((resolve) => {
       // Add stream-json output format (requires --verbose)
       const streamArgs = [...args, '--output-format', 'stream-json', '--verbose'];
@@ -325,13 +325,13 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           ...process.env,
           ...getActiveProviderEnv(),
           CLAUDECODE: undefined,
-          METAME_PROJECT: projectKey || ''
+          METAME_PROJECT: metameProject || ''
         },
       });
 
       // Track active process for /stop
       if (chatId) {
-        activeProcesses.set(chatId, { child, aborted: false });
+        activeProcesses.set(chatId, { child, aborted: false, startedAt: Date.now() });
         saveActivePids(); // Fix3: persist PID to disk
       }
 
@@ -851,7 +851,16 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       } catch { /* ignore status update failures */ }
     };
 
-    const { output, error, files, toolUsageLog } = await spawnClaudeStreaming(args, fullPrompt, session.cwd, onStatus, 600000, chatId);
+    let output, error, files, toolUsageLog;
+    try {
+      ({ output, error, files, toolUsageLog } = await spawnClaudeStreaming(args, fullPrompt, session.cwd, onStatus, 600000, chatId, boundProjectKey || ''));
+    } catch (spawnErr) {
+      clearInterval(typingTimer);
+      if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => { });
+      log('ERROR', `spawnClaudeStreaming crashed for ${chatId}: ${spawnErr.message}`);
+      await bot.sendMessage(chatId, `❌ 内部错误: ${spawnErr.message}`).catch(() => { });
+      return { ok: false, error: spawnErr.message };
+    }
     clearInterval(typingTimer);
 
     // Skill evolution: capture signal + hot path heuristic check
@@ -967,8 +976,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       log('ERROR', `askClaude failed for ${chatId}: ${errMsg.slice(0, 300)}`);
 
       // If session not found (expired/deleted), create new and retry once
-      if (errMsg.includes('not found') || errMsg.includes('No session')) {
-        log('WARN', `Session ${session.id} not found, creating new`);
+      if (errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use')) {
+        log('WARN', `Session ${session.id} unusable (${errMsg.includes('already in use') ? 'locked' : 'not found'}), creating new`);
         session = createSession(chatId, session.cwd);
 
         const retryArgs = ['-p', '--session-id', session.id];

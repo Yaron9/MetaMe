@@ -231,10 +231,10 @@ function createTaskScheduler(deps) {
     try {
       const memory = require('./memory');
       memory.acquire();
+      const memoryId = `${task.name}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       try {
         const nowIso = new Date().toISOString();
         const projectKey = (task._project && task._project.key) || 'heartbeat';
-        const memoryId = `${task.name}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         const summaryText = String(output || '(no output)').trim() || '(no output)';
         const summary = [
           `[heartbeat task] ${task.name}`,
