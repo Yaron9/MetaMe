@@ -717,9 +717,17 @@ function filterBySchema(obj, parentKey = '') {
     const value = obj[key];
 
     if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-      const nested = filterBySchema(value, fullKey);
-      if (Object.keys(nested).length > 0) {
-        result[key] = nested;
+      // map type: accept entire object as-is, do not recurse into sub-keys
+      const def = getDefinition(fullKey);
+      if (def && def.type === 'map') {
+        if (hasKey(fullKey) && !isLocked(fullKey)) {
+          result[key] = value;
+        }
+      } else {
+        const nested = filterBySchema(value, fullKey);
+        if (Object.keys(nested).length > 0) {
+          result[key] = nested;
+        }
       }
     } else {
       // Check schema whitelist — allow if key exists and is not locked
