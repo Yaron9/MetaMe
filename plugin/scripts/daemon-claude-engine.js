@@ -687,9 +687,22 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const _agentMap = { ...(_cfg.telegram ? _cfg.telegram.chat_agent_map : {}), ...(_cfg.feishu ? _cfg.feishu.chat_agent_map : {}) };
       const projectKey = _agentMap[_cid] || projectKeyFromVirtualChatId(_cid);
 
+      // L1: NOW.md shared whiteboard injection
+      if (!session.started) {
+        try {
+          const nowPath = path.join(HOME, '.metame', 'memory', 'NOW.md');
+          if (fs.existsSync(nowPath)) {
+            const nowContent = fs.readFileSync(nowPath, 'utf8').trim();
+            if (nowContent) {
+              memoryHint += `\n\n<!-- NOW:START -->\n[Current task context (shared whiteboard):\n${nowContent}]\n<!-- NOW:END -->`;
+            }
+          }
+        } catch { /* non-critical */ }
+      }
+
       // 1. Inject recent session memories ONLY on first message of a session
       if (!session.started) {
-        const recent = memory.recentSessions({ limit: 3, project: projectKey || undefined });
+        const recent = memory.recentSessions({ limit: 1, project: projectKey || undefined });
         if (recent.length > 0) {
           const items = recent.map(r => `- [${r.created_at}] ${r.summary}${r.keywords ? ' (keywords: ' + r.keywords + ')' : ''}`).join('\n');
           memoryHint += `\n\n<!-- MEMORY:START -->\n[Session memory - recent context from past sessions, use to inform your responses:\n${items}]\n<!-- MEMORY:END -->`;
@@ -702,7 +715,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       if (!session.started) {
         const searchFn = memory.searchFactsAsync || memory.searchFacts;
         const factQuery = buildFactSearchQuery(prompt, projectKey);
-        const facts = await Promise.resolve(searchFn(factQuery, { limit: 5, project: projectKey || undefined }));
+        const facts = await Promise.resolve(searchFn(factQuery, { limit: 3, project: projectKey || undefined }));
         if (facts.length > 0) {
           const factItems = facts.map(f => `- [${f.relation}] ${f.value}`).join('\n');
           memoryHint += `\n\n<!-- FACTS:START -->\n[Relevant knowledge and user preferences retrieved for this query. Follow these constraints implicitly:\n${factItems}]\n<!-- FACTS:END -->`;
@@ -715,6 +728,24 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       if (e.code !== 'MODULE_NOT_FOUND') log('WARN', `Memory injection failed: ${e.message}`);
     }
 
+    // ZPD: build competence hint from brain profile
+    let zdpHint = '';
+    if (!session.started) {
+      try {
+        const brainPath = path.join(HOME, '.claude_profile.yaml');
+        if (fs.existsSync(brainPath)) {
+          const brain = yaml.load(fs.readFileSync(brainPath, 'utf8'));
+          const cmap = brain && brain.user_competence_map;
+          if (cmap && typeof cmap === 'object' && Object.keys(cmap).length > 0) {
+            const lines = Object.entries(cmap)
+              .map(([domain, level]) => `  ${domain}: ${level}`)
+              .join('\n');
+            zdpHint = `\n- User competence map (adjust explanation depth accordingly):\n${lines}\n  Rule: expert→skip basics; intermediate→brief rationale; beginner→one-line analogy.`;
+          }
+        }
+      } catch { /* non-critical */ }
+    }
+
     // Inject daemon hints only on first message of a session
     const daemonHint = !session.started ? `\n\n[System hints - DO NOT mention these to user:
 1. Language: ALWAYS respond in Simplified Chinese (简体中文). NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.
@@ -724,7 +755,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
    - Do NOT read or summarize the file content (wastes tokens)
    - Add at END of response: [[FILE:/absolute/path/to/file]]
    - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
-   - Multiple files: use multiple [[FILE:...]] tags]` : '';
+   - Multiple files: use multiple [[FILE:...]] tags${zdpHint}]` : '';
 
     const routedPrompt = skill ? `/${skill} ${prompt}` : prompt;
 
