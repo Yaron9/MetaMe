@@ -144,6 +144,23 @@ function validate(key, value) {
     }
   }
 
+  if (def.type === 'map') {
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      return { valid: false, reason: `${key} must be an object (map)` };
+    }
+    if (def.maxKeys && Object.keys(value).length > def.maxKeys) {
+      return { valid: false, reason: `${key} exceeds maxKeys (${def.maxKeys})` };
+    }
+    if (def.values) {
+      for (const [k, v] of Object.entries(value)) {
+        if (!def.values.includes(v)) {
+          return { valid: false, reason: `${key}.${k} must be one of: ${def.values.join(', ')}` };
+        }
+      }
+    }
+    return { valid: true };
+  }
+
   return { valid: true };
 }
 

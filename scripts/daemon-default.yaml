@@ -63,6 +63,24 @@ heartbeat:
       notify: false
       enabled: true
 
+    # 夜间记忆蒸馏：每天 01:00 提炼热区事实为决策与经验文档
+    - name: nightly-reflect
+      type: script
+      command: node ~/.metame/memory-nightly-reflect.js
+      at: "01:00"
+      require_idle: true
+      notify: false
+      enabled: true
+
+    # 记忆索引：每天 01:30 更新 ~/.metame/memory/INDEX.md
+    - name: memory-index
+      type: script
+      command: node ~/.metame/memory-index.js
+      at: "01:30"
+      require_idle: true
+      notify: false
+      enabled: true
+
     # Legacy flat tasks (no project isolation). New tasks should go under projects: above.
     # Examples — uncomment or add your own:
     #
