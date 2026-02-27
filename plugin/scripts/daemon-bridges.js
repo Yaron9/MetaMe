@@ -12,7 +12,28 @@ function createBridgeStarter(deps) {
     saveState,
     getSession,
     handleCommand,
+    pendingActivations,  // optional — used to show smart activation hint
   } = deps;
+
+  // Returns the best pending activation for a given chatId (excludes self-created)
+  function getPendingActivationForChat(chatId) {
+    if (!pendingActivations || pendingActivations.size === 0) return null;
+    const cid = String(chatId);
+    let latest = null;
+    for (const rec of pendingActivations.values()) {
+      if (rec.createdByChatId === cid) continue;
+      if (!latest || rec.createdAt > latest.createdAt) latest = rec;
+    }
+    return latest;
+  }
+
+  function unauthorizedMsg(chatId, useSend) {
+    const pending = getPendingActivationForChat(chatId);
+    if (pending) {
+      return `⚠️ 此群未授权\n\n发送以下命令激活 Agent「${pending.agentName}」：\n\`/activate\``;
+    }
+    return '⚠️ 此群未授权\n\n如已创建 Agent，发送 `/activate` 完成绑定。\n否则请先在主群创建 Agent。';
+  }
 
   async function startTelegramBridge(config, executeTaskByName) {
     if (!config.telegram || !config.telegram.enabled) return null;
@@ -68,13 +89,13 @@ function createBridgeStarter(deps) {
             const trimmedText = msg.text && msg.text.trim();
             const isBindCmd = trimmedText && (
               trimmedText.startsWith('/agent bind')
-              || trimmedText.startsWith('/agent new')
               || trimmedText.startsWith('/agent-bind-dir')
               || trimmedText.startsWith('/browse bind')
+              || trimmedText === '/activate'
             );
             if (!allowedIds.includes(chatId) && !isBindCmd) {
               log('WARN', `Rejected message from unauthorized chat: ${chatId}`);
-              bot.sendMessage(chatId, '⚠️ This chat is not authorized.\n\nCopy and send this command to register:\n\n/agent bind personal').catch(() => {});
+              bot.sendMessage(chatId, unauthorizedMsg(chatId)).catch(() => {});
               continue;
             }
 
@@ -157,15 +178,14 @@ function createBridgeStarter(deps) {
         const trimmedText = text && text.trim();
         const isBindCmd = trimmedText && (
           trimmedText.startsWith('/agent bind')
-          || trimmedText.startsWith('/agent new')
           || trimmedText.startsWith('/agent-bind-dir')
           || trimmedText.startsWith('/browse bind')
+          || trimmedText === '/activate'
         );
         if (!allowedIds.includes(chatId) && !isBindCmd) {
           log('WARN', `Feishu: rejected message from ${chatId}`);
-          (bot.sendMarkdown
-            ? bot.sendMarkdown(chatId, '⚠️ 此会话未授权\n\n复制发送以下命令注册：\n\n/agent bind personal')
-            : bot.sendMessage(chatId, '⚠️ 此会话未授权\n\n复制发送以下命令注册：\n\n/agent bind personal')).catch(() => {});
+          const msg = unauthorizedMsg(chatId);
+          (bot.sendMarkdown ? bot.sendMarkdown(chatId, msg) : bot.sendMessage(chatId, msg)).catch(() => {});
           return;
         }
 
