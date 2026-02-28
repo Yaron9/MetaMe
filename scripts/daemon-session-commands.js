@@ -326,8 +326,26 @@ function createSessionCommandHandler(deps) {
         const excludeId = currentSession?.id;
         const recent = listRecentSessions(10);
         const filtered = excludeId ? recent.filter(s => s.sessionId !== excludeId) : recent;
-        if (filtered.length > 0 && filtered[0].projectPath) {
-          const target = filtered[0];
+
+        // For bound chats, prefer sessions from the same project to avoid
+        // the bound-chat guard (handleCommand) immediately overwriting with a new session.
+        let boundCwd = null;
+        try {
+          const cfg = loadConfig();
+          const chatAgentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
+          const mappedKey = chatAgentMap[String(chatId)];
+          const proj = mappedKey && cfg.projects ? cfg.projects[mappedKey] : null;
+          if (proj && proj.cwd) boundCwd = normalizeCwd(proj.cwd);
+        } catch { /* ignore */ }
+
+        let candidates = filtered;
+        if (boundCwd) {
+          const boundFiltered = filtered.filter(s => s.projectPath && normalizeCwd(s.projectPath) === boundCwd);
+          if (boundFiltered.length > 0) candidates = boundFiltered;
+        }
+
+        if (candidates.length > 0 && candidates[0].projectPath) {
+          const target = candidates[0];
           // Switch to that session (like /resume) AND its directory
           const state2 = loadState();
           state2.sessions[chatId] = {
