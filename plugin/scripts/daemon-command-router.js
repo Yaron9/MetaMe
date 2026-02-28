@@ -575,43 +575,21 @@ function createCommandRouter(deps) {
     }
 
     // --- Natural language → Claude Code session ---
-    // If a task is running: interrupt + collect + merge
+    // If a task is running: queue message, DON'T kill — will be sent as follow-up after completion
     if (activeProcesses.has(chatId)) {
       const isFirst = !messageQueue.has(chatId);
       if (isFirst) {
-        messageQueue.set(chatId, { messages: [], timer: null });
+        messageQueue.set(chatId, { messages: [] });
       }
       const q = messageQueue.get(chatId);
+      if (q.messages.length >= 10) {
+        await bot.sendMessage(chatId, '⚠️ 排队已满（10条），请等当前任务完成');
+        return;
+      }
       q.messages.push(text);
-      // Only notify once (first message), subsequent ones silently queue
       if (isFirst) {
-        await bot.sendMessage(chatId, '📝 收到，稍后一起处理');
+        await bot.sendMessage(chatId, '📝 收到，完成后继续处理');
       }
-      // Interrupt the running Claude process
-      const proc = activeProcesses.get(chatId);
-      if (proc && proc.child && !proc.aborted) {
-        proc.aborted = true;
-        try { process.kill(-proc.child.pid, 'SIGINT'); } catch { proc.child.kill('SIGINT'); }
-      }
-      // Debounce: wait 5s for more messages before processing
-      if (q.timer) clearTimeout(q.timer);
-      q.timer = setTimeout(async () => {
-        // Wait for active process to fully exit (up to 10s)
-        for (let i = 0; i < 20 && activeProcesses.has(chatId); i++) {
-          await sleep(500);
-        }
-        const msgs = q.messages.splice(0);
-        messageQueue.delete(chatId);
-        if (msgs.length === 0) return;
-        const combined = msgs.join('\n');
-        log('INFO', `Processing ${msgs.length} queued message(s) for ${chatId}`);
-        resetCooldown(chatId); // queued msgs already waited, skip cooldown
-        try {
-          await handleCommand(bot, chatId, combined, config, executeTaskByName);
-        } catch (e) {
-          log('ERROR', `Queue dispatch failed: ${e.message}`);
-        }
-      }, 5000);
       return;
     }
     // Strict mode: chats with a fixed agent in chat_agent_map must not cross-dispatch
@@ -653,8 +631,8 @@ function createCommandRouter(deps) {
     }
     const claudeResult = await askClaude(bot, chatId, text, config, readOnly);
     const claudeFailed = !!(claudeResult && claudeResult.ok === false);
-    const claudeInterrupted = !!(claudeResult && claudeResult.interrupted);
-    if (claudeFailed && !claudeInterrupted && !macLocalFirst && macFallbackEnabled && allowLocalMacControl) {
+    const claudeAborted = !!(claudeResult && claudeResult.error === 'Stopped by user');
+    if (claudeFailed && !claudeAborted && !macLocalFirst && macFallbackEnabled && allowLocalMacControl) {
       const fallbackHandled = await tryHandleMacNaturalLanguageIntent(bot, chatId, text, config, {
         source: 'claude-fallback',
         safeOnly: true,
@@ -663,6 +641,20 @@ function createCommandRouter(deps) {
       if (fallbackHandled) {
         log('WARN', `Claude-first mac fallback handled for ${String(chatId).slice(-8)} (mode=${macControlMode})`);
       }
+    }
+
+    // Process queued messages as follow-up in the same session (no kill, no context loss)
+    // Use while-loop instead of recursion to avoid unbounded stack growth
+    while (messageQueue.has(chatId)) {
+      const q = messageQueue.get(chatId);
+      const msgs = q.messages.splice(0);
+      messageQueue.delete(chatId);
+      if (msgs.length === 0) break;
+      const combined = msgs.join('\n');
+      log('INFO', `Follow-up: processing ${msgs.length} queued message(s) for ${chatId}`);
+      resetCooldown(chatId);
+      const followUp = await askClaude(bot, chatId, combined, config, readOnly);
+      if (followUp && followUp.error === 'Stopped by user') break;
     }
   }
 

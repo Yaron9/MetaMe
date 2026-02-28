@@ -1000,10 +1000,6 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           try { await bot.sendMessage(chatId, `Error: ${(retry.error || '').slice(0, 200)}`); } catch { /* */ }
           return { ok: false, error: retry.error || errMsg };
         }
-      } else if (errMsg === 'Stopped by user' && messageQueue.has(chatId)) {
-        // Interrupted by message queue — suppress error, queue timer will handle it
-        log('INFO', `Task interrupted by new message for ${chatId}`);
-        return { ok: false, error: errMsg, interrupted: true };
       } else {
         // Auto-fallback: if custom provider/model fails, revert to anthropic + opus
         const activeProv = providerMod ? providerMod.getActiveName() : 'anthropic';
