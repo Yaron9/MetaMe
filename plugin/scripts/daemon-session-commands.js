@@ -308,8 +308,14 @@ function createSessionCommandHandler(deps) {
       return true;
     }
 
-    if (text === '/cd' || text.startsWith('/cd ')) {
-      let newCwd = expandPath(text.slice(3).trim());
+    // /continue — alias for /cd last (sync to computer's latest session)
+    if (text === '/continue') {
+      // Reuse /cd last logic below
+      // fall through with newCwd = 'last'
+    }
+
+    if (text === '/continue' || text === '/cd' || text.startsWith('/cd ')) {
+      let newCwd = text === '/continue' ? 'last' : expandPath(text.slice(3).trim());
       if (!newCwd) {
         await sendDirPicker(bot, chatId, 'cd', 'Switch workdir:');
         return true;
@@ -333,7 +339,6 @@ function createSessionCommandHandler(deps) {
           const name = target.customTitle || target.summary || '';
           const label = name ? name.slice(0, 40) : target.sessionId.slice(0, 8);
           await bot.sendMessage(chatId, `🔄 Synced to: ${label}\n📁 ${path.basename(target.projectPath)}`);
-          await sendDirListing(bot, chatId, target.projectPath, null);
           return true;
         }
         await bot.sendMessage(chatId, 'No recent session found.');
