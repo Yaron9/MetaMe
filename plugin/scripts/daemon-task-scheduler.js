@@ -275,12 +275,9 @@ function createTaskScheduler(deps) {
     // Precondition gate: run a cheap shell check before burning tokens
     const precheck = checkPrecondition(task);
     if (!precheck.pass) {
-      state.tasks[task.name] = {
-        last_run: new Date().toISOString(),
-        status: 'skipped',
-        output_preview: 'Precondition not met — no activity',
-      };
-      saveState(state);
+      // Don't update state — a skipped precondition is not a run.
+      // Preserves existing success/error status and keeps last_run accurate
+      // so interval math in computeInitialNextRun stays correct.
       return { success: true, output: '(skipped — no activity)', skipped: true };
     }
 
