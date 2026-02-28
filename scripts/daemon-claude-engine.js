@@ -350,13 +350,14 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const HARD_CEILING_MS = 60 * 60 * 1000;
       const startTime = Date.now();
 
+      let sigkillTimer = null;
       function killChild(reason) {
         if (killed) return;
         killed = true;
         killedReason = reason;
         log('WARN', `Claude ${reason} timeout for chatId ${chatId} — killing process group`);
         try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
-        setTimeout(() => {
+        sigkillTimer = setTimeout(() => {
           try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { } }
         }, 5000);
       }
@@ -415,6 +416,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             if (event.type === 'assistant' && event.message?.content) {
               for (const block of event.message.content) {
                 if (block.type === 'tool_use') {
+                  toolCallCount++;
                   const toolName = block.name || 'Tool';
 
                   // Track tool usage for skill evolution
@@ -513,6 +515,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       child.on('close', (code) => {
         clearTimeout(idleTimer);
         clearTimeout(ceilingTimer);
+        clearTimeout(sigkillTimer);
         clearInterval(milestoneTimer);
 
         // Process any remaining buffer
@@ -537,7 +540,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           const reason = killedReason === 'ceiling'
             ? `⏱ 已运行 ${elapsed} 分钟，达到上限（1 小时）`
             : `⏱ 已 5 分钟无输出，判定卡死（共运行 ${elapsed} 分钟）`;
-          resolve({ output: finalResult || null, error: reason, files: writtenFiles, toolUsageLog });
+          resolve({ output: finalResult || null, error: reason, timedOut: true, files: writtenFiles, toolUsageLog });
         } else if (code !== 0) {
           resolve({ output: finalResult || null, error: stderr || `Exit code ${code}`, files: writtenFiles, toolUsageLog });
         } else {
@@ -548,6 +551,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       child.on('error', (err) => {
         clearTimeout(idleTimer);
         clearTimeout(ceilingTimer);
+        clearTimeout(sigkillTimer);
         clearInterval(milestoneTimer);
         if (chatId) { activeProcesses.delete(chatId); saveActivePids(); } // Fix3
         resolve({ output: null, error: err.message, files: [], toolUsageLog: [] });
@@ -900,9 +904,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       } catch { /* ignore status update failures */ }
     };
 
-    let output, error, files, toolUsageLog;
+    let output, error, files, toolUsageLog, timedOut;
     try {
-      ({ output, error, files, toolUsageLog } = await spawnClaudeStreaming(args, fullPrompt, session.cwd, onStatus, 600000, chatId, boundProjectKey || ''));
+      ({ output, error, timedOut, files, toolUsageLog } = await spawnClaudeStreaming(args, fullPrompt, session.cwd, onStatus, 600000, chatId, boundProjectKey || ''));
     } catch (spawnErr) {
       clearInterval(typingTimer);
       if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => { });
@@ -1025,8 +1029,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       log('ERROR', `askClaude failed for ${chatId}: ${errMsg.slice(0, 300)}`);
 
       // Timeout with partial results: send what we have, then the error
-      const isTimeout = errMsg.startsWith('⏱');
-      if (isTimeout && output) {
+      if (timedOut && output) {
         const { markedFiles: tmMarked, cleanOutput: tmClean } = parseFileMarkers(output);
         try {
           const partialMsg = await bot.sendMarkdown(chatId, `⚠️ **任务超时，以下是已完成的部分结果：**\n\n${tmClean}`);
