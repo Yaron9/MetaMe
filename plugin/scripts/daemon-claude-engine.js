@@ -985,7 +985,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       recordTokens(loadState(), estimated, { category: chatCategory });
 
       // Parse [[FILE:...]] markers from output (Claude's explicit file sends)
-      const { markedFiles, cleanOutput } = parseFileMarkers(output);
+      let { markedFiles, cleanOutput } = parseFileMarkers(output);
+
+      // Timeout with partial results: prepend warning
+      if (timedOut) {
+        cleanOutput = `⚠️ **任务超时，以下是已完成的部分结果：**\n\n${cleanOutput}`;
+      }
 
       // Match current session to a project for colored card display
       let activeProject = null;
@@ -1019,27 +1024,19 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       await sendFileButtons(bot, chatId, mergeFileCollections(markedFiles, files));
 
+      // Timeout: also send the reason after the partial result
+      if (timedOut && error) {
+        try { await bot.sendMessage(chatId, error); } catch { /* */ }
+      }
+
       // Auto-name: if this was the first message and session has no name, generate one
       if (wasNew && !getSessionName(session.id)) {
         autoNameSession(chatId, session.id, prompt, session.cwd).catch(() => { });
       }
-      return { ok: true };
+      return { ok: !timedOut };
     } else {
       const errMsg = error || 'Unknown error';
       log('ERROR', `askClaude failed for ${chatId}: ${errMsg.slice(0, 300)}`);
-
-      // Timeout with partial results: send what we have, then the error
-      if (timedOut && output) {
-        const { markedFiles: tmMarked, cleanOutput: tmClean } = parseFileMarkers(output);
-        try {
-          const partialMsg = await bot.sendMarkdown(chatId, `⚠️ **任务超时，以下是已完成的部分结果：**\n\n${tmClean}`);
-          if (partialMsg && partialMsg.message_id && session) trackMsgSession(partialMsg.message_id, session);
-          markSessionStarted(chatId);
-        } catch { /* ignore */ }
-        await sendFileButtons(bot, chatId, mergeFileCollections(tmMarked, files));
-        try { await bot.sendMessage(chatId, errMsg); } catch { /* */ }
-        return { ok: false, error: errMsg, partial: true };
-      }
 
       // If session not found (expired/deleted), create new and retry once
       if (errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use')) {
