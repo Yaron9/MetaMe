@@ -539,6 +539,7 @@ function createCommandRouter(deps) {
         '📱 手机端 Claude Code',
         '',
         '⚡ 快速同步电脑工作:',
+        '/continue — 接续电脑正在做的工作',
         '/last — 继续电脑上最近的对话',
         '/cd last — 切到电脑最近的项目目录',
         '',

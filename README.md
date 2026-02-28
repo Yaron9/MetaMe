@@ -363,6 +363,7 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 
 | Command | Action |
 |---------|--------|
+| `/continue` | Sync to computer's current work (session + directory) |
 | `/last` | Resume most recent session |
 | `/new` | Start new session (project picker) |
 | `/resume` | Pick from session list |
