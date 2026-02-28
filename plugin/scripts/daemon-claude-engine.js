@@ -338,22 +338,60 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       let buffer = '';
       let stderr = '';
       let killed = false;
+      let killedReason = 'idle'; // 'idle' | 'ceiling'
       let finalResult = '';
       let lastStatusTime = 0;
       const STATUS_THROTTLE = statusThrottleMs;
       const writtenFiles = []; // Track files created/modified by Write tool
       const toolUsageLog = []; // Track all tool invocations for skill evolution
 
-      const timer = setTimeout(() => {
+      // ── 自适应超时：5min 无输出判卡死 + 1h 绝对上限 ──
+      const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+      const HARD_CEILING_MS = 60 * 60 * 1000;
+      const startTime = Date.now();
+
+      function killChild(reason) {
+        if (killed) return;
         killed = true;
-        log('WARN', `Claude timeout (${timeoutMs / 60000}min) for chatId ${chatId} — killing process group`);
+        killedReason = reason;
+        log('WARN', `Claude ${reason} timeout for chatId ${chatId} — killing process group`);
         try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
         setTimeout(() => {
           try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { } }
         }, 5000);
-      }, timeoutMs);
+      }
+
+      let idleTimer = setTimeout(() => killChild('idle'), IDLE_TIMEOUT_MS);
+      const ceilingTimer = setTimeout(() => killChild('ceiling'), HARD_CEILING_MS);
+
+      function resetIdleTimer() {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => killChild('idle'), IDLE_TIMEOUT_MS);
+      }
+
+      // ── 进度里程碑：2min 首报，之后每 5min 一次 ──
+      let toolCallCount = 0;
+      let lastMilestoneMin = 0;
+      const milestoneTimer = setInterval(() => {
+        if (killed) return;
+        const elapsedMin = Math.floor((Date.now() - startTime) / 60000);
+        const nextMin = lastMilestoneMin === 0 ? 2 : lastMilestoneMin + 5;
+        if (elapsedMin >= nextMin) {
+          lastMilestoneMin = elapsedMin;
+          const parts = [`⏳ 已运行 ${elapsedMin} 分钟`];
+          if (toolCallCount > 0) parts.push(`调用 ${toolCallCount} 次工具`);
+          if (writtenFiles.length > 0) parts.push(`修改 ${writtenFiles.length} 个文件`);
+          const recentTool = toolUsageLog.length > 0 ? toolUsageLog[toolUsageLog.length - 1] : null;
+          if (recentTool) {
+            const ctx = recentTool.context || recentTool.skill || '';
+            parts.push(`最近: ${recentTool.tool}${ctx ? ' ' + ctx : ''}`);
+          }
+          if (onStatus) onStatus(parts.join(' | ')).catch(() => { });
+        }
+      }, 30000);
 
       child.stdout.on('data', (data) => {
+        resetIdleTimer();
         buffer += data.toString();
 
         // Process complete JSON lines
@@ -467,10 +505,15 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         }
       });
 
-      child.stderr.on('data', (data) => { stderr += data.toString(); });
+      child.stderr.on('data', (data) => {
+        resetIdleTimer();
+        stderr += data.toString();
+      });
 
       child.on('close', (code) => {
-        clearTimeout(timer);
+        clearTimeout(idleTimer);
+        clearTimeout(ceilingTimer);
+        clearInterval(milestoneTimer);
 
         // Process any remaining buffer
         if (buffer.trim()) {
@@ -490,7 +533,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         if (wasAborted) {
           resolve({ output: finalResult || null, error: 'Stopped by user', files: writtenFiles, toolUsageLog });
         } else if (killed) {
-          resolve({ output: finalResult || null, error: 'Timeout: Claude took too long', files: writtenFiles, toolUsageLog });
+          const elapsed = Math.round((Date.now() - startTime) / 60000);
+          const reason = killedReason === 'ceiling'
+            ? `⏱ 已运行 ${elapsed} 分钟，达到上限（1 小时）`
+            : `⏱ 已 5 分钟无输出，判定卡死（共运行 ${elapsed} 分钟）`;
+          resolve({ output: finalResult || null, error: reason, files: writtenFiles, toolUsageLog });
         } else if (code !== 0) {
           resolve({ output: finalResult || null, error: stderr || `Exit code ${code}`, files: writtenFiles, toolUsageLog });
         } else {
@@ -499,7 +546,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       });
 
       child.on('error', (err) => {
-        clearTimeout(timer);
+        clearTimeout(idleTimer);
+        clearTimeout(ceilingTimer);
+        clearInterval(milestoneTimer);
         if (chatId) { activeProcesses.delete(chatId); saveActivePids(); } // Fix3
         resolve({ output: null, error: err.message, files: [], toolUsageLog: [] });
       });
@@ -974,6 +1023,20 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     } else {
       const errMsg = error || 'Unknown error';
       log('ERROR', `askClaude failed for ${chatId}: ${errMsg.slice(0, 300)}`);
+
+      // Timeout with partial results: send what we have, then the error
+      const isTimeout = errMsg.startsWith('⏱');
+      if (isTimeout && output) {
+        const { markedFiles: tmMarked, cleanOutput: tmClean } = parseFileMarkers(output);
+        try {
+          const partialMsg = await bot.sendMarkdown(chatId, `⚠️ **任务超时，以下是已完成的部分结果：**\n\n${tmClean}`);
+          if (partialMsg && partialMsg.message_id && session) trackMsgSession(partialMsg.message_id, session);
+          markSessionStarted(chatId);
+        } catch { /* ignore */ }
+        await sendFileButtons(bot, chatId, mergeFileCollections(tmMarked, files));
+        try { await bot.sendMessage(chatId, errMsg); } catch { /* */ }
+        return { ok: false, error: errMsg, partial: true };
+      }
 
       // If session not found (expired/deleted), create new and retry once
       if (errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use')) {
