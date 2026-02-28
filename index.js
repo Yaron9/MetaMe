@@ -1727,12 +1727,22 @@ if (isSync) {
           .sort((a, b) => b.mtime - a.mtime)[0] || null;
       } catch { return null; }
     };
-    bestSession = findLatest(projDir);
-    if (!bestSession) {
+    const localBest = findLatest(projDir);
+    // Always scan globally to find the absolute most recent session
+    // (phone /continue may have worked in a different project's session)
+    let globalBest = null;
+    try {
       for (const d of fs.readdirSync(projectsRoot)) {
         const s = findLatest(path.join(projectsRoot, d));
-        if (s && (!bestSession || s.mtime > bestSession.mtime)) bestSession = s;
+        if (s && (!globalBest || s.mtime > globalBest.mtime)) globalBest = s;
       }
+    } catch { /* ignore */ }
+    // Use global best if it's more recent than local; prefer local otherwise
+    if (localBest && globalBest && globalBest.mtime > localBest.mtime) {
+      bestSession = globalBest;
+      console.log(`  (global session is newer than local — using global)`);
+    } else {
+      bestSession = localBest || globalBest;
     }
   } catch { }
 
