@@ -32,7 +32,8 @@ irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 
 **Already have Node.js ≥ 18 (any platform):**
 ```bash
-npm install -g metame-cli && metame
+npm install -g metame-cli
+metame
 ```
 
 ---
@@ -210,7 +211,8 @@ irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 
 **Already have Node.js ≥ 18 (any platform):**
 ```bash
-npm install -g metame-cli && metame
+npm install -g metame-cli
+metame
 ```
 
 **3 minutes to full setup:**
