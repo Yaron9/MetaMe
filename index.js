@@ -1835,6 +1835,33 @@ try {
   memory.close();
 } catch { /* memory not available, non-fatal */ }
 
+// Auto-start daemon if config exists but daemon is not running
+try {
+  if (fs.existsSync(DAEMON_CONFIG) && fs.existsSync(DAEMON_SCRIPT)) {
+    let daemonRunning = false;
+    if (fs.existsSync(DAEMON_PID)) {
+      try {
+        const pid = parseInt(fs.readFileSync(DAEMON_PID, 'utf8').trim(), 10);
+        process.kill(pid, 0); // signal 0 = check if alive
+        daemonRunning = true;
+      } catch { /* PID file stale, daemon not running */ }
+    }
+    if (!daemonRunning) {
+      const isNotWindows = process.platform !== 'win32';
+      const dCmd = isNotWindows ? 'caffeinate' : process.execPath;
+      const dArgs = isNotWindows ? ['-i', process.execPath, DAEMON_SCRIPT] : [DAEMON_SCRIPT];
+      const bg = spawn(dCmd, dArgs, {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        env: { ...process.env, HOME: HOME_DIR, METAME_ROOT: __dirname },
+      });
+      bg.unref();
+      console.log(`🤖 Daemon auto-started (PID: ${bg.pid})`);
+    }
+  }
+} catch { /* non-fatal */ }
+
 // Spawn the official claude tool with our marker + provider env
 const child = spawn('claude', launchArgs, {
   stdio: 'inherit',
