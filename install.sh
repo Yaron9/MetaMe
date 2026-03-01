@@ -20,7 +20,7 @@ warn()  { echo -e "${YELLOW}⚠${RESET} $1"; }
 fail()  { echo -e "${RED}✗${RESET} $1"; exit 1; }
 
 echo ""
-echo -e "${BOLD}  MetaMe — Your AI Shadow${RESET}"
+echo -e "${BOLD}  MetaMe — Your Digital Twin${RESET}"
 echo -e "${DIM}  One command to install everything.${RESET}"
 echo ""
 
@@ -34,6 +34,10 @@ info "System: $OS $ARCH"
 # -----------------------------------------------------------
 # 2. Check / Install Node.js
 # -----------------------------------------------------------
+is_wsl() {
+  [ -f /proc/version ] && grep -qi microsoft /proc/version 2>/dev/null
+}
+
 install_node() {
   info "Installing Node.js..."
   if [ "$OS" = "Darwin" ]; then
@@ -50,19 +54,34 @@ install_node() {
       brew install node
     fi
   elif [ "$OS" = "Linux" ]; then
-    if command -v apt-get &>/dev/null; then
+    # Detect if sudo is usable (installed + passwordless or cached)
+    has_sudo() {
+      command -v sudo &>/dev/null && sudo -n true 2>/dev/null
+    }
+
+    if command -v apt-get &>/dev/null && ! is_wsl && has_sudo; then
       info "Installing via apt (NodeSource)..."
       curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
       sudo apt-get install -y nodejs
-    elif command -v dnf &>/dev/null; then
+    elif command -v dnf &>/dev/null && ! is_wsl && has_sudo; then
       info "Installing via dnf (NodeSource)..."
       curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash -
       sudo dnf install -y nodejs
-    elif command -v pacman &>/dev/null; then
+    elif command -v pacman &>/dev/null && ! is_wsl && has_sudo; then
       info "Installing via pacman..."
       sudo pacman -Sy --noconfirm nodejs npm
     else
-      fail "Unsupported Linux distro. Install Node.js >= $MIN_NODE_VERSION manually: https://nodejs.org"
+      # WSL, no sudo, or unknown distro: use nvm (no root required)
+      info "Installing via nvm (no sudo required)..."
+      export NVM_DIR="${HOME}/.nvm"
+      curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash \
+        || fail "Failed to download nvm. Check your network connection."
+      # shellcheck source=/dev/null
+      [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" \
+        || fail "nvm installation failed — nvm.sh not found"
+      nvm install 22
+      nvm use 22
+      nvm alias default 22
     fi
   else
     fail "Unsupported OS: $OS. Install Node.js >= $MIN_NODE_VERSION manually: https://nodejs.org"
@@ -81,6 +100,10 @@ else
   warn "Node.js not found"
   install_node
 fi
+
+# Source nvm if installed (needed after nvm-based install)
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 
 # Verify node is available now
 command -v node &>/dev/null || fail "Node.js installation failed. Install manually: https://nodejs.org"

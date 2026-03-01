@@ -4,7 +4,7 @@
 $ErrorActionPreference = "Stop"
 
 Write-Host ""
-Write-Host "  MetaMe - Your AI Shadow" -ForegroundColor Cyan
+Write-Host "  MetaMe - Your Digital Twin" -ForegroundColor Cyan
 Write-Host "  Windows Installer (via WSL)" -ForegroundColor DarkGray
 Write-Host ""
 
@@ -14,7 +14,7 @@ Write-Host ""
 $wslInstalled = $false
 try {
     $wslOutput = wsl --status 2>&1
-    if ($LASTEXITCODE -eq 0 -or ($wslOutput -match "Default Distribution")) {
+    if ($LASTEXITCODE -eq 0) {
         $wslInstalled = $true
     }
 } catch {}
@@ -61,12 +61,48 @@ if (-not $wslInstalled) {
 Write-Host "[OK] WSL is installed" -ForegroundColor Green
 
 # -----------------------------------------------------------
-# 2. Run the bash installer inside WSL
+# 2. Mirror proxy settings to WSL if detected
+# -----------------------------------------------------------
+$proxyEnv = ""
+
+# Detect system proxy (works on both Windows PowerShell 5.1 and PowerShell 7)
+$detectedProxy = $null
+try {
+    $sysProxy = [System.Net.WebRequest]::GetSystemWebProxy()
+    $testUri = [Uri]"https://raw.githubusercontent.com"
+    $proxyUri = $sysProxy.GetProxy($testUri)
+    if ($proxyUri -and $proxyUri -ne $testUri) {
+        $detectedProxy = $proxyUri.ToString().TrimEnd('/')
+    }
+} catch {}
+
+# Fallback: check environment variables
+if (-not $detectedProxy) {
+    foreach ($v in @("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy")) {
+        if ([Environment]::GetEnvironmentVariable($v)) {
+            $detectedProxy = [Environment]::GetEnvironmentVariable($v)
+            break
+        }
+    }
+}
+
+if ($detectedProxy) {
+    # Replace localhost/127.0.0.1 with host.wsl.internal so WSL can reach Windows proxy
+    $wslProxy = $detectedProxy -replace "localhost|127\.0\.0\.1", "host.wsl.internal"
+    Write-Host "[i] Detected proxy: $detectedProxy" -ForegroundColor DarkGray
+    Write-Host "    Mirroring to WSL as: $wslProxy" -ForegroundColor DarkGray
+    # Use single-quoted heredoc-style to avoid PowerShell variable expansion issues
+    $proxyEnv = 'export http_proxy="{0}" https_proxy="{0}" HTTP_PROXY="{0}" HTTPS_PROXY="{0}"; ' -f $wslProxy
+}
+
+# -----------------------------------------------------------
+# 3. Run the bash installer inside WSL
 # -----------------------------------------------------------
 Write-Host "[2/3] Running MetaMe installer inside WSL..." -ForegroundColor Cyan
 Write-Host ""
 
-wsl bash -c "curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash"
+$bashCmd = "${proxyEnv}curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash"
+wsl bash -c $bashCmd
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
@@ -76,7 +112,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # -----------------------------------------------------------
-# 3. Create Windows shortcut
+# 4. Create Windows shortcut
 # -----------------------------------------------------------
 Write-Host ""
 Write-Host "[3/3] Setting up Windows access..." -ForegroundColor Cyan
