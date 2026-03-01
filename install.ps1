@@ -128,22 +128,38 @@ if ($isLocalhostProxy) {
 Write-Host "[2/3] Running MetaMe installer inside WSL..." -ForegroundColor Cyan
 Write-Host ""
 
-$bashCmd = "${proxyEnv}set -eo pipefail; curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash"
-wsl bash -c $bashCmd
+# Always clear inherited proxy vars first, then re-set only if proxy is reachable
+$unsetProxy = "unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy; "
+$installCmd = "set -eo pipefail; curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash"
 
-if ($LASTEXITCODE -ne 0) {
+$installed = $false
+
+# Try with proxy first if detected
+if ($proxyEnv) {
+    Write-Host "  Trying with proxy..." -ForegroundColor DarkGray
+    $bashCmd = "${unsetProxy}${proxyEnv}${installCmd}"
+    wsl bash -c $bashCmd
+    if ($LASTEXITCODE -eq 0) { $installed = $true }
+}
+
+# Fallback: try direct connection (no proxy)
+if (-not $installed) {
+    if ($proxyEnv) {
+        Write-Host "  Proxy unreachable, trying direct connection..." -ForegroundColor Yellow
+    }
+    $bashCmd = "${unsetProxy}${installCmd}"
+    wsl bash -c $bashCmd
+    if ($LASTEXITCODE -eq 0) { $installed = $true }
+}
+
+if (-not $installed) {
     Write-Host ""
     Write-Host "  Installation failed inside WSL." -ForegroundColor Red
     Write-Host ""
-    Write-Host "  Common fixes:" -ForegroundColor Yellow
-    Write-Host "    1. If using a proxy (Clash/v2ray), ensure WSL mirrored networking:" -ForegroundColor DarkGray
-    Write-Host "       Add to %USERPROFILE%\.wslconfig:" -ForegroundColor DarkGray
-    Write-Host "         [wsl2]" -ForegroundColor White
-    Write-Host "         networkingMode=mirrored" -ForegroundColor White
-    Write-Host "       Then run: wsl --shutdown" -ForegroundColor DarkGray
-    Write-Host ""
-    Write-Host "    2. Or try manually:" -ForegroundColor DarkGray
-    Write-Host "       wsl bash -c 'curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash'" -ForegroundColor White
+    Write-Host "  Try manually inside WSL:" -ForegroundColor Yellow
+    Write-Host "    wsl" -ForegroundColor White
+    Write-Host "    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY" -ForegroundColor White
+    Write-Host "    curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash" -ForegroundColor White
     Write-Host ""
     exit 1
 }
