@@ -20,7 +20,7 @@ function spawnClaude(args, options) {
   if (process.platform === 'win32') {
     const claudePath = resolveClaudeBin();
     const comspec = process.env.COMSPEC || 'C:\\WINDOWS\\system32\\cmd.exe';
-    return spawn(comspec, ['/c', claudePath, ...args], options);
+    return spawn(comspec, ['/c', `"${claudePath}"`, ...args], options);
   }
   return spawn('claude', args, options);
 }

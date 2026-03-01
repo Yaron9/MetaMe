@@ -46,7 +46,7 @@ function createClaudeEngine(deps) {
   function spawn(cmd, args, options) {
     if (process.platform === 'win32' && cmd === CLAUDE_BIN) {
       const comspec = process.env.COMSPEC || 'C:\\WINDOWS\\system32\\cmd.exe';
-      return _spawn(comspec, ['/c', cmd, ...args], options);
+      return _spawn(comspec, ['/c', `"${cmd}"`, ...args], options);
     }
     return _spawn(cmd, args, options);
   }
