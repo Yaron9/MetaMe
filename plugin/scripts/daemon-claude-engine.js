@@ -6,7 +6,7 @@ function createClaudeEngine(deps) {
   const {
     fs,
     path,
-    spawn,
+    spawn: _spawn,
     CLAUDE_BIN,
     HOME,
     CONFIG_FILE,
@@ -41,6 +41,16 @@ function createClaudeEngine(deps) {
     statusThrottleMs = 3000,
     fallbackThrottleMs = 8000,
   } = deps;
+
+  // On Windows, spawn claude.cmd via COMSPEC instead of shell:true
+  function spawn(cmd, args, options) {
+    if (process.platform === 'win32' && cmd === CLAUDE_BIN) {
+      const comspec = process.env.COMSPEC || 'C:\\WINDOWS\\system32\\cmd.exe';
+      return _spawn(comspec, ['/c', cmd, ...args], options);
+    }
+    return _spawn(cmd, args, options);
+  }
+
   const SESSION_CWD_VALIDATION_TTL_MS = 30 * 1000;
   const _sessionCwdValidationCache = new Map(); // key: `${sessionId}@@${cwd}` -> { inCwd, ts }
 
@@ -242,7 +252,6 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const child = spawn(CLAUDE_BIN, args, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
-        shell: process.platform === 'win32',
         env: {
           ...process.env,
           ...getActiveProviderEnv(),
@@ -321,7 +330,6 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const child = spawn(CLAUDE_BIN, streamArgs, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
-        shell: process.platform === 'win32',
         detached: process.platform !== 'win32', // process groups are POSIX-only
         env: {
           ...process.env,

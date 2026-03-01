@@ -161,7 +161,7 @@ function createTaskScheduler(deps) {
     path,
     HOME,
     CLAUDE_BIN,
-    spawn,
+    spawn: _spawn,
     execSync,
     execFileSync,
     parseInterval,
@@ -179,6 +179,15 @@ function createTaskScheduler(deps) {
     spawnSessionSummaries,
     skillEvolution,
   } = deps;
+
+  // On Windows, spawn claude.cmd via COMSPEC instead of shell:true
+  function spawn(cmd, args, options) {
+    if (process.platform === 'win32' && cmd === CLAUDE_BIN) {
+      const comspec = process.env.COMSPEC || 'C:\\WINDOWS\\system32\\cmd.exe';
+      return _spawn(comspec, ['/c', cmd, ...args], options);
+    }
+    return _spawn(cmd, args, options);
+  }
 
   function checkPrecondition(task) {
     if (!task.precondition) return { pass: true, context: '' };
@@ -403,7 +412,6 @@ function createTaskScheduler(deps) {
       const child = spawn(CLAUDE_BIN, asyncArgs, {
         cwd: cwd || undefined,
         stdio: ['pipe', 'pipe', 'pipe'],
-        shell: process.platform === 'win32',
         detached: process.platform !== 'win32', // process groups are POSIX-only
         env: asyncEnv,
       });
