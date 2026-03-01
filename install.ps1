@@ -128,13 +128,23 @@ if ($isLocalhostProxy) {
 Write-Host "[2/3] Running MetaMe installer inside WSL..." -ForegroundColor Cyan
 Write-Host ""
 
-$bashCmd = "${proxyEnv}curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash"
+$bashCmd = "${proxyEnv}set -eo pipefail; curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash"
 wsl bash -c $bashCmd
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "  Installation failed inside WSL." -ForegroundColor Red
-    Write-Host "  Try running manually: wsl bash -c 'curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash'" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Common fixes:" -ForegroundColor Yellow
+    Write-Host "    1. If using a proxy (Clash/v2ray), ensure WSL mirrored networking:" -ForegroundColor DarkGray
+    Write-Host "       Add to %USERPROFILE%\.wslconfig:" -ForegroundColor DarkGray
+    Write-Host "         [wsl2]" -ForegroundColor White
+    Write-Host "         networkingMode=mirrored" -ForegroundColor White
+    Write-Host "       Then run: wsl --shutdown" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "    2. Or try manually:" -ForegroundColor DarkGray
+    Write-Host "       wsl bash -c 'curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash'" -ForegroundColor White
+    Write-Host ""
     exit 1
 }
 
