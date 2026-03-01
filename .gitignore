@@ -2,10 +2,12 @@ node_modules
 .DS_Store
 # Local QMD development install (users install globally via bun install -g github:tobi/qmd)
 qmd/
-# CLAUDE.md is tracked for this project (contains maintenance handbook)
-# Other projects should gitignore their CLAUDE.md
+CLAUDE.md
 .claude_profile.yaml
 ROADMAP_PHASE_B.md
+METAME_MAINTENANCE.md
+package-lock.json
+feishu-login-qr.png
 
 # Playwright browser profile (runtime data, never commit)
 ~/.metame/browser-profile/
