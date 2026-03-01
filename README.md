@@ -228,6 +228,11 @@ metame
 
 > **First time?** Just run `metame` and talk naturally. The interview and setup are conversational — no commands to memorize.
 
+**Update MetaMe:**
+```bash
+npm install -g metame-cli
+```
+
 > **What does system registration mean?**
 > Once registered, MetaMe runs in the background automatically — screen locked, lid closed, woken from sleep — as long as the machine is on. Scheduled tasks fire on time. No terminal window needed.
 
