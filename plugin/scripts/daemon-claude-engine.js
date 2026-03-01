@@ -242,6 +242,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const child = spawn(CLAUDE_BIN, args, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
+        shell: process.platform === 'win32',
         env: {
           ...process.env,
           ...getActiveProviderEnv(),
@@ -320,7 +321,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const child = spawn(CLAUDE_BIN, streamArgs, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
-        detached: true, // Create new process group so killing -pid kills all sub-agents too
+        shell: process.platform === 'win32',
+        detached: process.platform !== 'win32', // process groups are POSIX-only
         env: {
           ...process.env,
           ...getActiveProviderEnv(),

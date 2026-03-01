@@ -403,7 +403,8 @@ function createTaskScheduler(deps) {
       const child = spawn(CLAUDE_BIN, asyncArgs, {
         cwd: cwd || undefined,
         stdio: ['pipe', 'pipe', 'pipe'],
-        detached: true, // own process group — kills sub-agents on timeout too
+        shell: process.platform === 'win32',
+        detached: process.platform !== 'win32', // process groups are POSIX-only
         env: asyncEnv,
       });
 
