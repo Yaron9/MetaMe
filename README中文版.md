@@ -209,7 +209,16 @@ curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bas
 ```powershell
 irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 ```
-> 脚本自动识别系统，安装 Node.js（Homebrew / nvm / apt），WSL 环境自动镜像代理设置。
+
+**Windows WSL 手动安装**（代理/网络问题导致自动安装失败时）：
+```bash
+# 如果 WSL 无网络，先退出代理软件（Clash/v2ray），然后在 WSL 中：
+curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+source ~/.nvm/nvm.sh
+nvm install 22
+npm install -g @anthropic-ai/claude-code metame-cli
+metame
+```
 
 **已有 Node.js ≥ 18：**
 ```bash
