@@ -215,14 +215,18 @@ npm install -g metame-cli
 metame
 ```
 
-**3 minutes to full setup:**
+**Setup guide (3 minutes):**
 
-| Step | Command | What happens |
-|------|---------|-------------|
-| 1. Install & profile | `metame` | First run: cognitive interview → builds `~/.claude_profile.yaml` |
-| 2. Connect phone | Follow the setup wizard | Bot token + app credentials → `~/.metame/daemon.yaml` |
-| 3. Start daemon | `metame start` | Background daemon launches, bot goes online |
-| 4. Register with system | macOS: `metame daemon install-launchd` · Linux: see below | Always-on, crash recovery |
+| Step | What to do | What happens |
+|------|-----------|-------------|
+| 1. Log in to Claude | Run `claude` and complete the login (Anthropic account or API key) | Claude Code is ready to use |
+| 2. Launch MetaMe | Run `metame` | Opens a Claude session with MetaMe loaded |
+| 3. Cognitive interview | Just chat — MetaMe will automatically start a deep interview on first run | Builds `~/.claude_profile.yaml` (your digital twin's brain) |
+| 4. Connect phone | Say "help me set up mobile access" or "connect my phone" | Interactive wizard for Telegram/Feishu bot setup → `~/.metame/daemon.yaml` |
+| 5. Start daemon | `metame start` | Background daemon launches, bot goes online |
+| 6. Register with system | macOS: `metame daemon install-launchd` · Linux: see below | Always-on, crash recovery |
+
+> **First time?** Just run `metame` and talk naturally. The interview and setup are conversational — no commands to memorize.
 
 > **What does system registration mean?**
 > Once registered, MetaMe runs in the background automatically — screen locked, lid closed, woken from sleep — as long as the machine is on. Scheduled tasks fire on time. No terminal window needed.

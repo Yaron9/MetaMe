@@ -217,14 +217,18 @@ npm install -g metame-cli
 metame
 ```
 
-**3 分钟完成全部设置：**
+**设置指南（3 分钟）：**
 
-| 步骤 | 命令 | 说明 |
+| 步骤 | 操作 | 说明 |
 |------|------|------|
-| 1. 安装 & 画像 | `metame` | 首次运行：认知访谈 → 生成 `~/.claude_profile.yaml` |
-| 2. 连接手机 | 跟随设置向导 | 填入 Bot Token / 飞书凭证 → `~/.metame/daemon.yaml` |
-| 3. 启动 daemon | `metame start` | 后台 daemon 启动，bot 上线 |
-| 4. 托管到系统 | macOS: `metame daemon install-launchd` · WSL/Linux: 见下方 | 系统级常驻，崩溃自恢复 |
+| 1. 登录 Claude | 运行 `claude`，完成登录（Anthropic 账号或 API Key） | Claude Code 准备就绪 |
+| 2. 启动 MetaMe | 运行 `metame` | 打开一个加载了 MetaMe 的 Claude 会话 |
+| 3. 认知访谈 | 直接聊天 — 首次运行会自动开始深度访谈 | 生成 `~/.claude_profile.yaml`（你的数字分身大脑） |
+| 4. 连接手机 | 对话中说"帮我设置手机访问"或"连接手机" | 交互式向导，配置 Telegram/飞书 Bot → `~/.metame/daemon.yaml` |
+| 5. 启动 daemon | `metame start` | 后台 daemon 启动，bot 上线 |
+| 6. 托管到系统 | macOS: `metame daemon install-launchd` · Linux: 见下方 | 系统级常驻，崩溃自恢复 |
+
+> **第一次用？** 只需运行 `metame` 然后自然聊天。访谈和配置全程对话式完成，不用记命令。
 
 > **托管后意味着什么？**
 > MetaMe 注册进系统任务调度器后，只要电脑不关机，哪怕锁屏、息屏、合盖休眠唤醒，它都会自动在后台运行。定时任务照常触发，手机消息照常收发。
