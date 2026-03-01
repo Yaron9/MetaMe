@@ -845,13 +845,18 @@ const CURRENT_VERSION = require('./package.json').version;
     });
 
     if (latest && latest !== CURRENT_VERSION) {
-      console.log(`📦 MetaMe ${latest} 可用（当前 ${CURRENT_VERSION}），正在自动更新...`);
+      console.log(`📦 MetaMe ${latest} available (current ${CURRENT_VERSION}), updating...`);
       const { execSync } = require('child_process');
       try {
-        execSync('npm update -g metame-cli', { stdio: 'pipe', timeout: 30000 });
-        console.log(`✅ 已更新到 ${latest}，下次启动生效。`);
+        execSync('npm install -g metame-cli@latest', {
+          stdio: 'pipe',
+          timeout: 60000,
+          ...(process.platform === 'win32' ? { shell: process.env.COMSPEC || true } : {}),
+        });
+        console.log(`✅ Updated to ${latest}. Restart metame to use the new version.`);
       } catch (e) {
-        console.log(`⚠️ 自动更新失败，请手动执行: npm update -g metame-cli`);
+        const msg = e.stderr ? e.stderr.toString().trim().split('\n').pop() : '';
+        console.log(`⚠️ Auto-update failed${msg ? ': ' + msg : ''}. Run manually: npm install -g metame-cli`);
       }
     }
   } catch { /* network unavailable, skip silently */ }
