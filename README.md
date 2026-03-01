@@ -20,17 +20,11 @@ MetaMe is an AI that lives on your machine — remembers how you think, stays on
 
 No cloud. Your machine, your data.
 
-**macOS / Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
 ```
 
-**Windows:**
-```powershell
-irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
-```
-
-**Already have Node.js ≥ 18 (any platform):**
+**Already have Node.js ≥ 18:**
 ```bash
 npm install -g metame-cli
 metame
@@ -199,17 +193,11 @@ Task fails → skill-scout finds a skill → installs → retries → succeeds
 
 ## Quick Start
 
-**macOS / Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
 ```
 
-**Windows:**
-```powershell
-irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
-```
-
-**Already have Node.js ≥ 18 (any platform):**
+**Already have Node.js ≥ 18:**
 ```bash
 npm install -g metame-cli
 metame
