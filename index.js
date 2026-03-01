@@ -8,19 +8,14 @@ const path = require('path');
 const os = require('os');
 const { spawn, execSync } = require('child_process');
 
-// On Windows, resolve the full path to claude.cmd so we can spawn it
-// via cmd.exe (using COMSPEC) without relying on shell:true finding cmd.exe in PATH
-function resolveClaudeBin() {
-  if (process.platform !== 'win32') return 'claude';
-  try {
-    return execSync('where claude', { encoding: 'utf8' }).trim().split('\n')[0];
-  } catch { return 'claude'; }
-}
+// On Windows, .cmd files (like claude.cmd from npm global) need shell:true to spawn.
+// We use COMSPEC to avoid conda/PATH issues where cmd.exe can't be found.
 function spawnClaude(args, options) {
   if (process.platform === 'win32') {
-    const claudePath = resolveClaudeBin();
-    const comspec = process.env.COMSPEC || 'C:\\WINDOWS\\system32\\cmd.exe';
-    return spawn(comspec, ['/c', `"${claudePath}"`, ...args], options);
+    return spawn('claude', args, {
+      ...options,
+      shell: process.env.COMSPEC || true,
+    });
   }
   return spawn('claude', args, options);
 }
@@ -881,14 +876,15 @@ const CURRENT_VERSION = pkgVersion;
   if (fs.existsSync(QMD_OFFERED_FILE)) return; // already offered before
 
   // Check if QMD already installed
-  try { execSync('which qmd', { stdio: 'pipe', timeout: 2000 }); return; } catch { }
+  const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+  try { execSync(`${whichCmd} qmd`, { stdio: 'pipe', timeout: 2000 }); return; } catch { }
 
   // Mark as offered NOW — so crash/ctrl-c won't re-ask
   try { fs.writeFileSync(QMD_OFFERED_FILE, new Date().toISOString(), 'utf8'); } catch { }
 
   // Check bun availability
   let bunAvailable = false;
-  try { execSync('which bun', { stdio: 'pipe', timeout: 2000 }); bunAvailable = true; } catch { }
+  try { execSync(`${whichCmd} bun`, { stdio: 'pipe', timeout: 2000 }); bunAvailable = true; } catch { }
 
   console.log('');
   console.log('┌─ 🔍 记忆搜索增强（可选，免费）');
@@ -1842,7 +1838,7 @@ try {
   let repoProject = cwdProject;
   try {
     const { execSync } = require('child_process');
-    const remote = execSync('git remote get-url origin 2>/dev/null || true', { encoding: 'utf8', stdio: 'pipe' }).trim();
+    const remote = execSync('git remote get-url origin', { encoding: 'utf8', stdio: 'pipe' }).trim();
     if (remote) repoProject = path.basename(remote, '.git');
   } catch { /* not a git repo, use dirname */ }
 
@@ -1864,11 +1860,14 @@ try {
 
 // Auto-start daemon if config exists but daemon is not running
 try {
-  if (fs.existsSync(DAEMON_CONFIG) && fs.existsSync(DAEMON_SCRIPT)) {
+  const _daemonCfgPath = path.join(METAME_DIR, 'daemon.yaml');
+  const _daemonScript = path.join(METAME_DIR, 'daemon.js');
+  const _daemonPid = path.join(METAME_DIR, 'daemon.pid');
+  if (fs.existsSync(_daemonCfgPath) && fs.existsSync(_daemonScript)) {
     let daemonRunning = false;
-    if (fs.existsSync(DAEMON_PID)) {
+    if (fs.existsSync(_daemonPid)) {
       try {
-        const pid = parseInt(fs.readFileSync(DAEMON_PID, 'utf8').trim(), 10);
+        const pid = parseInt(fs.readFileSync(_daemonPid, 'utf8').trim(), 10);
         process.kill(pid, 0); // signal 0 = check if alive
         daemonRunning = true;
       } catch { /* PID file stale, daemon not running */ }
@@ -1876,7 +1875,7 @@ try {
     if (!daemonRunning) {
       const isNotWindows = process.platform !== 'win32';
       const dCmd = isNotWindows ? 'caffeinate' : process.execPath;
-      const dArgs = isNotWindows ? ['-i', process.execPath, DAEMON_SCRIPT] : [DAEMON_SCRIPT];
+      const dArgs = isNotWindows ? ['-i', process.execPath, _daemonScript] : [_daemonScript];
       const bg = spawn(dCmd, dArgs, {
         detached: true,
         stdio: 'ignore',

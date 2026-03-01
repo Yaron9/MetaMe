@@ -180,11 +180,10 @@ function createTaskScheduler(deps) {
     skillEvolution,
   } = deps;
 
-  // On Windows, spawn claude.cmd via COMSPEC instead of shell:true
+  // On Windows, .cmd files need shell to spawn; use COMSPEC to avoid conda PATH issues
   function spawn(cmd, args, options) {
     if (process.platform === 'win32' && cmd === CLAUDE_BIN) {
-      const comspec = process.env.COMSPEC || 'C:\\WINDOWS\\system32\\cmd.exe';
-      return _spawn(comspec, ['/c', `"${cmd}"`, ...args], options);
+      return _spawn(cmd, args, { ...options, shell: process.env.COMSPEC || true });
     }
     return _spawn(cmd, args, options);
   }
