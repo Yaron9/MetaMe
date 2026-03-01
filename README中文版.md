@@ -20,17 +20,17 @@ MetaMe 是一个驻留在你 Mac 上的 AI——记住你的思维方式，7×24
 
 不上云。你的机器，你的数据。
 
-**macOS / Linux / WSL 终端：**
+**macOS / Linux：**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
 ```
 
-**Windows PowerShell：**
+**Windows：**
 ```powershell
 irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 ```
 
-**已有 Node.js ≥ 18：**
+**已有 Node.js ≥ 18（任意平台）：**
 ```bash
 npm install -g metame-cli && metame
 ```
@@ -200,27 +200,17 @@ MetaMe 的技能不是静态配置——它们会生长。
 
 ## 快速开始
 
-**macOS / Linux / WSL 终端：**
+**macOS / Linux：**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
 ```
 
-**Windows PowerShell：**
+**Windows：**
 ```powershell
 irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 ```
 
-**Windows WSL 手动安装**（代理/网络问题导致自动安装失败时）：
-```bash
-# 如果 WSL 无网络，先退出代理软件（Clash/v2ray），然后在 WSL 中：
-curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-source ~/.nvm/nvm.sh
-nvm install 22
-npm install -g @anthropic-ai/claude-code metame-cli
-metame
-```
-
-**已有 Node.js ≥ 18：**
+**已有 Node.js ≥ 18（任意平台）：**
 ```bash
 npm install -g metame-cli && metame
 ```
