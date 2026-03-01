@@ -130,6 +130,8 @@ Write-Host ""
 
 # Always clear inherited proxy vars first, then re-set only if proxy is reachable
 $unsetProxy = "unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy; "
+# Fix DNS if broken (common in WSL when proxy is down) — use Google + Cloudflare DNS
+$fixDns = "if ! nslookup raw.githubusercontent.com >/dev/null 2>&1; then echo 'nameserver 8.8.8.8' | sudo -n tee /etc/resolv.conf >/dev/null 2>&1 || true; fi; "
 $installCmd = "set -eo pipefail; curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash"
 
 $installed = $false
@@ -142,12 +144,12 @@ if ($proxyEnv) {
     if ($LASTEXITCODE -eq 0) { $installed = $true }
 }
 
-# Fallback: try direct connection (no proxy)
+# Fallback: try direct connection (no proxy), fix DNS if needed
 if (-not $installed) {
     if ($proxyEnv) {
         Write-Host "  Proxy unreachable, trying direct connection..." -ForegroundColor Yellow
     }
-    $bashCmd = "${unsetProxy}${installCmd}"
+    $bashCmd = "${unsetProxy}${fixDns}${installCmd}"
     wsl bash -c $bashCmd
     if ($LASTEXITCODE -eq 0) { $installed = $true }
 }
@@ -158,6 +160,7 @@ if (-not $installed) {
     Write-Host ""
     Write-Host "  Try manually inside WSL:" -ForegroundColor Yellow
     Write-Host "    wsl" -ForegroundColor White
+    Write-Host "    echo 'nameserver 8.8.8.8' | sudo tee /etc/resolv.conf" -ForegroundColor White
     Write-Host "    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY" -ForegroundColor White
     Write-Host "    curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash" -ForegroundColor White
     Write-Host ""
