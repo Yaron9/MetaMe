@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+// Suppress Node.js experimental warnings (e.g. SQLite)
+process.removeAllListeners('warning');
+
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
