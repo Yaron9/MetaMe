@@ -754,7 +754,8 @@ try {
 
 
 
-console.log("🔮 MetaMe: Link Established.");
+const pkgVersion = require('./package.json').version;
+console.log(`🔮 MetaMe v${pkgVersion}: Link Established.`);
 
 // Memory system status — show live stats without blocking launch
 try {
