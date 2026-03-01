@@ -25,6 +25,13 @@ function spawnClaude(args, options) {
   return spawn('claude', args, options);
 }
 
+// Quick flags (before heavy init)
+const pkgVersion = require('./package.json').version;
+if (process.argv.includes('-V') || process.argv.includes('--version')) {
+  console.log(`metame/${pkgVersion}`);
+  process.exit(0);
+}
+
 // ---------------------------------------------------------
 // 1. CONFIGURATION
 // ---------------------------------------------------------
@@ -771,7 +778,6 @@ try {
 
 
 
-const pkgVersion = require('./package.json').version;
 console.log(`🔮 MetaMe v${pkgVersion}: Link Established.`);
 
 // Memory system status — show live stats without blocking launch
@@ -828,7 +834,7 @@ try {
 // ---------------------------------------------------------
 // 4.9 AUTO-UPDATE CHECK (non-blocking)
 // ---------------------------------------------------------
-const CURRENT_VERSION = require('./package.json').version;
+const CURRENT_VERSION = pkgVersion;
 
 // Fire-and-forget: check npm for newer version and auto-update
 (async () => {
