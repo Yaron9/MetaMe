@@ -61,11 +61,11 @@ if (-not $wslInstalled) {
 Write-Host "[OK] WSL is installed" -ForegroundColor Green
 
 # -----------------------------------------------------------
-# 2. Mirror proxy settings to WSL if detected
+# 2. Ensure WSL can reach the network (proxy mirroring)
 # -----------------------------------------------------------
 $proxyEnv = ""
 
-# Detect system proxy (works on both Windows PowerShell 5.1 and PowerShell 7)
+# Detect if a localhost proxy is configured (Clash, v2ray, etc.)
 $detectedProxy = $null
 try {
     $sysProxy = [System.Net.WebRequest]::GetSystemWebProxy()
@@ -76,7 +76,6 @@ try {
     }
 } catch {}
 
-# Fallback: check environment variables
 if (-not $detectedProxy) {
     foreach ($v in @("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy")) {
         if ([Environment]::GetEnvironmentVariable($v)) {
@@ -86,13 +85,41 @@ if (-not $detectedProxy) {
     }
 }
 
-if ($detectedProxy) {
-    # Replace localhost/127.0.0.1 with host.wsl.internal so WSL can reach Windows proxy
-    $wslProxy = $detectedProxy -replace "localhost|127\.0\.0\.1", "host.wsl.internal"
+$isLocalhostProxy = $detectedProxy -and ($detectedProxy -match "localhost|127\.0\.0\.1|\[::1\]")
+
+if ($isLocalhostProxy) {
+    Write-Host "[i] Detected localhost proxy: $detectedProxy" -ForegroundColor DarkGray
+
+    # Enable WSL mirrored networking so localhost works across the boundary
+    $wslConfig = Join-Path $env:USERPROFILE ".wslconfig"
+    $needsMirroring = $true
+
+    if (Test-Path $wslConfig) {
+        $content = Get-Content $wslConfig -Raw
+        if ($content -match "networkingMode\s*=\s*mirrored") {
+            $needsMirroring = $false
+        }
+    }
+
+    if ($needsMirroring) {
+        Write-Host "    Enabling WSL mirrored networking for proxy access..." -ForegroundColor DarkGray
+        $mirrorBlock = "`r`n[wsl2]`r`nnetworkingMode=mirrored`r`n"
+        if (Test-Path $wslConfig) {
+            Add-Content -Path $wslConfig -Value $mirrorBlock
+        } else {
+            Set-Content -Path $wslConfig -Value $mirrorBlock
+        }
+        # Shut down WSL so the new config takes effect on next launch
+        Write-Host "    Restarting WSL to apply network config..." -ForegroundColor DarkGray
+        wsl --shutdown 2>$null
+    }
+
+    # With mirrored networking, localhost proxy works directly — pass it as-is
+    $proxyEnv = 'export http_proxy="{0}" https_proxy="{0}" HTTP_PROXY="{0}" HTTPS_PROXY="{0}"; ' -f $detectedProxy
+} elseif ($detectedProxy) {
+    # Non-localhost proxy (corporate etc.) — pass through directly
     Write-Host "[i] Detected proxy: $detectedProxy" -ForegroundColor DarkGray
-    Write-Host "    Mirroring to WSL as: $wslProxy" -ForegroundColor DarkGray
-    # Use single-quoted heredoc-style to avoid PowerShell variable expansion issues
-    $proxyEnv = 'export http_proxy="{0}" https_proxy="{0}" HTTP_PROXY="{0}" HTTPS_PROXY="{0}"; ' -f $wslProxy
+    $proxyEnv = 'export http_proxy="{0}" https_proxy="{0}" HTTP_PROXY="{0}" HTTPS_PROXY="{0}"; ' -f $detectedProxy
 }
 
 # -----------------------------------------------------------
