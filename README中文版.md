@@ -32,7 +32,8 @@ irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 
 **已有 Node.js ≥ 18（任意平台）：**
 ```bash
-npm install -g metame-cli && metame
+npm install -g metame-cli
+metame
 ```
 
 ---
@@ -212,7 +213,8 @@ irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 
 **已有 Node.js ≥ 18（任意平台）：**
 ```bash
-npm install -g metame-cli && metame
+npm install -g metame-cli
+metame
 ```
 
 **3 分钟完成全部设置：**
