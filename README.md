@@ -20,17 +20,17 @@ MetaMe is an AI that lives on your machine — remembers how you think, stays on
 
 No cloud. Your machine, your data.
 
-**macOS / Linux / WSL terminal:**
+**macOS / Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
 ```
 
-**Windows PowerShell:**
+**Windows:**
 ```powershell
 irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 ```
 
-**Already have Node.js ≥ 18:**
+**Already have Node.js ≥ 18 (any platform):**
 ```bash
 npm install -g metame-cli && metame
 ```
@@ -198,27 +198,17 @@ Task fails → skill-scout finds a skill → installs → retries → succeeds
 
 ## Quick Start
 
-**macOS / Linux / WSL terminal:**
+**macOS / Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
 ```
 
-**Windows PowerShell:**
+**Windows:**
 ```powershell
 irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 ```
 
-**Windows WSL manual install** (if the auto-installer fails due to proxy/network issues):
-```bash
-# Exit proxy software (Clash/v2ray) if WSL has no network, then in WSL:
-curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-source ~/.nvm/nvm.sh
-nvm install 22
-npm install -g @anthropic-ai/claude-code metame-cli
-metame
-```
-
-**Already have Node.js ≥ 18:**
+**Already have Node.js ≥ 18 (any platform):**
 ```bash
 npm install -g metame-cli && metame
 ```
@@ -230,7 +220,7 @@ npm install -g metame-cli && metame
 | 1. Install & profile | `metame` | First run: cognitive interview → builds `~/.claude_profile.yaml` |
 | 2. Connect phone | Follow the setup wizard | Bot token + app credentials → `~/.metame/daemon.yaml` |
 | 3. Start daemon | `metame start` | Background daemon launches, bot goes online |
-| 4. Register with system | macOS: `metame daemon install-launchd` · WSL/Linux: see below | Always-on, crash recovery |
+| 4. Register with system | macOS: `metame daemon install-launchd` · Linux: see below | Always-on, crash recovery |
 
 > **What does system registration mean?**
 > Once registered, MetaMe runs in the background automatically — screen locked, lid closed, woken from sleep — as long as the machine is on. Scheduled tasks fire on time. No terminal window needed.

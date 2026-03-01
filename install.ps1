@@ -5,194 +5,109 @@ $ErrorActionPreference = "Stop"
 
 Write-Host ""
 Write-Host "  MetaMe - Your Digital Twin" -ForegroundColor Cyan
-Write-Host "  Windows Installer (via WSL)" -ForegroundColor DarkGray
+Write-Host "  Windows Installer" -ForegroundColor DarkGray
 Write-Host ""
 
+$MIN_NODE_VERSION = 18
+
 # -----------------------------------------------------------
-# 1. Check if WSL is available
+# 1. Check / Install Node.js
 # -----------------------------------------------------------
-$wslInstalled = $false
+$nodeInstalled = $false
 try {
-    $wslOutput = wsl --status 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        $wslInstalled = $true
+    $nodeVer = (node -v 2>$null)
+    if ($nodeVer) {
+        $major = [int]($nodeVer -replace '^v','').Split('.')[0]
+        if ($major -ge $MIN_NODE_VERSION) {
+            Write-Host "[OK] Node.js $nodeVer found" -ForegroundColor Green
+            $nodeInstalled = $true
+        } else {
+            Write-Host "[!] Node.js $nodeVer is too old (need >= $MIN_NODE_VERSION)" -ForegroundColor Yellow
+        }
     }
 } catch {}
 
-if (-not $wslInstalled) {
+if (-not $nodeInstalled) {
+    Write-Host "[1/3] Installing Node.js..." -ForegroundColor Cyan
+
+    # Try winget first
+    $hasWinget = $false
+    try { winget --version 2>$null; if ($LASTEXITCODE -eq 0) { $hasWinget = $true } } catch {}
+
+    if ($hasWinget) {
+        Write-Host "  Installing via winget..." -ForegroundColor DarkGray
+        winget install OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements
+    } else {
+        # Download Node.js MSI installer
+        Write-Host "  Downloading Node.js installer..." -ForegroundColor DarkGray
+        $nodeUrl = "https://nodejs.org/dist/v22.12.0/node-v22.12.0-x64.msi"
+        $msiPath = Join-Path $env:TEMP "node-install.msi"
+        Invoke-WebRequest -Uri $nodeUrl -OutFile $msiPath -UseBasicParsing
+        Write-Host "  Running installer..." -ForegroundColor DarkGray
+        Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /qn" -Wait
+        Remove-Item $msiPath -ErrorAction SilentlyContinue
+    }
+
+    # Refresh PATH so node/npm are available in this session
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$machinePath;$userPath"
+
     try {
-        $distros = wsl --list --quiet 2>&1
-        if ($distros -and $distros.Length -gt 0 -and $LASTEXITCODE -eq 0) {
-            $wslInstalled = $true
+        $nodeVer = (node -v 2>$null)
+        if ($nodeVer) {
+            Write-Host "[OK] Node.js $nodeVer installed" -ForegroundColor Green
+        } else {
+            throw "not found"
         }
-    } catch {}
-}
-
-if (-not $wslInstalled) {
-    Write-Host "[1/3] Installing WSL..." -ForegroundColor Yellow
-    Write-Host "  This requires administrator privileges." -ForegroundColor DarkGray
-    Write-Host ""
-
-    # Check if running as admin
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-
-    if (-not $isAdmin) {
-        Write-Host "  Please run this command in an Administrator PowerShell:" -ForegroundColor Red
+    } catch {
         Write-Host ""
+        Write-Host "  Node.js installation requires a terminal restart." -ForegroundColor Yellow
+        Write-Host "  Please close this terminal, open a new one, and re-run:" -ForegroundColor Yellow
         Write-Host "  irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex" -ForegroundColor White
         Write-Host ""
-        Write-Host "  Or install WSL manually first:" -ForegroundColor DarkGray
-        Write-Host "  wsl --install" -ForegroundColor White
-        Write-Host ""
+        exit 0
+    }
+}
+
+# -----------------------------------------------------------
+# 2. Install Claude Code
+# -----------------------------------------------------------
+$hasClaudeCode = $false
+try { claude -v 2>$null; if ($LASTEXITCODE -eq 0) { $hasClaudeCode = $true } } catch {}
+
+if ($hasClaudeCode) {
+    Write-Host "[OK] Claude Code already installed" -ForegroundColor Green
+} else {
+    Write-Host "[2/3] Installing Claude Code..." -ForegroundColor Cyan
+    npm install -g @anthropic-ai/claude-code
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  Claude Code installation failed. Try manually: npm install -g @anthropic-ai/claude-code" -ForegroundColor Red
         exit 1
     }
-
-    wsl --install -d Ubuntu
-    Write-Host ""
-    Write-Host "  WSL + Ubuntu installed." -ForegroundColor Green
-    Write-Host ""
-    Write-Host "  IMPORTANT: You must RESTART your computer now." -ForegroundColor Yellow
-    Write-Host "  After reboot, open Ubuntu from Start Menu to finish setup," -ForegroundColor Yellow
-    Write-Host "  then re-run this installer." -ForegroundColor Yellow
-    Write-Host ""
-    exit 0
-}
-
-Write-Host "[OK] WSL is installed" -ForegroundColor Green
-
-# -----------------------------------------------------------
-# 2. Ensure WSL can reach the network (proxy mirroring)
-# -----------------------------------------------------------
-$proxyEnv = ""
-
-# Detect if a localhost proxy is configured (Clash, v2ray, etc.)
-$detectedProxy = $null
-try {
-    $sysProxy = [System.Net.WebRequest]::GetSystemWebProxy()
-    $testUri = [Uri]"https://raw.githubusercontent.com"
-    $proxyUri = $sysProxy.GetProxy($testUri)
-    if ($proxyUri -and $proxyUri -ne $testUri) {
-        $detectedProxy = $proxyUri.ToString().TrimEnd('/')
-    }
-} catch {}
-
-if (-not $detectedProxy) {
-    foreach ($v in @("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy")) {
-        if ([Environment]::GetEnvironmentVariable($v)) {
-            $detectedProxy = [Environment]::GetEnvironmentVariable($v)
-            break
-        }
-    }
-}
-
-$isLocalhostProxy = $detectedProxy -and ($detectedProxy -match "localhost|127\.0\.0\.1|\[::1\]")
-
-if ($isLocalhostProxy) {
-    Write-Host "[i] Detected localhost proxy: $detectedProxy" -ForegroundColor DarkGray
-
-    # Enable WSL mirrored networking so localhost works across the boundary
-    $wslConfig = Join-Path $env:USERPROFILE ".wslconfig"
-    $needsMirroring = $true
-
-    if (Test-Path $wslConfig) {
-        $content = Get-Content $wslConfig -Raw
-        if ($content -match "networkingMode\s*=\s*mirrored") {
-            $needsMirroring = $false
-        }
-    }
-
-    if ($needsMirroring) {
-        Write-Host "    Enabling WSL mirrored networking for proxy access..." -ForegroundColor DarkGray
-        $mirrorBlock = "`r`n[wsl2]`r`nnetworkingMode=mirrored`r`n"
-        if (Test-Path $wslConfig) {
-            Add-Content -Path $wslConfig -Value $mirrorBlock
-        } else {
-            Set-Content -Path $wslConfig -Value $mirrorBlock
-        }
-        # Shut down WSL so the new config takes effect on next launch
-        Write-Host "    Restarting WSL to apply network config..." -ForegroundColor DarkGray
-        wsl --shutdown 2>$null
-    }
-
-    # With mirrored networking, localhost proxy works directly — pass it as-is
-    $proxyEnv = 'export http_proxy="{0}" https_proxy="{0}" HTTP_PROXY="{0}" HTTPS_PROXY="{0}"; ' -f $detectedProxy
-} elseif ($detectedProxy) {
-    # Non-localhost proxy (corporate etc.) — pass through directly
-    Write-Host "[i] Detected proxy: $detectedProxy" -ForegroundColor DarkGray
-    $proxyEnv = 'export http_proxy="{0}" https_proxy="{0}" HTTP_PROXY="{0}" HTTPS_PROXY="{0}"; ' -f $detectedProxy
+    Write-Host "[OK] Claude Code installed" -ForegroundColor Green
 }
 
 # -----------------------------------------------------------
-# 3. Run the bash installer inside WSL
+# 3. Install MetaMe
 # -----------------------------------------------------------
-Write-Host "[2/3] Running MetaMe installer inside WSL..." -ForegroundColor Cyan
-Write-Host ""
-
-# Always clear inherited proxy vars first, then re-set only if proxy is reachable
-$unsetProxy = "unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy; "
-# Fix DNS if broken (common in WSL when proxy is down) — use Google + Cloudflare DNS
-$fixDns = "if ! nslookup raw.githubusercontent.com >/dev/null 2>&1; then echo 'nameserver 8.8.8.8' | sudo -n tee /etc/resolv.conf >/dev/null 2>&1 || true; fi; "
-$installCmd = "set -eo pipefail; curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash"
-
-$installed = $false
-
-# Try with proxy first if detected
-if ($proxyEnv) {
-    Write-Host "  Trying with proxy..." -ForegroundColor DarkGray
-    $bashCmd = "${unsetProxy}${proxyEnv}${installCmd}"
-    wsl bash -c $bashCmd
-    if ($LASTEXITCODE -eq 0) { $installed = $true }
-}
-
-# Fallback: try direct connection (no proxy), fix DNS if needed
-if (-not $installed) {
-    if ($proxyEnv) {
-        Write-Host "  Proxy unreachable, trying direct connection..." -ForegroundColor Yellow
-    }
-    $bashCmd = "${unsetProxy}${fixDns}${installCmd}"
-    wsl bash -c $bashCmd
-    if ($LASTEXITCODE -eq 0) { $installed = $true }
-}
-
-if (-not $installed) {
-    Write-Host ""
-    Write-Host "  Installation failed inside WSL." -ForegroundColor Red
-    Write-Host ""
-    Write-Host "  Try manually inside WSL:" -ForegroundColor Yellow
-    Write-Host "    wsl" -ForegroundColor White
-    Write-Host "    echo 'nameserver 8.8.8.8' | sudo tee /etc/resolv.conf" -ForegroundColor White
-    Write-Host "    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY" -ForegroundColor White
-    Write-Host "    curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash" -ForegroundColor White
-    Write-Host ""
+Write-Host "[3/3] Installing MetaMe..." -ForegroundColor Cyan
+npm install -g metame-cli
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  MetaMe installation failed. Try manually: npm install -g metame-cli" -ForegroundColor Red
     exit 1
 }
+Write-Host "[OK] MetaMe installed" -ForegroundColor Green
 
 # -----------------------------------------------------------
-# 4. Create Windows shortcut
+# Done
 # -----------------------------------------------------------
-Write-Host ""
-Write-Host "[3/3] Setting up Windows access..." -ForegroundColor Cyan
-
-# Add a batch wrapper so `metame` works from PowerShell/CMD too
-$wrapperDir = Join-Path $env:LOCALAPPDATA "MetaMe"
-if (-not (Test-Path $wrapperDir)) { New-Item -ItemType Directory -Path $wrapperDir -Force | Out-Null }
-
-$wrapperPath = Join-Path $wrapperDir "metame.cmd"
-Set-Content -Path $wrapperPath -Value "@echo off`r`nwsl bash -ic 'metame %*'"
-
-# Add to PATH if not already there
-$currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($currentPath -notlike "*$wrapperDir*") {
-    [Environment]::SetEnvironmentVariable("Path", "$currentPath;$wrapperDir", "User")
-    Write-Host "  Added metame to PATH (restart terminal to use)" -ForegroundColor DarkGray
-}
-
 Write-Host ""
 Write-Host "  Installation complete!" -ForegroundColor Green
 Write-Host ""
-Write-Host "  Usage:" -ForegroundColor White
-Write-Host "    From PowerShell/CMD:  metame" -ForegroundColor Cyan
-Write-Host "    From WSL terminal:    metame" -ForegroundColor Cyan
+Write-Host "  Run:" -ForegroundColor White
+Write-Host "    metame          - Start MetaMe" -ForegroundColor Cyan
+Write-Host "    claude          - Start Claude Code" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  First launch will guide you through setup." -ForegroundColor DarkGray
 Write-Host ""
