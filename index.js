@@ -1757,6 +1757,7 @@ if (isSync) {
   if (daemonCfg.dangerously_skip_permissions) resumeArgs.push('--dangerously-skip-permissions');
   const syncChild = spawn('claude', resumeArgs, {
     stdio: 'inherit',
+    shell: process.platform === 'win32',
     env: { ...process.env, ...providerEnv, METAME_ACTIVE_SESSION: 'true' }
   });
   syncChild.on('error', () => {
@@ -1832,6 +1833,7 @@ try {
 // Spawn the official claude tool with our marker + provider env
 const child = spawn('claude', launchArgs, {
   stdio: 'inherit',
+  shell: process.platform === 'win32',
   env: { ...process.env, ...activeProviderEnv, METAME_ACTIVE_SESSION: 'true' }
 });
 
