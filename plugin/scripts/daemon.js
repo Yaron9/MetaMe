@@ -37,7 +37,10 @@ const CLAUDE_BIN = (() => {
     '/usr/local/bin/claude',
     '/opt/homebrew/bin/claude',
   ];
-  try { return execSync('which claude 2>/dev/null', { encoding: 'utf8' }).trim(); } catch {}
+  try {
+    const cmd = process.platform === 'win32' ? 'where claude' : 'which claude 2>/dev/null';
+    return execSync(cmd, { encoding: 'utf8' }).trim().split('\n')[0];
+  } catch {}
   for (const p of candidates) { if (fs.existsSync(p)) return p; }
   return 'claude'; // fallback: hope it's in PATH
 })();

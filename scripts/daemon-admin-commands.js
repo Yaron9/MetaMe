@@ -746,7 +746,7 @@ function createAdminCommandHandler(deps) {
       }
 
       try {
-        execSync('which claude', { encoding: 'utf8' });
+        execSync(process.platform === 'win32' ? 'where claude' : 'which claude', { encoding: 'utf8' });
         checks.push('✅ Claude CLI');
       } catch {
         checks.push('❌ Claude CLI 未找到');
