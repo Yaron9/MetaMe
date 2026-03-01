@@ -20,11 +20,18 @@ MetaMe 是一个驻留在你 Mac 上的 AI——记住你的思维方式，7×24
 
 不上云。你的机器，你的数据。
 
+**macOS / Linux / WSL 终端：**
 ```bash
-# macOS / Linux / Windows WSL — 同一条命令：
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
+```
 
-# 或手动安装（已有 Node.js ≥ 18）：
+**Windows PowerShell：**
+```powershell
+irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
+```
+
+**已有 Node.js ≥ 18：**
+```bash
 npm install -g metame-cli && metame
 ```
 
@@ -193,18 +200,18 @@ MetaMe 的技能不是静态配置——它们会生长。
 
 ## 快速开始
 
-**macOS**
+**macOS / Linux / WSL 终端：**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
 ```
 
-**Linux / Windows WSL**
-```bash
-curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
+**Windows PowerShell：**
+```powershell
+irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 ```
-> 同一条命令。脚本自动识别系统，用 apt / dnf / pacman 安装 Node.js。
+> 脚本自动识别系统，安装 Node.js（Homebrew / nvm / apt），WSL 环境自动镜像代理设置。
 
-**已有 Node.js ≥ 18**
+**已有 Node.js ≥ 18：**
 ```bash
 npm install -g metame-cli && metame
 ```

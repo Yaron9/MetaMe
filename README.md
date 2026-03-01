@@ -20,9 +20,14 @@ MetaMe is an AI that lives on your machine — remembers how you think, stays on
 
 No cloud. Your machine, your data.
 
-**macOS / Linux / Windows WSL — same command:**
+**macOS / Linux / WSL terminal:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
+```
+
+**Windows PowerShell:**
+```powershell
+irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 ```
 
 **Already have Node.js ≥ 18:**
@@ -193,11 +198,16 @@ Task fails → skill-scout finds a skill → installs → retries → succeeds
 
 ## Quick Start
 
-**macOS / Linux / Windows WSL:**
+**macOS / Linux / WSL terminal:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
 ```
-> Same command everywhere. The script detects your OS and uses Homebrew (macOS) or apt/dnf/pacman (Linux/WSL) to install Node.js automatically.
+
+**Windows PowerShell:**
+```powershell
+irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
+```
+> The script detects your OS, installs Node.js (via Homebrew / nvm / apt), sets up WSL if needed, and mirrors proxy settings automatically.
 
 **Already have Node.js ≥ 18:**
 ```bash
