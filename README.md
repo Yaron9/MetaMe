@@ -207,7 +207,16 @@ curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bas
 ```powershell
 irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 ```
-> The script detects your OS, installs Node.js (via Homebrew / nvm / apt), sets up WSL if needed, and mirrors proxy settings automatically.
+
+**Windows WSL manual install** (if the auto-installer fails due to proxy/network issues):
+```bash
+# Exit proxy software (Clash/v2ray) if WSL has no network, then in WSL:
+curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+source ~/.nvm/nvm.sh
+nvm install 22
+npm install -g @anthropic-ai/claude-code metame-cli
+metame
+```
 
 **Already have Node.js ≥ 18:**
 ```bash
