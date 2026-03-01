@@ -8,6 +8,23 @@ const path = require('path');
 const os = require('os');
 const { spawn, execSync } = require('child_process');
 
+// On Windows, resolve the full path to claude.cmd so we can spawn it
+// via cmd.exe (using COMSPEC) without relying on shell:true finding cmd.exe in PATH
+function resolveClaudeBin() {
+  if (process.platform !== 'win32') return 'claude';
+  try {
+    return execSync('where claude', { encoding: 'utf8' }).trim().split('\n')[0];
+  } catch { return 'claude'; }
+}
+function spawnClaude(args, options) {
+  if (process.platform === 'win32') {
+    const claudePath = resolveClaudeBin();
+    const comspec = process.env.COMSPEC || 'C:\\WINDOWS\\system32\\cmd.exe';
+    return spawn(comspec, ['/c', claudePath, ...args], options);
+  }
+  return spawn('claude', args, options);
+}
+
 // ---------------------------------------------------------
 // 1. CONFIGURATION
 // ---------------------------------------------------------
@@ -1760,9 +1777,8 @@ if (isSync) {
   const providerEnv = (() => { try { return require(path.join(__dirname, 'scripts', 'providers.js')).buildActiveEnv(); } catch { return {}; } })();
   const resumeArgs = ['--resume', bestSession.id];
   if (daemonCfg.dangerously_skip_permissions) resumeArgs.push('--dangerously-skip-permissions');
-  const syncChild = spawn('claude', resumeArgs, {
+  const syncChild = spawnClaude(resumeArgs, {
     stdio: 'inherit',
-    shell: process.platform === 'win32',
     env: { ...process.env, ...providerEnv, METAME_ACTIVE_SESSION: 'true' }
   });
   syncChild.on('error', () => {
@@ -1863,9 +1879,8 @@ try {
 } catch { /* non-fatal */ }
 
 // Spawn the official claude tool with our marker + provider env
-const child = spawn('claude', launchArgs, {
+const child = spawnClaude(launchArgs, {
   stdio: 'inherit',
-  shell: process.platform === 'win32',
   env: { ...process.env, ...activeProviderEnv, METAME_ACTIVE_SESSION: 'true' }
 });
 
