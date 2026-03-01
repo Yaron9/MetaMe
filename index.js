@@ -1574,6 +1574,7 @@ WantedBy=default.target
     const bg = spawn(cmd, args, {
       detached: true,
       stdio: 'ignore',
+      windowsHide: true,
       env: { ...process.env, HOME: HOME_DIR, METAME_ROOT: __dirname },
     });
     bg.unref();
