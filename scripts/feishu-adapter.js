@@ -401,7 +401,9 @@ function createBot(config) {
 
               if (text || fileInfo) {
                 // Fire-and-forget: don't block the event loop (SDK needs fast ack)
-                Promise.resolve().then(() => onMessage(chatId, text, data, fileInfo, senderId)).catch(() => {});
+                Promise.resolve().then(() => onMessage(chatId, text, data, fileInfo, senderId)).catch((err) => {
+                  try { console.error(`[feishu-adapter] onMessage error: ${err && err.message || err}`); } catch { }
+                });
               }
             } catch (e) {
               // Non-fatal
@@ -417,7 +419,9 @@ function createBot(config) {
               if (action && chatId) {
                 const cmd = action.value && action.value.cmd;
                 if (cmd) {
-                  Promise.resolve().then(() => onMessage(chatId, cmd, data)).catch(() => {});
+                  Promise.resolve().then(() => onMessage(chatId, cmd, data)).catch((err) => {
+                  try { console.error(`[feishu-adapter] card action error: ${err && err.message || err}`); } catch { }
+                });
                 }
               }
             } catch (e) {

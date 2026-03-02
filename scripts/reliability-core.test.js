@@ -13,10 +13,17 @@ function mkHome(prefix = 'metame-reliability-') {
   return home;
 }
 
+function homeEnv(home) {
+  // On Windows, os.homedir() reads USERPROFILE, not HOME
+  return process.platform === 'win32'
+    ? { HOME: home, USERPROFILE: home }
+    : { HOME: home };
+}
+
 function runNode(home, code, extraEnv = {}) {
   return execFileSync(process.execPath, ['-e', code], {
     cwd: ROOT,
-    env: { ...process.env, HOME: home, ...extraEnv },
+    env: { ...process.env, ...homeEnv(home), ...extraEnv },
     encoding: 'utf8',
     timeout: 30000,
   });
@@ -25,17 +32,22 @@ function runNode(home, code, extraEnv = {}) {
 function installFakeClaude(home, body) {
   const bin = path.join(home, 'bin');
   fs.mkdirSync(bin, { recursive: true });
+  if (process.platform === 'win32') {
+    const cli = path.join(bin, 'claude.cmd');
+    fs.writeFileSync(cli, `@echo off\n${body}\n`, 'utf8');
+    return { ...homeEnv(home), PATH: `${bin};${process.env.PATH}` };
+  }
   const cli = path.join(bin, 'claude');
   fs.writeFileSync(cli, `#!/bin/sh\n${body}\n`, 'utf8');
   fs.chmodSync(cli, 0o755);
-  return { PATH: `${bin}:${process.env.PATH}` };
+  return { ...homeEnv(home), PATH: `${bin}:${process.env.PATH}` };
 }
 
 function sendSignal(home, prompt, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'signal-capture.js')], {
       cwd: ROOT,
-      env: { ...process.env, HOME: home, ...extraEnv },
+      env: { ...process.env, ...homeEnv(home), ...extraEnv },
       stdio: ['pipe', 'ignore', 'ignore'],
     });
     const timer = setTimeout(() => {

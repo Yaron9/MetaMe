@@ -12,10 +12,16 @@ function mkHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'metame-skill-evo-'));
 }
 
+function homeEnv(home) {
+  return process.platform === 'win32'
+    ? { HOME: home, USERPROFILE: home }
+    : { HOME: home };
+}
+
 function runWithHome(home, code) {
   return execFileSync(process.execPath, ['-e', code], {
     cwd: ROOT,
-    env: { ...process.env, HOME: home },
+    env: { ...process.env, ...homeEnv(home) },
     encoding: 'utf8',
   });
 }

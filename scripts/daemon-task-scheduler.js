@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { classifyTaskUsage } = require('./usage-classifier');
+const { IS_WIN } = require('./platform');
 
 const WEEKDAY_INDEX = Object.freeze({
   sun: 0,
@@ -192,7 +193,30 @@ function createTaskScheduler(deps) {
     if (!task.precondition) return { pass: true, context: '' };
 
     try {
-      const output = execSync(task.precondition, {
+      let cmd = task.precondition;
+
+      // Cross-platform: expand ~ to HOME and handle `test -s` (Unix-only) via Node.js
+      cmd = cmd.replace(/^~|(?<=\s)~/g, HOME);
+      if (IS_WIN) {
+        // `test -s <file>` checks file exists and is non-empty — do it in JS
+        const testMatch = cmd.match(/^test\s+-s\s+(.+)$/);
+        if (testMatch) {
+          const filePath = testMatch[1].trim().replace(/["']/g, '');
+          const fs = require('fs');
+          try {
+            const stat = fs.statSync(filePath);
+            if (stat.size > 0) {
+              const content = fs.readFileSync(filePath, 'utf8').trim();
+              log('INFO', `Precondition passed for ${task.name} (${content.split('\n').length} lines)`);
+              return { pass: true, context: content };
+            }
+          } catch { /* file doesn't exist */ }
+          log('INFO', `Precondition failed for ${task.name}: file empty or missing`);
+          return { pass: false, context: '' };
+        }
+      }
+
+      const output = execSync(cmd, {
         encoding: 'utf8',
         timeout: 15000,
         maxBuffer: 64 * 1024,
@@ -296,7 +320,8 @@ function createTaskScheduler(deps) {
 
     // Script tasks: run a local script directly (e.g. distill.js), no claude -p
     if (task.type === 'script') {
-      log('INFO', `Executing script task: ${task.name} → ${task.command}`);
+      const scriptCmd = task.command.replace(/^~|(?<=\s)~/g, HOME);
+      log('INFO', `Executing script task: ${task.name} → ${scriptCmd}`);
       try {
         const scriptEnv = {
           ...process.env,
@@ -304,7 +329,7 @@ function createTaskScheduler(deps) {
           METAME_INTERNAL_PROMPT: '1',
         };
         delete scriptEnv.CLAUDECODE;
-        const output = execSync(task.command, {
+        const output = execSync(scriptCmd, {
           encoding: 'utf8',
           timeout: resolveTimeoutMs(task.timeout, 120),
           maxBuffer: 1024 * 1024,

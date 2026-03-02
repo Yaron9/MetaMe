@@ -16,6 +16,22 @@
 // Suppress Node.js experimental warnings (e.g. SQLite)
 process.removeAllListeners('warning');
 
+// Global error handlers — prevent silent event-loop death
+process.on('unhandledRejection', (reason) => {
+  try {
+    const msg = reason instanceof Error ? reason.stack || reason.message : String(reason);
+    const line = `[${new Date().toISOString()}] [ERROR] [UNHANDLED_REJECTION] ${msg}\n`;
+    fs.appendFileSync(path.join(os.homedir(), '.metame', 'daemon.log'), line);
+  } catch { /* last resort: don't crash the crash handler */ }
+});
+process.on('uncaughtException', (err) => {
+  try {
+    const line = `[${new Date().toISOString()}] [FATAL] [UNCAUGHT_EXCEPTION] ${err.stack || err.message}\n`;
+    fs.appendFileSync(path.join(os.homedir(), '.metame', 'daemon.log'), line);
+  } catch { /* last resort */ }
+  // Don't exit — let the daemon survive and self-heal via watchdog
+});
+
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -30,7 +46,8 @@ const LOG_FILE = path.join(METAME_DIR, 'daemon.log');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const DISPATCH_DIR = path.join(METAME_DIR, 'dispatch');
 const DISPATCH_LOG = path.join(DISPATCH_DIR, 'dispatch-log.jsonl');
-const SOCK_PATH = path.join(METAME_DIR, 'daemon.sock');
+const { socketPath, needsSocketCleanup } = require('./platform');
+const SOCK_PATH = socketPath(METAME_DIR);
 
 // Resolve claude binary path (daemon may not inherit user's full PATH)
 const CLAUDE_BIN = (() => {
@@ -975,7 +992,7 @@ function handleDispatchItem(item, config) {
  */
 function startDispatchSocket(getConfig) {
   const net = require('net');
-  try { fs.unlinkSync(SOCK_PATH); } catch { /* ok */ }
+  if (needsSocketCleanup()) { try { fs.unlinkSync(SOCK_PATH); } catch { /* ok */ } }
   const server = net.createServer((conn) => {
     let buf = '';
     conn.on('data', d => { buf += d; });
@@ -1611,7 +1628,6 @@ const { startTelegramBridge, startFeishuBridge } = createBridgeStarter({
 
 const { killExistingDaemon, writePid, cleanPid } = createPidManager({
   fs,
-  execSync,
   PID_FILE,
   log,
 });
@@ -1819,6 +1835,27 @@ async function main() {
 
   process.on('SIGTERM', () => { shutdown().catch(() => process.exit(0)); });
   process.on('SIGINT', () => { shutdown().catch(() => process.exit(0)); });
+
+  // Watchdog: detect heartbeat stall and self-restart
+  const WATCHDOG_INTERVAL = 5 * 60 * 1000; // check every 5 min
+  const HEARTBEAT_STALL_THRESHOLD = 5 * 60 * 1000; // 5 min without heartbeat = stalled
+  setInterval(() => {
+    try {
+      const st = loadState();
+      const lastAlive = st.last_alive ? new Date(st.last_alive).getTime() : 0;
+      const elapsed = Date.now() - lastAlive;
+      if (lastAlive > 0 && elapsed > HEARTBEAT_STALL_THRESHOLD) {
+        log('FATAL', `[WATCHDOG] Heartbeat stalled for ${Math.round(elapsed / 1000)}s — forcing restart`);
+        // Write state before exit so next launch knows why
+        st.watchdog_restart = new Date().toISOString();
+        st.watchdog_stall_seconds = Math.round(elapsed / 1000);
+        saveState(st);
+        process.exit(1); // caffeinate or launchd will restart us
+      }
+    } catch (e) {
+      log('WARN', `[WATCHDOG] Check failed: ${e.message}`);
+    }
+  }, WATCHDOG_INTERVAL).unref();
 
   // Keep alive
   log('INFO', 'Daemon running. Send SIGTERM to stop.');

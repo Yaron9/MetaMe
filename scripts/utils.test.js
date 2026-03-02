@@ -2,6 +2,8 @@
 
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
+const os = require('os');
+const path = require('path');
 const {
   parseInterval,
   formatRelativeTime,
@@ -138,20 +140,25 @@ describe('createPathMap', () => {
 // ---------------------------------------------------------
 describe('project scope helpers', () => {
   it('normalizes absolute paths', () => {
-    assert.equal(normalizeProjectPath('/tmp/./metame/../metame'), '/tmp/metame');
+    const input = path.join(os.tmpdir(), '.', 'metame', '..', 'metame');
+    const expected = path.resolve(os.tmpdir(), 'metame');
+    assert.equal(normalizeProjectPath(input), expected);
   });
 
   it('returns deterministic scope ids for the same cwd', () => {
-    const a = projectScopeFromCwd('/tmp/metame');
-    const b = projectScopeFromCwd('/tmp/./metame');
+    const base = path.join(os.tmpdir(), 'metame');
+    const dotted = path.join(os.tmpdir(), '.', 'metame');
+    const a = projectScopeFromCwd(base);
+    const b = projectScopeFromCwd(dotted);
     assert.equal(a, b);
     assert.match(a, /^proj_[a-f0-9]{16}$/);
   });
 
   it('derives project info from cwd', () => {
-    const info = deriveProjectInfo('/tmp/demo-repo');
+    const testPath = path.join(os.tmpdir(), 'demo-repo');
+    const info = deriveProjectInfo(testPath);
     assert.equal(info.project, 'demo-repo');
-    assert.equal(info.project_path, '/tmp/demo-repo');
+    assert.equal(info.project_path, path.resolve(testPath));
     assert.match(info.project_id, /^proj_[a-f0-9]{16}$/);
   });
 });
