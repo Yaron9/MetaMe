@@ -11,7 +11,7 @@
  *   2. search_count < 3
  *   3. superseded_by IS NULL          (already-superseded facts excluded)
  *   4. conflict_status IS NULL OR conflict_status = 'OK'  (skip CONFLICT/ARCHIVED)
- *   5. relation NOT IN protected set  (user_pref, workflow_rule, arch_convention never archived)
+ *   5. relation NOT IN protected set  (workflow_rule, arch_convention, config_fact never archived)
  *
  * Protected relations are permanently excluded — they are high-value guardrails
  * that must survive regardless of search frequency.
@@ -32,7 +32,7 @@ const LOCK_FILE = path.join(METAME_DIR, 'memory-gc.lock');
 const GC_LOG_FILE = path.join(METAME_DIR, 'memory_gc_log.jsonl');
 
 // Relations that are permanently protected from archival
-const PROTECTED_RELATIONS = ['user_pref', 'workflow_rule', 'arch_convention', 'config_fact'];
+const PROTECTED_RELATIONS = ['workflow_rule', 'arch_convention', 'config_fact'];
 
 // GC threshold: facts older than this many days are candidates
 const STALE_DAYS = 30;

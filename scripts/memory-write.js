@@ -22,7 +22,6 @@ const VALID_RELATIONS = new Set([
   'arch_convention',
   'config_fact',
   'config_change',
-  'user_pref',
   'workflow_rule',
   'project_milestone',
 ]);

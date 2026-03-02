@@ -226,7 +226,7 @@ function saveSession({ sessionId, project, scope = null, summary, keywords = '',
 
 // Relations with "current state" semantics: new value replaces old.
 // Historical relations (tech_decision, bug_lesson, arch_convention, project_milestone) keep all versions.
-const STATEFUL_RELATIONS = new Set(['user_pref', 'config_fact', 'config_change', 'workflow_rule']);
+const STATEFUL_RELATIONS = new Set(['config_fact', 'config_change', 'workflow_rule']);
 
 /**
  * Save atomic facts extracted from a session.
