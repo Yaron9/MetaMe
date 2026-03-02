@@ -17,6 +17,7 @@ feishu-login-qr.png
 
 # Local working dirs
 docs/
+!scripts/docs/
 tasks/
 upload/
 

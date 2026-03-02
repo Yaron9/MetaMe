@@ -50,6 +50,41 @@ if (!fs.existsSync(METAME_DIR)) {
   fs.mkdirSync(METAME_DIR, { recursive: true });
 }
 
+// ---------------------------------------------------------
+// DEPLOY PHASE: sync scripts, docs, bin to ~/.metame/
+// ---------------------------------------------------------
+
+/**
+ * Sync files from srcDir to destDir. Only writes when content differs.
+ * @param {string} srcDir - source directory
+ * @param {string} destDir - destination directory
+ * @param {object} [opts]
+ * @param {string[]} [opts.fileList] - explicit file list (skip readdirSync)
+ * @param {number}  [opts.chmod] - chmod after write (e.g. 0o755)
+ * @returns {boolean} true if any file was updated
+ */
+function syncDirFiles(srcDir, destDir, { fileList, chmod } = {}) {
+  if (!fs.existsSync(srcDir)) return false;
+  if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+  let updated = false;
+  const files = fileList || fs.readdirSync(srcDir).filter(f => fs.statSync(path.join(srcDir, f)).isFile());
+  for (const f of files) {
+    const src = path.join(srcDir, f);
+    const dest = path.join(destDir, f);
+    try {
+      if (!fs.existsSync(src)) continue;
+      const srcContent = fs.readFileSync(src, 'utf8');
+      const destContent = fs.existsSync(dest) ? fs.readFileSync(dest, 'utf8') : '';
+      if (srcContent !== destContent) {
+        fs.writeFileSync(dest, srcContent, 'utf8');
+        if (chmod) try { fs.chmodSync(dest, chmod); } catch { /* Windows */ }
+        updated = true;
+      }
+    } catch { /* non-fatal per file */ }
+  }
+  return updated;
+}
+
 // Auto-deploy bundled scripts to ~/.metame/
 // IMPORTANT: daemon.yaml is USER CONFIG — never overwrite it. Only daemon-default.yaml (template) is synced.
 const scriptsDir = path.join(__dirname, 'scripts');
@@ -75,23 +110,7 @@ try {
   }
 } catch { /* non-fatal */ }
 
-let scriptsUpdated = false;
-for (const script of BUNDLED_SCRIPTS) {
-  const src = path.join(scriptsDir, script);
-  const dest = path.join(METAME_DIR, script);
-  try {
-    if (fs.existsSync(src)) {
-      const srcContent = fs.readFileSync(src, 'utf8');
-      const destContent = fs.existsSync(dest) ? fs.readFileSync(dest, 'utf8') : '';
-      if (srcContent !== destContent) {
-        fs.writeFileSync(dest, srcContent, 'utf8');
-        scriptsUpdated = true;
-      }
-    }
-  } catch {
-    // Non-fatal
-  }
-}
+const scriptsUpdated = syncDirFiles(scriptsDir, METAME_DIR, { fileList: BUNDLED_SCRIPTS });
 
 // Daemon restart on script update:
 // Don't kill daemon here — daemon's own file watcher detects ~/.metame/daemon.js changes
@@ -100,6 +119,11 @@ for (const script of BUNDLED_SCRIPTS) {
 if (scriptsUpdated) {
   console.log(`${icon("pkg")} Scripts synced to ~/.metame/ — daemon will auto-restart when idle.`);
 }
+
+// Docs: lazy-load references for CLAUDE.md pointer instructions
+syncDirFiles(path.join(__dirname, 'scripts', 'docs'), path.join(METAME_DIR, 'docs'));
+// Bin: CLI tools (dispatch_to etc.)
+syncDirFiles(path.join(__dirname, 'scripts', 'bin'), path.join(METAME_DIR, 'bin'), { chmod: 0o755 });
 
 // ---------------------------------------------------------
 // Deploy bundled skills to ~/.claude/skills/
@@ -750,16 +774,20 @@ const CAPABILITY_SECTIONS = [
   `"告诉X/让X" → \`~/.metame/bin/dispatch_to <project_key> "内容"\`，手机端 \`/dispatch to <key> <消息>\`。` + dispatchTable,
   '新增 Agent：`/agent bind <名称> <工作目录>`',
   '',
+  '## Agent 创建与管理',
+  '用户问创建/管理/绑定 Agent 时 → 先 `cat ~/.metame/docs/agent-guide.md` 再回答。',
+  '',
+  '## 手机端文件交互',
+  '用户要文件（"发给我"/"发过来"/"导出"）→ 先 `cat ~/.metame/docs/file-transfer.md` 再执行。',
+  '**收**：用户发图片/文件自动存到 `upload/`，用 Read 查看。',
+  '**发**：回复末尾加 `[[FILE:/absolute/path]]`，daemon 自动发手机。不要读内容再复述。',
+  '',
   '## 跨会话记忆',
   '用户提"上次/之前"时搜索：`node ~/.metame/memory-search.js "关键词1" "keyword2"`',
   '一次传 3-4 个关键词（中文+英文+函数名），`--facts` 只搜事实，`--sessions` 只搜会话。',
   '',
   '## Skills',
   '能力不足/工具缺失/任务失败 → 先查 `cat ~/.claude/skills/skill-manager/SKILL.md`，不要自己猜。',
-  '',
-  '## 手机端文件交互',
-  '**收**：用户发图片/文件自动存到 `upload/`，用 Read 查看。',
-  '**发**：回复末尾加 `[[FILE:/absolute/path]]`，daemon 自动发手机。不要读内容再复述。',
 
 ].join('\n');
 
@@ -776,6 +804,14 @@ try {
       '[\\s\\S]*?' +
       GLOBAL_MARKER_END.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&') + '\\n?'
     ), '');
+  }
+
+  // New user: seed with default template if CLAUDE.md is empty or missing
+  if (!globalContent.trim()) {
+    const tplPath = path.join(__dirname, 'scripts', 'templates', 'default-global-claude.md');
+    if (fs.existsSync(tplPath)) {
+      globalContent = fs.readFileSync(tplPath, 'utf8');
+    }
   }
 
   const injection =
