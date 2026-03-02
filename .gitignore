@@ -20,7 +20,16 @@ docs/
 tasks/
 upload/
 
-# Generated test files (run_test.js auto-generates from daemon.js)
+# Generated test files
 test_daemon.js
 scripts/test_daemon.js
+run_test.js
 x.md
+
+# Build artifacts
+*.tgz
+
+# Dev-only config (not needed by users)
+eslint.config.js
+__pycache__/
+*.pyc
