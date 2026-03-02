@@ -1,7 +1,7 @@
 # MetaMe
 
 <p align="center">
-  <img src="./logo.png" alt="MetaMe Logo" width="200"/>
+  <img src="./logo_high_contrast.png" alt="MetaMe Logo" width="200"/>
 </p>
 
 <p align="center">
@@ -14,9 +14,9 @@
   <a href="./README.md">English</a> | <a href="./README中文版.md">中文</a>
 </p>
 
-> **Your digital twin. Lives on your Mac.**
+> **Your digital twin. Lives on your machine.**
 
-MetaMe is an AI that lives on your machine — remembers how you think, stays online 24/7, and takes commands from your phone via Telegram or Feishu. Not in the cloud. In your computer.
+MetaMe is an AI that lives on your machine — remembers how you think, stays online 24/7, and takes commands from your phone via Telegram or Feishu. Not in the cloud. In your computer. Runs natively on macOS and Windows.
 
 No cloud. Your machine, your data.
 
@@ -26,6 +26,12 @@ curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bas
 
 **Already have Node.js ≥ 18:**
 ```bash
+npm install -g metame-cli
+metame
+```
+
+**Windows (PowerShell):**
+```powershell
 npm install -g metame-cli
 metame
 ```
@@ -171,7 +177,7 @@ Chain skills into multi-step workflows — research → write → publish — fu
 | `cwd` | Working directory for the task |
 | `timeout` | Max run time |
 
-> **Scheduled tasks require system registration.** Run `metame daemon install-launchd` and tasks fire on schedule even with the screen locked or the lid closed — as long as the Mac is on.
+> **Scheduled tasks require system registration.** Run `metame daemon install-launchd` (macOS) or `metame daemon install-task-scheduler` (Windows) and tasks fire on schedule even with the screen locked — as long as the machine is on.
 
 ### 5. Skills That Evolve Themselves
 
@@ -212,7 +218,7 @@ metame
 | 3. Cognitive interview | Just chat — MetaMe will automatically start a deep interview on first run | Builds `~/.claude_profile.yaml` (your digital twin's brain) |
 | 4. Connect phone | Say "help me set up mobile access" or "connect my phone" | Interactive wizard for Telegram/Feishu bot setup → `~/.metame/daemon.yaml` |
 | 5. Start daemon | `metame start` | Background daemon launches, bot goes online |
-| 6. Register with system | macOS: `metame daemon install-launchd` · Linux: see below | Always-on, crash recovery |
+| 6. Register with system | macOS: `metame daemon install-launchd` · Windows: `metame daemon install-task-scheduler` · Linux: see below | Always-on, crash recovery |
 
 > **First time?** Just run `metame` and talk naturally. The interview and setup are conversational — no commands to memorize.
 
@@ -223,6 +229,18 @@ npm install -g metame-cli
 
 > **What does system registration mean?**
 > Once registered, MetaMe runs in the background automatically — screen locked, lid closed, woken from sleep — as long as the machine is on. Scheduled tasks fire on time. No terminal window needed.
+
+**Windows — register with Task Scheduler:**
+
+```powershell
+metame daemon install-task-scheduler
+```
+
+> The daemon auto-starts at login. Remove with: `schtasks /delete /tn "MetaMe-Daemon" /f`
+
+> **Windows notes:** Emoji display uses ASCII fallback (`[OK]`, `[FAIL]`) for GBK terminal compatibility. Named Pipes replace Unix sockets for IPC. `/mac` commands are not available.
+
+> **Windows users: install natively, not via WSL.** WSL often fails to inherit the host's network proxy (causing npm install and Claude API timeouts), has path mapping issues, and process management doesn't interoperate. `npm install -g metame-cli` directly in PowerShell/CMD is the most reliable approach.
 
 **WSL2 / Linux — register with systemd:**
 
@@ -270,6 +288,7 @@ systemctl --user start metame
 | **Heartbeat System** | Three-layer programmable nervous system. Layer 0 kernel always-on (zero config). Layer 1 system evolution built-in (distill + memory + skills). Layer 2 your custom scheduled tasks with `require_idle`, `precondition`, `notify`, workflows. |
 | **Multi-Agent** | Multiple projects with dedicated chat groups. `/agent bind` for one-tap setup. True parallel execution. |
 | **Browser Automation** | Built-in Playwright MCP. Browser control out of the box for every user. |
+| **Cross-Platform** | Native support for macOS and Windows. Platform abstraction layer handles spawn, IPC, process management, and terminal encoding automatically. |
 | **Provider Relay** | Route through any Anthropic-compatible API. Use GPT-4, DeepSeek, Gemini — zero config file mutation. |
 | **Metacognition** | Detects behavioral patterns (decision style, comfort zones, goal drift) and injects mirror observations. Zero extra API cost. |
 | **Multi-User ACL** | Role-based permission system (admin / member / stranger). Share bots with teammates safely. Dynamic user management via `/user` commands with hot-reload config. |
@@ -402,7 +421,7 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 ```
 ┌─────────────┐     Telegram/Feishu      ┌──────────────────────────────┐
 │  Your Phone  │ ◄──────────────────────► │   MetaMe Daemon              │
-└─────────────┘                           │   (your Mac, 24/7)           │
+└─────────────┘                           │   (your machine, 24/7)       │
                                           │                              │
                                           │   ┌──────────────┐           │
                                           │   │ Claude Code   │           │
@@ -462,6 +481,22 @@ Includes: cognitive profile injection, daemon (Telegram/Feishu), heartbeat tasks
 **One key difference from the npm CLI:** the plugin daemon starts when you open Claude Code and stops when you close it. It does not run 24/7 in the background. For always-on mobile access (receiving messages while Claude Code is closed), use the npm CLI with `metame daemon install-launchd`.
 
 Use the plugin if you prefer not to install a global npm package and only need mobile access while Claude Code is open. Use the npm CLI (`metame-cli`) for 24/7 daemon, the `metame` command, and first-run interview.
+
+## Contributing
+
+MetaMe is early-stage and evolving fast. Every issue and PR directly shapes the project.
+
+**Report a bug or request a feature:**
+- Open an [Issue](https://github.com/Yaron9/MetaMe/issues) — describe what happened, what you expected, and your environment (macOS/Windows/WSL, Node version).
+
+**Submit a PR:**
+1. Fork the repo and create a branch from `main`
+2. All source edits go in `scripts/` — run `npm run sync:plugin` to sync to `plugin/scripts/`
+3. Run `npx eslint scripts/daemon*.js` — zero errors required
+4. Run `npm test` — all tests must pass
+5. Open a PR against `main` with a clear description
+
+**Good first contributions:** Windows edge cases, new `/commands`, documentation improvements, test coverage.
 
 ## License
 

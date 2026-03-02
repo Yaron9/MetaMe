@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawn, execSync } = require('child_process');
+const { sleepSync, findProcessesByPattern, icon } = require('./scripts/platform');
 
 // On Windows, .cmd files (like claude.cmd from npm global) need shell:true to spawn.
 // We use COMSPEC to avoid conda/PATH issues where cmd.exe can't be found.
@@ -52,7 +53,7 @@ if (!fs.existsSync(METAME_DIR)) {
 // Auto-deploy bundled scripts to ~/.metame/
 // IMPORTANT: daemon.yaml is USER CONFIG — never overwrite it. Only daemon-default.yaml (template) is synced.
 const scriptsDir = path.join(__dirname, 'scripts');
-const BUNDLED_BASE_SCRIPTS = ['signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js', 'skill-evolution.js', 'memory.js', 'memory-extract.js', 'memory-search.js', 'memory-gc.js', 'qmd-client.js', 'session-summarize.js', 'check-macos-control-capabilities.sh', 'usage-classifier.js', 'task-board.js', 'memory-nightly-reflect.js', 'memory-index.js'];
+const BUNDLED_BASE_SCRIPTS = ['platform.js', 'signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js', 'skill-evolution.js', 'memory.js', 'memory-extract.js', 'memory-search.js', 'memory-gc.js', 'qmd-client.js', 'session-summarize.js', 'check-macos-control-capabilities.sh', 'usage-classifier.js', 'task-board.js', 'memory-nightly-reflect.js', 'memory-index.js'];
 const DAEMON_MODULE_SCRIPTS = (() => {
   try {
     return fs.readdirSync(scriptsDir).filter((f) => /^daemon-[\w-]+\.js$/.test(f));
@@ -97,7 +98,7 @@ for (const script of BUNDLED_SCRIPTS) {
 // and has defer logic (waits for active Claude tasks to finish before restarting).
 // Killing here bypasses that and interrupts ongoing conversations.
 if (scriptsUpdated) {
-  console.log('📦 Scripts synced to ~/.metame/ — daemon will auto-restart when idle.');
+  console.log(`${icon("pkg")} Scripts synced to ~/.metame/ — daemon will auto-restart when idle.`);
 }
 
 // ---------------------------------------------------------
@@ -131,7 +132,7 @@ if (fs.existsSync(bundledSkillsDir)) {
       skillsInstalled.push(skillName);
     }
     if (skillsInstalled.length > 0) {
-      console.log(`🧠 Skills installed: ${skillsInstalled.join(', ')}`);
+      console.log(`${icon("brain")} Skills installed: ${skillsInstalled.join(', ')}`);
     }
   } catch {
     // Non-fatal
@@ -153,7 +154,7 @@ if (!fs.existsSync(DAEMON_CONFIG_FILE)) {
   if (fs.existsSync(DAEMON_YAML_BACKUP)) {
     // Restore from backup — user had real config that was lost
     fs.copyFileSync(DAEMON_YAML_BACKUP, DAEMON_CONFIG_FILE);
-    console.log('⚠️  daemon.yaml was missing — restored from backup.');
+    console.log(`${icon("warn")}  daemon.yaml was missing — restored from backup.`);
   } else {
     const daemonTemplate = path.join(scriptsDir, 'daemon-default.yaml');
     if (fs.existsSync(daemonTemplate)) {
@@ -179,13 +180,34 @@ function ensureHookInstalled() {
     }
 
     // Check if our hook is already configured
-    const hookCommand = `node ${SIGNAL_CAPTURE_SCRIPT}`;
+    // Use forward slashes + quotes — Claude Code runs hooks via bash even on Windows
+    const scriptPathForHook = SIGNAL_CAPTURE_SCRIPT.replace(/\\/g, '/');
+    const hookCommand = `node "${scriptPathForHook}"`;
     const existing = settings.hooks?.UserPromptSubmit || [];
     const alreadyInstalled = existing.some(entry =>
-      entry.hooks?.some(h => h.command === hookCommand)
+      entry.hooks?.some(h => h.command && h.command.includes('signal-capture.js'))
     );
 
-    if (!alreadyInstalled) {
+    // Remove stale hooks with backslash paths (old Windows format)
+    if (settings.hooks?.UserPromptSubmit) {
+      for (const entry of settings.hooks.UserPromptSubmit) {
+        if (entry.hooks) {
+          entry.hooks = entry.hooks.filter(h =>
+            !(h.command && h.command.includes('signal-capture.js') && h.command.includes('\\'))
+          );
+        }
+      }
+      settings.hooks.UserPromptSubmit = settings.hooks.UserPromptSubmit.filter(
+        entry => entry.hooks && entry.hooks.length > 0
+      );
+    }
+
+    // Re-check after cleanup
+    const stillInstalled = (settings.hooks?.UserPromptSubmit || []).some(entry =>
+      entry.hooks?.some(h => h.command && h.command.includes('signal-capture.js'))
+    );
+
+    if (!stillInstalled) {
       if (!settings.hooks) settings.hooks = {};
       if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
 
@@ -197,11 +219,11 @@ function ensureHookInstalled() {
       });
 
       fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2), 'utf8');
-      console.log("🪝 MetaMe: Signal capture hook installed.");
+      console.log(`${icon("hook")} MetaMe: Signal capture hook installed.`);
     }
   } catch (e) {
     // Non-fatal: hook install failure shouldn't block launch
-    console.error("⚠️  Hook install skipped:", e.message);
+    console.error(`${icon("warn")}  Hook install skipped:`, e.message);
   }
 }
 
@@ -264,7 +286,7 @@ function spawnDistillBackground() {
   // 4-hour cooldown: check last distill timestamp from profile
   const cooldownMs = 4 * 60 * 60 * 1000;
   try {
-    const profilePath = path.join(process.env.HOME || '', '.claude_profile.yaml');
+    const profilePath = path.join(HOME_DIR, '.claude_profile.yaml');
     if (fs.existsSync(profilePath)) {
       const yaml = require('js-yaml');
       const profile = yaml.load(fs.readFileSync(profilePath, 'utf8'));
@@ -391,7 +413,7 @@ status:
 // ---------------------------------------------------------
 const PROTOCOL_NORMAL = `${METAME_START}
 ---
-## 🧠 SYSTEM KERNEL: SHADOW_MODE (Active)
+## ${icon("brain")} SYSTEM KERNEL: SHADOW_MODE (Active)
 
 **1. THE BRAIN (Source of Truth):**
    * **FILE:** \`$HOME/.claude_profile.yaml\`
@@ -417,7 +439,7 @@ const PROTOCOL_NORMAL = `${METAME_START}
 
 const PROTOCOL_ONBOARDING = `${METAME_START}
 ---
-## 🧠 SYSTEM KERNEL: SHADOW_MODE (Active)
+## ${icon("brain")} SYSTEM KERNEL: SHADOW_MODE (Active)
 
 **1. THE BRAIN (Source of Truth):**
    * **FILE:** \`$HOME/.claude_profile.yaml\`
@@ -474,7 +496,7 @@ This step connects the bot to the user's PRIVATE chat — this is the admin chan
 
 - If **Feishu:**
   1. Guide through: open.feishu.cn/app → create app → get App ID + Secret → enable bot → add event subscription (long connection mode) → add permissions (im:message, im:message.p2p_msg:readonly, im:message.group_at_msg:readonly, im:message:send_as_bot, im:resource) → publish.
-     **⚠️ 重要：** 在「事件订阅」页面，必须开启「接收消息 im.message.receive_v1」事件。然后在该事件的配置中，勾选「获取群组中所有消息」（否则 bot 在群聊中只能收到 @它 的消息，无法接收普通群消息）。
+     **${icon("warn")} 重要：** 在「事件订阅」页面，必须开启「接收消息 im.message.receive_v1」事件。然后在该事件的配置中，勾选「获取群组中所有消息」（否则 bot 在群聊中只能收到 @它 的消息，无法接收普通群消息）。
   2. Ask user to paste App ID and App Secret.
   3. Write \`app_id\` and \`app_secret\` into \`~/.metame/daemon.yaml\` under \`feishu:\` section, set \`enabled: true\`.
   4. Tell user: "Now open Feishu and send any message to your new bot (private chat), then tell me you're done."
@@ -549,7 +571,7 @@ if (isKnownUser) {
   finalProtocol = PROTOCOL_NORMAL;
 } else {
   finalProtocol = PROTOCOL_ONBOARDING;
-  console.log("🆕 New user detected — entering Genesis interview mode...");
+  console.log(`${icon("new")} New user detected — entering Genesis interview mode...`);
 }
 
 // ---------------------------------------------------------
@@ -659,11 +681,11 @@ try {
       if (triggerDrift || triggerComfort || trigger7th) {
         let hint = '';
         if (triggerDrift) {
-          hint = `最近几个session的方向和"${driftDeclaredFocus}"有偏差。请在对话开始时温和地问：🪞 是方向有意调整了，还是不小心偏了？`;
+          hint = `最近几个session的方向和"${driftDeclaredFocus}"有偏差。请在对话开始时温和地问：${icon("mirror")} 是方向有意调整了，还是不小心偏了？`;
         } else if (triggerComfort) {
-          hint = '连续几次都在熟悉领域。如果用户在session结束时自然停顿，可以温和地问：🪞 准备好探索拉伸区了吗？';
+          hint = `连续几次都在熟悉领域。如果用户在session结束时自然停顿，可以温和地问：${icon("mirror")} 准备好探索拉伸区了吗？`;
         } else {
-          hint = '这是第' + distillCount + '次session。如果session自然结束，可以附加一句：🪞 一个词形容这次session的感受？';
+          hint = '这是第' + distillCount + `次session。如果session自然结束，可以附加一句：${icon("mirror")} 一个词形容这次session的感受？`;
         }
         const timing = triggerDrift ? '在对话开始时就问一次' : '只在session即将结束时说一次';
         reflectionLine = `\n[MetaMe reflection: ${hint} ${timing}。如果用户没回应就不要追问。]\n`;
@@ -767,13 +789,13 @@ try {
   fs.writeFileSync(GLOBAL_CLAUDE_MD, finalGlobal, 'utf8');
 } catch (e) {
   // Non-fatal: global CLAUDE.md injection is best-effort
-  console.error(`⚠️ Failed to inject global CLAUDE.md: ${e.message}`);
+  console.error(`${icon("warn")} Failed to inject global CLAUDE.md: ${e.message}`);
 }
 
 
 
 
-console.log(`🔮 MetaMe v${pkgVersion}: Link Established.`);
+console.log(`${icon("magic")} MetaMe v${pkgVersion}: Link Established.`);
 
 // Memory system status — show live stats without blocking launch
 try {
@@ -789,7 +811,7 @@ try {
     memMod.close();
   } catch { /* memory.js not available or DB not ready */ }
   if (factCount > 0 || tagCount > 0) {
-    console.log(`🧠 Memory: ${factCount} facts · ${tagCount} sessions tagged`);
+    console.log(`${icon("brain")} Memory: ${factCount} facts · ${tagCount} sessions tagged`);
   }
 } catch { /* non-fatal */ }
 
@@ -801,12 +823,12 @@ try {
     : 0;
 
   if (pendingCount > 0) {
-    console.log(`🧬 Cognition: ${pendingCount} moment${pendingCount > 1 ? 's' : ''} pending distillation`);
+    console.log(`${icon("dna")} Cognition: ${pendingCount} moment${pendingCount > 1 ? 's' : ''} pending distillation`);
   } else {
     // Show last distill time
     let lastDistillStr = '从未';
     try {
-      const profilePath = path.join(process.env.HOME || '', '.claude_profile.yaml');
+      const profilePath = path.join(HOME_DIR, '.claude_profile.yaml');
       if (fs.existsSync(profilePath)) {
         const _yaml = require('js-yaml');
         const profile = _yaml.load(fs.readFileSync(profilePath, 'utf8'));
@@ -820,7 +842,7 @@ try {
         }
       }
     } catch { /* non-fatal */ }
-    console.log(`🧬 Cognition: 无新信号 · 上次蒸馏 ${lastDistillStr}`);
+    console.log(`${icon("dna")} Cognition: 无新信号 · 上次蒸馏 ${lastDistillStr}`);
   }
 } catch { /* non-fatal */ }
 
@@ -846,7 +868,7 @@ const CURRENT_VERSION = pkgVersion;
     });
 
     if (latest && latest !== CURRENT_VERSION) {
-      console.log(`📦 MetaMe ${latest} available (current ${CURRENT_VERSION}), updating...`);
+      console.log(`${icon("pkg")} MetaMe ${latest} available (current ${CURRENT_VERSION}), updating...`);
       const { execSync } = require('child_process');
       try {
         execSync('npm install -g metame-cli@latest', {
@@ -854,10 +876,10 @@ const CURRENT_VERSION = pkgVersion;
           timeout: 60000,
           ...(process.platform === 'win32' ? { shell: process.env.COMSPEC || true } : {}),
         });
-        console.log(`✅ Updated to ${latest}. Restart metame to use the new version.`);
+        console.log(`${icon("ok")} Updated to ${latest}. Restart metame to use the new version.`);
       } catch (e) {
         const msg = e.stderr ? e.stderr.toString().trim().split('\n').pop() : '';
-        console.log(`⚠️ Auto-update failed${msg ? ': ' + msg : ''}. Run manually: npm install -g metame-cli`);
+        console.log(`${icon("warn")} Auto-update failed${msg ? ': ' + msg : ''}. Run manually: npm install -g metame-cli`);
       }
     }
   } catch { /* network unavailable, skip silently */ }
@@ -887,14 +909,14 @@ const CURRENT_VERSION = pkgVersion;
   try { execSync(`${whichCmd} bun`, { stdio: 'pipe', timeout: 2000 }); bunAvailable = true; } catch { }
 
   console.log('');
-  console.log('┌─ 🔍 记忆搜索增强（可选，免费）');
+  console.log(`┌─ ${icon("search")} 记忆搜索增强（可选，免费）`);
   console.log('│');
   console.log('│  当前模式：基础全文搜索（FTS5）');
   console.log('│  安装 QMD 后：BM25 + 向量语义 + 重排序 混合搜索');
   console.log('│  效果：召回质量约 5x，模糊描述也能精准命中历史记忆');
   if (!bunAvailable) {
     console.log('│');
-    console.log('│  ⚠️  未检测到 bun，无法自动安装。');
+    console.log(`│  ${icon("warn")}  未检测到 bun，无法自动安装。`);
     console.log('│  手动安装：curl -fsSL https://bun.sh/install | bash');
     console.log('│             bun install -g github:tobi/qmd');
     console.log('└────────────────────────────────────────────────');
@@ -913,12 +935,12 @@ const CURRENT_VERSION = pkgVersion;
     process.stdout.write('\n');
 
     if (answer === 'y' || answer === 'yes') {
-      console.log('   ⬇️  正在安装 QMD...');
+      console.log(`   ${icon("down")}  正在安装 QMD...`);
       try {
         execSync('bun install -g github:tobi/qmd', { stdio: 'inherit', timeout: 120000 });
-        console.log('   ✅ QMD 已安装，下次记忆搜索自动启用向量模式。');
+        console.log(`   ${icon("ok")} QMD 已安装，下次记忆搜索自动启用向量模式。`);
       } catch {
-        console.log('   ⚠️  安装失败，可手动执行：bun install -g github:tobi/qmd');
+        console.log(`   ${icon("warn")}  安装失败，可手动执行：bun install -g github:tobi/qmd`);
       }
     } else {
       console.log('   跳过。如需日后安装：bun install -g github:tobi/qmd');
@@ -937,7 +959,7 @@ const CURRENT_VERSION = pkgVersion;
 const isRefresh = process.argv.includes('refresh') || process.argv.includes('--refresh');
 
 if (isRefresh) {
-  console.log("✅ MetaMe configuration re-injected.");
+  console.log(`${icon("ok")} MetaMe configuration re-injected.`);
   console.log("   Ask Claude to 'read CLAUDE.md' to apply the changes.");
   process.exit(0);
 }
@@ -953,7 +975,7 @@ if (isEvolve) {
   const insight = process.argv.slice(evolveIndex + 1).join(' ').trim();
 
   if (!insight) {
-    console.error("❌ Error: Missing insight.");
+    console.error(`${icon("fail")} Error: Missing insight.`);
     console.error("   Usage: metame evolve \"I realized I prefer functional programming\"");
     process.exit(1);
   }
@@ -975,14 +997,14 @@ if (isEvolve) {
       // Save back to file
       fs.writeFileSync(BRAIN_FILE, yaml.dump(doc), 'utf8');
 
-      console.log("🧠 MetaMe Brain Updated.");
+      console.log(`${icon("brain")} MetaMe Brain Updated.`);
       console.log(`   Added insight: "${insight}"`);
       console.log("   (Run 'metame refresh' to apply this to the current session)");
     } else {
-      console.error("❌ Error: No profile found. Run 'metame' first to initialize.");
+      console.error(`${icon("fail")} Error: No profile found. Run 'metame' first to initialize.`);
     }
   } catch (e) {
-    console.error("❌ Error updating profile:", e.message);
+    console.error(`${icon("fail")} Error updating profile:`, e.message);
   }
   process.exit(0);
 }
@@ -1002,7 +1024,7 @@ if (isSetTrait) {
   const value = process.argv.slice(setIndex + 2).join(' ').trim();
 
   if (!key || !value) {
-    console.error("❌ Error: Missing key or value.");
+    console.error(`${icon("fail")} Error: Missing key or value.`);
     console.error("   Usage: metame set-trait identity.role \"New Role\"");
     process.exit(1);
   }
@@ -1028,14 +1050,14 @@ if (isSetTrait) {
 
       fs.writeFileSync(BRAIN_FILE, yaml.dump(doc), 'utf8');
 
-      console.log(`🧠 MetaMe Brain Surgically Updated.`);
+      console.log(`${icon("brain")} MetaMe Brain Surgically Updated.`);
       console.log(`   Set \`${key}\` = "${value}"`);
       console.log("   (Run 'metame refresh' to apply this to the current session)");
     } else {
-      console.error("❌ Error: No profile found.");
+      console.error(`${icon("fail")} Error: No profile found.`);
     }
   } catch (e) {
-    console.error("❌ Error updating profile:", e.message);
+    console.error(`${icon("fail")} Error updating profile:`, e.message);
   }
   process.exit(0);
 }
@@ -1052,9 +1074,9 @@ if (isQuiet) {
     if (!doc.growth) doc.growth = {};
     doc.growth.quiet_until = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
     fs.writeFileSync(BRAIN_FILE, yaml.dump(doc, { lineWidth: -1 }), 'utf8');
-    console.log("🤫 MetaMe: Mirror & reflections silenced for 48 hours.");
+    console.log(`${icon("brain")} MetaMe: Mirror & reflections silenced for 48 hours.`);
   } catch (e) {
-    console.error("❌ Error:", e.message);
+    console.error(`${icon("fail")} Error:`, e.message);
   }
   process.exit(0);
 }
@@ -1068,26 +1090,26 @@ if (isInsights) {
     const zoneHistory = (doc.growth && doc.growth.zone_history) || [];
 
     if (patterns.length === 0) {
-      console.log("🔍 MetaMe: No patterns detected yet. Keep using MetaMe and patterns will emerge after ~5 sessions.");
+      console.log(`${icon("search")} MetaMe: No patterns detected yet. Keep using MetaMe and patterns will emerge after ~5 sessions.`);
     } else {
-      console.log("🪞 MetaMe Insights:\n");
+      console.log(`${icon("mirror")} MetaMe Insights:\n`);
       patterns.forEach((p, i) => {
-        const icon = p.type === 'avoidance' ? '⚠️' : p.type === 'growth' ? '🌱' : p.type === 'energy' ? '⚡' : '🔄';
-        console.log(`   ${icon} [${p.type}] ${p.summary} (confidence: ${(p.confidence * 100).toFixed(0)}%)`);
+        const sym = p.type === 'avoidance' ? icon("warn") : p.type === 'growth' ? '+' : p.type === 'energy' ? '*' : icon("reload");
+        console.log(`   ${sym} [${p.type}] ${p.summary} (confidence: ${(p.confidence * 100).toFixed(0)}%)`);
         console.log(`      Detected: ${p.detected}${p.surfaced ? `, Last shown: ${p.surfaced}` : ''}`);
       });
       if (zoneHistory.length > 0) {
-        console.log(`\n   📊 Recent zone history: ${zoneHistory.join(' → ')}`);
+        console.log(`\n   ${icon("chart")} Recent zone history: ${zoneHistory.join(' → ')}`);
         console.log(`      (C=Comfort, S=Stretch, P=Panic)`);
       }
       const answered = (doc.growth && doc.growth.reflections_answered) || 0;
       const skipped = (doc.growth && doc.growth.reflections_skipped) || 0;
       if (answered + skipped > 0) {
-        console.log(`\n   💭 Reflections: ${answered} answered, ${skipped} skipped`);
+        console.log(`\n   ${icon("thought")} Reflections: ${answered} answered, ${skipped} skipped`);
       }
     }
   } catch (e) {
-    console.error("❌ Error:", e.message);
+    console.error(`${icon("fail")} Error:`, e.message);
   }
   process.exit(0);
 }
@@ -1098,7 +1120,7 @@ if (isMirror) {
   const mirrorIndex = process.argv.indexOf('mirror');
   const toggle = process.argv[mirrorIndex + 1];
   if (toggle !== 'on' && toggle !== 'off') {
-    console.error("❌ Usage: metame mirror on|off");
+    console.error(`${icon("fail")} Usage: metame mirror on|off`);
     process.exit(1);
   }
   try {
@@ -1106,9 +1128,9 @@ if (isMirror) {
     if (!doc.growth) doc.growth = {};
     doc.growth.mirror_enabled = (toggle === 'on');
     fs.writeFileSync(BRAIN_FILE, yaml.dump(doc, { lineWidth: -1 }), 'utf8');
-    console.log(`🪞 MetaMe: Mirror ${toggle === 'on' ? 'enabled' : 'disabled'}.`);
+    console.log(`${icon("mirror")} MetaMe: Mirror ${toggle === 'on' ? 'enabled' : 'disabled'}.`);
   } catch (e) {
-    console.error("❌ Error:", e.message);
+    console.error(`${icon("fail")} Error:`, e.message);
   }
   process.exit(0);
 }
@@ -1124,7 +1146,7 @@ if (isProvider) {
 
   if (!subCmd || subCmd === 'list') {
     const active = providers.getActiveProvider();
-    console.log(`🔌 MetaMe Providers (active: ${active ? active.name : 'anthropic'})`);
+    console.log(`${icon("plug")} MetaMe Providers (active: ${active ? active.name : 'anthropic'})`);
     console.log(providers.listFormatted());
     process.exit(0);
   }
@@ -1132,18 +1154,18 @@ if (isProvider) {
   if (subCmd === 'use') {
     const name = process.argv[providerIndex + 2];
     if (!name) {
-      console.error("❌ Usage: metame provider use <name>");
+      console.error(`${icon("fail")} Usage: metame provider use <name>`);
       process.exit(1);
     }
     try {
       providers.setActive(name);
       const p = providers.getActiveProvider();
-      console.log(`✅ Provider switched → ${name} (${p.label || name})`);
+      console.log(`${icon("ok")} Provider switched → ${name} (${p.label || name})`);
       if (name !== 'anthropic') {
         console.log(`   Base URL: ${p.base_url || 'not set'}`);
       }
     } catch (e) {
-      console.error(`❌ ${e.message}`);
+      console.error(`${icon("fail")} ${e.message}`);
       process.exit(1);
     }
     process.exit(0);
@@ -1152,7 +1174,7 @@ if (isProvider) {
   if (subCmd === 'add') {
     const name = process.argv[providerIndex + 2];
     if (!name) {
-      console.error("❌ Usage: metame provider add <name>");
+      console.error(`${icon("fail")} Usage: metame provider add <name>`);
       process.exit(1);
     }
     const readline = require('readline');
@@ -1160,7 +1182,7 @@ if (isProvider) {
     const ask = (q) => new Promise(r => rl.question(q, r));
 
     (async () => {
-      console.log(`\n🔌 Add Provider: ${name}\n`);
+      console.log(`\n${icon("plug")} Add Provider: ${name}\n`);
       console.log("The relay must accept Anthropic Messages API format.");
       console.log("(Most quality relays like OpenRouter, OneAPI, etc. support this.)\n");
 
@@ -1169,7 +1191,7 @@ if (isProvider) {
       const api_key = (await ask("API Key: ")).trim();
 
       if (!base_url) {
-        console.error("❌ Base URL is required.");
+        console.error(`${icon("fail")} Base URL is required.`);
         rl.close();
         process.exit(1);
       }
@@ -1180,10 +1202,10 @@ if (isProvider) {
 
       try {
         providers.addProvider(name, config);
-        console.log(`\n✅ Provider "${name}" added.`);
+        console.log(`\n${icon("ok")} Provider "${name}" added.`);
         console.log(`   Switch to it: metame provider use ${name}`);
       } catch (e) {
-        console.error(`❌ ${e.message}`);
+        console.error(`${icon("fail")} ${e.message}`);
       }
       rl.close();
       process.exit(0);
@@ -1194,14 +1216,14 @@ if (isProvider) {
   if (subCmd === 'remove') {
     const name = process.argv[providerIndex + 2];
     if (!name) {
-      console.error("❌ Usage: metame provider remove <name>");
+      console.error(`${icon("fail")} Usage: metame provider remove <name>`);
       process.exit(1);
     }
     try {
       providers.removeProvider(name);
-      console.log(`✅ Provider "${name}" removed.`);
+      console.log(`${icon("ok")} Provider "${name}" removed.`);
     } catch (e) {
-      console.error(`❌ ${e.message}`);
+      console.error(`${icon("fail")} ${e.message}`);
     }
     process.exit(0);
   }
@@ -1210,15 +1232,15 @@ if (isProvider) {
     const role = process.argv[providerIndex + 2]; // distill | daemon
     const name = process.argv[providerIndex + 3]; // provider name or empty to clear
     if (!role) {
-      console.error("❌ Usage: metame provider set-role <distill|daemon> [provider-name]");
+      console.error(`${icon("fail")} Usage: metame provider set-role <distill|daemon> [provider-name]`);
       console.error("   Omit provider name to reset to active provider.");
       process.exit(1);
     }
     try {
       providers.setRole(role, name || null);
-      console.log(`✅ ${role} provider ${name ? `set to "${name}"` : 'reset to active'}.`);
+      console.log(`${icon("ok")} ${role} provider ${name ? `set to "${name}"` : 'reset to active'}.`);
     } catch (e) {
-      console.error(`❌ ${e.message}`);
+      console.error(`${icon("fail")} ${e.message}`);
     }
     process.exit(0);
   }
@@ -1229,11 +1251,11 @@ if (isProvider) {
     const name = targetName || prov.active;
     const p = prov.providers[name];
     if (!p) {
-      console.error(`❌ Provider "${name}" not found.`);
+      console.error(`${icon("fail")} Provider "${name}" not found.`);
       process.exit(1);
     }
 
-    console.log(`🔍 Testing provider: ${name} (${p.label || name})`);
+    console.log(`${icon("search")} Testing provider: ${name} (${p.label || name})`);
     if (name === 'anthropic') {
       console.log("   Using official Anthropic endpoint — testing via claude CLI...");
     } else {
@@ -1257,18 +1279,18 @@ if (isProvider) {
       const elapsed = Date.now() - start;
 
       if (result.includes('PROVIDER_OK')) {
-        console.log(`   ✅ Connected (${elapsed}ms)`);
+        console.log(`   ${icon("ok")} Connected (${elapsed}ms)`);
       } else {
-        console.log(`   ⚠️  Response received (${elapsed}ms) but unexpected: ${result.slice(0, 80)}`);
+        console.log(`   ${icon("warn")}  Response received (${elapsed}ms) but unexpected: ${result.slice(0, 80)}`);
       }
     } catch (e) {
-      console.error(`   ❌ Failed: ${e.message.split('\n')[0]}`);
+      console.error(`   ${icon("fail")} Failed: ${e.message.split('\n')[0]}`);
     }
     process.exit(0);
   }
 
   // Unknown subcommand — show help
-  console.log("🔌 MetaMe Provider Commands:");
+  console.log(`${icon("plug")} MetaMe Provider Commands:`);
   console.log("   metame provider              — list providers");
   console.log("   metame provider use <name>   — switch active provider");
   console.log("   metame provider add <name>   — add a new provider");
@@ -1312,20 +1334,20 @@ if (isDaemon) {
         if (fs.existsSync(templateSrc)) {
           fs.copyFileSync(templateSrc, DAEMON_CONFIG);
         } else {
-          console.error("❌ Template not found. Reinstall MetaMe.");
+          console.error(`${icon("fail")} Template not found. Reinstall MetaMe.`);
           process.exit(1);
         }
         try { fs.chmodSync(METAME_DIR, 0o700); } catch { /* ignore on Windows */ }
-        console.log("✅ Config created: ~/.metame/daemon.yaml\n");
+        console.log(`${icon("ok")} Config created: ~/.metame/daemon.yaml\n`);
       } else {
-        console.log("✅ Config exists: ~/.metame/daemon.yaml\n");
+        console.log(`${icon("ok")} Config exists: ~/.metame/daemon.yaml\n`);
       }
 
       const yaml = require(path.join(__dirname, 'node_modules', 'js-yaml'));
       let cfg = yaml.load(fs.readFileSync(DAEMON_CONFIG, 'utf8')) || {};
 
       // --- Telegram Setup ---
-      console.log("━━━ 📱 Telegram Setup ━━━");
+      console.log(`━━━ ${icon("phone")} Telegram Setup ━━━`);
       console.log("");
       console.log("Step 1: Create a Bot");
       console.log("  • Open Telegram app on your phone or desktop");
@@ -1370,21 +1392,21 @@ if (isDaemon) {
 
           if (chatIds.length > 0) {
             cfg.telegram.allowed_chat_ids = chatIds;
-            console.log(`  ✅ Found chat ID(s): ${chatIds.join(', ')}`);
+            console.log(`  ${icon("ok")} Found chat ID(s): ${chatIds.join(', ')}`);
           } else {
-            console.log("  ⚠️  No messages found. Make sure you messaged the bot.");
+            console.log(`  ${icon("warn")}  No messages found. Make sure you messaged the bot.`);
             console.log("     You can set allowed_chat_ids manually in daemon.yaml later.");
           }
         } catch {
-          console.log("  ⚠️  Could not fetch chat ID. Set it manually in daemon.yaml.");
+          console.log(`  ${icon("warn")}  Could not fetch chat ID. Set it manually in daemon.yaml.`);
         }
-        console.log("  ✅ Telegram configured!\n");
+        console.log(`  ${icon("ok")} Telegram configured!\n`);
       } else {
         console.log("  Skipped.\n");
       }
 
       // --- Feishu Setup ---
-      console.log("━━━ 📘 Feishu (Lark) Setup ━━━");
+      console.log(`━━━ ${icon("feishu")} Feishu (Lark) Setup ━━━`);
       console.log("");
       console.log("Step 1: Create an App");
       console.log("  • Go to: https://open.feishu.cn/app");
@@ -1428,7 +1450,7 @@ if (isDaemon) {
           cfg.feishu.app_id = feishuAppId;
           cfg.feishu.app_secret = feishuSecret;
           if (!cfg.feishu.allowed_chat_ids) cfg.feishu.allowed_chat_ids = [];
-          console.log("  ✅ Feishu configured!");
+          console.log(`  ${icon("ok")} Feishu configured!`);
           console.log("  Note: allowed_chat_ids is empty = deny all users.");
           console.log("        Add chat IDs to daemon.yaml or use /agent bind from target chat.\n");
         }
@@ -1438,7 +1460,7 @@ if (isDaemon) {
 
       // Write config
       fs.writeFileSync(DAEMON_CONFIG, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
-      console.log("━━━ ✅ Setup Complete ━━━");
+      console.log(`━━━ ${icon("ok")} Setup Complete ━━━`);
       console.log(`Config saved: ${DAEMON_CONFIG}`);
       console.log("\nNext steps:");
       console.log("  metame start                — start the daemon");
@@ -1455,7 +1477,7 @@ if (isDaemon) {
 
   if (subCmd === 'install-launchd') {
     if (process.platform !== 'darwin') {
-      console.error("❌ launchd is macOS-only.");
+      console.error(`${icon("fail")} launchd is macOS-only.`);
       process.exit(1);
     }
     const plistDir = path.join(HOME_DIR, 'Library', 'LaunchAgents');
@@ -1497,7 +1519,7 @@ if (isDaemon) {
 </dict>
 </plist>`;
     fs.writeFileSync(plistPath, plistContent, 'utf8');
-    console.log(`✅ launchd plist installed: ${plistPath}`);
+    console.log(`${icon("ok")} launchd plist installed: ${plistPath}`);
     console.log("   Load now: launchctl load " + plistPath);
     console.log("   Unload:   launchctl unload " + plistPath);
     process.exit(0);
@@ -1505,7 +1527,7 @@ if (isDaemon) {
 
   if (subCmd === 'install-systemd') {
     if (process.platform === 'darwin') {
-      console.error("❌ Use 'metame daemon install-launchd' on macOS.");
+      console.error(`${icon("fail")} Use 'metame daemon install-launchd' on macOS.`);
       process.exit(1);
     }
 
@@ -1513,7 +1535,7 @@ if (isDaemon) {
     try {
       require('child_process').execSync('systemctl --user --no-pager status 2>/dev/null || true');
     } catch {
-      console.error("❌ systemd not available.");
+      console.error(`${icon("fail")} systemd not available.`);
       console.error("   WSL users: add [boot]\\nsystemd=true to /etc/wsl.conf, then restart WSL.");
       process.exit(1);
     }
@@ -1553,7 +1575,7 @@ WantedBy=default.target
     // Enable lingering so service runs even when user is not logged in
     try { es(`loginctl enable-linger ${process.env.USER || ''}`); } catch { /* may need root */ }
 
-    console.log(`✅ systemd service installed: ${servicePath}`);
+    console.log(`${icon("ok")} systemd service installed: ${servicePath}`);
     console.log("   Status:  systemctl --user status metame-daemon");
     console.log("   Logs:    journalctl --user -u metame-daemon -f");
     console.log("   Disable: systemctl --user disable metame-daemon");
@@ -1562,7 +1584,7 @@ WantedBy=default.target
     const isWSL = fs.existsSync('/proc/version') &&
       fs.readFileSync('/proc/version', 'utf8').toLowerCase().includes('microsoft');
     if (isWSL) {
-      console.log("\n   📌 WSL auto-boot tip:");
+      console.log(`\n   ${icon("pin")} WSL auto-boot tip:`);
       console.log("   Add this to Windows Task Scheduler (run at login):");
       console.log(`   wsl -d ${process.env.WSL_DISTRO_NAME || 'Ubuntu'} -- sh -c 'nohup sleep infinity &'`);
       console.log("   This keeps WSL alive so the daemon stays running.");
@@ -1570,17 +1592,44 @@ WantedBy=default.target
     process.exit(0);
   }
 
+  if (subCmd === 'install-task-scheduler') {
+    if (process.platform !== 'win32') {
+      console.error("Task Scheduler is Windows-only. Use install-launchd (macOS) or install-systemd (Linux).");
+      process.exit(1);
+    }
+    const nodePath = process.execPath;
+    const taskName = 'MetaMe-Daemon';
+    const scriptPath = DAEMON_SCRIPT.replace(/\//g, '\\');
+    const nodePathWin = nodePath.replace(/\//g, '\\');
+    try {
+      try {
+        execSync(`schtasks /delete /tn "${taskName}" /f`, { stdio: 'ignore' });
+      } catch { /* task may not exist yet */ }
+      execSync(
+        `schtasks /create /tn "${taskName}" /tr "\\"${nodePathWin}\\" \\"${scriptPath}\\"" /sc onlogon /rl limited /f`,
+        { stdio: 'inherit' }
+      );
+      console.log(`Task Scheduler task "${taskName}" installed.`);
+      console.log(`   The daemon will auto-start at login.`);
+      console.log(`   Remove: schtasks /delete /tn "${taskName}" /f`);
+      console.log(`   Query:  schtasks /query /tn "${taskName}"`);
+    } catch (e) {
+      console.error(`Failed to create scheduled task: ${e.message}`);
+      console.error("   Try running as Administrator, or create it manually in Task Scheduler.");
+      process.exit(1);
+    }
+    process.exit(0);
+  }
+
   if (subCmd === 'start') {
     // Kill any lingering daemon.js processes to avoid Feishu WebSocket conflicts
     try {
-      const { execSync: es } = require('child_process');
-      const pids = es("pgrep -f 'node.*daemon\\.js' 2>/dev/null || true", { encoding: 'utf8' }).trim();
-      if (pids) {
-        for (const p of pids.split('\n').filter(Boolean)) {
-          const n = parseInt(p, 10);
-          if (n && n !== process.pid) try { process.kill(n, 'SIGKILL'); } catch { /* */ }
+      const pids = findProcessesByPattern('node.*daemon\\.js');
+      if (pids.length) {
+        for (const n of pids) {
+          try { process.kill(n, 'SIGKILL'); } catch { /* */ }
         }
-        es('sleep 1');
+        sleepSync(1000);
       }
     } catch { /* ignore */ }
     // Check if already running
@@ -1588,25 +1637,26 @@ WantedBy=default.target
       try { fs.unlinkSync(DAEMON_PID); } catch { /* */ }
     }
     if (!fs.existsSync(DAEMON_CONFIG)) {
-      console.error("❌ No config found. Run: metame daemon init");
+      console.error(`${icon("fail")} No config found. Run: metame daemon init`);
       process.exit(1);
     }
     if (!fs.existsSync(DAEMON_SCRIPT)) {
-      console.error("❌ daemon.js not found. Reinstall MetaMe.");
+      console.error(`${icon("fail")} daemon.js not found. Reinstall MetaMe.`);
       process.exit(1);
     }
-    // Use caffeinate on macOS/Linux to prevent sleep while daemon is running
-    const isNotWindows = process.platform !== 'win32';
-    const cmd = isNotWindows ? 'caffeinate' : process.execPath;
-    const args = isNotWindows ? ['-i', process.execPath, DAEMON_SCRIPT] : [DAEMON_SCRIPT];
+    // Use caffeinate on macOS to prevent sleep while daemon is running
+    const isMac = process.platform === 'darwin';
+    const isWin = process.platform === 'win32';
+    const cmd = isMac ? 'caffeinate' : process.execPath;
+    const args = isMac ? ['-i', process.execPath, DAEMON_SCRIPT] : [DAEMON_SCRIPT];
     const bg = spawn(cmd, args, {
-      detached: true,
+      detached: !isWin,
       stdio: 'ignore',
       windowsHide: true,
       env: { ...process.env, HOME: HOME_DIR, METAME_ROOT: __dirname },
     });
     bg.unref();
-    console.log(`✅ MetaMe daemon started (PID: ${bg.pid})`);
+    console.log(`${icon("ok")} MetaMe daemon started (PID: ${bg.pid})`);
     console.log("   Logs: metame logs");
     console.log("   Stop: metame stop");
     process.exit(0);
@@ -1614,7 +1664,7 @@ WantedBy=default.target
 
   if (subCmd === 'stop') {
     if (!fs.existsSync(DAEMON_PID)) {
-      console.log("ℹ️  No daemon running (no PID file).");
+      console.log(`${icon("info")}  No daemon running (no PID file).`);
       process.exit(0);
     }
     const pid = parseInt(fs.readFileSync(DAEMON_PID, 'utf8').trim(), 10);
@@ -1623,16 +1673,15 @@ WantedBy=default.target
       // Wait for process to die (up to 3s), then force kill
       let dead = false;
       for (let i = 0; i < 6; i++) {
-        const { execSync: es } = require('child_process');
-        es('sleep 0.5');
+        sleepSync(500);
         try { process.kill(pid, 0); } catch { dead = true; break; }
       }
       if (!dead) {
         try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
       }
-      console.log(`✅ Daemon stopped (PID: ${pid})`);
+      console.log(`${icon("ok")} Daemon stopped (PID: ${pid})`);
     } catch (e) {
-      console.log(`⚠️  Process ${pid} not found (may have already exited).`);
+      console.log(`${icon("warn")}  Process ${pid} not found (may have already exited).`);
     }
     try { fs.unlinkSync(DAEMON_PID); } catch { /* ignore */ }
     process.exit(0);
@@ -1649,7 +1698,7 @@ WantedBy=default.target
       try { process.kill(pid, 0); isRunning = true; } catch { /* dead */ }
     }
 
-    console.log(`🤖 MetaMe Daemon: ${isRunning ? '🟢 Running' : '🔴 Stopped'}`);
+    console.log(`${icon("bot")} MetaMe Daemon: ${isRunning ? icon("green") + ' Running' : icon("red") + ' Stopped'}`);
     if (state.started_at) console.log(`   Started: ${state.started_at}`);
     if (state.pid) console.log(`   PID: ${state.pid}`);
 
@@ -1677,8 +1726,8 @@ WantedBy=default.target
     if (taskEntries.length > 0) {
       console.log("   Recent tasks:");
       for (const [name, info] of taskEntries) {
-        const icon = info.status === 'success' ? '✅' : '❌';
-        console.log(`     ${icon} ${name}: ${info.last_run || 'unknown'}`);
+        const sym = info.status === 'success' ? icon("ok") : icon("fail");
+        console.log(`     ${sym} ${name}: ${info.last_run || 'unknown'}`);
         if (info.output_preview) console.log(`        ${info.output_preview.slice(0, 80)}...`);
       }
       const hiddenStale = Object.keys(tasks).length - taskEntries.length;
@@ -1691,7 +1740,7 @@ WantedBy=default.target
 
   if (subCmd === 'logs') {
     if (!fs.existsSync(DAEMON_LOG)) {
-      console.log("ℹ️  No log file yet. Start the daemon first.");
+      console.log(`${icon("info")}  No log file yet. Start the daemon first.`);
       process.exit(0);
     }
     const content = fs.readFileSync(DAEMON_LOG, 'utf8');
@@ -1704,11 +1753,11 @@ WantedBy=default.target
   if (subCmd === 'run') {
     const taskName = process.argv[daemonIndex + 2];
     if (!taskName) {
-      console.error("❌ Usage: metame daemon run <task-name>");
+      console.error(`${icon("fail")} Usage: metame daemon run <task-name>`);
       process.exit(1);
     }
     if (!fs.existsSync(DAEMON_SCRIPT)) {
-      console.error("❌ daemon.js not found. Reinstall MetaMe.");
+      console.error(`${icon("fail")} daemon.js not found. Reinstall MetaMe.`);
       process.exit(1);
     }
     // Run in foreground using daemon.js --run
@@ -1721,7 +1770,7 @@ WantedBy=default.target
   }
 
   // Unknown subcommand
-  console.log("📖 MetaMe Daemon Commands:");
+  console.log(`${icon("book")} MetaMe Daemon Commands:`);
   console.log("   metame start                  — start background daemon");
   console.log("   metame stop                   — stop daemon");
   console.log("   metame status                 — show status & budget");
@@ -1729,9 +1778,11 @@ WantedBy=default.target
   console.log("   metame daemon init            — initialize config");
   console.log("   metame daemon run <name>      — run a task once");
   if (process.platform === 'darwin') {
-    console.log("   metame daemon install-launchd — auto-start on macOS");
+    console.log("   metame daemon install-launchd          — auto-start on macOS");
+  } else if (process.platform === 'win32') {
+    console.log("   metame daemon install-task-scheduler   — auto-start on Windows");
   } else {
-    console.log("   metame daemon install-systemd — auto-start on Linux/WSL");
+    console.log("   metame daemon install-systemd          — auto-start on Linux/WSL");
   }
   process.exit(0);
 }
@@ -1780,7 +1831,7 @@ if (isSync) {
     process.exit(1);
   }
 
-  console.log(`\n🔄 Resuming session ${bestSession.id.slice(0, 8)}...\n`);
+  console.log(`\n${icon("reload")} Resuming session ${bestSession.id.slice(0, 8)}...\n`);
   const providerEnv = (() => { try { return require(path.join(__dirname, 'scripts', 'providers.js')).buildActiveEnv(); } catch { return {}; } })();
   const resumeArgs = ['--resume', bestSession.id];
   if (daemonCfg.dangerously_skip_permissions) resumeArgs.push('--dangerously-skip-permissions');
@@ -1801,7 +1852,7 @@ if (isSync) {
 // We rely on our own scoped variable to detect nesting,
 // ignoring the leaky CLAUDE_CODE_SSE_PORT from IDEs.
 if (process.env.METAME_ACTIVE_SESSION === 'true') {
-  console.error("\n🚫 ACTION BLOCKED: Nested Session Detected");
+  console.error(`\n${icon("stop")} ACTION BLOCKED: Nested Session Detected`);
   console.error("   You are actively running inside a MetaMe session.");
   console.error("   To reload configuration, use: \x1b[36m!metame refresh\x1b[0m\n");
   process.exit(1);
@@ -1814,7 +1865,7 @@ if (process.env.METAME_ACTIVE_SESSION === 'true') {
 const activeProviderEnv = (() => { try { return require(path.join(__dirname, 'scripts', 'providers.js')).buildActiveEnv(); } catch { return {}; } })();
 const activeProviderName = (() => { try { return require(path.join(__dirname, 'scripts', 'providers.js')).getActiveName(); } catch { return 'anthropic'; } })();
 if (activeProviderName !== 'anthropic') {
-  console.log(`🔌 Provider: ${activeProviderName}`);
+  console.log(`${icon("plug")} Provider: ${activeProviderName}`);
 }
 
 // Build launch args — inject system prompt for new users
@@ -1873,17 +1924,18 @@ try {
       } catch { /* PID file stale, daemon not running */ }
     }
     if (!daemonRunning) {
-      const isNotWindows = process.platform !== 'win32';
-      const dCmd = isNotWindows ? 'caffeinate' : process.execPath;
-      const dArgs = isNotWindows ? ['-i', process.execPath, _daemonScript] : [_daemonScript];
+      const _isMac = process.platform === 'darwin';
+      const _isWin = process.platform === 'win32';
+      const dCmd = _isMac ? 'caffeinate' : process.execPath;
+      const dArgs = _isMac ? ['-i', process.execPath, _daemonScript] : [_daemonScript];
       const bg = spawn(dCmd, dArgs, {
-        detached: true,
+        detached: !_isWin,
         stdio: 'ignore',
         windowsHide: true,
         env: { ...process.env, HOME: HOME_DIR, METAME_ROOT: __dirname },
       });
       bg.unref();
-      console.log(`🤖 Daemon auto-started (PID: ${bg.pid})`);
+      console.log(`${icon("bot")} Daemon auto-started (PID: ${bg.pid})`);
     }
   }
 } catch { /* non-fatal */ }
@@ -1895,7 +1947,7 @@ const child = spawnClaude(launchArgs, {
 });
 
 child.on('error', () => {
-  console.error("\n❌ Error: Could not launch 'claude'.");
+  console.error(`\n${icon("fail")} Error: Could not launch 'claude'.`);
   console.error("   Please make sure Claude Code is installed globally:");
   console.error("   npm install -g @anthropic-ai/claude-code");
 });
