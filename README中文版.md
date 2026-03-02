@@ -1,7 +1,7 @@
 # MetaMe
 
 <p align="center">
-  <img src="./logo.png" alt="MetaMe Logo" width="200"/>
+  <img src="./logo_high_contrast.png" alt="MetaMe Logo" width="200"/>
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 
 > **住在你电脑里的数字分身。**
 
-MetaMe 是一个驻留在你 Mac 上的 AI——记住你的思维方式，7×24 待命，通过 Telegram 或飞书随时接受手机指令。它不在云端，它住在你的机器里。
+MetaMe 是一个驻留在你电脑上的 AI——记住你的思维方式，7×24 待命，通过 Telegram 或飞书随时接受手机指令。它不在云端，它住在你的机器里。原生支持 macOS 和 Windows。
 
 不上云。你的机器，你的数据。
 
@@ -26,6 +26,12 @@ curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bas
 
 **已有 Node.js ≥ 18：**
 ```bash
+npm install -g metame-cli
+metame
+```
+
+**Windows (PowerShell)：**
+```powershell
 npm install -g metame-cli
 metame
 ```
@@ -171,7 +177,7 @@ heartbeat:
 | `cwd` | 任务运行目录 |
 | `timeout` | 任务超时时间 |
 
-> **定时任务依赖 launchd 常驻**。运行 `metame daemon install-launchd` 后，任务在息屏、锁屏状态下依然按时触发——只要电脑不关机。
+> **定时任务依赖系统托管**。macOS 运行 `metame daemon install-launchd`，Windows 运行 `metame daemon install-task-scheduler`，之后任务在息屏、锁屏状态下依然按时触发——只要电脑不关机。
 
 ### 5. 会自我进化的技能系统
 
@@ -214,7 +220,7 @@ metame
 | 3. 认知访谈 | 直接聊天 — 首次运行会自动开始深度访谈 | 生成 `~/.claude_profile.yaml`（你的数字分身大脑） |
 | 4. 连接手机 | 对话中说"帮我设置手机访问"或"连接手机" | 交互式向导，配置 Telegram/飞书 Bot → `~/.metame/daemon.yaml` |
 | 5. 启动 daemon | `metame start` | 后台 daemon 启动，bot 上线 |
-| 6. 托管到系统 | macOS: `metame daemon install-launchd` · Linux: 见下方 | 系统级常驻，崩溃自恢复 |
+| 6. 托管到系统 | macOS: `metame daemon install-launchd` · Windows: `metame daemon install-task-scheduler` · Linux: 见下方 | 系统级常驻，崩溃自恢复 |
 
 > **第一次用？** 只需运行 `metame` 然后自然聊天。访谈和配置全程对话式完成，不用记命令。
 
@@ -225,6 +231,18 @@ npm install -g metame-cli
 
 > **托管后意味着什么？**
 > MetaMe 注册进系统任务调度器后，只要电脑不关机，哪怕锁屏、息屏、合盖休眠唤醒，它都会自动在后台运行。定时任务照常触发，手机消息照常收发。
+
+**Windows 系统托管（Task Scheduler）：**
+
+```powershell
+metame daemon install-task-scheduler
+```
+
+> 开机自动启动 daemon。移除命令：`schtasks /delete /tn "MetaMe-Daemon" /f`
+
+> **Windows 说明：** 终端 emoji 自动降级为 ASCII（`[OK]`、`[FAIL]`），兼容 GBK 编码。IPC 使用 Named Pipe 替代 Unix Socket。`/mac` 命令不可用。
+
+> **Windows 用户请直接用原生 PowerShell/CMD 安装，不建议使用 WSL。** WSL 虚拟系统常见问题：无法继承宿主机的网络代理（导致 npm install 和 Claude API 连接超时）、路径映射差异、进程管理不互通。直接在 Windows 终端 `npm install -g metame-cli` 是最稳的方式。
 
 **WSL2 / Linux 系统托管（用 systemd）：**
 
@@ -274,6 +292,7 @@ systemctl --user start metame
 | **心跳系统** | 三层可编程神经系统。Layer 0 内核永远在线（零配置）。Layer 1 系统自进化内置（蒸馏+记忆+技能）。Layer 2 自定义定时任务，支持 `require_idle`、`precondition`、`notify`、工作流。 |
 | **多 Agent** | 多项目独立群聊，`/agent bind` 一键配置，真正并行执行。 |
 | **浏览器自动化** | 内置 Playwright MCP，开箱即用。配合 Skill 实现发布、填表、抓取等自动化。 |
+| **跨平台** | 原生支持 macOS 和 Windows。平台抽象层自动处理进程管理、IPC、终端编码差异，一套代码两平台。 |
 | **模型中继** | 兼容任何 Anthropic API 中继。GPT-4、DeepSeek、Gemini 随意切换，零文件污染。 |
 | **元认知** | 检测行为模式（决策风格、舒适区、目标偏离），注入镜像观察。零额外 API 成本。 |
 | **多用户 ACL** | 角色分级权限（admin / member / stranger）。把 bot 安全分享给团队成员。`/user` 命令动态管理用户，配置文件热重载。 |
@@ -405,7 +424,7 @@ feishu:
 ```
 ┌─────────────┐     Telegram / 飞书      ┌──────────────────────────────┐
 │   你的手机   │ ◄──────────────────────► │   MetaMe Daemon              │
-└─────────────┘                           │  （你的 Mac，7×24）           │
+└─────────────┘                           │  （你的电脑，7×24）           │
                                           │                              │
                                           │   ┌──────────────┐           │
                                           │   │ Claude Code   │           │
@@ -465,6 +484,22 @@ claude plugin install github:Yaron9/MetaMe/plugin
 **与 npm CLI 的关键差异：** 插件版 daemon 在 Claude Code 打开时启动、关闭时停止，**不会** 24/7 常驻后台。如需手机随时发消息（Claude Code 关闭时也能收到），需用 npm CLI + `metame daemon install-launchd`。
 
 不想装全局 npm 包且只需要 Claude Code 打开时的手机访问，用插件版。需要 24/7 常驻、`metame` 命令和首次采访，用 npm CLI（`metame-cli`）。
+
+## 参与贡献
+
+MetaMe 仍处于早期阶段，快速迭代中。每一个 Issue 和 PR 都直接影响项目方向。
+
+**报 Bug / 提需求：**
+- 开一个 [Issue](https://github.com/Yaron9/MetaMe/issues)，描述问题现象、期望行为、运行环境（macOS/Windows/WSL、Node 版本）。
+
+**提交 PR：**
+1. Fork 仓库，从 `main` 创建分支
+2. 源码修改统一在 `scripts/` 目录，改完跑 `npm run sync:plugin` 同步到 `plugin/scripts/`
+3. `npx eslint scripts/daemon*.js` — 零错误
+4. `npm test` — 全部通过
+5. 向 `main` 提 PR，写清改了什么、为什么改
+
+**适合新手的贡献方向：** Windows 边界场景、新的 `/命令`、文档完善、测试覆盖。
 
 ## 许可证
 
