@@ -1,7 +1,9 @@
 'use strict';
 
+const { sleepSync } = require('./platform');
+
 function createPidManager(deps) {
-  const { fs, execSync, PID_FILE, log } = deps;
+  const { fs, PID_FILE, log } = deps;
 
   function killExistingDaemon() {
     if (!fs.existsSync(PID_FILE)) return;
@@ -12,7 +14,7 @@ function createPidManager(deps) {
         log('INFO', `Killed existing daemon (PID: ${oldPid})`);
         for (let i = 0; i < 10; i++) {
           try { process.kill(oldPid, 0); } catch { break; }
-          execSync('sleep 0.5', { stdio: 'ignore' });
+          sleepSync(500);
         }
       }
     } catch {

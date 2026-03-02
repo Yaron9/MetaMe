@@ -9,7 +9,7 @@
  *
  * Tiers:
  *   T1 — Identity (LOCKED, never auto-modify)
- *   T2 — Core Values (LOCKED, deep personality)
+ *   T2 — Soul (LOCKED, 6-dimension personality model)
  *   T3 — Preferences (auto-writable, needs confidence)
  *   T5 — Evolution (system-managed, strict limits)
  *
@@ -23,14 +23,47 @@ const SCHEMA = {
   'identity.role': { tier: 'T1', type: 'string', locked: false },
   'identity.locale': { tier: 'T1', type: 'string', locked: true },
 
-  // === T2: Core Values / Traits ===
-  'core_values.*': { tier: 'T2', type: 'string', locked: true },
-  'core_traits.crisis_reflex': { tier: 'T2', type: 'enum', locked: true, values: ['Action', 'Analysis', 'Delegation', 'Freeze'] },
-  'core_traits.flow_trigger': { tier: 'T2', type: 'enum', locked: true, values: ['Ideation', 'Execution', 'Teaching', 'Debugging'] },
-  'core_traits.shadow_self': { tier: 'T2', type: 'string', locked: true, maxChars: 80 },
-  'core_traits.learning_style': { tier: 'T2', type: 'enum', locked: true, values: ['Hands-on', 'Conceptual', 'Social', 'Reflective'] },
-  'core_traits.north_star.aspiration': { tier: 'T2', type: 'string', locked: true, maxChars: 80 },
-  'core_traits.north_star.realistic': { tier: 'T2', type: 'string', locked: true, maxChars: 80 },
+  // === T2: Soul (6-Dimension Model, LOCKED) ===
+
+  // Dim 1: Values (Schwartz Value Theory)
+  'soul.values.primary': { tier: 'T2', type: 'string', locked: true, maxChars: 40 },
+  'soul.values.secondary': { tier: 'T2', type: 'string', locked: true, maxChars: 40 },
+  'soul.values.anti_value': { tier: 'T2', type: 'string', locked: true, maxChars: 40 },
+
+  // Dim 2: Drive (Self-Determination Theory)
+  'soul.drive.primary_need': { tier: 'T2', type: 'enum', locked: true,
+    values: ['autonomy', 'mastery', 'connection', 'impact', 'security', 'novelty', 'meaning'] },
+  'soul.drive.flow_trigger': { tier: 'T2', type: 'string', locked: true, maxChars: 60 },
+  'soul.drive.north_star.aspiration': { tier: 'T2', type: 'string', locked: true, maxChars: 80 },
+  'soul.drive.north_star.realistic': { tier: 'T2', type: 'string', locked: true, maxChars: 80 },
+
+  // Dim 3: Cognition Style (Jung + Kahneman)
+  'soul.cognition_style.thinking_axis': { tier: 'T2', type: 'enum', locked: true,
+    values: ['systematic', 'intuitive', 'dialectical'] },
+  'soul.cognition_style.learning_mode': { tier: 'T2', type: 'enum', locked: true,
+    values: ['by_doing', 'by_modeling', 'by_abstracting', 'by_debating', 'by_reflecting'] },
+  'soul.cognition_style.complexity_appetite': { tier: 'T2', type: 'enum', locked: true,
+    values: ['reductionist', 'comfortable_with_ambiguity', 'complexity_seeker'] },
+
+  // Dim 4: Stress & Shadow (Jung Shadow + Resilience Theory)
+  'soul.stress.crisis_reflex': { tier: 'T2', type: 'enum', locked: true,
+    values: ['fight', 'flight', 'freeze', 'analyze'] },
+  'soul.stress.shadow': { tier: 'T2', type: 'string', locked: true, maxChars: 80 },
+  'soul.stress.recovery_pattern': { tier: 'T2', type: 'enum', locked: true,
+    values: ['solitude', 'social_support', 'physical_action', 'intellectual_distraction', 'sleep_reset'] },
+
+  // Dim 5: Relational (Attachment Theory + FIRO-B)
+  'soul.relational.trust_formation': { tier: 'T2', type: 'enum', locked: true,
+    values: ['competence_first', 'character_first', 'shared_experience', 'slow_incremental'] },
+  'soul.relational.conflict_style': { tier: 'T2', type: 'enum', locked: true,
+    values: ['direct_confrontation', 'strategic_avoidance', 'diplomatic_mediation', 'withdrawal'] },
+  'soul.relational.authority_stance': { tier: 'T2', type: 'enum', locked: true,
+    values: ['challenge_authority', 'respect_hierarchy', 'pragmatic_compliance', 'build_own_authority'] },
+
+  // Dim 6: Identity Narrative (McAdams Narrative Identity)
+  'soul.identity_narrative.self_in_one_line': { tier: 'T2', type: 'string', locked: true, maxChars: 100 },
+  'soul.identity_narrative.core_contradiction': { tier: 'T2', type: 'string', locked: true, maxChars: 80 },
+  'soul.identity_narrative.feared_self': { tier: 'T2', type: 'string', locked: true, maxChars: 60 },
 
   // === T3: Preferences ===
   'preferences.code_style': { tier: 'T3', type: 'enum', values: ['concise', 'verbose', 'documented'] },
@@ -80,7 +113,7 @@ const SCHEMA = {
 
 /**
  * Check if a dotted key matches the schema.
- * Supports wildcard entries like 'core_values.*'
+ * Supports wildcard entries (e.g. 'namespace.*') and exact dotted keys.
  */
 function hasKey(key) {
   if (SCHEMA[key]) return true;

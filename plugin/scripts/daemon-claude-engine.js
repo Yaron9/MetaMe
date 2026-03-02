@@ -633,7 +633,10 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     }, 4000);
 
     // Agent nickname routing: "贾维斯" / "小美，帮我..." → switch project session
-    const agentMatch = routeAgent(prompt, config);
+    // Strict chats (chat_agent_map bound groups) must NOT switch agents via nickname
+    const _strictAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
+    const _isStrictChatSession = !!(_strictAgentMap[String(chatId)] || projectKeyFromVirtualChatId(String(chatId)));
+    const agentMatch = _isStrictChatSession ? null : routeAgent(prompt, config);
     if (agentMatch) {
       const { key, proj, rest } = agentMatch;
       const projCwd = normalizeCwd(proj.cwd);
@@ -835,7 +838,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
    Use these before answering complex questions about MetaMe architecture or past decisions.
 4. Active memory: After confirming a new insight, bug root cause, or user preference, persist it with:
    node ~/.metame/memory-write.js "Entity.sub" "relation_type" "value (20-300 chars)"
-   Valid relations: tech_decision, bug_lesson, arch_convention, config_fact, config_change, user_pref, workflow_rule, project_milestone
+   Valid relations: tech_decision, bug_lesson, arch_convention, config_fact, config_change, workflow_rule, project_milestone
    Only write verified facts. Do not write speculative or process-description entries.
    When you observe the user is clearly expert or beginner in a domain, note it in your response and suggest: "要不要把你的 {domain} 水平 ({level}) 记录到能力雷达？"
 5. Task handoff: When suspending a multi-step task or handing off to another agent, write current status to ~/.metame/memory/NOW.md using:
