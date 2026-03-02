@@ -1,0 +1,92 @@
+#!/usr/bin/env node
+/**
+ * dispatch_to [--new] <project_key> "<prompt>"
+ * Tries Unix socket / Named Pipe first (low-latency), falls back to pending.jsonl.
+ */
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const net = require('net');
+const crypto = require('crypto');
+const os = require('os');
+const { socketPath } = require('../platform');
+
+const args = process.argv.slice(2);
+const newSession = args[0] === '--new' ? (args.shift(), true) : false;
+const [target, ...rest] = args;
+const prompt = rest.join(' ').replace(/^["']|["']$/g, '');
+if (!target || !prompt) {
+  console.error('Usage: dispatch_to [--new] <project_key> "<prompt>"');
+  process.exit(1);
+}
+
+const METAME_DIR = path.join(os.homedir(), '.metame');
+const DISPATCH_DIR = path.join(METAME_DIR, 'dispatch');
+const PENDING = path.join(DISPATCH_DIR, 'pending.jsonl');
+const DISPATCH_SECRET_FILE = path.join(METAME_DIR, '.dispatch_secret');
+const SOCK_PATH = socketPath(METAME_DIR);
+
+function getDispatchSecret() {
+  try {
+    if (fs.existsSync(DISPATCH_SECRET_FILE)) {
+      return fs.readFileSync(DISPATCH_SECRET_FILE, 'utf8').trim();
+    }
+  } catch { /* fall through to generate */ }
+  const secret = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.writeFileSync(DISPATCH_SECRET_FILE, secret, { mode: 0o600 });
+  } catch { /* ignore write errors */ }
+  return secret;
+}
+
+const ts = new Date().toISOString();
+const secret = getDispatchSecret();
+const sigPayload = JSON.stringify({ target, prompt, ts });
+const sig = crypto.createHmac('sha256', secret).update(sigPayload).digest('hex');
+
+const msg = { target, prompt, from: '_claude_session', new_session: newSession, created_at: ts, ts, sig };
+
+function fallbackToFile() {
+  fs.mkdirSync(DISPATCH_DIR, { recursive: true });
+  fs.appendFileSync(PENDING, JSON.stringify(msg) + '\n');
+  console.log(`DISPATCH_OK(file): ${target} → ${prompt.slice(0, 60)}${newSession ? ' [new session]' : ''}`);
+}
+
+const sock = net.createConnection({ path: SOCK_PATH });
+let done = false;
+
+const timer = setTimeout(() => {
+  if (done) return;
+  done = true;
+  sock.destroy();
+  fallbackToFile();
+}, 2000);
+
+sock.on('connect', () => {
+  sock.write(JSON.stringify(msg));
+  sock.end();
+});
+
+sock.on('data', (data) => {
+  if (done) return;
+  done = true;
+  clearTimeout(timer);
+  try {
+    const res = JSON.parse(data.toString().trim());
+    if (res.ok) {
+      console.log(`DISPATCH_OK(socket): ${target} → ${prompt.slice(0, 60)}${newSession ? ' [new session]' : ''}`);
+    } else {
+      fallbackToFile();
+    }
+  } catch {
+    fallbackToFile();
+  }
+  sock.destroy();
+});
+
+sock.on('error', () => {
+  if (done) return;
+  done = true;
+  clearTimeout(timer);
+  fallbackToFile();
+});
