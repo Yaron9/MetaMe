@@ -653,41 +653,18 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     }
 
     // Skill routing: detect skill first, then decide session
-    // BUT: if agent was explicitly addressed by nickname, don't let skill routing hijack the session
-    const skill = agentMatch ? null : routeSkill(prompt);
+    // BUT: skip skill routing if agent addressed by nickname OR chat already has an active session
+    // (active conversation should never be hijacked by keyword-based skill matching)
+    let session = getSession(chatId);
+    const hasActiveSession = session && session.started;
+    const skill = (agentMatch || hasActiveSession) ? null : routeSkill(prompt);
     const chatIdStr = String(chatId);
     const chatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
     const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
     const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
     const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
 
-    // Skills with dedicated pinned sessions (reused across days, no re-injection needed)
-    const PINNED_SKILL_SESSIONS = new Set(['skill-manager']);
-    const usePinnedSkillSession = !!(skill && PINNED_SKILL_SESSIONS.has(skill));
-
-    let session = getSession(chatId);
-
-    if (usePinnedSkillSession) {
-      // Use a dedicated long-lived session per skill
-      const state = loadState();
-      if (!state.pinned_sessions) state.pinned_sessions = {};
-      const pinned = state.pinned_sessions[skill];
-      if (pinned) {
-        // Reuse existing pinned session
-        state.sessions[chatId] = { id: pinned.id, cwd: pinned.cwd, started: true };
-        saveState(state);
-        session = state.sessions[chatId];
-        log('INFO', `Pinned session reused for skill ${skill}: ${pinned.id.slice(0, 8)}`);
-      } else {
-        // First time — create session and pin it
-        session = createSession(chatId, HOME, skill);
-        const st2 = loadState();
-        if (!st2.pinned_sessions) st2.pinned_sessions = {};
-        st2.pinned_sessions[skill] = { id: session.id, cwd: session.cwd };
-        saveState(st2);
-        log('INFO', `Pinned session created for skill ${skill}: ${session.id.slice(0, 8)}`);
-      }
-    } else if (!session) {
+    if (!session) {
       if (boundCwd) {
         // Agent-bound chats must stay in their own workspace: never attach to another project's session.
         const recentInBound = listRecentSessions(1, boundCwd);
