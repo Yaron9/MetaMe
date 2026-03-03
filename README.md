@@ -200,6 +200,7 @@ MetaMe has a living skill ecosystem. Skills aren't static configs — they grow.
 - **Auto-discovery**: When a task fails or a capability is missing, MetaMe's skill-scout automatically searches for, installs, and verifies new skills.
 - **Learning by watching**: Can't automate a complex browser workflow? Say "我来演示" and MetaMe records your actions, then converts them into a reusable skill.
 - **Post-task evolution**: After every significant task, the skill-evolution-manager reviews what worked and what didn't, then surgically updates the relevant skills with new knowledge.
+- **Workflow pattern discovery**: MetaMe silently tracks your repeated multi-tool workflows (e.g. "search Twitter → summarize → post to Feishu"). When a pattern is detected 4+ times, it proposes creating a dedicated skill — one tap to approve, zero manual effort.
 - **Composable**: Skills chain together in workflows. A `deep-research` skill feeds into `tech-writing`, which feeds into `wechat-publisher` — each one improving from real usage.
 
 ```
@@ -207,6 +208,10 @@ Task fails → skill-scout finds a skill → installs → retries → succeeds
                                                       ↓
                                       skill-evolution-manager
                                       updates skill with lessons learned
+
+Repeated workflow detected → workflow sketch accumulated
+                                       ↓ (4+ occurrences)
+                            proposal → /skill-evo approve → auto-create skill
 ```
 
 ---
@@ -300,7 +305,7 @@ systemctl --user start metame
 | **Cognitive Profile** | 6-dimension soul schema (Values, Drive, Cognition Style, Stress & Shadow, Relational, Identity Narrative). 67 fields, tier-locked, 800-token budget. First-time Genesis Interview builds your profile from scratch. |
 | **Layered Memory** | Five-tier memory: long-term facts (semantic recall), session summaries (continuity bridge), session index (topic tags), nightly reflection (decision/lesson distillation), memory index (global lookup). All automatic. |
 | **Mobile Bridge** | Full Claude Code via Telegram/Feishu. Stateful sessions, file transfer both ways, real-time streaming status. |
-| **Skill Evolution** | Self-healing skill system. Auto-discovers missing skills, learns from browser recordings, evolves after every task. Skills get smarter over time. |
+| **Skill Evolution** | Self-healing skill system. Auto-discovers missing skills, learns from browser recordings, evolves after every task. Detects repeated multi-tool workflows and proposes new skills automatically. Skills get smarter over time. |
 | **Token Budget** | Daily token usage tracking with per-category breakdown. Configurable daily limit, automatic 80% warning threshold, usage history with rollover. |
 | **Auto-Provisioning** | First run deploys default CLAUDE.md, documentation, and `dispatch_to` to `~/.metame/`. Subsequent runs sync scripts without overwriting user config. |
 | **Heartbeat System** | Three-layer programmable nervous system. Layer 0 kernel always-on (zero config). Layer 1 system evolution built-in (5 tasks: distill + memory + skills + nightly reflection + memory index). Layer 2 your custom scheduled tasks with `require_idle`, `precondition`, `notify`, workflows. |

@@ -212,25 +212,25 @@ function createTaskScheduler(deps) {
     try {
       let cmd = task.precondition;
 
-      // Cross-platform: expand ~ to HOME and handle `test -s` (Unix-only) via Node.js
+      // Cross-platform: expand ~ to HOME and handle `test -s` via Node.js
       cmd = cmd.replace(/^~|(?<=\s)~/g, HOME);
-      if (IS_WIN) {
-        // `test -s <file>` checks file exists and is non-empty — do it in JS
-        const testMatch = cmd.match(/^test\s+-s\s+(.+)$/);
-        if (testMatch) {
-          const filePath = testMatch[1].trim().replace(/["']/g, '');
-          const fs = require('fs');
-          try {
-            const stat = fs.statSync(filePath);
-            if (stat.size > 0) {
-              const content = fs.readFileSync(filePath, 'utf8').trim();
-              log('INFO', `Precondition passed for ${task.name} (${content.split('\n').length} lines)`);
-              return { pass: true, context: content };
-            }
-          } catch { /* file doesn't exist */ }
-          log('INFO', `Precondition failed for ${task.name}: file empty or missing`);
-          return { pass: false, context: '' };
-        }
+      // Handle `test -s <file>` natively in JS on ALL platforms.
+      // Shell `test -s` produces no stdout on success, which previously
+      // caused the empty-output check below to incorrectly skip the task.
+      const testMatch = cmd.match(/^test\s+-s\s+(.+)$/);
+      if (testMatch) {
+        const filePath = testMatch[1].trim().replace(/["']/g, '');
+        const fs = require('fs');
+        try {
+          const stat = fs.statSync(filePath);
+          if (stat.size > 0) {
+            const content = fs.readFileSync(filePath, 'utf8').trim();
+            log('INFO', `Precondition passed for ${task.name} (${content.split('\n').length} lines)`);
+            return { pass: true, context: content };
+          }
+        } catch { /* file doesn't exist */ }
+        log('INFO', `Precondition failed for ${task.name}: file empty or missing`);
+        return { pass: false, context: '' };
       }
 
       const output = execSync(cmd, {
@@ -671,7 +671,25 @@ function createTaskScheduler(deps) {
     // Tracks tasks currently running (prevents concurrent runs of the same task)
     const runningTasks = new Set();
 
+    // Wake detection: if tick interval far exceeds expected, system likely slept (macOS lid close).
+    // Use 5min floor to avoid false triggers from CPU load spikes or GC pauses.
+    let lastTickTime = Date.now();
+    const WAKE_THRESHOLD = Math.max(checkIntervalSec * 3 * 1000, 5 * 60 * 1000);
+
     const timer = setInterval(() => {
+      const tickNow = Date.now();
+      const tickElapsed = tickNow - lastTickTime;
+      lastTickTime = tickNow;
+
+      if (tickElapsed > WAKE_THRESHOLD) {
+        log('FATAL', `[WAKE-DETECT] System resumed after ${Math.round(tickElapsed / 1000)}s sleep — restarting daemon to rebuild connections`);
+        const st = loadState();
+        st.wake_restart = new Date().toISOString();
+        st.wake_sleep_seconds = Math.round(tickElapsed / 1000);
+        saveState(st);
+        process.exit(1); // caffeinate will restart us with fresh connections
+      }
+
       // ① Physiological heartbeat (zero token, pure awareness)
       physiologicalHeartbeat(config);
 
@@ -749,7 +767,12 @@ function createTaskScheduler(deps) {
           for (const item of notifications) {
             let msg = '';
             const idHint = item.id ? `\nID: \`${item.id}\`` : '';
-            if (item.type === 'skill_gap') {
+            if (item.type === 'workflow_proposal') {
+              msg = `🔄 *工作流技能建议*\n检测到重复工作流: ${item.search_hint || item.reason}`;
+              if (item.tools_signature && item.tools_signature.length) msg += `\n工具: ${item.tools_signature.join(', ')}`;
+              if (item.example_prompt) msg += `\n示例: "${item.example_prompt}"`;
+              if (item.evidence_count) msg += `\n出现次数: ${item.evidence_count}`;
+            } else if (item.type === 'skill_gap') {
               msg = `🧬 *技能缺口检测*\n${item.reason}`;
               if (item.search_hint) msg += `\n搜索建议: \`${item.search_hint}\``;
             } else if (item.type === 'skill_fix') {
@@ -757,8 +780,11 @@ function createTaskScheduler(deps) {
             } else if (item.type === 'user_complaint') {
               msg = `⚠️ *技能反馈*\n技能 \`${item.skill_name}\` 收到用户反馈\n${item.reason}`;
             }
-            if (msg && item.id) msg += `${idHint}\n处理: \`/skill-evo done ${item.id}\` 或 \`/skill-evo dismiss ${item.id}\``;
-            else if (msg) msg += idHint;
+            if (msg && item.id && item.type === 'workflow_proposal') {
+              msg += `${idHint}\n处理: \`/skill-evo approve ${item.id}\` 或 \`/skill-evo dismiss ${item.id}\``;
+            } else if (msg && item.id) {
+              msg += `${idHint}\n处理: \`/skill-evo done ${item.id}\` 或 \`/skill-evo dismiss ${item.id}\``;
+            } else if (msg) msg += idHint;
             if (msg && notifyFn) notifyFn(msg);
           }
         } catch (e) { log('WARN', `Skill evolution queue check failed: ${e.message}`); }

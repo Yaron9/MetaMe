@@ -31,6 +31,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { appendChange } = require('./skill-changelog');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
@@ -39,7 +40,14 @@ const SKILL_SIGNAL_OVERFLOW_FILE = path.join(METAME_DIR, 'skill_signals.overflow
 const SKILL_SIGNAL_LOCK_FILE = path.join(METAME_DIR, 'skill_signals.lock');
 const EVOLUTION_QUEUE_FILE = path.join(METAME_DIR, 'evolution_queue.yaml');
 const EVOLUTION_POLICY_FILE = path.join(METAME_DIR, 'evolution_policy.yaml');
+const WORKFLOW_SKETCHES_FILE = path.join(METAME_DIR, 'workflow_sketches.yaml');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
+
+// Read-only exploration tools — excluded from workflow candidate detection
+const READONLY_TOOLS = new Set([
+  'Read', 'Glob', 'Grep', 'ListDir', 'ListFiles',
+  'ReadFile', 'GrepSearch', 'SearchFiles',
+]);
 
 // Skill directories (check both locations)
 const SKILL_DIRS = [
@@ -67,6 +75,14 @@ const DEFAULT_POLICY = {
   min_evidence_for_gap: 3,
   max_updates_per_analysis: 3,
   max_gaps_per_analysis: 2,
+
+  // Workflow discovery
+  workflow_discovery_interval: 2,   // every N cold-path cycles
+  min_signals_for_workflow: 3,      // minimum workflow_candidate signals to analyze
+  workflow_proposal_threshold: 4,   // occurrence_count needed to propose
+  workflow_min_confidence: 0.7,     // Haiku confidence threshold
+  workflow_max_sketches: 10,        // max persisted sketches
+  workflow_stale_days: 14,          // auto-purge after N days without new occurrence
 
   // Self-evaluation
   self_eval_interval: 5,           // every N cold-path runs, evaluate policy effectiveness
@@ -113,6 +129,38 @@ Respond with ONLY a JSON code block:
 \\\`\\\`\\\`
 
 If no actionable insights, respond with exactly: NO_EVOLUTION`,
+
+  workflow_prompt_template: `You are a workflow pattern analyzer for an AI assistant called MetaMe.
+Analyze recent multi-tool interaction signals and cluster them into recurring workflow patterns.
+
+KNOWN SKETCHES (existing pattern pool):
+\${knownSketches}
+
+NEW SIGNALS (workflow candidates):
+\${workflowSignals}
+
+CLUSTERING RULES (MUST follow):
+1. EXISTING SKETCHES are your "known pattern pool". For each new signal, FIRST try to match it to an existing sketch.
+2. If a signal matches an existing sketch: output that sketch's EXACT ID, increment occurrence_count by 1, append the signal's prompt to example_prompts.
+3. Only create a NEW sketch (id: null) when the signal clearly represents a workflow NOT covered by any existing sketch.
+4. A workflow must involve 2+ distinct ACTION steps (search→summarize→post). Pure exploration (read files, search code) is NOT a workflow.
+5. Do NOT rephrase existing sketch patterns — preserve them exactly.
+
+Respond with ONLY a JSON code block:
+\\\`\\\`\\\`json
+[
+  {
+    "id": "existing-sketch-id-or-null",
+    "pattern": "description of the workflow (Chinese preferred)",
+    "tools_signature": ["WebSearch", "Bash"],
+    "example_prompts": ["user prompt example"],
+    "occurrence_count": 1,
+    "confidence": 0.8
+  }
+]
+\\\`\\\`\\\`
+
+If no meaningful workflows found, respond with exactly: NO_WORKFLOWS`,
 };
 
 function clampInt(value, fallback, min, max) {
@@ -152,6 +200,12 @@ function sanitizePolicy(input) {
     min_evidence_for_gap: clampInt(merged.min_evidence_for_gap, DEFAULT_POLICY.min_evidence_for_gap, 1, 20),
     max_updates_per_analysis: clampInt(merged.max_updates_per_analysis, DEFAULT_POLICY.max_updates_per_analysis, 1, 20),
     max_gaps_per_analysis: clampInt(merged.max_gaps_per_analysis, DEFAULT_POLICY.max_gaps_per_analysis, 1, 20),
+    workflow_discovery_interval: clampInt(merged.workflow_discovery_interval, DEFAULT_POLICY.workflow_discovery_interval, 1, 100),
+    min_signals_for_workflow: clampInt(merged.min_signals_for_workflow, DEFAULT_POLICY.min_signals_for_workflow, 1, 100),
+    workflow_proposal_threshold: clampInt(merged.workflow_proposal_threshold, DEFAULT_POLICY.workflow_proposal_threshold, 2, 50),
+    workflow_min_confidence: Math.max(0.1, Math.min(1.0, Number(merged.workflow_min_confidence) || DEFAULT_POLICY.workflow_min_confidence)),
+    workflow_max_sketches: clampInt(merged.workflow_max_sketches, DEFAULT_POLICY.workflow_max_sketches, 1, 50),
+    workflow_stale_days: clampInt(merged.workflow_stale_days, DEFAULT_POLICY.workflow_stale_days, 1, 365),
     self_eval_interval: clampInt(merged.self_eval_interval, DEFAULT_POLICY.self_eval_interval, 1, 1000),
     cold_path_run_count: clampInt(merged.cold_path_run_count, DEFAULT_POLICY.cold_path_run_count, 0, 1000000),
     complaint_patterns: sanitizePatternList(merged.complaint_patterns, DEFAULT_POLICY.complaint_patterns),
@@ -159,6 +213,9 @@ function sanitizePolicy(input) {
     prompt_template: (typeof merged.prompt_template === 'string' && merged.prompt_template.trim())
       ? merged.prompt_template
       : DEFAULT_POLICY.prompt_template,
+    workflow_prompt_template: (typeof merged.workflow_prompt_template === 'string' && merged.workflow_prompt_template.trim())
+      ? merged.workflow_prompt_template
+      : DEFAULT_POLICY.workflow_prompt_template,
   };
   return policy;
 }
@@ -226,8 +283,14 @@ function extractSkillSignal(prompt, output, error, files, cwd, toolUsageLog) {
   const outputText = typeof output === 'string' ? output : '';
   const hasToolFailure = /(?:failed|error|not found|not available|skill.{0,20}(?:missing|absent|not.{0,10}install))/i.test(outputText);
 
-  // Skip if no skill involvement and no failure
-  if (!hasSkills && !hasError && !hasToolFailure) return null;
+  // Workflow candidate detection: multi-tool chain with at least 1 action tool
+  const toolNames = tools.map(t => t.name).filter(Boolean);
+  const hasActionTool = toolNames.some(n => !READONLY_TOOLS.has(n));
+  const isWorkflowCandidate = !hasSkills && !hasError && !hasToolFailure &&
+    hasActionTool && toolNames.length >= 2;
+
+  // Skip if no skill involvement, no failure, and not a workflow candidate
+  if (!hasSkills && !hasError && !hasToolFailure && !isWorkflowCandidate) return null;
 
   return {
     ts: new Date().toISOString(),
@@ -240,6 +303,7 @@ function extractSkillSignal(prompt, output, error, files, cwd, toolUsageLog) {
     files_modified: (files || []).slice(0, 10),
     cwd: cwd || null,
     outcome: (hasError || hasToolFailure) ? 'error' : (outputText ? 'success' : 'empty'),
+    workflow_candidate: isWorkflowCandidate || undefined,
   };
 }
 
@@ -425,6 +489,13 @@ function checkHotEvolution(signal) {
 
   saveEvolutionQueue(yaml, queue);
 
+  // Log hot detections to changelog
+  if (signal.error || signal.has_tool_failure) {
+    for (const sk of (signal.skills_invoked || [])) {
+      appendChange('hot_detected', sk, `failure detected: ${(signal.error || 'tool_failure').substring(0, 80)}`);
+    }
+  }
+
   // Rule 4: Track insight outcomes (success/failure per skill)
   if (signal.skills_invoked && signal.skills_invoked.length > 0) {
     const isSuccess = signal.outcome === 'success' && !signal.error && !signal.has_tool_failure;
@@ -589,6 +660,8 @@ async function distillSkills() {
     const result = await callHaiku(prompt, distillEnv, 90000);
 
     if (result.includes('NO_EVOLUTION')) {
+      // Run workflow discovery before clearing signals
+      try { await discoverWorkflows(signals, distillEnv); } catch {}
       clearSignals();
       bumpRunCount(yaml, policy);
       return { updates: [], missing_skills: [] };
@@ -636,6 +709,9 @@ async function distillSkills() {
 
     // Log this run for self-evaluation
     logEvolutionRun(yaml, policy, signals.length, updates.length, missingSkills.length);
+
+    // Run workflow discovery before clearing signals
+    try { await discoverWorkflows(signals, distillEnv); } catch {}
 
     clearSignals();
 
@@ -771,6 +847,190 @@ RULES:
 }
 
 // ─────────────────────────────────────────────
+// Workflow Discovery (Cold Path extension)
+// ─────────────────────────────────────────────
+
+function loadWorkflowSketches(yaml) {
+  try {
+    if (!fs.existsSync(WORKFLOW_SKETCHES_FILE)) return { version: 1, last_updated: null, sketches: [] };
+    const content = fs.readFileSync(WORKFLOW_SKETCHES_FILE, 'utf8');
+    const data = yaml.load(content) || {};
+    return {
+      version: data.version || 1,
+      last_updated: data.last_updated || null,
+      sketches: Array.isArray(data.sketches) ? data.sketches : [],
+    };
+  } catch {
+    return { version: 1, last_updated: null, sketches: [] };
+  }
+}
+
+function saveWorkflowSketches(yaml, data) {
+  try {
+    data.last_updated = new Date().toISOString();
+    fs.writeFileSync(WORKFLOW_SKETCHES_FILE, yaml.dump(data, { lineWidth: -1 }), 'utf8');
+  } catch {}
+}
+
+/**
+ * Merge Haiku-clustered results back into persisted sketches.
+ * - Existing IDs: increment count, append examples, update last_seen/confidence
+ * - New IDs (null): generate ID, add to sketches (respecting max cap)
+ * Returns merged sketches array.
+ */
+function mergeWorkflowSketches(existing, clustered, policy) {
+  const sketchMap = new Map();
+  for (const s of existing) sketchMap.set(s.id, { ...s });
+
+  const now = new Date().toISOString();
+
+  for (const c of clustered) {
+    if (c.id && sketchMap.has(c.id)) {
+      // Update existing sketch
+      const s = sketchMap.get(c.id);
+      s.occurrence_count = (s.occurrence_count || 0) + 1;
+      s.last_seen = now;
+      if (c.confidence != null) s.confidence = c.confidence;
+      // Append new example prompts (dedup, cap at 5)
+      const exSet = new Set(s.example_prompts || []);
+      for (const ex of (c.example_prompts || [])) {
+        if (!exSet.has(ex) && exSet.size < 5) exSet.add(ex);
+      }
+      s.example_prompts = [...exSet];
+    } else {
+      // New sketch
+      const newId = `wf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      sketchMap.set(newId, {
+        id: newId,
+        pattern: c.pattern || 'unknown',
+        tools_signature: c.tools_signature || [],
+        example_prompts: (c.example_prompts || []).slice(0, 5),
+        occurrence_count: c.occurrence_count || 1,
+        first_seen: now,
+        last_seen: now,
+        confidence: c.confidence || 0.5,
+        proposed: false,
+      });
+    }
+  }
+
+  // Enforce max sketches: keep most recently seen
+  let sketches = [...sketchMap.values()];
+  if (sketches.length > policy.workflow_max_sketches) {
+    sketches.sort((a, b) => new Date(b.last_seen || 0).getTime() - new Date(a.last_seen || 0).getTime());
+    sketches = sketches.slice(0, policy.workflow_max_sketches);
+  }
+
+  return sketches;
+}
+
+/**
+ * Analyze workflow_candidate signals, cluster via Haiku, persist sketches,
+ * and promote mature sketches to evolution_queue as workflow_proposal.
+ */
+async function discoverWorkflows(signals, distillEnv) {
+  let yaml;
+  try { yaml = require('js-yaml'); } catch { return; }
+
+  const policy = loadPolicy();
+
+  // Only run every N cold-path cycles
+  if ((policy.cold_path_run_count || 0) % policy.workflow_discovery_interval !== 0) return;
+
+  // Filter workflow candidates
+  const wfSignals = signals.filter(s => s.workflow_candidate);
+  if (wfSignals.length < policy.min_signals_for_workflow) return;
+
+  const sketchData = loadWorkflowSketches(yaml);
+
+  // Build known sketches text for Haiku
+  const knownSketches = sketchData.sketches.length > 0
+    ? sketchData.sketches.map(s =>
+      `- id: "${s.id}" pattern: "${s.pattern}" tools: [${(s.tools_signature || []).join(',')}] count: ${s.occurrence_count}`
+    ).join('\n')
+    : '(none)';
+
+  // Build signals text
+  const workflowSignals = wfSignals.map((s, i) => {
+    const toolNames = (s.tools_used || []).map(t => t.name).filter(Boolean);
+    return `${i + 1}. prompt="${(s.prompt || '').substring(0, 120)}" tools=[${toolNames.join(',')}]`;
+  }).join('\n');
+
+  const prompt = policy.workflow_prompt_template
+    .replace(/\$\{knownSketches\}/g, knownSketches)
+    .replace(/\$\{workflowSignals\}/g, workflowSignals);
+
+  try {
+    const result = await callHaiku(prompt, distillEnv, 60000);
+
+    if (result.includes('NO_WORKFLOWS')) return;
+
+    const jsonMatch = result.match(/```json\s*([\s\S]*?)```/);
+    if (!jsonMatch) return;
+
+    const clustered = JSON.parse(jsonMatch[1]);
+    if (!Array.isArray(clustered) || clustered.length === 0) return;
+
+    // Merge into persisted sketches
+    sketchData.sketches = mergeWorkflowSketches(sketchData.sketches, clustered, policy);
+
+    // Purge stale sketches (not seen within workflow_stale_days, not proposed)
+    const staleCutoff = Date.now() - policy.workflow_stale_days * 24 * 60 * 60 * 1000;
+    const veryOldCutoff = Date.now() - 90 * 24 * 60 * 60 * 1000;
+    sketchData.sketches = sketchData.sketches.filter(s => {
+      const lastSeenMs = new Date(s.last_seen || s.first_seen || 0).getTime();
+      if (s.proposed) return true; // keep proposed until dismissed
+      if (lastSeenMs <= veryOldCutoff) return false; // 90 days hard cap
+      return lastSeenMs > staleCutoff || (s.occurrence_count || 0) >= 2;
+    });
+
+    // Promote mature sketches to evolution queue
+    const queue = loadEvolutionQueue(yaml);
+    for (const sketch of sketchData.sketches) {
+      if (sketch.proposed) continue;
+      if ((sketch.occurrence_count || 0) >= policy.workflow_proposal_threshold &&
+          (sketch.confidence || 0) >= policy.workflow_min_confidence) {
+        addToQueue(queue, {
+          type: 'workflow_proposal',
+          skill_name: null,
+          reason: `检测到重复工作流: ${sketch.pattern}`,
+          search_hint: sketch.pattern,
+          evidence_count: sketch.occurrence_count,
+          workflow_sketch_id: sketch.id,
+          example_prompt: (sketch.example_prompts || [])[0] || '',
+          tools_signature: sketch.tools_signature || [],
+        });
+        sketch.proposed = true;
+      }
+    }
+    saveEvolutionQueue(yaml, queue);
+    saveWorkflowSketches(yaml, sketchData);
+
+  } catch (err) {
+    try { console.log(`⚠️ Workflow discovery failed (non-fatal): ${err.message}`); } catch {}
+  }
+}
+
+/**
+ * Reset a workflow sketch after user dismisses a proposal.
+ * Clears proposed flag and occurrence_count so it can re-accumulate.
+ */
+function resetWorkflowSketch(sketchId) {
+  let yaml;
+  try { yaml = require('js-yaml'); } catch { return false; }
+
+  const data = loadWorkflowSketches(yaml);
+  const sketch = data.sketches.find(s => s.id === sketchId);
+  if (!sketch) return false;
+
+  sketch.proposed = false;
+  sketch.occurrence_count = 0;
+  sketch.example_prompts = [];
+  saveWorkflowSketches(yaml, data);
+  return true;
+}
+
+// ─────────────────────────────────────────────
 // Evolution Queue Management
 // ─────────────────────────────────────────────
 
@@ -806,7 +1066,8 @@ function addToQueue(queue, entry) {
     i.type === entry.type &&
     i.skill_name === entry.skill_name &&
     i.status === 'pending' &&
-    (entry.type !== 'skill_gap' || (i.search_hint || '') === (entry.search_hint || ''))
+    (entry.type !== 'skill_gap' || (i.search_hint || '') === (entry.search_hint || '')) &&
+    (entry.type !== 'workflow_proposal' || (i.workflow_sketch_id || '') === (entry.workflow_sketch_id || ''))
   );
 
   if (existing) {
@@ -886,6 +1147,7 @@ function resolveQueueItem(type, skillName, resolution) {
     item.status = resolution; // 'installed' | 'dismissed'
     item.resolved_at = new Date().toISOString();
     saveEvolutionQueue(yaml, queue);
+    appendChange('queue_resolved', skillName || item.search_hint || 'unknown', `${type} → ${resolution}`);
   }
 }
 
@@ -948,6 +1210,16 @@ function mergeEvolution(skillDir, newData) {
   }
 
   fs.writeFileSync(evoPath, JSON.stringify(current, null, 2), 'utf8');
+
+  // Log to changelog
+  const skillName = path.basename(skillDir);
+  const added = [];
+  for (const key of ['preferences', 'fixes', 'contexts']) {
+    if (newData[key] && newData[key].length) added.push(`+${newData[key].length} ${key}`);
+  }
+  if (added.length > 0) {
+    appendChange('evolved', skillName, added.join(', '), (newData.fixes || newData.preferences || newData.contexts || [])[0]);
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -1073,6 +1345,8 @@ module.exports = {
   appendSkillSignal,
   checkHotEvolution,
   distillSkills,
+  discoverWorkflows,
+  resetWorkflowSketch,
   checkEvolutionQueue,
   resolveQueueItem,
   resolveQueueItemById,

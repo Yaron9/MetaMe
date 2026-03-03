@@ -195,17 +195,73 @@ function createAdminCommandHandler(deps) {
         return { handled: true, config };
       }
 
+      // /skill-evo approve <id> — approve a workflow_proposal and dispatch skill creation
+      const approveMatch = arg.match(/^approve\s+(\S+)$/i);
+      if (approveMatch) {
+        const id = approveMatch[1];
+        // Find the queue item
+        const items = skillEvolution.listQueueItems({ status: 'notified', limit: 200 });
+        const pendingItems = skillEvolution.listQueueItems({ status: 'pending', limit: 200 });
+        const item = [...items, ...pendingItems].find(i => i.id === id && i.type === 'workflow_proposal');
+        if (!item) {
+          await bot.sendMessage(chatId, `❌ 未找到 workflow_proposal: ${id}`);
+          return { handled: true, config };
+        }
+        // Build skill-creator prefilled prompt
+        const toolsSig = (item.tools_signature || []).join(', ');
+        const prefilledPrompt = [
+          '/skill-creator',
+          `创建一个新技能，自动化以下工作流：`,
+          `工作流模式: ${item.search_hint || item.reason}`,
+          toolsSig ? `常用工具: ${toolsSig}` : '',
+          item.example_prompt ? `用户示例: "${item.example_prompt}"` : '',
+          `该技能应封装这个多步工作流为单一可调用技能。`,
+        ].filter(Boolean).join('\n');
+        // Dispatch to metame agent for skill creation
+        try {
+          const HOME = require('os').homedir();
+          const dispatchBin = require('path').join(HOME, '.metame', 'bin', 'dispatch_to');
+          const { execFileSync: _execFileSync } = require('child_process');
+          // dispatch_to is a Node.js script; on Windows execFileSync can't resolve shebangs,
+          // so invoke via node explicitly for cross-platform safety
+          const isWin = process.platform === 'win32';
+          const cmd = isWin ? process.execPath : dispatchBin;
+          const cmdArgs = isWin ? [dispatchBin, 'metame', prefilledPrompt] : ['metame', prefilledPrompt];
+          _execFileSync(cmd, cmdArgs, {
+            encoding: 'utf8',
+            timeout: 15000,
+          });
+          // Mark installed only after successful dispatch
+          skillEvolution.resolveQueueItemById(id, 'installed');
+          await bot.sendMessage(chatId, `✅ 已派发给 Jarvis 创建技能，完成后会通知你\n工作流: ${item.search_hint || item.reason}`);
+        } catch (e) {
+          // Dispatch failed — don't mark installed, keep in queue
+          await bot.sendMessage(chatId, `⚠️ 自动派发失败: ${e.message}\n提案仍在队列中，可重试: /skill-evo approve ${id}`);
+        }
+        return { handled: true, config };
+      }
+
       const dismissMatch = arg.match(/^(?:dismiss|skip|ignored?)\s+(\S+)$/i);
       if (dismissMatch) {
         const id = dismissMatch[1];
+        // Check if this is a workflow_proposal — if so, reset the sketch
+        const items = skillEvolution.listQueueItems({ status: 'notified', limit: 200 });
+        const pendingItems = skillEvolution.listQueueItems({ status: 'pending', limit: 200 });
+        const item = [...items, ...pendingItems].find(i => i.id === id);
         const ok = skillEvolution.resolveQueueItemById
           ? skillEvolution.resolveQueueItemById(id, 'dismissed')
           : false;
+        // Reset workflow sketch so it can re-accumulate
+        if (ok && item && item.type === 'workflow_proposal' && item.workflow_sketch_id) {
+          if (skillEvolution.resetWorkflowSketch) {
+            skillEvolution.resetWorkflowSketch(item.workflow_sketch_id);
+          }
+        }
         await bot.sendMessage(chatId, ok ? `✅ 已标记 dismissed: ${id}` : `❌ 未找到可处理项: ${id}`);
         return { handled: true, config };
       }
 
-      await bot.sendMessage(chatId, '用法: /skill-evo list | /skill-evo done <id> | /skill-evo dismiss <id>');
+      await bot.sendMessage(chatId, '用法: /skill-evo list | /skill-evo done <id> | /skill-evo dismiss <id> | /skill-evo approve <id>');
       return { handled: true, config };
     }
 
