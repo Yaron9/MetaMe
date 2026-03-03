@@ -95,6 +95,23 @@ function nextClockRunAfter(schedule, fromMs) {
   return baseMs + 24 * 60 * 60 * 1000;
 }
 
+// Map short aliases and full model IDs to what Claude CLI accepts.
+// Claude CLI 2.x accepts both 'sonnet' and 'claude-sonnet-4-6'.
+// This normalization keeps daemon.yaml configs forward-compatible.
+const MODEL_ALIASES = {
+  haiku: 'claude-haiku-4-5-20251001',
+  sonnet: 'claude-sonnet-4-6',
+  opus: 'claude-opus-4-6',
+};
+
+function normalizeModel(raw) {
+  if (!raw || typeof raw !== 'string') return MODEL_ALIASES.haiku;
+  const lower = raw.trim().toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(MODEL_ALIASES, lower)) return MODEL_ALIASES[lower];
+  // Already a full model ID (e.g. 'claude-sonnet-4-6') — pass through
+  return raw.trim();
+}
+
 function buildTaskSchedule(task, parseInterval) {
   const atRaw = typeof task.at === 'string' ? task.at.trim() : '';
   if (atRaw) {
@@ -358,7 +375,7 @@ function createTaskScheduler(deps) {
     }
 
     const preamble = buildProfilePreamble();
-    const model = task.model || 'haiku';
+    const model = normalizeModel(task.model || 'haiku');
     // If precondition returned context data, append it to the prompt
     let taskPrompt = task.prompt;
     if (precheck.context) {
@@ -533,7 +550,7 @@ function createTaskScheduler(deps) {
     const steps = task.steps || [];
     if (steps.length === 0) return { success: false, error: 'No steps defined', output: '' };
 
-    const model = task.model || 'sonnet';
+    const model = normalizeModel(task.model || 'sonnet');
     const cwd = task.cwd ? task.cwd.replace(/^~/, HOME) : HOME;
     const sessionId = crypto.randomUUID();
     const outputs = [];
@@ -686,12 +703,24 @@ function createTaskScheduler(deps) {
 
           if (runningTasks.has(task.name)) {
             // Task is still running; skip this cycle and keep full interval cadence.
-            nextRun[task.name] = nextRunAfter(schedule, currentTime);
+            try {
+              nextRun[task.name] = nextRunAfter(schedule, currentTime);
+            } catch (schedErr) {
+              nextRun[task.name] = currentTime + checkIntervalSec * 2 * 1000;
+              log('ERROR', `nextRunAfter (running guard) failed for "${task.name}": ${schedErr.message}`);
+            }
             log('WARN', `Task ${task.name} still running — skipping this interval`);
             continue;
           }
 
-          nextRun[task.name] = nextRunAfter(schedule, currentTime);
+          try {
+            nextRun[task.name] = nextRunAfter(schedule, currentTime);
+          } catch (schedErr) {
+            // If next-run calculation fails, back off by at least 2 ticks to prevent infinite loop
+            nextRun[task.name] = currentTime + checkIntervalSec * 2 * 1000;
+            log('ERROR', `nextRunAfter failed for "${task.name}": ${schedErr.message} — backing off`);
+            continue;
+          }
           runningTasks.add(task.name);
           // executeTask now returns a Promise (async, non-blocking, process-group kill)
           Promise.resolve(executeTask(task, config))
