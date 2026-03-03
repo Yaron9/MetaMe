@@ -632,6 +632,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       bot.sendTyping(chatId).catch(() => { });
     }, 4000);
 
+    // Top-level safety net: any uncaught error inside askClaude MUST clean up timers and notify user.
+    // Without this, a ReferenceError / TypeError in the routing or injection code would silently
+    // kill the handler, leaving the typing indicator spinning forever.
+    try { // ── safety-net-start ──
+
     // Agent nickname routing: "贾维斯" / "小美，帮我..." → switch project session
     // Strict chats (chat_agent_map bound groups) must NOT switch agents via nickname
     const _strictAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
@@ -704,7 +709,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     }
 
     // Safety guard: prevent stale state from resuming another workspace's session.
-    if (!usePinnedSkillSession && session && session.started && session.id && session.id !== '__continue__' && session.cwd) {
+    if (session && session.started && session.id && session.id !== '__continue__' && session.cwd) {
       const sessionCwd = normalizeCwd(session.cwd);
       const existsInCwd = isSessionInCwd(session.id, sessionCwd);
       if (!existsInCwd) {
@@ -1069,6 +1074,14 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         }
         return { ok: false, error: errMsg };
       }
+    }
+
+    } catch (fatalErr) { // ── safety-net-catch ──
+      clearInterval(typingTimer);
+      if (statusMsgId && bot.deleteMessage) await bot.deleteMessage(chatId, statusMsgId).catch(() => { });
+      log('FATAL', `[askClaude] Uncaught error for ${chatId}: ${fatalErr.message}\n${fatalErr.stack}`);
+      try { await bot.sendMessage(chatId, `❌ 内部错误: ${fatalErr.message}`); } catch { /* */ }
+      return { ok: false, error: fatalErr.message };
     }
   }
 

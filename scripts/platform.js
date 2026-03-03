@@ -121,6 +121,7 @@ const _icons = IS_WIN ? {
   phone:    '[TEL]',
   feishu:   '[FS]',
   check:    '[v]',
+  tool:     '[T]',
 } : {
   ok:       '\u2705',     // ✅
   fail:     '\u274C',     // ❌
@@ -149,6 +150,7 @@ const _icons = IS_WIN ? {
   phone:    '\uD83D\uDCF1', // 📱
   feishu:   '\uD83D\uDCD8', // 📘
   check:    '\u2714',     // ✔
+  tool:     '\uD83D\uDEE0\uFE0F', // 🛠️
 };
 
 /**

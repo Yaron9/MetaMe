@@ -88,7 +88,7 @@ function syncDirFiles(srcDir, destDir, { fileList, chmod } = {}) {
 // Auto-deploy bundled scripts to ~/.metame/
 // IMPORTANT: daemon.yaml is USER CONFIG — never overwrite it. Only daemon-default.yaml (template) is synced.
 const scriptsDir = path.join(__dirname, 'scripts');
-const BUNDLED_BASE_SCRIPTS = ['platform.js', 'signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js', 'skill-evolution.js', 'memory.js', 'memory-extract.js', 'memory-search.js', 'memory-gc.js', 'qmd-client.js', 'session-summarize.js', 'check-macos-control-capabilities.sh', 'usage-classifier.js', 'task-board.js', 'memory-nightly-reflect.js', 'memory-index.js'];
+const BUNDLED_BASE_SCRIPTS = ['platform.js', 'signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js', 'skill-evolution.js', 'memory.js', 'memory-extract.js', 'memory-search.js', 'memory-gc.js', 'qmd-client.js', 'session-summarize.js', 'check-macos-control-capabilities.sh', 'usage-classifier.js', 'task-board.js', 'memory-nightly-reflect.js', 'memory-index.js', 'skill-changelog.js'];
 const DAEMON_MODULE_SCRIPTS = (() => {
   try {
     return fs.readdirSync(scriptsDir).filter((f) => /^daemon-[\w-]+\.js$/.test(f));
@@ -882,7 +882,37 @@ try {
   }
 } catch { /* non-fatal */ }
 
+// Skill evolution status
+try {
+  const skillChangelog = require('./scripts/skill-changelog');
+  const skillCount = skillChangelog.countInstalledSkills();
+  const lastSession = skillChangelog.getLastSessionStart();
+  const recentChanges = skillChangelog.getRecentChanges(lastSession);
 
+  if (recentChanges.length === 0) {
+    console.log(`${icon("tool")} Skills: ${skillCount} installed · 无新变更`);
+  } else {
+    const evolved = recentChanges.filter(c => c.action === 'evolved');
+    const others = recentChanges.filter(c => c.action !== 'evolved');
+    const parts = [`${skillCount} installed`];
+    if (evolved.length > 0) parts.push(`${evolved.length} evolved since last session`);
+    if (others.length > 0) parts.push(`${others.length} other event${others.length > 1 ? 's' : ''}`);
+    console.log(`${icon("tool")} Skills: ${parts.join(' · ')}`);
+
+    // Show up to 3 details
+    const shown = recentChanges.slice(0, 3);
+    for (const c of shown) {
+      const actionIcon = c.action === 'evolved' ? '↑' : c.action === 'installed' ? '+' : c.action === 'hot_detected' ? '!' : '·';
+      console.log(`   ${actionIcon} ${c.skill || 'system'}: ${c.summary}`);
+    }
+    if (recentChanges.length > 3) {
+      console.log(`   +${recentChanges.length - 3} more`);
+    }
+  }
+
+  // Write session start marker for next time
+  skillChangelog.writeSessionStart();
+} catch { /* non-fatal */ }
 
 // ---------------------------------------------------------
 // 4.9 AUTO-UPDATE CHECK (non-blocking)
