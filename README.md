@@ -24,7 +24,7 @@ No cloud. Your machine, your data.
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
 ```
 
-**Already have Node.js ≥ 18:**
+**Already have Node.js ≥ 22.5:**
 ```bash
 npm install -g metame-cli
 metame
@@ -38,13 +38,15 @@ metame
 
 ---
 
-> ### 🚀 v1.4.19 — Multi-User ACL + Session Context Preview
+> ### 🚀 v1.4.33 — 6-Dimension Soul Schema + Nightly Reflection + Auto-Provisioning
 >
-> - **Multi-user permission system**: role-based ACL (admin / member / stranger) — share your bots with teammates without giving them full access. Manage users with `/user` commands.
-> - **Session context preview**: `/resume` and `/sessions` now show the last message snippet so you know exactly what to pick up.
-> - **Team Task protocol**: multi-agent task board for cross-agent collaboration. Agents can dispatch and track tasks across workspaces.
-> - **Layered Memory Architecture**: three-layer memory (long-term facts, session summaries, session index) — all automatic.
-> - **Unix Socket IPC**: dispatch latency <100ms.
+> - **6-dimension soul schema**: cognitive profile upgraded from key-value pairs to a structured 67-field model covering Values, Drive, Cognition Style, Stress & Shadow, Relational, and Identity Narrative — with tier-based lock protection.
+> - **Nightly reflection**: every night, hot-zone facts are distilled into searchable decision logs and lessons learned.
+> - **Memory index**: auto-generated global index of all memory documents for instant retrieval.
+> - **Auto-provisioning**: first run automatically deploys default CLAUDE.md, docs, and `dispatch_to` — zero manual setup.
+> - **Token budget tracking**: daily token usage monitoring with per-category breakdown and 80% warning threshold.
+> - **Multi-user ACL**: role-based permissions (admin / member / stranger) with binding protection.
+> - **Windows native support**: cross-platform path handling, Named Pipes IPC, GBK-safe encoding.
 >
 > Zero configuration. It just works.
 
@@ -56,7 +58,9 @@ metame
 
 Claude Code forgets you every time you switch folders. MetaMe doesn't.
 
-A cognitive profile (`~/.claude_profile.yaml`) follows you everywhere — not just facts like "user prefers TypeScript", but *how you think*: your decision style, cognitive load preferences, communication patterns. It learns silently from your conversations via background distillation, no effort required.
+A cognitive profile (`~/.claude_profile.yaml`) follows you everywhere — not just facts like "user prefers TypeScript", but *how you think*. The profile is built on a **6-dimension soul schema**: Values, Drive, Cognition Style, Stress & Shadow, Relational, and Identity Narrative — 67 fields organized into 4 tiers (T1 locked identity → T5 system-managed evolution). First-time users go through a **Genesis Interview**: a structured deep conversation that builds your cognitive fingerprint from scratch.
+
+Once established, the profile updates silently from your conversations via background distillation — no effort required.
 
 ```
 $ metame
@@ -80,7 +84,7 @@ Start on your laptop, continue on the train. `/stop` to interrupt, `/undo` to ro
 
 ### 3. Layered Memory That Works While You Sleep
 
-MetaMe's memory system runs automatically in the background — no prompts, no manual saves.
+MetaMe's memory system runs automatically in the background — no prompts, no manual saves. Five layers, fully autonomous.
 
 **Layer 1 — Long-term Facts**
 When you go idle, MetaMe runs memory consolidation: extracts key decisions, patterns, and knowledge from your sessions into a persistent facts store. These are semantically recalled on every session start.
@@ -91,12 +95,20 @@ Resuming a conversation after 2+ hours? MetaMe injects a brief summary of what y
 **Layer 3 — Session Index**
 Every session gets tagged with topics and intent. This powers future session routing: when you reference "that thing we worked on last week", MetaMe knows where to look.
 
+**Layer 4 — Nightly Reflection**
+Every night at 01:00, MetaMe reviews your most-accessed facts from the past week and distills them into high-level decision logs and operational lessons — searchable documents that grow your personal knowledge base over time.
+
+**Layer 5 — Memory Index**
+At 01:30, an auto-generated global index (`INDEX.md`) maps every memory document across all categories. This serves as a fast lookup table so MetaMe always knows where to find relevant context.
+
 ```
 [Background, while you sleep]
 idle 30min → memory consolidation triggered
   → session_tags.json updated (topics indexed)
   → facts extracted → ~/.metame/memory.db
   → session summary cached → daemon_state.json
+01:00 → nightly reflection: hot facts → decisions + lessons
+01:30 → memory index regenerated
 
 [Next morning, when you resume]
 "continue from yesterday" →
@@ -117,12 +129,14 @@ Built into the daemon. Runs every 60 seconds regardless of what's in your config
 - Detects when you go idle → generates session continuity summaries
 
 **Layer 1 — System Evolution (built-in defaults)**
-Three tasks shipped out of the box. They are precondition-gated and run only when useful:
+Five tasks shipped out of the box. They are precondition-gated and run only when useful:
 
 ```yaml
 - cognitive-distill   # 4h · has signals? → distill preferences into profile
 - memory-extract      # 4h · scan sessions → extract long-term facts + topic tags
 - skill-evolve        # 6h · has signals? → evolve skills from task outcomes
+- nightly-reflect     # 01:00 daily · hot facts → decision logs + lessons learned
+- memory-index        # 01:30 daily · regenerate global memory index
 ```
 
 `precondition` guards mean zero tokens burned when there's nothing to process.
@@ -203,11 +217,13 @@ Task fails → skill-scout finds a skill → installs → retries → succeeds
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
 ```
 
-**Already have Node.js ≥ 18:**
+**Already have Node.js ≥ 22.5:**
 ```bash
 npm install -g metame-cli
 metame
 ```
+
+> **First run auto-provisioning:** MetaMe automatically deploys a default `CLAUDE.md`, documentation files, and the `dispatch_to` tool to `~/.metame/`. No manual setup needed.
 
 **Setup guide (3 minutes):**
 
@@ -215,7 +231,7 @@ metame
 |------|-----------|-------------|
 | 1. Log in to Claude | Run `claude` and complete the login (Anthropic account or API key) | Claude Code is ready to use |
 | 2. Launch MetaMe | Run `metame` | Opens a Claude session with MetaMe loaded |
-| 3. Cognitive interview | Just chat — MetaMe will automatically start a deep interview on first run | Builds `~/.claude_profile.yaml` (your digital twin's brain) |
+| 3. Genesis Interview | Just chat — MetaMe will automatically start a deep soul interview on first run | Builds `~/.claude_profile.yaml` (6-dimension cognitive profile) |
 | 4. Connect phone | Say "help me set up mobile access" or "connect my phone" | Interactive wizard for Telegram/Feishu bot setup → `~/.metame/daemon.yaml` |
 | 5. Start daemon | `metame start` | Background daemon launches, bot goes online |
 | 6. Register with system | macOS: `metame daemon install-launchd` · Windows: `metame daemon install-task-scheduler` · Linux: see below | Always-on, crash recovery |
@@ -281,11 +297,13 @@ systemctl --user start metame
 
 | Capability | What It Does |
 |-----------|-------------|
-| **Cognitive Profile** | Learns how you think across sessions. Schema-enforced, 800-token budget, auto-distilled via Haiku. Lock any value with `# [LOCKED]`. |
-| **Layered Memory** | Three-tier memory: long-term facts (semantic recall), session summaries (continuity bridge), session index (topic tags). All automatic. |
+| **Cognitive Profile** | 6-dimension soul schema (Values, Drive, Cognition Style, Stress & Shadow, Relational, Identity Narrative). 67 fields, tier-locked, 800-token budget. First-time Genesis Interview builds your profile from scratch. |
+| **Layered Memory** | Five-tier memory: long-term facts (semantic recall), session summaries (continuity bridge), session index (topic tags), nightly reflection (decision/lesson distillation), memory index (global lookup). All automatic. |
 | **Mobile Bridge** | Full Claude Code via Telegram/Feishu. Stateful sessions, file transfer both ways, real-time streaming status. |
 | **Skill Evolution** | Self-healing skill system. Auto-discovers missing skills, learns from browser recordings, evolves after every task. Skills get smarter over time. |
-| **Heartbeat System** | Three-layer programmable nervous system. Layer 0 kernel always-on (zero config). Layer 1 system evolution built-in (distill + memory + skills). Layer 2 your custom scheduled tasks with `require_idle`, `precondition`, `notify`, workflows. |
+| **Token Budget** | Daily token usage tracking with per-category breakdown. Configurable daily limit, automatic 80% warning threshold, usage history with rollover. |
+| **Auto-Provisioning** | First run deploys default CLAUDE.md, documentation, and `dispatch_to` to `~/.metame/`. Subsequent runs sync scripts without overwriting user config. |
+| **Heartbeat System** | Three-layer programmable nervous system. Layer 0 kernel always-on (zero config). Layer 1 system evolution built-in (5 tasks: distill + memory + skills + nightly reflection + memory index). Layer 2 your custom scheduled tasks with `require_idle`, `precondition`, `notify`, workflows. |
 | **Multi-Agent** | Multiple projects with dedicated chat groups. `/agent bind` for one-tap setup. True parallel execution. |
 | **Browser Automation** | Built-in Playwright MCP. Browser control out of the box for every user. |
 | **Cross-Platform** | Native support for macOS and Windows. Platform abstraction layer handles spawn, IPC, process management, and terminal encoding automatically. |
@@ -429,27 +447,34 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
                                           │   └──────────────┘           │
                                           │                              │
                                           │   ~/.claude_profile          │
-                                          │   (cognitive layer)          │
+                                          │   (6-dim soul schema)        │
                                           │                              │
                                           │   ~/.metame/memory.db        │
                                           │   session_tags.json          │
-                                          │   (memory layer)  ← NEW      │
+                                          │   (5-layer memory)           │
+                                          │                              │
+                                          │   dispatch_to (auto-deployed)│
                                           └──────────────────────────────┘
                                                        ↑
-                                          idle mode → summaries + background memory tasks
-                                                      (automatic, precondition-gated)
+                                          idle → summaries + memory tasks
+                                          01:00 → nightly reflection
+                                          01:30 → memory index rebuild
 ```
 
-- **Profile** (`~/.claude_profile.yaml`): Your cognitive fingerprint. Injected into every Claude session via `CLAUDE.md`.
-- **Daemon** (`scripts/daemon.js`): Background process handling Telegram/Feishu messages, heartbeat tasks, Unix socket dispatch, and idle/sleep transitions.
-- **Distillation** (`scripts/distill.js`): Heartbeat task (default 4h, signal-gated) that updates your profile.
-- **Memory Extract** (`scripts/memory-extract.js`): Heartbeat task (default 4h, idle-gated) that extracts long-term facts and session topic tags.
-- **Session Summarize** (`scripts/session-summarize.js`): Generates a 2-4 sentence summary for idle sessions. Injected as context when resuming after a 2h+ gap.
+- **Profile** (`~/.claude_profile.yaml`): 6-dimension soul schema. Injected into every Claude session via `CLAUDE.md`.
+- **Daemon**: Background process handling Telegram/Feishu messages, heartbeat tasks, Unix socket dispatch, and idle/sleep transitions.
+- **Distillation**: Heartbeat task (4h, signal-gated) that updates your cognitive profile.
+- **Memory Extract**: Heartbeat task (4h, idle-gated) that extracts long-term facts and session topic tags.
+- **Nightly Reflection**: Daily at 01:00. Distills hot-zone facts into decision logs and operational lessons.
+- **Memory Index**: Daily at 01:30. Regenerates the global memory index for fast retrieval.
+- **Session Summarize**: Generates a brief summary for idle sessions. Injected as context when resuming after a 2h+ gap.
 
 ## Security
 
 - All data stays on your machine. No cloud, no telemetry.
 - `allowed_chat_ids` whitelist — new groups get a smart prompt: if a pending agent activation exists, they're guided to send `/activate`; otherwise they receive setup instructions.
+- **Multi-user ACL**: role-based permissions (admin / member / stranger). Admins manage access via `/user` commands with hot-reload config.
+- **Binding protection**: each group can only be bound to one agent. Existing bindings cannot be overwritten without explicit `force:true`.
 - `operator_ids` for shared groups — non-operators get read-only mode.
 - `~/.metame/` directory is mode 700.
 - Bot tokens stored locally, never transmitted.
@@ -460,7 +485,7 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 |--------|-------|
 | Daemon memory (idle) | ~100 MB RSS — standard Node.js process baseline |
 | Daemon CPU (idle, between heartbeats) | ~0% — event-loop sleeping |
-| Cognitive profile injection | ~600 tokens/session (0.3% of 200k context) |
+| Cognitive profile injection | ~800 tokens/session (0.4% of 200k context) |
 | Dispatch latency (Unix socket) | <100ms |
 | Memory consolidation (per session) | ~1,500–2,000 tokens input + ~50–300 tokens output (Haiku) |
 | Session summary (per session) | ~400–900 tokens input + ≤250 tokens output (Haiku) |
