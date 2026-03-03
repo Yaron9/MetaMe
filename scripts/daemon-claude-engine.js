@@ -354,10 +354,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const writtenFiles = []; // Track files created/modified by Write tool
       const toolUsageLog = []; // Track all tool invocations for skill evolution
 
-      // ── 自适应超时：5min 无输出判卡死 + 1h 绝对上限 ──
+      // ── 自适应超时：5min 无输出判卡死（工具执行中延长至25min）+ 1h 绝对上限 ──
       const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+      const TOOL_EXEC_TIMEOUT_MS = 25 * 60 * 1000; // 工具执行中（如音频合成）允许更长等待
       const HARD_CEILING_MS = 60 * 60 * 1000;
       const startTime = Date.now();
+      let waitingForTool = false; // 是否在等待工具返回
 
       let sigkillTimer = null;
       function killChild(reason) {
@@ -376,7 +378,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       function resetIdleTimer() {
         clearTimeout(idleTimer);
-        idleTimer = setTimeout(() => killChild('idle'), IDLE_TIMEOUT_MS);
+        const timeout = waitingForTool ? TOOL_EXEC_TIMEOUT_MS : IDLE_TIMEOUT_MS;
+        idleTimer = setTimeout(() => killChild('idle'), timeout);
       }
 
       // ── 进度里程碑：2min 首报，之后每 5min 一次 ──
@@ -421,11 +424,23 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
               }
             }
 
+            // 工具返回 → 恢复正常 idle timeout
+            if (event.type === 'content_block_start' || event.type === 'content_block_delta' ||
+                (event.type === 'assistant' && !event.message?.content?.some(b => b.type === 'tool_use'))) {
+              if (waitingForTool) {
+                waitingForTool = false;
+                resetIdleTimer();
+              }
+            }
+
             // Detect tool usage and send status
             if (event.type === 'assistant' && event.message?.content) {
               for (const block of event.message.content) {
                 if (block.type === 'tool_use') {
                   toolCallCount++;
+                  // 进入工具等待状态，延长 idle timeout
+                  waitingForTool = true;
+                  resetIdleTimer();
                   const toolName = block.name || 'Tool';
 
                   // Track tool usage for skill evolution
