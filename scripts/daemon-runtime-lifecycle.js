@@ -50,6 +50,7 @@ function setupRuntimeWatchers(deps) {
     log,
     notifyFn,
     adminNotifyFn,
+    notifyPersonalFn,
     activeProcesses,
     getConfig,
     setConfig,
@@ -68,7 +69,7 @@ function setupRuntimeWatchers(deps) {
     refreshLogMaxSize(newConfig);
     const timer = getHeartbeatTimer();
     if (timer) clearInterval(timer);
-    setHeartbeatTimer(startHeartbeat(newConfig, notifyFn));
+    setHeartbeatTimer(startHeartbeat(newConfig, notifyFn, notifyPersonalFn));
     const { general, project } = getAllTasks(newConfig);
     const totalCount = general.length + project.length;
     log('INFO', `Config reloaded: ${totalCount} tasks (${project.length} in projects)`);

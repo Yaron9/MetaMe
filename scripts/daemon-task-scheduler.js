@@ -633,7 +633,7 @@ function createTaskScheduler(deps) {
     return found || null;
   }
 
-  function startHeartbeat(config, notifyFn) {
+  function startHeartbeat(config, notifyFn, notifyPersonalFn) {
     const { all: tasks } = getAllTasks(config);
 
     const enabledTasks = tasks.filter(t => t.enabled !== false);
@@ -785,7 +785,9 @@ function createTaskScheduler(deps) {
             } else if (msg && item.id) {
               msg += `${idHint}\n处理: \`/skill-evo done ${item.id}\` 或 \`/skill-evo dismiss ${item.id}\``;
             } else if (msg) msg += idHint;
-            if (msg && notifyFn) notifyFn(msg);
+            // Skill notifications go only to personal chats, not agent group chats
+            const skillNotifyFn = notifyPersonalFn || notifyFn;
+            if (msg && skillNotifyFn) skillNotifyFn(msg);
           }
         } catch (e) { log('WARN', `Skill evolution queue check failed: ${e.message}`); }
       }

@@ -1758,12 +1758,13 @@ async function main() {
   });
   const notifyFn = notifier.notify;
   const adminNotifyFn = notifier.notifyAdmin;
+  const notifyPersonalFn = notifier.notifyPersonal;
 
   // Start dispatch socket server (low-latency IPC, fallback: file polling still works)
   const dispatchSocket = startDispatchSocket(() => config);
 
   // Start heartbeat scheduler
-  let heartbeatTimer = startHeartbeat(config, notifyFn);
+  let heartbeatTimer = startHeartbeat(config, notifyFn, notifyPersonalFn);
 
   const runtimeWatchers = setupRuntimeWatchers({
     fs,
@@ -1778,6 +1779,7 @@ async function main() {
     log,
     notifyFn,
     adminNotifyFn,
+    notifyPersonalFn,
     activeProcesses,
     getConfig: () => config,
     setConfig: (next) => { config = next; },
