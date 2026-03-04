@@ -14,6 +14,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const yaml = require('js-yaml');
 
 const METAME_DIR = path.join(os.homedir(), '.metame');
 const CHANGELOG_FILE = path.join(METAME_DIR, 'skill_changelog.jsonl');
@@ -25,6 +26,33 @@ const SKILL_DIRS = [
   path.join(os.homedir(), '.opencode', 'skills'),
 ];
 
+/** Map action name to display icon. */
+function getActionIcon(action) {
+  const iconMap = { evolved: '↑', installed: '+', hot_detected: '!' };
+  return iconMap[action] || '·';
+}
+
+/**
+ * Scan all SKILL_DIRS and return installed skills as [{name, skillDir}].
+ * Deduplicates by skill name across dirs.
+ */
+function _scanSkillDirs() {
+  const result = [];
+  const seen = new Set();
+  for (const dir of SKILL_DIRS) {
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        if (seen.has(name)) continue;
+        const skillDir = path.join(dir, name);
+        try { fs.statSync(path.join(skillDir, 'SKILL.md')); } catch { continue; }
+        seen.add(name);
+        result.push({ name, skillDir });
+      }
+    } catch { /* dir doesn't exist or not readable */ }
+  }
+  return result;
+}
+
 /**
  * Append a changelog entry.
  * @param {string} action - installed|evolved|hot_detected|queue_resolved|sunset
@@ -34,7 +62,7 @@ const SKILL_DIRS = [
  */
 function appendChange(action, skill, summary, detail) {
   try {
-    if (!fs.existsSync(METAME_DIR)) fs.mkdirSync(METAME_DIR, { mode: 0o700, recursive: true });
+    fs.mkdirSync(METAME_DIR, { mode: 0o700, recursive: true });
     const entry = {
       ts: new Date().toISOString(),
       action,
@@ -53,7 +81,6 @@ function appendChange(action, skill, summary, detail) {
  */
 function getRecentChanges(since) {
   try {
-    if (!fs.existsSync(CHANGELOG_FILE)) return [];
     const lines = fs.readFileSync(CHANGELOG_FILE, 'utf8').trim().split('\n').filter(Boolean);
     const entries = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
     if (!since) return entries;
@@ -70,7 +97,6 @@ function getRecentChanges(since) {
  */
 function getLastSessionStart() {
   try {
-    if (!fs.existsSync(LAST_SESSION_FILE)) return null;
     const ts = fs.readFileSync(LAST_SESSION_FILE, 'utf8').trim();
     return ts || null;
   } catch {
@@ -83,7 +109,7 @@ function getLastSessionStart() {
  */
 function writeSessionStart() {
   try {
-    if (!fs.existsSync(METAME_DIR)) fs.mkdirSync(METAME_DIR, { mode: 0o700, recursive: true });
+    fs.mkdirSync(METAME_DIR, { mode: 0o700, recursive: true });
     fs.writeFileSync(LAST_SESSION_FILE, new Date().toISOString(), 'utf8');
   } catch { /* non-fatal */ }
 }
@@ -93,16 +119,7 @@ function writeSessionStart() {
  * @returns {number}
  */
 function countInstalledSkills() {
-  const seen = new Set();
-  for (const dir of SKILL_DIRS) {
-    try {
-      if (!fs.existsSync(dir)) continue;
-      for (const name of fs.readdirSync(dir)) {
-        if (fs.existsSync(path.join(dir, name, 'SKILL.md'))) seen.add(name);
-      }
-    } catch { /* skip */ }
-  }
-  return seen.size;
+  return _scanSkillDirs().length;
 }
 
 /**
@@ -111,43 +128,27 @@ function countInstalledSkills() {
  */
 function getSkillStats() {
   const installed = [];
-  const seen = new Set();
-  for (const dir of SKILL_DIRS) {
+  for (const { name, skillDir } of _scanSkillDirs()) {
+    const info = { name, hasEvolution: false, evolutionCount: 0, lastEvolved: null };
     try {
-      if (!fs.existsSync(dir)) continue;
-      for (const name of fs.readdirSync(dir)) {
-        if (seen.has(name)) continue;
-        const skillDir = path.join(dir, name);
-        if (!fs.existsSync(path.join(skillDir, 'SKILL.md'))) continue;
-        seen.add(name);
-        const info = { name, hasEvolution: false, evolutionCount: 0, lastEvolved: null };
-        const evoPath = path.join(skillDir, 'evolution.json');
-        try {
-          if (fs.existsSync(evoPath)) {
-            const evo = JSON.parse(fs.readFileSync(evoPath, 'utf8'));
-            const fixes = (evo.fixes || []).length;
-            const prefs = (evo.preferences || []).length;
-            const ctxs = (evo.contexts || []).length;
-            info.evolutionCount = fixes + prefs + ctxs;
-            info.hasEvolution = info.evolutionCount > 0;
-            info.lastEvolved = evo.last_updated || null;
-          }
-        } catch { /* no evolution data */ }
-        installed.push(info);
-      }
-    } catch { /* skip */ }
+      const evo = JSON.parse(fs.readFileSync(path.join(skillDir, 'evolution.json'), 'utf8'));
+      const fixes = (evo.fixes || []).length;
+      const prefs = (evo.preferences || []).length;
+      const ctxs = (evo.contexts || []).length;
+      info.evolutionCount = fixes + prefs + ctxs;
+      info.hasEvolution = info.evolutionCount > 0;
+      info.lastEvolved = evo.last_updated || null;
+    } catch { /* no evolution data */ }
+    installed.push(info);
   }
 
   // Queue pending items
   let queuePending = [];
   try {
-    const yaml = require('js-yaml');
     const queueFile = path.join(METAME_DIR, 'evolution_queue.yaml');
-    if (fs.existsSync(queueFile)) {
-      const data = yaml.load(fs.readFileSync(queueFile, 'utf8'));
-      if (data && Array.isArray(data.items)) {
-        queuePending = data.items.filter(i => i.status === 'pending' || i.status === 'notified');
-      }
+    const data = yaml.load(fs.readFileSync(queueFile, 'utf8'));
+    if (data && Array.isArray(data.items)) {
+      queuePending = data.items.filter(i => i.status === 'pending' || i.status === 'notified');
     }
   } catch { /* no queue */ }
 
@@ -186,12 +187,10 @@ function formatDashboard() {
   // Signal count
   try {
     const sigFile = path.join(METAME_DIR, 'skill_signals.jsonl');
-    if (fs.existsSync(sigFile)) {
-      const sigCount = fs.readFileSync(sigFile, 'utf8').trim().split('\n').filter(Boolean).length;
-      if (sigCount > 0) {
-        lines.push('');
-        lines.push(`信号缓冲: ${sigCount} 条待蒸馏`);
-      }
+    const sigCount = fs.readFileSync(sigFile, 'utf8').trim().split('\n').filter(Boolean).length;
+    if (sigCount > 0) {
+      lines.push('');
+      lines.push(`信号缓冲: ${sigCount} 条待蒸馏`);
     }
   } catch { /* skip */ }
 
@@ -201,8 +200,7 @@ function formatDashboard() {
     lines.push('最近变更 (7天内):');
     for (const c of stats.recentChanges.slice(-10)) {
       const date = c.ts.substring(5, 10); // MM-DD
-      const icon = c.action === 'evolved' ? '↑' : c.action === 'installed' ? '+' : c.action === 'hot_detected' ? '!' : '·';
-      lines.push(`  ${date} ${(c.skill || 'system').padEnd(28)} ${icon} ${c.summary}`);
+      lines.push(`  ${date} ${(c.skill || 'system').padEnd(28)} ${getActionIcon(c.action)} ${c.summary}`);
     }
   }
 
@@ -243,4 +241,5 @@ module.exports = {
   countInstalledSkills,
   getSkillStats,
   formatDashboard,
+  getActionIcon,
 };

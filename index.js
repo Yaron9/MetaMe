@@ -902,7 +902,7 @@ try {
     // Show up to 3 details
     const shown = recentChanges.slice(0, 3);
     for (const c of shown) {
-      const actionIcon = c.action === 'evolved' ? '↑' : c.action === 'installed' ? '+' : c.action === 'hot_detected' ? '!' : '·';
+      const actionIcon = skillChangelog.getActionIcon(c.action);
       console.log(`   ${actionIcon} ${c.skill || 'system'}: ${c.summary}`);
     }
     if (recentChanges.length > 3) {

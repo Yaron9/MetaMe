@@ -639,6 +639,17 @@ function createTaskScheduler(deps) {
 
     const enabledTasks = tasks.filter(t => t.enabled !== false);
     const checkIntervalSec = (config.daemon && config.daemon.heartbeat_check_interval) || 60;
+
+    // Helper: compute next run time, falling back to 2-tick backoff on error.
+    function safeNextRun(taskName, schedule, now) {
+      try {
+        return { next: nextRunAfter(schedule, now), failed: false };
+      } catch (e) {
+        log('ERROR', `nextRunAfter failed for "${taskName}": ${e.message}`);
+        return { next: now + checkIntervalSec * 2 * 1000, failed: true };
+      }
+    }
+
     const taskSchedules = new Map();
     const runnableTasks = [];
     for (const task of enabledTasks) {
@@ -721,24 +732,14 @@ function createTaskScheduler(deps) {
 
           if (runningTasks.has(task.name)) {
             // Task is still running; skip this cycle and keep full interval cadence.
-            try {
-              nextRun[task.name] = nextRunAfter(schedule, currentTime);
-            } catch (schedErr) {
-              nextRun[task.name] = currentTime + checkIntervalSec * 2 * 1000;
-              log('ERROR', `nextRunAfter (running guard) failed for "${task.name}": ${schedErr.message}`);
-            }
+            nextRun[task.name] = safeNextRun(task.name, schedule, currentTime).next;
             log('WARN', `Task ${task.name} still running — skipping this interval`);
             continue;
           }
 
-          try {
-            nextRun[task.name] = nextRunAfter(schedule, currentTime);
-          } catch (schedErr) {
-            // If next-run calculation fails, back off by at least 2 ticks to prevent infinite loop
-            nextRun[task.name] = currentTime + checkIntervalSec * 2 * 1000;
-            log('ERROR', `nextRunAfter failed for "${task.name}": ${schedErr.message} — backing off`);
-            continue;
-          }
+          const { next: nextRunTime, failed: schedFailed } = safeNextRun(task.name, schedule, currentTime);
+          nextRun[task.name] = nextRunTime;
+          if (schedFailed) continue; // back off, skip execution this cycle
           runningTasks.add(task.name);
           // executeTask now returns a Promise (async, non-blocking, process-group kill)
           Promise.resolve(executeTask(task, config))
