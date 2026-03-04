@@ -758,12 +758,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
     // Memory & Knowledge Injection (RAG)
     let memoryHint = '';
+    // projectKey must be declared outside the try block so the daemonHint template below can reference it.
+    const _cid0 = String(chatId);
+    const _agentMap0 = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
+    const projectKey = _agentMap0[_cid0] || projectKeyFromVirtualChatId(_cid0);
     try {
       const memory = require('./memory');
-      const _cid = String(chatId);
-      const _cfg = loadConfig();
-      const _agentMap = { ...(_cfg.telegram ? _cfg.telegram.chat_agent_map : {}), ...(_cfg.feishu ? _cfg.feishu.chat_agent_map : {}) };
-      const projectKey = _agentMap[_cid] || projectKeyFromVirtualChatId(_cid);
 
       // L1: NOW.md per-agent whiteboard injection（按 projectKey 隔离，防并发冲突）
       if (!session.started) {
