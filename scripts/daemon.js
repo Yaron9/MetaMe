@@ -932,6 +932,15 @@ function handleDispatchItem(item, config) {
     log('WARN', `dispatch: unknown target "${item.target}"`);
     return;
   }
+  // 安全护栏：禁止 agent 主动 dispatch 到 personal（防止 LLM 幻觉乱发消息给小美）
+  // personal 只允许用户本人触发，或来源为 user/unknown 的系统任务
+  const _agentSources = new Set(Object.keys((config.projects) || {}));
+  const isFromAgent = _agentSources.has(item.from) || item.from === '_claude_session';
+  const targetProject = config.projects?.[item.target] || {};
+  if (isFromAgent && targetProject.guard === 'user-only') {
+    log('WARN', `dispatch: blocked agent "${item.from}" → "${item.target}" (user-only guard)`);
+    return;
+  }
   log('INFO', `Dispatch: ${item.from || '?'} → ${item.target}: ${item.prompt.slice(0, 60)}`);
   let pendingReplyFn = null;
   let streamOptions = null;
