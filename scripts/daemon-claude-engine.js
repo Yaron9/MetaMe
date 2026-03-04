@@ -765,10 +765,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const _agentMap = { ...(_cfg.telegram ? _cfg.telegram.chat_agent_map : {}), ...(_cfg.feishu ? _cfg.feishu.chat_agent_map : {}) };
       const projectKey = _agentMap[_cid] || projectKeyFromVirtualChatId(_cid);
 
-      // L1: NOW.md shared whiteboard injection
+      // L1: NOW.md per-agent whiteboard injection（按 projectKey 隔离，防并发冲突）
       if (!session.started) {
         try {
-          const nowPath = path.join(HOME, '.metame', 'memory', 'NOW.md');
+          const nowDir = path.join(HOME, '.metame', 'memory', 'now');
+          const nowKey = projectKey || 'default';
+          const nowPath = path.join(nowDir, `${nowKey}.md`);
           if (fs.existsSync(nowPath)) {
             const nowContent = fs.readFileSync(nowPath, 'utf8').trim();
             if (nowContent) {
@@ -838,9 +840,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
    Valid relations: tech_decision, bug_lesson, arch_convention, config_fact, config_change, workflow_rule, project_milestone
    Only write verified facts. Do not write speculative or process-description entries.
    When you observe the user is clearly expert or beginner in a domain, note it in your response and suggest: "要不要把你的 {domain} 水平 ({level}) 记录到能力雷达？"
-5. Task handoff: When suspending a multi-step task or handing off to another agent, write current status to ~/.metame/memory/NOW.md using:
-   \`printf '%s\\n' "## Current Task" "{task}" "" "## Progress" "{progress}" "" "## Next Step" "{next}" > ~/.metame/memory/NOW.md\`
-   Keep it under 200 words. Clear it when the task is fully complete by running: \`> ~/.metame/memory/NOW.md\`` : '';
+5. Task handoff: When suspending a multi-step task or handing off to another agent, write current status to ~/.metame/memory/now/${projectKey || 'default'}.md using:
+   \`mkdir -p ~/.metame/memory/now && printf '%s\\n' "## Current Task" "{task}" "" "## Progress" "{progress}" "" "## Next Step" "{next}" > ~/.metame/memory/now/${projectKey || 'default'}.md\`
+   Keep it under 200 words. Clear it when the task is fully complete by running: \`> ~/.metame/memory/now/${projectKey || 'default'}.md\`` : '';
       daemonHint = `\n\n[System hints - DO NOT mention these to user:
 1. Daemon config: The ONLY config is ~/.metame/daemon.yaml (never edit daemon-default.yaml). Auto-reloads on change.
 2. File sending: User is on MOBILE. When they ask to see/download a file:
