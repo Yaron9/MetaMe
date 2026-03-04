@@ -5,6 +5,7 @@ const {
   CORE_USAGE_CATEGORIES,
   USAGE_CATEGORY_LABEL,
 } = require('./usage-classifier');
+const { IS_WIN } = require('./platform');
 
 function createAdminCommandHandler(deps) {
   const {
@@ -199,10 +200,9 @@ function createAdminCommandHandler(deps) {
       const approveMatch = arg.match(/^approve\s+(\S+)$/i);
       if (approveMatch) {
         const id = approveMatch[1];
-        // Find the queue item
-        const items = skillEvolution.listQueueItems({ status: 'notified', limit: 200 });
-        const pendingItems = skillEvolution.listQueueItems({ status: 'pending', limit: 200 });
-        const item = [...items, ...pendingItems].find(i => i.id === id && i.type === 'workflow_proposal');
+        // Find the queue item (search both pending and notified states)
+        const item = skillEvolution.listQueueItems({ status: ['pending', 'notified'], limit: 200 })
+          .find(i => i.id === id && i.type === 'workflow_proposal');
         if (!item) {
           await bot.sendMessage(chatId, `❌ 未找到 workflow_proposal: ${id}`);
           return { handled: true, config };
@@ -217,20 +217,18 @@ function createAdminCommandHandler(deps) {
           item.example_prompt ? `用户示例: "${item.example_prompt}"` : '',
           `该技能应封装这个多步工作流为单一可调用技能。`,
         ].filter(Boolean).join('\n');
-        // Dispatch to metame agent for skill creation
+        // Dispatch to metame agent for skill creation (async — must not block event loop)
         try {
           const HOME = require('os').homedir();
           const dispatchBin = require('path').join(HOME, '.metame', 'bin', 'dispatch_to');
-          const { execFileSync: _execFileSync } = require('child_process');
-          // dispatch_to is a Node.js script; on Windows execFileSync can't resolve shebangs,
+          const { execFile } = require('child_process');
+          const { promisify } = require('util');
+          const execFileAsync = promisify(execFile);
+          // dispatch_to is a Node.js script; on Windows shebang resolution is unavailable,
           // so invoke via node explicitly for cross-platform safety
-          const isWin = process.platform === 'win32';
-          const cmd = isWin ? process.execPath : dispatchBin;
-          const cmdArgs = isWin ? [dispatchBin, 'metame', prefilledPrompt] : ['metame', prefilledPrompt];
-          _execFileSync(cmd, cmdArgs, {
-            encoding: 'utf8',
-            timeout: 15000,
-          });
+          const cmd = IS_WIN ? process.execPath : dispatchBin;
+          const cmdArgs = IS_WIN ? [dispatchBin, 'metame', prefilledPrompt] : ['metame', prefilledPrompt];
+          await execFileAsync(cmd, cmdArgs, { encoding: 'utf8', timeout: 15000 });
           // Mark installed only after successful dispatch
           skillEvolution.resolveQueueItemById(id, 'installed');
           await bot.sendMessage(chatId, `✅ 已派发给 Jarvis 创建技能，完成后会通知你\n工作流: ${item.search_hint || item.reason}`);
@@ -245,9 +243,8 @@ function createAdminCommandHandler(deps) {
       if (dismissMatch) {
         const id = dismissMatch[1];
         // Check if this is a workflow_proposal — if so, reset the sketch
-        const items = skillEvolution.listQueueItems({ status: 'notified', limit: 200 });
-        const pendingItems = skillEvolution.listQueueItems({ status: 'pending', limit: 200 });
-        const item = [...items, ...pendingItems].find(i => i.id === id);
+        const item = skillEvolution.listQueueItems({ status: ['pending', 'notified'], limit: 200 })
+          .find(i => i.id === id);
         const ok = skillEvolution.resolveQueueItemById
           ? skillEvolution.resolveQueueItemById(id, 'dismissed')
           : false;

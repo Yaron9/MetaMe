@@ -222,13 +222,12 @@ function createTaskScheduler(deps) {
         const filePath = testMatch[1].trim().replace(/["']/g, '');
         const fs = require('fs');
         try {
-          const stat = fs.statSync(filePath);
-          if (stat.size > 0) {
-            const content = fs.readFileSync(filePath, 'utf8').trim();
+          const content = fs.readFileSync(filePath, 'utf8').trim();
+          if (content.length > 0) {
             log('INFO', `Precondition passed for ${task.name} (${content.split('\n').length} lines)`);
             return { pass: true, context: content };
           }
-        } catch { /* file doesn't exist */ }
+        } catch { /* file doesn't exist or unreadable */ }
         log('INFO', `Precondition failed for ${task.name}: file empty or missing`);
         return { pass: false, context: '' };
       }
