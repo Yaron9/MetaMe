@@ -67,19 +67,24 @@ function createClaudeEngine(deps) {
     return _spawn(cmd, args, options);
   }
 
-  let _sessionPatchQueue = Promise.resolve();
+  // Per-chatId patch queues: Agent A's writes never block Agent B.
+  const _patchQueues = new Map(); // chatId -> Promise
   function patchSessionSerialized(chatId, patchFn) {
-    _sessionPatchQueue = _sessionPatchQueue.then(() => {
+    const prev = _patchQueues.get(chatId) || Promise.resolve();
+    const next = prev.then(() => {
       const state = loadState();
       if (!state.sessions) state.sessions = {};
       const cur = state.sessions[chatId] || {};
-      const next = typeof patchFn === 'function' ? patchFn(cur) : cur;
-      state.sessions[chatId] = next && typeof next === 'object' ? next : cur;
+      const patched = typeof patchFn === 'function' ? patchFn(cur) : cur;
+      state.sessions[chatId] = patched && typeof patched === 'object' ? patched : cur;
       saveState(state);
     }).catch((e) => {
-      log('WARN', `patchSessionSerialized failed: ${e.message}`);
+      log('WARN', `patchSessionSerialized failed for ${chatId}: ${e.message}`);
     });
-    return _sessionPatchQueue;
+    _patchQueues.set(chatId, next);
+    // GC: remove resolved entries to prevent unbounded Map growth
+    next.then(() => { if (_patchQueues.get(chatId) === next) _patchQueues.delete(chatId); });
+    return next;
   }
 
   const CODEX_RESUME_RETRY_WINDOW_MS = 10 * 60 * 1000;
@@ -895,8 +900,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       || getDefaultEngine()
     );
     const runtime = getEngineRuntime(engineName);
+    // Persist engine only if it actually changed — compare against local snapshot to avoid
+    // a second getSession() read that could race with concurrent agent writes.
+    const prevEngine = session.engine;
     session.engine = engineName;
-    if (!getSession(chatId) || getSession(chatId).engine !== engineName) {
+    if (prevEngine !== engineName) {
       await patchSessionSerialized(chatId, (cur) => ({
         ...cur,
         engine: engineName,
