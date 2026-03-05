@@ -172,19 +172,22 @@ for (const altDir of [
   path.join(HOME_DIR, '.agents', 'skills'),
 ]) {
   try {
-    const parentDir = path.dirname(altDir);
-    if (!fs.existsSync(parentDir)) continue; // engine not installed, skip
     const stat = fs.lstatSync(altDir);
     if (stat.isSymbolicLink()) continue; // already a symlink, good
-    // Physical directory exists — replace with symlink
-    fs.rmSync(altDir, { recursive: true, force: true });
+    // Physical directory exists — back it up, then replace with symlink
+    const backupDir = altDir + '.bak.' + Date.now();
+    fs.renameSync(altDir, backupDir);
+    console.log(`[metame] Backed up existing ${altDir} → ${backupDir}`);
     fs.symlinkSync(CLAUDE_SKILLS_DIR, altDir);
   } catch (e) {
     if (e.code === 'ENOENT') {
-      // Directory doesn't exist — create symlink
-      try { fs.symlinkSync(CLAUDE_SKILLS_DIR, altDir); } catch { /* non-fatal */ }
+      // Parent dir or target doesn't exist — try creating symlink
+      try {
+        fs.mkdirSync(path.dirname(altDir), { recursive: true });
+        fs.symlinkSync(CLAUDE_SKILLS_DIR, altDir);
+      } catch { /* non-fatal */ }
     }
-    // Other errors: non-fatal, skip
+    // Other errors (e.g. engine not installed): non-fatal, skip
   }
 }
 
@@ -1945,17 +1948,20 @@ if (isCodex) {
     codexArgs = ['exec', '--full-auto', ...codexUserArgs];
   }
 
+  const codexProviderEnv = (() => { try { return require(path.join(__dirname, 'scripts', 'providers.js')).buildActiveEnv(); } catch { return {}; } })();
   const codexChild = spawn(codexBin, codexArgs, {
     stdio: 'inherit',
     cwd: process.cwd(),
-    env: { ...process.env, METAME_ACTIVE_SESSION: 'true' },
+    env: { ...process.env, ...codexProviderEnv, METAME_ACTIVE_SESSION: 'true' },
   });
 
-  codexChild.on('error', () => {
-    console.error(`\n${icon("fail")} Error: Could not launch 'codex'.`);
+  let codexLaunchError = false;
+  codexChild.on('error', (err) => {
+    codexLaunchError = true;
+    console.error(`\n${icon("fail")} Error: Could not launch 'codex': ${err.message}`);
     console.error("   Please install: npm install -g @openai/codex");
   });
-  codexChild.on('close', (code) => process.exit(code || 0));
+  codexChild.on('close', (code) => process.exit(codexLaunchError ? 127 : (code || 0)));
 
   // Background distillation
   spawnDistillBackground();
