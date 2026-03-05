@@ -36,6 +36,7 @@ function createClaudeEngine(deps) {
     getSessionName,
     writeSessionName,
     markSessionStarted,
+    isCodexSessionValid,
     gitCheckpoint,
     gitCheckpointAsync,
     recordTokens,
@@ -910,6 +911,17 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       if (!existsInCwd) {
         log('WARN', `Session mismatch detected for ${chatId}: ${session.id.slice(0, 8)} not found in ${sessionCwd}; creating fresh session`);
         session = createSession(chatId, sessionCwd, boundProject && boundProject.name ? boundProject.name : '', engineName);
+      }
+    }
+
+    // Codex: pre-validate session via ~/.codex/state_5.sqlite before spawning.
+    // Avoids the expensive try→fail→retry cycle; notifies user upfront if session expired.
+    if (engineName === 'codex' && session && session.started && session.id && session.id !== '__continue__' && isCodexSessionValid) {
+      const check = isCodexSessionValid(session.id, session.cwd);
+      if (!check.valid) {
+        log('WARN', `Codex session ${session.id.slice(0, 8)} not found in SQLite for ${chatId}; creating fresh session`);
+        await bot.sendMessage(chatId, '⚠️ Codex session 已过期，将以全新 session 继续。').catch(() => {});
+        session = createSession(chatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', 'codex');
       }
     }
 

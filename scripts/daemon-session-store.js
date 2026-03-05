@@ -534,6 +534,35 @@ function createSessionStore(deps) {
     }
   }
 
+  // Codex session validation via ~/.codex/state_5.sqlite
+  // Returns { valid, cwd, rolloutPath } or { valid: false }
+  const CODEX_DB = path.join(HOME, '.codex', 'state_5.sqlite');
+  const _codexSessionCache = new Map(); // sessionId -> { result, ts }
+  const CODEX_SESSION_CACHE_TTL = 30000;
+
+  function isCodexSessionValid(sessionId, expectedCwd) {
+    if (!sessionId) return false;
+    const cached = _codexSessionCache.get(sessionId);
+    if (cached && Date.now() - cached.ts < CODEX_SESSION_CACHE_TTL) return cached.result;
+
+    try {
+      const { DatabaseSync } = require('node:sqlite');
+      const db = new DatabaseSync(CODEX_DB, { readonly: true });
+      const row = db.prepare('SELECT cwd, rollout_path FROM threads WHERE id = ?').get(sessionId);
+      db.close();
+      const result = row
+        ? { valid: true, cwd: row.cwd, rolloutPath: row.rollout_path }
+        : { valid: false };
+      if (result.valid && expectedCwd) {
+        result.valid = path.resolve(row.cwd) === path.resolve(expectedCwd);
+      }
+      _codexSessionCache.set(sessionId, { result, ts: Date.now() });
+      return result;
+    } catch {
+      return { valid: false };
+    }
+  }
+
   return {
     findSessionFile,
     clearSessionFileCache,
@@ -553,6 +582,7 @@ function createSessionStore(deps) {
     writeSessionName,
     markSessionStarted,
     getSessionRecentContext,
+    isCodexSessionValid,
   };
 }
 

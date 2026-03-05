@@ -1274,6 +1274,7 @@ const {
   writeSessionName,
   markSessionStarted,
   watchSessionFiles,
+  isCodexSessionValid,
 } = createSessionStore({
   fs,
   path,
@@ -1535,6 +1536,7 @@ const { spawnClaudeAsync, askClaude } = createClaudeEngine({
   sendFileButtons,
   findSessionFile,
   listRecentSessions,
+  isCodexSessionValid,
   getSession,
   createSession,
   getSessionName,
