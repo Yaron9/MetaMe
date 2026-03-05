@@ -165,6 +165,29 @@ if (fs.existsSync(bundledSkillsDir)) {
   }
 }
 
+// Ensure ~/.codex/skills and ~/.agents/skills are symlinks to ~/.claude/skills
+// This keeps skill evolution unified across all engines.
+for (const altDir of [
+  path.join(HOME_DIR, '.codex', 'skills'),
+  path.join(HOME_DIR, '.agents', 'skills'),
+]) {
+  try {
+    const parentDir = path.dirname(altDir);
+    if (!fs.existsSync(parentDir)) continue; // engine not installed, skip
+    const stat = fs.lstatSync(altDir);
+    if (stat.isSymbolicLink()) continue; // already a symlink, good
+    // Physical directory exists — replace with symlink
+    fs.rmSync(altDir, { recursive: true, force: true });
+    fs.symlinkSync(CLAUDE_SKILLS_DIR, altDir);
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      // Directory doesn't exist — create symlink
+      try { fs.symlinkSync(CLAUDE_SKILLS_DIR, altDir); } catch { /* non-fatal */ }
+    }
+    // Other errors: non-fatal, skip
+  }
+}
+
 // Load daemon config for local launch flags
 let daemonCfg = {};
 try {
@@ -1881,7 +1904,12 @@ WantedBy=default.target
   }
 
   // Unknown subcommand
-  console.log(`${icon("book")} MetaMe Daemon Commands:`);
+  console.log(`${icon("book")} MetaMe Commands:`);
+  console.log("   metame                        — launch Claude with MetaMe init");
+  console.log("   metame codex [args]           — launch Codex with MetaMe init");
+  console.log("   metame continue               — resume latest session");
+  console.log("");
+  console.log(`${icon("book")} Daemon Commands:`);
   console.log("   metame start                  — start background daemon");
   console.log("   metame stop                   — stop daemon");
   console.log("   metame status                 — show status & budget");
@@ -1899,7 +1927,43 @@ WantedBy=default.target
 }
 
 // ---------------------------------------------------------
-// 5.8 CONTINUE/SYNC — resume latest session from terminal
+// 5.8 CODEX — launch Codex with MetaMe initialization
+// ---------------------------------------------------------
+const isCodex = process.argv[2] === 'codex';
+if (isCodex) {
+  // spawn() resolves PATH automatically; error event handles missing binary
+  const codexBin = 'codex';
+
+  // Build codex args: remaining user args after 'codex'
+  const codexUserArgs = process.argv.slice(3);
+  let codexArgs;
+  if (codexUserArgs.length === 0) {
+    // Interactive mode: `codex --full-auto`
+    codexArgs = ['--full-auto'];
+  } else {
+    // Non-interactive: `codex exec --full-auto <user args>`
+    codexArgs = ['exec', '--full-auto', ...codexUserArgs];
+  }
+
+  const codexChild = spawn(codexBin, codexArgs, {
+    stdio: 'inherit',
+    cwd: process.cwd(),
+    env: { ...process.env, METAME_ACTIVE_SESSION: 'true' },
+  });
+
+  codexChild.on('error', () => {
+    console.error(`\n${icon("fail")} Error: Could not launch 'codex'.`);
+    console.error("   Please install: npm install -g @openai/codex");
+  });
+  codexChild.on('close', (code) => process.exit(code || 0));
+
+  // Background distillation
+  spawnDistillBackground();
+  return;
+}
+
+// ---------------------------------------------------------
+// 5.9 CONTINUE/SYNC — resume latest session from terminal
 // ---------------------------------------------------------
 // Usage: exit Claude first, then run `metame continue` from terminal.
 // Finds the most recent session and launches Claude with --resume.
