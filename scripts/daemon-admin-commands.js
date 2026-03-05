@@ -6,6 +6,8 @@ const {
   USAGE_CATEGORY_LABEL,
 } = require('./usage-classifier');
 const { IS_WIN } = require('./platform');
+let mentorEngine = null;
+try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
 
 function createAdminCommandHandler(deps) {
   const {
@@ -91,6 +93,30 @@ function createAdminCommandHandler(deps) {
     }
     if (task.interval) return `every ${task.interval}`;
     return 'unspecified';
+  }
+
+  function modeFromLevel(level) {
+    const n = Number(level);
+    if (!Number.isFinite(n)) return 'gentle';
+    if (n >= 8) return 'intense';
+    if (n >= 4) return 'active';
+    return 'gentle';
+  }
+
+  function ensureMentorConfig(cfg) {
+    if (!cfg.daemon) cfg.daemon = {};
+    if (!cfg.daemon.mentor || typeof cfg.daemon.mentor !== 'object') {
+      cfg.daemon.mentor = {};
+    }
+    const mentor = cfg.daemon.mentor;
+    if (typeof mentor.enabled !== 'boolean') mentor.enabled = false;
+    if (!Number.isFinite(Number(mentor.friction_level))) mentor.friction_level = 3;
+    if (!mentor.mode || !['gentle', 'active', 'intense'].includes(String(mentor.mode))) {
+      mentor.mode = modeFromLevel(mentor.friction_level);
+    }
+    if (!Array.isArray(mentor.exclude_agents)) mentor.exclude_agents = ['personal', 'xianyu'];
+    if (!Array.isArray(mentor.emotion_keywords_extra)) mentor.emotion_keywords_extra = [];
+    return mentor;
   }
 
   async function handleAdminCommand(ctx) {
@@ -684,6 +710,68 @@ function createAdminCommandHandler(deps) {
         await bot.sendMessage(chatId, 'Mirror & reflections silenced for 48h.');
       } catch (e) {
         await bot.sendMessage(chatId, `Error: ${e.message}`);
+      }
+      return { handled: true, config };
+    }
+
+    if (text === '/mentor' || text.startsWith('/mentor ')) {
+      try {
+        backupConfig();
+        const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
+        const mentorCfg = ensureMentorConfig(cfg);
+        const arg = text.slice('/mentor'.length).trim();
+
+        if (!arg || arg === 'status') {
+          const status = mentorEngine && typeof mentorEngine.getRuntimeStatus === 'function'
+            ? mentorEngine.getRuntimeStatus()
+            : { debt_count: 0, cooldown_remaining_ms: 0 };
+          const mode = String(mentorCfg.mode || modeFromLevel(mentorCfg.friction_level));
+          const level = Number(mentorCfg.friction_level || 0);
+          const cooldownSec = Math.ceil((Number(status.cooldown_remaining_ms) || 0) / 1000);
+          const lines = [
+            `Mentor: ${mentorCfg.enabled ? 'ON' : 'OFF'}`,
+            `Mode: ${mode}`,
+            `Friction level: ${level}`,
+            `Debts: ${status.debt_count || 0}`,
+            `Emotion cooldown: ${cooldownSec > 0 ? `${cooldownSec}s` : '0s'}`,
+            'Zone: n/a (runtime)',
+          ];
+          await bot.sendMessage(chatId, lines.join('\n'));
+          return { handled: true, config };
+        }
+
+        if (arg === 'on' || arg === 'off') {
+          mentorCfg.enabled = arg === 'on';
+          writeConfigSafe(cfg);
+          config = loadConfig();
+          await bot.sendMessage(chatId, mentorCfg.enabled
+            ? '✅ Mentor mode enabled.'
+            : '✅ Mentor mode disabled.');
+          return { handled: true, config };
+        }
+
+        const mLevel = arg.match(/^level\s+(-?\d{1,2})$/i);
+        if (mLevel) {
+          let level = Number(mLevel[1]);
+          if (!Number.isFinite(level)) level = 3;
+          level = Math.max(0, Math.min(10, Math.floor(level)));
+          mentorCfg.friction_level = level;
+          mentorCfg.mode = modeFromLevel(level);
+          writeConfigSafe(cfg);
+          config = loadConfig();
+          await bot.sendMessage(chatId, `✅ Mentor level set to ${level} (${mentorCfg.mode}).`);
+          return { handled: true, config };
+        }
+
+        await bot.sendMessage(chatId, [
+          '用法:',
+          '/mentor on',
+          '/mentor off',
+          '/mentor level <0-10>',
+          '/mentor status',
+        ].join('\n'));
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ Mentor command failed: ${e.message}`);
       }
       return { handled: true, config };
     }

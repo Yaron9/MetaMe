@@ -281,7 +281,12 @@ function extractErrorClass(text) {
 function detectPatterns(recentMessages, sessionStartTime, opts = {}) {
   const now = safeNow(opts.nowMs);
   const runtime = loadRuntime();
-  runtime.last_pattern_check = now;
+  let dirty = false;
+  const prevPatternTs = Number(runtime.last_pattern_check || 0);
+  if (!prevPatternTs || (now - prevPatternTs) > 30000) {
+    runtime.last_pattern_check = now;
+    dirty = true;
+  }
 
   const normalized = (Array.isArray(recentMessages) ? recentMessages : [])
     .map(m => (typeof m === 'string' ? { text: m } : (m && typeof m === 'object' ? m : null)))
@@ -303,15 +308,31 @@ function detectPatterns(recentMessages, sessionStartTime, opts = {}) {
   const isFatiguedRaw = sessionMs > 90 * 60 * 1000;
   const lastFatigue = Number(runtime.last_fatigue_alert || 0);
   const fatigued = isFatiguedRaw && (!lastFatigue || (now - lastFatigue) > FATIGUE_COOLDOWN_MS);
-  if (fatigued) runtime.last_fatigue_alert = now;
+  if (fatigued) {
+    runtime.last_fatigue_alert = now;
+    dirty = true;
+  }
 
   let suggestion = '';
   if (stuck) suggestion = '检测到你在反复遇到类似问题，建议先退一步梳理整体思路。';
   else if (fatigued) suggestion = '你已连续工作较久，建议短暂休息后再继续。';
   else if (autopilot) suggestion = '你在高效执行模式，建议确认一下当前方向是否仍然正确。';
 
-  saveRuntime(runtime);
+  if (dirty) saveRuntime(runtime);
   return { autopilot, stuck, fatigued, suggestion, semantic_repetition: semanticRepetition };
+}
+
+function getRuntimeStatus(nowMs = Date.now()) {
+  const runtime = loadRuntime();
+  const now = safeNow(nowMs);
+  const until = Number(runtime.emotion_breaker_until || 0);
+  return {
+    debt_count: Array.isArray(runtime.debts) ? runtime.debts.length : 0,
+    cooldown_until: until || null,
+    cooldown_remaining_ms: until > now ? (until - now) : 0,
+    last_fatigue_alert: runtime.last_fatigue_alert || null,
+    last_pattern_check: runtime.last_pattern_check || null,
+  };
 }
 
 function shouldSkipByCompetence(profile, sessionState = {}) {
@@ -372,6 +393,7 @@ module.exports = {
   collectDebt,
   gcExpiredDebts,
   detectPatterns,
+  getRuntimeStatus,
   _private: {
     runtimeFilePath,
     loadRuntime,
@@ -381,4 +403,3 @@ module.exports = {
     repetitionFromTexts,
   },
 };
-
