@@ -1,6 +1,7 @@
 'use strict';
 
 const { classifyChatUsage } = require('./usage-classifier');
+const { deriveProjectInfo } = require('./utils');
 
 function createClaudeEngine(deps) {
   const {
@@ -41,6 +42,10 @@ function createClaudeEngine(deps) {
     statusThrottleMs = 3000,
     fallbackThrottleMs = 8000,
   } = deps;
+  let mentorEngine = null;
+  try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
+  let sessionAnalytics = null;
+  try { sessionAnalytics = require('./session-analytics'); } catch { /* optional */ }
 
   // On Windows, .cmd files need shell to spawn; use COMSPEC to avoid conda PATH issues
   function spawn(cmd, args, options) {
@@ -190,6 +195,82 @@ function createClaudeEngine(deps) {
       if (idx > 7 && idx + 2 < v.length) return v.slice(idx + 2);
     }
     return null;
+  }
+
+  function resolveMentorMode(cfg = {}) {
+    const mode = String(cfg.mode || '').trim().toLowerCase();
+    if (mode === 'gentle' || mode === 'active' || mode === 'intense') return mode;
+    const level = Number(cfg.friction_level);
+    if (Number.isFinite(level)) {
+      if (level >= 8) return 'intense';
+      if (level >= 4) return 'active';
+    }
+    return 'gentle';
+  }
+
+  function extractUserText(content) {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return '';
+    for (const item of content) {
+      if (item && item.type === 'text' && item.text) return item.text;
+    }
+    return '';
+  }
+
+  function collectRecentSessionSignals(sessionId, limit = 6) {
+    const out = { recentMessages: [], sessionStartTime: null };
+    if (!sessionId || typeof findSessionFile !== 'function') return out;
+    const file = findSessionFile(sessionId);
+    if (!file || !fs.existsSync(file)) return out;
+
+    try {
+      const raw = fs.readFileSync(file, 'utf8');
+      const lines = raw.split('\n').filter(Boolean).slice(-800);
+      let current = null;
+      for (const line of lines) {
+        let entry;
+        try { entry = JSON.parse(line); } catch { continue; }
+        if (!out.sessionStartTime && entry.timestamp) out.sessionStartTime = entry.timestamp;
+
+        if (entry.type === 'user' && entry.message) {
+          if (current) out.recentMessages.push(current);
+          current = {
+            text: extractUserText(entry.message.content),
+            tool_calls: 0,
+          };
+        } else if (entry.type === 'assistant' && current && entry.message && Array.isArray(entry.message.content)) {
+          for (const item of entry.message.content) {
+            if (item && item.type === 'tool_use') current.tool_calls++;
+          }
+        }
+      }
+      if (current) out.recentMessages.push(current);
+      if (out.recentMessages.length > limit) {
+        out.recentMessages = out.recentMessages.slice(-limit);
+      }
+    } catch {
+      return out;
+    }
+    return out;
+  }
+
+  function countCodeLines(output) {
+    const text = String(output || '');
+    if (!text.trim()) return 0;
+    const lines = text.split('\n');
+    let inFence = false;
+    let count = 0;
+    let sawFence = false;
+    for (const line of lines) {
+      if (/^\s*```/.test(line)) {
+        sawFence = true;
+        inFence = !inFence;
+        continue;
+      }
+      if (inFence && line.trim()) count++;
+    }
+    if (!sawFence) return 0;
+    return count;
   }
 
   function isMacAutomationIntent(prompt) {
@@ -733,9 +814,35 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       }
     }
 
+    const daemonCfg = loadConfig().daemon || {};
+    const mentorCfg = (daemonCfg.mentor && typeof daemonCfg.mentor === 'object') ? daemonCfg.mentor : {};
+    const mentorEnabled = !!(mentorEngine && mentorCfg.enabled);
+    const excludeAgents = new Set(
+      (Array.isArray(mentorCfg.exclude_agents) ? mentorCfg.exclude_agents : [])
+        .map(x => String(x || '').trim())
+        .filter(Boolean)
+    );
+    const chatAgentKey = boundProjectKey || 'personal';
+    const mentorExcluded = excludeAgents.has(chatAgentKey);
+    let mentorSuppressed = false;
+
+    // Mentor pre-flight breaker: first hit sends a short reassurance; cooldown does not block normal answers.
+    if (mentorEnabled && !mentorExcluded) {
+      try {
+        const breaker = mentorEngine.checkEmotionBreaker(prompt, mentorCfg);
+        if (breaker && breaker.tripped) {
+          mentorSuppressed = true;
+          if (breaker.reason !== 'cooldown_active' && breaker.response) {
+            await bot.sendMessage(chatId, breaker.response).catch(() => { });
+          }
+        }
+      } catch (e) {
+        log('WARN', `Mentor breaker failed: ${e.message}`);
+      }
+    }
+
     // Build claude command
     const args = ['-p'];
-    const daemonCfg = loadConfig().daemon || {};
     const model = daemonCfg.model || 'opus';
     args.push('--model', model);
     if (readOnly) {
@@ -810,11 +917,13 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
     // ZPD: build competence hint from brain profile
     let zdpHint = '';
+    let brainDoc = null;
     if (!session.started) {
       try {
         const brainPath = path.join(HOME, '.claude_profile.yaml');
         if (fs.existsSync(brainPath)) {
           const brain = yaml.load(fs.readFileSync(brainPath, 'utf8'));
+          brainDoc = brain;
           const cmap = brain && brain.user_competence_map;
           if (cmap && typeof cmap === 'object' && Object.keys(cmap).length > 0) {
             const lines = Object.entries(cmap)
@@ -824,6 +933,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           }
         }
       } catch { /* non-critical */ }
+    }
+    if (!brainDoc) {
+      try {
+        const brainPath = path.join(HOME, '.claude_profile.yaml');
+        if (fs.existsSync(brainPath)) brainDoc = yaml.load(fs.readFileSync(brainPath, 'utf8')) || {};
+      } catch { /* ignore */ }
     }
 
     // Inject daemon hints only on first message of a session
@@ -887,9 +1002,44 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       } catch { /* non-critical */ }
     }
 
+    // Mentor context hook: inject after memoryHint, before langGuard.
+    let mentorHint = '';
+    if (mentorEnabled && !mentorExcluded && !mentorSuppressed) {
+      try {
+        const signals = collectRecentSessionSignals(session.id, 6);
+        let skeleton = null;
+        if (sessionAnalytics && typeof sessionAnalytics.extractSkeleton === 'function') {
+          const file = findSessionFile(session.id);
+          if (file && fs.existsSync(file)) {
+            const st = fs.statSync(file);
+            if (st.size <= 2 * 1024 * 1024) {
+              skeleton = sessionAnalytics.extractSkeleton(file);
+            }
+          }
+        }
+        const zone = skeleton && mentorEngine.computeZone
+          ? mentorEngine.computeZone(skeleton).zone
+          : 'stretch';
+        const sessionState = {
+          zone,
+          recentMessages: signals.recentMessages,
+          cwd: session.cwd,
+          skeleton,
+          sessionStartTime: signals.sessionStartTime || new Date().toISOString(),
+          topic: String(prompt || '').slice(0, 120),
+          currentTopic: String(prompt || '').slice(0, 120),
+          lastUserMessage: String(prompt || '').slice(0, 200),
+        };
+        const built = mentorEngine.buildMentorPrompt(sessionState, brainDoc || {}, mentorCfg);
+        if (built && String(built).trim()) mentorHint = `\n\n${String(built).trim()}`;
+      } catch (e) {
+        log('WARN', `Mentor prompt build failed: ${e.message}`);
+      }
+    }
+
     // Always append a compact language guard to prevent accidental Korean/Japanese responses
     const langGuard = '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
-    const fullPrompt = routedPrompt + daemonHint + macAutomationHint + summaryHint + memoryHint + langGuard;
+    const fullPrompt = routedPrompt + daemonHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
 
     // Git checkpoint before Claude modifies files (for /undo)
     // Pass the user prompt as label so checkpoint list is human-readable
@@ -941,6 +1091,24 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     // Clean up status message
     if (statusMsgId && bot.deleteMessage) {
       bot.deleteMessage(chatId, statusMsgId).catch(() => { });
+    }
+
+    // Mentor post-flight debt registration (intense mode only).
+    if (mentorEnabled && !mentorExcluded && !mentorSuppressed && mentorEngine && typeof mentorEngine.registerDebt === 'function' && output) {
+      try {
+        const mode = resolveMentorMode(mentorCfg);
+        if (mode === 'intense') {
+          const codeLines = countCodeLines(output);
+          if (codeLines > 30) {
+            const info = deriveProjectInfo(session && session.cwd ? session.cwd : '');
+            const projectId = info && info.project_id ? info.project_id : 'proj_default';
+            mentorEngine.registerDebt(projectId, String(prompt || '').slice(0, 120), codeLines);
+            log('INFO', `[MENTOR] Registered reflection debt (${projectId}, lines=${codeLines})`);
+          }
+        }
+      } catch (e) {
+        log('WARN', `Mentor post-flight failed: ${e.message}`);
+      }
     }
 
     // When Claude completes with no text output (pure tool work), send a done notice

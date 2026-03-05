@@ -48,3 +48,4 @@
 ## 注意事项
 - 专属群（chat_agent_map 中的群）永远绑定同一个 Agent，不能通过昵称切换
 - 新群必须发 `/activate` 才能使用，未授权群会提示"此群未授权"
+- 需要定位脚本入口、升级步骤或文件落点时，先看 `~/.metame/docs/pointer-map.md`

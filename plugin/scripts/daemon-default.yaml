@@ -134,3 +134,9 @@ daemon:
   # Mobile users can't click "allow" — so we pre-authorize everything.
   # Security relies on allowed_chat_ids whitelist, not tool restrictions.
   dangerously_skip_permissions: true
+  mentor:
+    enabled: false
+    friction_level: 3
+    mode: gentle
+    exclude_agents: [personal, xianyu]
+    emotion_keywords_extra: []

@@ -2,6 +2,9 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
+const os = require('os');
+const path = require('path');
+const fs = require('fs');
 const { createAdminCommandHandler } = require('./daemon-admin-commands');
 const taskEnvelope = require('./daemon-task-envelope');
 
@@ -329,5 +332,55 @@ describe('daemon-admin-commands /TeamTask', () => {
     assert.equal(res.handled, true);
     assert.match(sent[0], /\/TeamTask create <agent> <目标>/);
     assert.doesNotMatch(sent[0], /\/dispatch task/);
+  });
+});
+
+describe('daemon-admin-commands /mentor', () => {
+  it('toggles mentor and adjusts level/mode', async () => {
+    const sent = [];
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-mentor-cmd-'));
+    const configFile = path.join(tmpDir, 'daemon.yaml');
+    const yaml = require('js-yaml');
+    const initial = { daemon: { model: 'opus' } };
+    fs.writeFileSync(configFile, yaml.dump(initial), 'utf8');
+
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        yaml,
+        CONFIG_FILE: configFile,
+        loadConfig: () => yaml.load(fs.readFileSync(configFile, 'utf8')) || {},
+        writeConfigSafe: (cfg) => fs.writeFileSync(configFile, yaml.dump(cfg), 'utf8'),
+      }
+    );
+    const bot = {
+      sendMessage: async (_chatId, text) => { sent.push(String(text)); },
+    };
+
+    let res = await handleAdminCommand({
+      bot, chatId: 'mobile-user-mentor', text: '/mentor on', config: {}, state: { tasks: {}, budget: { tokens_used: 0 } },
+    });
+    assert.equal(res.handled, true);
+    assert.match(sent[sent.length - 1], /enabled/i);
+
+    res = await handleAdminCommand({
+      bot, chatId: 'mobile-user-mentor', text: '/mentor level 9', config: {}, state: { tasks: {}, budget: { tokens_used: 0 } },
+    });
+    assert.equal(res.handled, true);
+    assert.match(sent[sent.length - 1], /9 \(intense\)/i);
+
+    res = await handleAdminCommand({
+      bot, chatId: 'mobile-user-mentor', text: '/mentor status', config: {}, state: { tasks: {}, budget: { tokens_used: 0 } },
+    });
+    assert.equal(res.handled, true);
+    assert.match(sent[sent.length - 1], /Mentor: ON/);
+    assert.match(sent[sent.length - 1], /Mode: intense/);
+
+    const finalCfg = yaml.load(fs.readFileSync(configFile, 'utf8')) || {};
+    assert.equal(finalCfg.daemon.mentor.enabled, true);
+    assert.equal(finalCfg.daemon.mentor.friction_level, 9);
+    assert.equal(finalCfg.daemon.mentor.mode, 'intense');
+
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 });

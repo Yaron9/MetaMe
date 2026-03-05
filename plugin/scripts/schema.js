@@ -109,6 +109,9 @@ const SCHEMA = {
   'growth.last_reflection': { tier: 'T5', type: 'string' },
   'growth.quiet_until': { tier: 'T5', type: 'string' },
   'growth.mirror_enabled': { tier: 'T5', type: 'boolean' },
+  'growth.mentor_mode': { tier: 'T5', type: 'enum', values: ['off', 'gentle', 'active', 'intense'] },
+  'growth.mentor_friction_level': { tier: 'T5', type: 'number', min: 0, max: 10 },
+  'growth.weekly_report_last': { tier: 'T5', type: 'string' },
 };
 
 /**
@@ -178,6 +181,15 @@ function validate(key, value) {
   if (def.type === 'array' && Array.isArray(value)) {
     if (def.maxItems && value.length > def.maxItems) {
       return { valid: false, reason: `Array exceeds ${def.maxItems} items` };
+    }
+  }
+
+  if (def.type === 'number' && typeof value === 'number') {
+    if (Number.isFinite(def.min) && value < def.min) {
+      return { valid: false, reason: `Number must be >= ${def.min}` };
+    }
+    if (Number.isFinite(def.max) && value > def.max) {
+      return { valid: false, reason: `Number must be <= ${def.max}` };
     }
   }
 
