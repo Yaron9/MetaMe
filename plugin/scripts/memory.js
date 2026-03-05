@@ -369,7 +369,7 @@ function saveFacts(sessionId, project, facts, { scope = null } = {}) {
 
   if (conflicts > 0) log('WARN', `[MEMORY] ${conflicts} conflict(s) detected`);
 
-  return { saved, skipped, superseded, conflicts };
+  return { saved, skipped, superseded, conflicts, savedFacts };
 }
 
 /**
