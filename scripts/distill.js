@@ -19,7 +19,7 @@ const BUFFER_FILE = path.join(HOME, '.metame', 'raw_signals.jsonl');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const LOCK_FILE = path.join(HOME, '.metame', 'distill.lock');
 
-const { hasKey, isLocked, getTier, getWritableKeysForPrompt, estimateTokens, TOKEN_BUDGET } = require('./schema');
+const { hasKey, isLocked, getTier, getDefinition, getWritableKeysForPrompt, estimateTokens, TOKEN_BUDGET } = require('./schema');
 const { loadPending, savePending, upsertPending, getPromotable, removePromoted, expireStale } = require('./pending-traits');
 const { writeBrainFileSafe, normalizeProjectPath, deriveProjectInfo } = require('./utils');
 
