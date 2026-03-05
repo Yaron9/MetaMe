@@ -894,23 +894,14 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       session = createSession(chatId, boundCwd || undefined, boundProject && boundProject.name ? boundProject.name : '', boundEngineName);
     }
 
+    // Engine is determined from config only — bound agent config wins, then global default.
+    // No per-chatId engine state: switching engines uses /provider (changes global default)
+    // or agent config in daemon.yaml. This avoids a per-message state write.
     const engineName = normalizeEngineName(
-      (boundProject && boundProject.engine)
-      || (session && session.engine)
-      || getDefaultEngine()
+      (boundProject && boundProject.engine) || getDefaultEngine()
     );
     const runtime = getEngineRuntime(engineName);
-    // Persist engine only if it actually changed — compare against local snapshot to avoid
-    // a second getSession() read that could race with concurrent agent writes.
-    const prevEngine = session.engine;
-    session.engine = engineName;
-    if (prevEngine !== engineName) {
-      await patchSessionSerialized(chatId, (cur) => ({
-        ...cur,
-        engine: engineName,
-        cwd: session.cwd || cur.cwd || HOME,
-      }));
-    }
+    session.engine = engineName; // keep local copy for Codex resume detection below
 
     // Safety guard: prevent stale state from resuming another workspace's session.
     if (engineName === 'claude' && session && session.started && session.id && session.id !== '__continue__' && session.cwd) {
