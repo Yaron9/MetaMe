@@ -882,52 +882,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const boundEngineName = (boundProject && boundProject.engine) ? normalizeEngineName(boundProject.engine) : getDefaultEngine();
 
     if (!session) {
-      if (boundCwd) {
-        if (normalizeEngineName(boundEngineName) === 'claude') {
-          // Claude supports --continue natively: skip the expensive scanAllSessions() scan.
-          // After the first turn, onSession() replaces __continue__ with the resolved real session ID.
-          await patchSessionSerialized(chatId, () => ({
-            id: '__continue__',
-            cwd: boundCwd,
-            started: true,
-            engine: boundEngineName,
-          }));
-          session = getSession(chatId) || { id: '__continue__', cwd: boundCwd, started: true, engine: boundEngineName };
-          log('INFO', `Auto-attach ${chatId} → __continue__ in ${path.basename(boundCwd)}`);
-        } else {
-          // Codex (and other engines) have no --continue equivalent; must resolve the real session ID.
-          const recentInBound = listRecentSessions(1, boundCwd);
-          if (recentInBound.length > 0 && recentInBound[0].sessionId) {
-            const target = recentInBound[0];
-            await patchSessionSerialized(chatId, () => ({
-              id: target.sessionId,
-              cwd: boundCwd,
-              started: true,
-              engine: boundEngineName,
-            }));
-            session = getSession(chatId) || { id: target.sessionId, cwd: boundCwd, started: true, engine: boundEngineName };
-            log('INFO', `Auto-attached ${chatId} to bound-session: ${target.sessionId.slice(0, 8)} (${path.basename(boundCwd)})`);
-          } else {
-            session = createSession(chatId, boundCwd, boundProject && boundProject.name ? boundProject.name : '', boundEngineName);
-          }
-        }
-      } else {
-        // Non-bound chats: scan for most recent session (only happens once post-restart).
-        const recent = listRecentSessions(1);
-        if (recent.length > 0 && recent[0].sessionId && recent[0].projectPath) {
-          const target = recent[0];
-          await patchSessionSerialized(chatId, () => ({
-            id: target.sessionId,
-            cwd: target.projectPath,
-            started: true,
-            engine: getDefaultEngine(),
-          }));
-          session = getSession(chatId) || { id: target.sessionId, cwd: target.projectPath, started: true, engine: getDefaultEngine() };
-          log('INFO', `Auto-attached ${chatId} to recent session: ${target.sessionId.slice(0, 8)} (${path.basename(target.projectPath)})`);
-        } else {
-          session = createSession(chatId, undefined, '', boundEngineName);
-        }
-      }
+      // No saved state for this chatId: start a fresh session.
+      // Note: daemon_state.json persists across restarts, so this only happens on truly first use
+      // or after an explicit /new command. Auto-attaching to a recent session is intentionally
+      // avoided to prevent cross-agent contamination when multiple agents share cwd or cache.
+      session = createSession(chatId, boundCwd || undefined, boundProject && boundProject.name ? boundProject.name : '', boundEngineName);
     }
 
     const engineName = normalizeEngineName(
