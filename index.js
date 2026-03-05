@@ -124,6 +124,8 @@ if (scriptsUpdated) {
 syncDirFiles(path.join(__dirname, 'scripts', 'docs'), path.join(METAME_DIR, 'docs'));
 // Bin: CLI tools (dispatch_to etc.)
 syncDirFiles(path.join(__dirname, 'scripts', 'bin'), path.join(METAME_DIR, 'bin'), { chmod: 0o755 });
+// Hooks: Claude Code event hooks (Stop, PostToolUse, etc.)
+syncDirFiles(path.join(__dirname, 'scripts', 'hooks'), path.join(METAME_DIR, 'hooks'));
 
 // ---------------------------------------------------------
 // Deploy bundled skills to ~/.claude/skills/
@@ -231,6 +233,8 @@ function ensureHookInstalled() {
       entry.hooks?.some(h => h.command && h.command.includes('signal-capture.js'))
     );
 
+    let modified = false;
+
     if (!stillInstalled) {
       if (!settings.hooks) settings.hooks = {};
       if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
@@ -241,9 +245,33 @@ function ensureHookInstalled() {
           command: hookCommand
         }]
       });
-
-      fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2), 'utf8');
+      modified = true;
       console.log(`${icon("hook")} MetaMe: Signal capture hook installed.`);
+    }
+
+    // Ensure Stop hook (session-logger + tool-failure capture) is installed
+    const stopHookScript = path.join(METAME_DIR, 'hooks', 'stop-session-capture.js').replace(/\\/g, '/');
+    const stopHookCommand = `node "${stopHookScript}"`;
+    const stopHookInstalled = (settings.hooks?.Stop || []).some(entry =>
+      entry.hooks?.some(h => h.command && h.command.includes('stop-session-capture.js'))
+    );
+
+    if (!stopHookInstalled) {
+      if (!settings.hooks) settings.hooks = {};
+      if (!settings.hooks.Stop) settings.hooks.Stop = [];
+
+      settings.hooks.Stop.push({
+        hooks: [{
+          type: 'command',
+          command: stopHookCommand
+        }]
+      });
+      modified = true;
+      console.log(`${icon("hook")} MetaMe: Stop session capture hook installed.`);
+    }
+
+    if (modified) {
+      fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2), 'utf8');
     }
   } catch (e) {
     // Non-fatal: hook install failure shouldn't block launch
@@ -743,7 +771,8 @@ const GLOBAL_MARKER_END = '<!-- METAME-GLOBAL:END -->';
 // Build dynamic Agent dispatch table from daemon.yaml projects.
 // Only include agents whose cwd actually exists on disk — test/stale agents
 // with deleted paths are automatically excluded, no manual cleanup needed.
-let dispatchTable = '';
+// The table is written to ~/.metame/docs/dispatch-table.md (NOT inlined into CLAUDE.md).
+const DISPATCH_TABLE_PATH = path.join(METAME_DIR, 'docs', 'dispatch-table.md');
 try {
   const daemonYamlPath = path.join(os.homedir(), '.metame', 'daemon.yaml');
   if (fs.existsSync(daemonYamlPath)) {
@@ -752,13 +781,29 @@ try {
     const rows = Object.entries(projects)
       .filter(([, p]) => {
         if (!p || !p.name || !p.cwd) return false;
-        // Expand ~ to home directory
         const expandedCwd = String(p.cwd).replace(/^~/, os.homedir());
         return fs.existsSync(expandedCwd);
       })
       .map(([key, p]) => `| \`${key}\` | ${p.name} |`);
     if (rows.length > 0) {
-      dispatchTable = '\n\n| project_key | 昵称 |\n|-------------|------|\n' + rows.join('\n') + '\n\n`--new` 强制新建会话（用户说"新开会话"时加此参数）。';
+      const tableContent = [
+        '# Agent Dispatch 路由表',
+        '',
+        '> 自动生成，来源：daemon.yaml。勿手动编辑。',
+        '',
+        '| project_key | 昵称 |',
+        '|-------------|------|',
+        ...rows,
+        '',
+        '## 使用方法',
+        '```bash',
+        '~/.metame/bin/dispatch_to [--new] <project_key> "内容"',
+        '```',
+        '`--new` 强制新建会话（用户说"新开会话"时加此参数）。',
+        '新增 Agent：`/agent bind <名称> <工作目录>`',
+      ].join('\n') + '\n';
+      fs.mkdirSync(path.dirname(DISPATCH_TABLE_PATH), { recursive: true });
+      fs.writeFileSync(DISPATCH_TABLE_PATH, tableContent);
     }
   }
 } catch { /* daemon.yaml missing or invalid — skip dispatch table */ }
@@ -771,8 +816,7 @@ const KERNEL_BODY = PROTOCOL_NORMAL
 
 const CAPABILITY_SECTIONS = [
   '## Agent Dispatch',
-  `"告诉X/让X" → \`~/.metame/bin/dispatch_to <project_key> "内容"\`，手机端 \`/dispatch to <key> <消息>\`。` + dispatchTable,
-  '新增 Agent：`/agent bind <名称> <工作目录>`',
+  '识别到"告诉X/让X/通知X"等转发意图时 → 先 `cat ~/.metame/docs/dispatch-table.md` 获取路由表（昵称→project_key），再执行转发。不要凭记忆猜测昵称对应关系。',
   '',
   '## Agent 创建与管理',
   '用户问创建/管理/绑定 Agent 时 → 先 `cat ~/.metame/docs/agent-guide.md` 再回答。',
