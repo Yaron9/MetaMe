@@ -33,6 +33,8 @@ function createAdminCommandHandler(deps) {
     getMessageQueue,
     loadState,
     saveState,
+    getDefaultEngine = () => 'claude',
+    setDefaultEngine = () => {},
   } = deps;
 
   function resolveProjectKey(targetName, projects) {
@@ -1026,6 +1028,25 @@ function createAdminCommandHandler(deps) {
       } catch (e) {
         await bot.sendMessage(chatId, `❌ ${e.message}`);
       }
+      return { handled: true, config };
+    }
+
+    // /engine [name] — show or switch default engine (claude/codex)
+    if (text === '/engine' || text.startsWith('/engine ')) {
+      const arg = text.slice('/engine'.length).trim().toLowerCase();
+      if (!arg) {
+        const cur = getDefaultEngine();
+        const distill = providerMod ? providerMod.getDistillModel() : '(unknown)';
+        await bot.sendMessage(chatId, `🔧 当前引擎: ${cur}\n🧪 蒸馏模型: ${distill}\n\n用法: /engine claude 或 /engine codex`);
+        return { handled: true, config };
+      }
+      if (arg !== 'claude' && arg !== 'codex') {
+        await bot.sendMessage(chatId, `❌ 不支持的引擎: ${arg}\n可选: claude, codex`);
+        return { handled: true, config };
+      }
+      setDefaultEngine(arg);
+      const distill = providerMod ? providerMod.getDistillModel() : '(unknown)';
+      await bot.sendMessage(chatId, `✅ 默认引擎: ${arg}\n🧪 蒸馏模型已同步: ${distill}`);
       return { handled: true, config };
     }
 

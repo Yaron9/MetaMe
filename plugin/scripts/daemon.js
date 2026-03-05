@@ -144,7 +144,7 @@ const { createFileBrowser } = require('./daemon-file-browser');
 const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lifecycle');
 const { createNotifier } = require('./daemon-notify');
 const { createClaudeEngine } = require('./daemon-claude-engine');
-const { createEngineRuntimeFactory } = require('./daemon-engine-runtime');
+const { createEngineRuntimeFactory, detectDefaultEngine, ENGINE_DISTILL_MAP } = require('./daemon-engine-runtime');
 const { createCommandRouter } = require('./daemon-command-router');
 const { createTaskScheduler } = require('./daemon-task-scheduler');
 const { createAgentTools } = require('./daemon-agent-tools');
@@ -1119,7 +1119,8 @@ const {
 /**
  * Attach chatId to the most recent session in projCwd, or create a new one.
  */
-function attachOrCreateSession(chatId, projCwd, name, engine = 'claude') {
+function attachOrCreateSession(chatId, projCwd, name, engine) {
+  engine = engine || getDefaultEngine();
   // Virtual chatIds (_agent_* / _scope_*) are isolated from real user chats.
   // This avoids cross-context session collisions between user chat and dispatch flows.
   createSession(chatId, projCwd, name || '', engine);
@@ -1317,7 +1318,7 @@ function saveActivePids() {
       if (proc.child && proc.child.pid) {
         pids[chatId] = {
           pid: proc.child.pid,
-          engine: proc.engine || 'claude',
+          engine: proc.engine || getDefaultEngine(),
           killSignal: proc.killSignal || 'SIGTERM',
         };
       }
@@ -1351,6 +1352,35 @@ function killOrphanPids() {
     }
     fs.unlinkSync(ACTIVE_PIDS_FILE);
   } catch { }
+}
+
+const detectedEngine = detectDefaultEngine({ fs, execSync });
+let _defaultEngine = loadState().default_engine || detectedEngine;
+if (providerMod && typeof providerMod.setEngine === 'function') {
+  providerMod.setEngine(_defaultEngine);
+}
+log('INFO', `Default engine: ${_defaultEngine} (detected: ${detectedEngine})`);
+
+function getDefaultEngine() {
+  return _defaultEngine;
+}
+
+function setDefaultEngine(engine) {
+  _defaultEngine = engine;
+  const st = loadState();
+  st.default_engine = engine;
+  saveState(st);
+  if (providerMod) {
+    // Couple distill model
+    if (typeof providerMod.setDistillModel === 'function') {
+      const paired = ENGINE_DISTILL_MAP[engine] || ENGINE_DISTILL_MAP.claude;
+      try { providerMod.setDistillModel(paired); } catch { /* ignore */ }
+    }
+    // Couple distill binary
+    if (typeof providerMod.setEngine === 'function') {
+      try { providerMod.setEngine(engine); } catch { /* ignore */ }
+    }
+  }
 }
 
 const getEngineRuntime = createEngineRuntimeFactory({
@@ -1428,6 +1458,8 @@ const { handleAdminCommand } = createAdminCommandHandler({
   getMessageQueue: () => messageQueue,
   loadState,
   saveState,
+  getDefaultEngine,
+  setDefaultEngine,
 });
 
 const { handleSessionCommand } = createSessionCommandHandler({
@@ -1455,6 +1487,7 @@ const { handleSessionCommand } = createSessionCommandHandler({
   sessionRichLabel,
   buildSessionCardElements,
   sessionLabel,
+  getDefaultEngine,
 });
 
 // Message queue for messages received while a task is running
@@ -1498,6 +1531,7 @@ const { spawnClaudeAsync, askClaude } = createClaudeEngine({
   statusThrottleMs: STATUS_THROTTLE_MS,
   fallbackThrottleMs: FALLBACK_THROTTLE_MS,
   getEngineRuntime,
+  getDefaultEngine,
 });
 
 const agentTools = createAgentTools({
@@ -1557,6 +1591,7 @@ const { handleAgentCommand } = createAgentCommandHandler({
   attachOrCreateSession,
   agentFlowTtlMs: getAgentFlowTtlMs,
   agentBindTtlMs: getAgentBindTtlMs,
+  getDefaultEngine,
 });
 
 // Caffeinate process for /nosleep toggle (macOS only)
@@ -1630,6 +1665,7 @@ const { handleCommand } = createCommandRouter({
   pendingAgentFlows,
   pendingActivations,
   agentFlowTtlMs: getAgentFlowTtlMs,
+  getDefaultEngine,
 });
 
 // Bind handleCommand for agent dispatch (must come after handleCommand definition)

@@ -51,6 +51,19 @@ function resolveBinary(engineName, deps = {}) {
   return key;
 }
 
+const ENGINE_DISTILL_MAP = Object.freeze({
+  claude: 'haiku',
+  codex: 'gpt-5.1-codex-mini',
+});
+
+function detectDefaultEngine(deps = {}) {
+  for (const engine of ['claude', 'codex']) {
+    const bin = resolveBinary(engine, deps);
+    if (bin !== engine) return engine; // resolveBinary found a real path
+  }
+  return 'claude'; // ultimate fallback
+}
+
 function classifyEngineError(text) {
   const msg = String(text || '').trim();
   if (!msg) return null;
@@ -250,6 +263,8 @@ module.exports = {
   createEngineRuntimeFactory,
   normalizeEngineName,
   resolveBinary,
+  detectDefaultEngine,
+  ENGINE_DISTILL_MAP,
   _private: {
     classifyEngineError,
     parseClaudeStreamEvent,

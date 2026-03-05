@@ -43,7 +43,11 @@ function createClaudeEngine(deps) {
     statusThrottleMs = 3000,
     fallbackThrottleMs = 8000,
     getEngineRuntime: injectedGetEngineRuntime,
+    getDefaultEngine: _getDefaultEngine,
   } = deps;
+  function getDefaultEngine() {
+    return (typeof _getDefaultEngine === 'function') ? _getDefaultEngine() : 'claude';
+  }
   let mentorEngine = null;
   try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
   let sessionAnalytics = null;
@@ -104,7 +108,7 @@ function createClaudeEngine(deps) {
 
   function formatEngineSpawnError(err, runtime) {
     if (!err) return 'Unknown spawn error';
-    const rt = runtime || { name: 'claude' };
+    const rt = runtime || { name: getDefaultEngine() };
     if (err.code === 'ENOENT') {
       if (rt.name === 'codex') {
         return 'Codex CLI 未安装。请先运行: npm install -g @openai/codex';
@@ -441,7 +445,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       child.on('error', (err) => {
         clearTimeout(timer);
-        resolve({ output: null, error: formatEngineSpawnError(err, { name: 'claude' }) });
+        resolve({ output: null, error: formatEngineSpawnError(err, { name: getDefaultEngine() }) });
       });
 
       // Write input and close stdin
@@ -491,7 +495,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         settled = true;
         resolve(payload);
       };
-      const rt = runtime || getEngineRuntime('claude');
+      const rt = runtime || getEngineRuntime(getDefaultEngine());
       const streamArgs = rt.name === 'claude'
         ? [...args, '--output-format', 'stream-json', '--verbose']
         : args;
@@ -784,7 +788,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     if (!messageId || !session || !session.id) return;
     const st = loadState();
     if (!st.msg_sessions) st.msg_sessions = {};
-    st.msg_sessions[messageId] = { id: session.id, cwd: session.cwd, engine: session.engine || 'claude' };
+    st.msg_sessions[messageId] = { id: session.id, cwd: session.cwd, engine: session.engine || getDefaultEngine() };
     const keys = Object.keys(st.msg_sessions);
     if (keys.length > 200) {
       for (const k of keys.slice(0, keys.length - 200)) delete st.msg_sessions[k];
@@ -851,7 +855,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     if (agentMatch) {
       const { key, proj, rest } = agentMatch;
       const projCwd = normalizeCwd(proj.cwd);
-      attachOrCreateSession(chatId, projCwd, proj.name || key, normalizeEngineName(proj.engine));
+      attachOrCreateSession(chatId, projCwd, proj.name || key, proj.engine ? normalizeEngineName(proj.engine) : getDefaultEngine());
       log('INFO', `Agent switch via nickname: ${key} (${projCwd})`);
       if (!rest) {
         // Pure nickname call — confirm switch and stop
@@ -874,7 +878,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
     const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
     const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
-    const boundEngineName = normalizeEngineName(boundProject && boundProject.engine);
+    const boundEngineName = (boundProject && boundProject.engine) ? normalizeEngineName(boundProject.engine) : getDefaultEngine();
 
     if (!session) {
       if (boundCwd) {
@@ -906,7 +910,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             id: target.sessionId,
             cwd: target.projectPath,
             started: true,
-            engine: 'claude',
+            engine: getDefaultEngine(),
           };
           saveState(state);
           session = state.sessions[chatId];
@@ -920,7 +924,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const engineName = normalizeEngineName(
       (boundProject && boundProject.engine)
       || (session && session.engine)
-      || 'claude'
+      || getDefaultEngine()
     );
     const runtime = getEngineRuntime(engineName);
     session.engine = engineName;

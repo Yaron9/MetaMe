@@ -28,10 +28,12 @@ function createAgentCommandHandler(deps) {
     attachOrCreateSession,
     agentFlowTtlMs,
     agentBindTtlMs,
+    getDefaultEngine = () => 'claude',
   } = deps;
 
   function normalizeEngineName(name) {
-    return String(name || '').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+    const n = String(name || '').trim().toLowerCase();
+    return n === 'codex' ? 'codex' : getDefaultEngine();
   }
 
   function inferEngineByCwd(cfg, cwd) {
@@ -147,7 +149,7 @@ function createAgentCommandHandler(deps) {
           chatId,
           normalizeCwd(res.data.cwd),
           p.name || agentName || res.data.projectKey || '',
-          p.engine || 'claude'
+          p.engine || getDefaultEngine()
         );
       }
       await bot.sendMessage(chatId, `${icon} ${p.name || agentName} ${action}\n目录: ${displayCwd}`);
@@ -161,7 +163,7 @@ function createAgentCommandHandler(deps) {
     }
     const fallbackCwd = (fallback.data && fallback.data.cwd) || agentCwd;
     if (fallbackCwd && typeof attachOrCreateSession === 'function') {
-      attachOrCreateSession(chatId, normalizeCwd(fallbackCwd), agentName || '', 'claude');
+      attachOrCreateSession(chatId, normalizeCwd(fallbackCwd), agentName || '', getDefaultEngine());
     }
     return {
       ok: true,

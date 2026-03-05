@@ -26,6 +26,7 @@ function createCommandRouter(deps) {
     pendingAgentFlows,
     pendingActivations,
     agentFlowTtlMs,
+    getDefaultEngine,
   } = deps;
 
   function resolveFlowTtlMs() {
@@ -478,7 +479,7 @@ function createCommandRouter(deps) {
       }
       const data = res.data || {};
       const projName = projectNameFromResult(data, agentName);
-      if (data.cwd) attachOrCreateSession(chatId, normalizeCwd(data.cwd), projName, (data.project && data.project.engine) || 'claude');
+      if (data.cwd) attachOrCreateSession(chatId, normalizeCwd(data.cwd), projName, (data.project && data.project.engine) || getDefaultEngine());
       await bot.sendMessage(chatId, `✅ 已绑定 Agent\n名称: ${projName}\n目录: ${data.cwd || '（未知）'}`);
       return true;
     }
@@ -517,10 +518,10 @@ function createCommandRouter(deps) {
       const proj = config.projects[mappedKey];
       const projCwd = normalizeCwd(proj.cwd);
       const cur = loadState().sessions?.[chatId];
-      const curEngine = String((cur && cur.engine) || 'claude').toLowerCase();
-      const projEngine = String((proj && proj.engine) || 'claude').toLowerCase();
+      const curEngine = String((cur && cur.engine) || getDefaultEngine()).toLowerCase();
+      const projEngine = String((proj && proj.engine) || getDefaultEngine()).toLowerCase();
       if (!cur || cur.cwd !== projCwd || curEngine !== projEngine) {
-        attachOrCreateSession(chatId, projCwd, proj.name || mappedKey, proj.engine || 'claude');
+        attachOrCreateSession(chatId, projCwd, proj.name || mappedKey, proj.engine || getDefaultEngine());
       }
     }
 
@@ -579,7 +580,7 @@ function createCommandRouter(deps) {
         '/undo <hash> — 回退到指定 git checkpoint',
         '/quit — 结束会话，重新加载 MCP/配置',
         '',
-        `⚙️ /model [${currentModel}] /provider [${currentProvider}] /distill-model /status /tasks /run /budget /reload /mentor`,
+        `⚙️ /model [${currentModel}] /engine [${getDefaultEngine()}] /provider [${currentProvider}] /distill-model /status /tasks /run /budget /reload /mentor`,
         '🧩 /TeamTask create <agent> <目标> [--scope <id>] · /TeamTask · /TeamTask <id>',
         '🧠 /memory — 记忆统计 · /memory <关键词> — 搜索事实',
         '🧬 /skill-evo — 查看/处理技能演化队列',
@@ -619,7 +620,7 @@ function createCommandRouter(deps) {
       if (quickAgent && !quickAgent.rest) {
         const { key, proj } = quickAgent;
         const projCwd = normalizeCwd(proj.cwd);
-        attachOrCreateSession(chatId, projCwd, proj.name || key, proj.engine || 'claude');
+        attachOrCreateSession(chatId, projCwd, proj.name || key, proj.engine || getDefaultEngine());
         log('INFO', `Agent switch via nickname: ${key} (${projCwd})`);
         await bot.sendMessage(chatId, `${proj.icon || '🤖'} ${proj.name || key} 在线`);
         return;

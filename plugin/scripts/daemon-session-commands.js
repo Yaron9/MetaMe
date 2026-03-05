@@ -26,10 +26,12 @@ function createSessionCommandHandler(deps) {
     sessionRichLabel,
     buildSessionCardElements,
     sessionLabel,
+    getDefaultEngine = () => 'claude',
   } = deps;
 
   function normalizeEngineName(name) {
-    return String(name || '').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+    const n = String(name || '').trim().toLowerCase();
+    return n === 'codex' ? 'codex' : getDefaultEngine();
   }
 
   function inferEngineByCwd(cfg, cwd) {
@@ -75,7 +77,7 @@ function createSessionCommandHandler(deps) {
         const boundProj = boundKey && newCfg.projects && newCfg.projects[boundKey];
         if (boundProj && boundProj.cwd) {
           const boundCwd = normalizeCwd(boundProj.cwd);
-          const session = createSession(chatId, boundCwd, '', String(boundProj.engine || '').toLowerCase() === 'codex' ? 'codex' : 'claude');
+          const session = createSession(chatId, boundCwd, '', normalizeEngineName(boundProj.engine));
           await bot.sendMessage(chatId, `✅ 新会话已创建\nWorkdir: ${session.cwd}`);
           return true;
         }
@@ -436,7 +438,7 @@ function createSessionCommandHandler(deps) {
         await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)} (new session)`);
       } else {
         state2.sessions[chatId].cwd = newCwd;
-        if (!state2.sessions[chatId].engine) state2.sessions[chatId].engine = 'claude';
+        if (!state2.sessions[chatId].engine) state2.sessions[chatId].engine = getDefaultEngine();
         saveState(state2);
         await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)}`);
       }

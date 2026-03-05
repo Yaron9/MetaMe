@@ -316,8 +316,8 @@ function callHaiku(input, extraEnv, timeout, options = {}) {
 }
 
 /**
- * Call `claude -p --model <distill_model>` as a subprocess with extra env vars.
- * Deletes CLAUDECODE from env to prevent recursive session detection.
+ * Call distill model as a subprocess with extra env vars.
+ * Engine-aware: claude uses `claude -p --model`, codex uses `codex exec --json -m`.
  */
 function callDistillModel(input, extraEnv, timeout, options = {}) {
   const { execFile } = require('child_process');
@@ -326,10 +326,14 @@ function callDistillModel(input, extraEnv, timeout, options = {}) {
   // Force refresh to pick up cross-process edits to providers.yaml immediately.
   const config = loadProviders({ force: true });
   const model = resolveDistillModel(config, options.model);
+  const engine = options.engine || _currentEngine;
+  const bin = engine === 'codex' ? 'codex' : 'claude';
+  const args = engine === 'codex'
+    ? ['exec', '--json', '-m', model, '--full-auto', '-']
+    : ['-p', '--model', model, '--no-session-persistence'];
   return new Promise((resolve, reject) => {
     const proc = execFile(
-      'claude',
-      ['-p', '--model', model, '--no-session-persistence'],
+      bin, args,
       { env, timeout, maxBuffer: 10 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err) {
@@ -338,13 +342,37 @@ function callDistillModel(input, extraEnv, timeout, options = {}) {
           err.stdout = stdout;
           err.stderr = stderr;
           reject(err);
-        } else resolve(stdout.trim());
+        } else {
+          // codex --json outputs JSON lines; extract agent message text
+          if (engine === 'codex') {
+            try {
+              const lines = stdout.trim().split('\n');
+              for (let i = lines.length - 1; i >= 0; i--) {
+                const evt = JSON.parse(lines[i]);
+                if (evt.type === 'item.completed' && evt.item && evt.item.type === 'agent_message') {
+                  // item.text (string) is the primary field; content[] is an alternative format
+                  const text = evt.item.text
+                    || (evt.item.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+                  if (text && text.trim()) { resolve(text.trim()); return; }
+                }
+              }
+            } catch { /* fall through */ }
+          }
+          resolve(stdout.trim());
+        }
       },
     );
     proc.stdin.write(input);
     proc.stdin.end();
   });
 }
+
+// ---------------------------------------------------------
+// ENGINE AWARENESS (set by daemon.js setDefaultEngine)
+// ---------------------------------------------------------
+let _currentEngine = 'claude';
+function setEngine(name) { _currentEngine = (name === 'codex') ? 'codex' : 'claude'; }
+function getEngine() { return _currentEngine; }
 
 // ---------------------------------------------------------
 const api = {
@@ -368,6 +396,8 @@ const api = {
   callDistillModel,
   callHaiku,
   getProvidersFilePath,
+  setEngine,
+  getEngine,
 };
 
 Object.defineProperty(api, 'PROVIDERS_FILE', {
