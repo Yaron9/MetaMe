@@ -1409,5 +1409,9 @@ if (require.main === module) {
     } else {
       console.log(`💤 ${result.summary}`);
     }
+    // Report estimated token usage for daemon budget tracking
+    // Each callHaiku invocation ~2k-5k tokens; estimate from signal count + result size
+    const estTokens = Math.ceil(((result.signalCount || 1) * 500) + ((result.summary || '').length / 4));
+    console.log(`__TOKENS__:${estTokens}`);
   })();
 }

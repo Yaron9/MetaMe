@@ -198,6 +198,9 @@ function createTaskScheduler(deps) {
     skillEvolution,
   } = deps;
 
+  // Max characters from precondition context to inject into prompts (prevents token bombs)
+  const MAX_PRECONDITION_CHARS = 4000;
+
   // On Windows, .cmd files need shell to spawn; use COMSPEC to avoid conda PATH issues
   function spawn(cmd, args, options) {
     if (process.platform === 'win32' && cmd === CLAUDE_BIN) {
@@ -352,15 +355,30 @@ function createTaskScheduler(deps) {
           env: scriptEnv,
         }).trim();
 
+        // Parse token report from script stdout: last line matching __TOKENS__:<number>
+        // Scripts that call LLM APIs should print this before exiting.
+        // Fallback: estimate from output length (rough, but better than 0).
+        let scriptTokens = 0;
+        const tokenMatch = output.match(/__TOKENS__:(\d+)/);
+        if (tokenMatch) {
+          scriptTokens = Number(tokenMatch[1]);
+        } else if (output.length > 100) {
+          // Conservative estimate for scripts that don't self-report
+          scriptTokens = Math.ceil(output.length / 4);
+        }
+        if (scriptTokens > 0) {
+          recordTokens(state, scriptTokens, { category: classifyTaskUsage(task) });
+        }
+
         state.tasks[task.name] = {
           last_run: new Date().toISOString(),
           status: 'success',
           output_preview: output.slice(0, 200),
         };
         saveState(state);
-        if (output) log('INFO', `Script task ${task.name} completed: ${output.slice(0, 300)}`);
+        if (output) log('INFO', `Script task ${task.name} completed (${scriptTokens} tokens): ${output.slice(0, 300)}`);
         else log('INFO', `Script task ${task.name} completed`);
-        return { success: true, output, tokens: 0 };
+        return { success: true, output, tokens: scriptTokens };
       } catch (e) {
         log('ERROR', `Script task ${task.name} failed: ${e.message}`);
         state.tasks[task.name] = {
@@ -375,10 +393,13 @@ function createTaskScheduler(deps) {
 
     const preamble = buildProfilePreamble();
     const model = normalizeModel(task.model || 'haiku');
-    // If precondition returned context data, append it to the prompt
+    // If precondition returned context data, append it to the prompt (truncated to prevent token bombs)
     let taskPrompt = task.prompt;
     if (precheck.context) {
-      taskPrompt += `\n\n以下是相关原始数据:\n\`\`\`\n${precheck.context}\n\`\`\``;
+      const ctx = precheck.context.length > MAX_PRECONDITION_CHARS
+        ? precheck.context.slice(0, MAX_PRECONDITION_CHARS) + '\n... (truncated)'
+        : precheck.context;
+      taskPrompt += `\n\n以下是相关原始数据:\n\`\`\`\n${ctx}\n\`\`\``;
     }
     const fullPrompt = preamble + taskPrompt;
 
@@ -568,7 +589,12 @@ function createTaskScheduler(deps) {
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
       let prompt = (step.skill ? `/${step.skill} ` : '') + (step.prompt || '');
-      if (i === 0 && precheck.context) prompt += `\n\n相关数据:\n\`\`\`\n${precheck.context}\n\`\`\``;
+      if (i === 0 && precheck.context) {
+        const ctx = precheck.context.length > MAX_PRECONDITION_CHARS
+          ? precheck.context.slice(0, MAX_PRECONDITION_CHARS) + '\n... (truncated)'
+          : precheck.context;
+        prompt += `\n\n相关数据:\n\`\`\`\n${ctx}\n\`\`\``;
+      }
       const args = ['-p', '--model', model, '--dangerously-skip-permissions'];
       for (const tool of allowed) args.push('--allowedTools', tool);
       if (mcpConfig) args.push('--mcp-config', mcpConfig);

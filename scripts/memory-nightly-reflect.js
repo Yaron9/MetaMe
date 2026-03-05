@@ -465,6 +465,9 @@ facts(json): ${JSON.stringify(groupFacts, null, 2).slice(0, 5000)}
 if (require.main === module) {
   run().then(() => {
     console.log('✅ nightly-reflect complete');
+    // Report estimated token usage for daemon budget tracking
+    // ~5k tokens per reflection + capsule generation
+    console.log('__TOKENS__:5000');
   }).catch(e => {
     console.error(`[NIGHTLY-REFLECT] Fatal: ${e.message}`);
     process.exit(1);

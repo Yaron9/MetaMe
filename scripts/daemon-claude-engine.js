@@ -1176,8 +1176,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       }
     }
 
-    // Always append a compact language guard to prevent accidental Korean/Japanese responses
-    const langGuard = '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
+    // Language guard: only inject on first message of a new session to avoid
+    // linearly growing token cost on every turn in long conversations.
+    // Claude Code preserves session context, so the guard persists after initial injection.
+    const langGuard = session.started
+      ? ''
+      : '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
     const fullPrompt = routedPrompt + daemonHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
 
     // Git checkpoint before Claude modifies files (for /undo)

@@ -7,7 +7,7 @@
  * into memory.db. Runs independently of raw_signals.jsonl so that
  * pure technical sessions (no preference signals) are still captured.
  *
- * Designed to run as a standalone heartbeat task every 30 minutes.
+ * Designed to run as a standalone heartbeat task (default interval: 4h).
  */
 
 'use strict';
@@ -356,6 +356,10 @@ async function run() {
 if (require.main === module) {
   run().then(({ sessionsProcessed, factsSaved, factsSkipped }) => {
     console.log(`✅ memory-extract: ${sessionsProcessed} session(s), ${factsSaved} facts saved, ${factsSkipped} skipped`);
+    // Report estimated token usage for daemon budget tracking
+    // Each session processed ≈ 1 callHaiku invocation ≈ 3k tokens
+    const estTokens = sessionsProcessed * 3000;
+    if (estTokens > 0) console.log(`__TOKENS__:${estTokens}`);
   }).catch(e => {
     console.error(`[memory-extract] Fatal: ${e.message}`);
     process.exit(1);

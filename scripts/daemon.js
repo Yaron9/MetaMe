@@ -894,6 +894,8 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
  * Spawn session-summarize.js for sessions that have been idle 2-24 hours.
  * Called on sleep mode entry. Skips sessions that already have a fresh summary.
  */
+const MAX_CONCURRENT_SUMMARIES = 3;
+
 function spawnSessionSummaries() {
   const scriptPath = path.join(__dirname, 'session-summarize.js');
   if (!fs.existsSync(scriptPath)) return;
@@ -901,18 +903,31 @@ function spawnSessionSummaries() {
   const now = Date.now();
   const TWO_HOURS = 2 * 60 * 60 * 1000;
   const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
+  // Collect eligible sessions, sort by most recently active first
+  const eligible = [];
   for (const [cid, sess] of Object.entries(state.sessions || {})) {
     if (!sess.id || !sess.started) continue;
     const lastActive = sess.last_active || 0;
     const idleMs = now - lastActive;
     if (idleMs < TWO_HOURS || idleMs > SEVEN_DAYS) continue;
-    // Skip if summary is already newer than last activity
     if ((sess.last_summary_at || 0) > lastActive) continue;
+    eligible.push({ cid, sess, lastActive });
+  }
+  eligible.sort((a, b) => b.lastActive - a.lastActive);
+
+  let spawned = 0;
+  for (const { cid, sess } of eligible) {
+    if (spawned >= MAX_CONCURRENT_SUMMARIES) {
+      log('INFO', `[DAEMON] Session summary concurrency limit (${MAX_CONCURRENT_SUMMARIES}) reached, deferring remaining`);
+      break;
+    }
+    const idleMs = now - (sess.last_active || 0);
     try {
       const child = spawn(process.execPath, [scriptPath, cid, sess.id], {
         detached: true, stdio: 'ignore',
       });
       child.unref();
+      spawned++;
       log('INFO', `[DAEMON] Session summary spawned for ${cid} (idle ${Math.round(idleMs / 3600000)}h)`);
     } catch (e) {
       log('WARN', `[DAEMON] Failed to spawn session summary: ${e.message}`);
