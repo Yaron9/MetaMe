@@ -662,12 +662,34 @@ function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
     }
     const ftsResults = db.prepare(sql).all(...params);
     if (ftsResults.length > 0) {
+      // Supplement with fact_labels matches (concepts written by memory-extract).
+      const ftsIds = new Set(ftsResults.map(r => r.id));
+      const remaining = limit - ftsResults.length;
+      if (remaining > 0) {
+        try {
+          const labelLike = '%' + query.trim() + '%';
+          const labelRows = db.prepare(`
+            SELECT DISTINCT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at
+            FROM fact_labels fl JOIN facts f ON f.id = fl.fact_id
+            WHERE fl.label LIKE ?
+              AND f.superseded_by IS NULL
+              AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
+            LIMIT ?
+          `).all(labelLike, remaining + ftsResults.length);
+          for (const row of labelRows) {
+            if (!ftsIds.has(row.id) && ftsResults.length < limit) {
+              ftsIds.add(row.id);
+              ftsResults.push(row);
+            }
+          }
+        } catch { /* fact_labels table may not exist yet */ }
+      }
       _trackSearch(ftsResults.map(r => r.id));
       return ftsResults;
     }
   } catch { /* FTS error, fall through */ }
 
-  // LIKE fallback
+  // LIKE fallback (also check fact_labels)
   const like = '%' + query.trim() + '%';
   const likeSql = scope && project
     ? `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
@@ -700,6 +722,27 @@ function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
       : project
         ? db.prepare(likeSql).all(like, like, like, project, limit)
         : db.prepare(likeSql).all(like, like, like, limit);
+  // Supplement LIKE results with fact_labels matches.
+  if (likeResults.length < limit) {
+    try {
+      const labelLike = '%' + query.trim() + '%';
+      const likeIds = new Set(likeResults.map(r => r.id));
+      const labelRows = db.prepare(`
+        SELECT DISTINCT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at
+        FROM fact_labels fl JOIN facts f ON f.id = fl.fact_id
+        WHERE fl.label LIKE ?
+          AND f.superseded_by IS NULL
+          AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
+        LIMIT ?
+      `).all(labelLike, limit);
+      for (const row of labelRows) {
+        if (!likeIds.has(row.id) && likeResults.length < limit) {
+          likeIds.add(row.id);
+          likeResults.push(row);
+        }
+      }
+    } catch { /* fact_labels table may not exist yet */ }
+  }
   if (likeResults.length > 0) _trackSearch(likeResults.map(r => r.id));
   return likeResults;
 }

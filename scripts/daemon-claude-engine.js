@@ -1032,6 +1032,18 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         };
         const built = mentorEngine.buildMentorPrompt(sessionState, brainDoc || {}, mentorCfg);
         if (built && String(built).trim()) mentorHint = `\n\n${String(built).trim()}`;
+
+        // Collect reflection debt: if user returns to same project+topic, inject recall prompt.
+        if (mentorEngine.collectDebt) {
+          const info = deriveProjectInfo(session && session.cwd ? session.cwd : '');
+          const projectId = info && info.project_id ? info.project_id : '';
+          if (projectId) {
+            const debt = mentorEngine.collectDebt(projectId, String(prompt || '').slice(0, 120));
+            if (debt && debt.prompt) {
+              mentorHint += `\n\n[Reflection debt] ${debt.prompt}`;
+            }
+          }
+        }
       } catch (e) {
         log('WARN', `Mentor prompt build failed: ${e.message}`);
       }
