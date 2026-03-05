@@ -431,6 +431,7 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 | `/undo <hash>` | Roll back to a specific git checkpoint |
 | `/list` | Browse & download project files |
 | `/model` | Switch model (sonnet/opus/haiku) |
+| `/distill-model` | Show/update background distill model (default: `haiku`) |
 | `/mentor` | Mentor mode control: on/off/level/status |
 | `/activate` | Activate and bind the most recently created pending agent in a new group |
 | `/agent bind <name> [dir]` | Manually register group as dedicated agent |
@@ -510,10 +511,10 @@ For day-2 operations and troubleshooting (engine routing, codex login/rate-limit
 | Cognitive profile injection | ~800 tokens/session (0.4% of 200k context) |
 | Dispatch latency (Unix socket) | <100ms |
 | Memory consolidation (per session) | ~1,500–2,000 tokens input + ~50–300 tokens output (Haiku) |
-| Session summary (per session) | ~400–900 tokens input + ≤250 tokens output (Haiku) |
+| Session summary (per session) | ~400–900 tokens input + ≤250 tokens output (distill model configurable) |
 | Mobile commands (`/stop`, `/list`, `/undo`) | 0 tokens |
 
-> Both memory consolidation and session summarization run in the background via Haiku (`--model haiku`). Input is capped by code: skeleton text ≤ 3,000 chars, summary output ≤ 500 chars. Neither runs per-message — memory consolidation follows heartbeat schedule with idle/precondition guards, and summaries trigger once per idle session on sleep-mode transitions.
+> Memory consolidation and session summarization run in the background via the configured distill model (`/distill-model`, default `haiku`). Input is capped by code: skeleton text ≤ 3,000 chars, summary output ≤ 500 chars. Neither runs per-message — memory consolidation follows heartbeat schedule with idle/precondition guards, and summaries trigger once per idle session on sleep-mode transitions.
 
 ## Plugin
 

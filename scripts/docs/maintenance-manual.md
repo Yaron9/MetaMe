@@ -59,6 +59,10 @@ feishu:
 - `/compact`：
   - Claude 会话：正常压缩
   - Codex 会话：返回“暂不支持，请继续同会话”
+- `/distill-model`：
+  - 查询当前蒸馏模型：`/distill-model`
+  - 设置蒸馏模型：`/distill-model gpt-5.1-codex-mini`
+  - 也支持严格自然语言：`把蒸馏模型改成 5.1mini`
 
 ## 5. 运行时文件与状态
 

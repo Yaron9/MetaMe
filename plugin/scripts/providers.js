@@ -27,6 +27,44 @@ const PROVIDERS_FILE = path.join(METAME_DIR, 'providers.yaml');
 
 const yaml = require('./resolve-yaml');
 
+const DEFAULT_DISTILL_MODEL = 'haiku';
+const DISTILL_MODEL_ALIASES = new Map([
+  ['5.1mini', 'gpt-5.1-codex-mini'],
+  ['gpt5.1mini', 'gpt-5.1-codex-mini'],
+  ['gpt-5.1-mini', 'gpt-5.1-codex-mini'],
+  ['gpt5.1-codex-mini', 'gpt-5.1-codex-mini'],
+  ['codex-mini', 'gpt-5.1-codex-mini'],
+  ['5mini', 'gpt-5-mini'],
+  ['gpt5mini', 'gpt-5-mini'],
+]);
+
+function canonicalizeAliasKey(input) {
+  return String(input || '').trim().toLowerCase().replace(/[\s_]+/g, '').replace(/^gpt[-\s]?/i, 'gpt');
+}
+
+function normalizeDistillModel(model, { allowEmpty = false } = {}) {
+  const raw = String(model || '').trim();
+  if (!raw) {
+    if (allowEmpty) return null;
+    throw new Error('蒸馏模型不能为空。');
+  }
+  const alias = DISTILL_MODEL_ALIASES.get(canonicalizeAliasKey(raw));
+  const normalized = (alias || raw).trim();
+  if (!/^[a-zA-Z0-9._-]{2,80}$/.test(normalized)) {
+    throw new Error(`无效蒸馏模型: ${raw}`);
+  }
+  return normalized;
+}
+
+function resolveDistillModel(config, overrideModel) {
+  if (overrideModel !== undefined && overrideModel !== null && String(overrideModel).trim() !== '') {
+    return normalizeDistillModel(overrideModel);
+  }
+  const configured = config && config.distill_model ? String(config.distill_model).trim() : '';
+  if (configured) return normalizeDistillModel(configured);
+  return DEFAULT_DISTILL_MODEL;
+}
+
 // ---------------------------------------------------------
 // DEFAULT CONFIG
 // ---------------------------------------------------------
@@ -38,6 +76,7 @@ function defaultConfig() {
     },
     distill_provider: null,
     daemon_provider: null,
+    distill_model: null,
   };
 }
 
@@ -59,6 +98,9 @@ function loadProviders() {
       providers: data.providers,
       distill_provider: data.distill_provider || null,
       daemon_provider: data.daemon_provider || null,
+      distill_model: (() => {
+        try { return normalizeDistillModel(data.distill_model, { allowEmpty: true }); } catch { return null; }
+      })(),
     };
     return _providersCache;
   } catch {
@@ -182,6 +224,19 @@ function setRole(role, providerName) {
   saveProviders(config);
 }
 
+function getDistillModel() {
+  const config = loadProviders();
+  return resolveDistillModel(config);
+}
+
+function setDistillModel(model) {
+  const config = loadProviders();
+  const normalized = normalizeDistillModel(model, { allowEmpty: true });
+  config.distill_model = normalized || null;
+  saveProviders(config);
+  return config.distill_model;
+}
+
 // ---------------------------------------------------------
 // DISPLAY
 // ---------------------------------------------------------
@@ -204,6 +259,7 @@ function listFormatted() {
     if (d) lines.push(`  Distill provider: ${d}`);
     if (dm) lines.push(`  Daemon provider:  ${dm}`);
   }
+  lines.push(`  Distill model:    ${resolveDistillModel(config)}`);
 
   return lines.join('\n');
 }
@@ -212,17 +268,19 @@ function listFormatted() {
 // Claude subprocess helper (shared by distill.js + skill-evolution.js)
 // ---------------------------------------------------------
 /**
- * Call `claude -p --model haiku` as a subprocess with extra env vars.
+ * Call `claude -p --model <distill_model>` as a subprocess with extra env vars.
  * Deletes CLAUDECODE from env to prevent recursive session detection.
  */
-function callHaiku(input, extraEnv, timeout) {
+function callHaiku(input, extraEnv, timeout, options = {}) {
   const { execFile } = require('child_process');
   const env = { ...process.env, ...extraEnv, METAME_INTERNAL_PROMPT: '1' };
   delete env.CLAUDECODE;
+  const config = loadProviders();
+  const model = resolveDistillModel(config, options.model);
   return new Promise((resolve, reject) => {
     const proc = execFile(
       'claude',
-      ['-p', '--model', 'haiku', '--no-session-persistence'],
+      ['-p', '--model', model, '--no-session-persistence'],
       { env, timeout, maxBuffer: 10 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err) {
@@ -256,6 +314,9 @@ module.exports = {
   addProvider,
   removeProvider,
   setRole,
+  getDistillModel,
+  setDistillModel,
+  normalizeDistillModel,
   listFormatted,
   callHaiku,
   PROVIDERS_FILE,

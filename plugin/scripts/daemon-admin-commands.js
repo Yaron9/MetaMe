@@ -103,6 +103,24 @@ function createAdminCommandHandler(deps) {
     return 'gentle';
   }
 
+  function parseDistillModelIntent(input) {
+    const text = String(input || '').trim();
+    if (!text || text.startsWith('/')) return null;
+    if (!/(蒸馏|distill|提炼|提纯)/i.test(text)) return null;
+    if (!/(改成|改为|设为|设置|切到|切换到|换成|改用|使用|用|set|switch|use)/i.test(text)) return null;
+
+    const explicitModel = text.match(/(?:模型|model)\s*(?:改成|改为|设为|设置|切到|切换到|换成|改用|使用|用|to|is)?\s*[:：]?\s*([a-zA-Z0-9._-]{2,80})/i);
+    if (explicitModel) return { model: explicitModel[1] };
+
+    const quotedModel = text.match(/[“"'「]([a-zA-Z0-9._-]{2,80})[”"'」]/);
+    if (quotedModel) return { model: quotedModel[1] };
+
+    const knownToken = text.match(/\b(gpt-5\.1-codex-mini|gpt-5-mini|haiku|sonnet|opus|5\.1mini|5mini|codex-mini)\b/i);
+    if (knownToken) return { model: knownToken[1] };
+
+    return null;
+  }
+
   function ensureMentorConfig(cfg) {
     if (!cfg.daemon) cfg.daemon = {};
     if (!cfg.daemon.mentor || typeof cfg.daemon.mentor !== 'object') {
@@ -1008,10 +1026,45 @@ function createAdminCommandHandler(deps) {
       return { handled: true, config };
     }
 
+    // /distill-model [name] — show or update distill model
+    if (text === '/distill-model' || text.startsWith('/distill-model ')) {
+      if (!providerMod || typeof providerMod.getDistillModel !== 'function' || typeof providerMod.setDistillModel !== 'function') {
+        await bot.sendMessage(chatId, '❌ Distill model config is not available.');
+        return { handled: true, config };
+      }
+      const arg = text.slice('/distill-model'.length).trim();
+      if (!arg) {
+        await bot.sendMessage(chatId, `🧪 当前蒸馏模型: ${providerMod.getDistillModel()}\n用法: /distill-model <model>\n示例: /distill-model gpt-5.1-codex-mini`);
+        return { handled: true, config };
+      }
+      try {
+        providerMod.setDistillModel(arg);
+        await bot.sendMessage(chatId, `✅ 蒸馏模型已更新为: ${providerMod.getDistillModel()}`);
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ 设置失败: ${e.message}`);
+      }
+      return { handled: true, config };
+    }
+
+    const nlDistillIntent = parseDistillModelIntent(text);
+    if (nlDistillIntent) {
+      if (!providerMod || typeof providerMod.setDistillModel !== 'function' || typeof providerMod.getDistillModel !== 'function') {
+        await bot.sendMessage(chatId, '❌ Distill model config is not available.');
+        return { handled: true, config };
+      }
+      try {
+        providerMod.setDistillModel(nlDistillIntent.model);
+        await bot.sendMessage(chatId, `✅ 已按自然语言请求更新蒸馏模型: ${providerMod.getDistillModel()}`);
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ 设置失败: ${e.message}`);
+      }
+      return { handled: true, config };
+    }
+
     return { handled: false, config };
   }
 
-  return { handleAdminCommand };
+  return { handleAdminCommand, _private: { parseDistillModelIntent } };
 }
 
 module.exports = { createAdminCommandHandler };

@@ -3,7 +3,7 @@
 /**
  * MetaMe Passive Distiller
  *
- * Reads raw signal buffer, calls Claude (haiku, non-interactive)
+ * Reads raw signal buffer, calls Claude (configured distill model, non-interactive)
  * to extract persistent preferences/identity, merges into profile.
  *
  * Runs automatically before each MetaMe session launch.
@@ -620,7 +620,7 @@ ${sessionContext ? '\nHint: high tool_calls + routine messages → zone likely h
 OUTPUT — respond with ONLY a YAML code block. If nothing worth saving AND no behavior: respond with exactly NO_UPDATE.
 Do NOT repeat existing unchanged values.`;
 
-    // 6. Call Claude in print mode with haiku (+ provider env for relay support)
+    // 6. Call Claude in print mode with configured distill model (+ provider env for relay support)
     let result;
     try {
       result = await callHaiku(distillPrompt, distillEnv, 60000);

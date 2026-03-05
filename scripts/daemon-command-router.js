@@ -579,7 +579,7 @@ function createCommandRouter(deps) {
         '/undo <hash> — 回退到指定 git checkpoint',
         '/quit — 结束会话，重新加载 MCP/配置',
         '',
-        `⚙️ /model [${currentModel}] /provider [${currentProvider}] /status /tasks /run /budget /reload /mentor`,
+        `⚙️ /model [${currentModel}] /provider [${currentProvider}] /distill-model /status /tasks /run /budget /reload /mentor`,
         '🧩 /TeamTask create <agent> <目标> [--scope <id>] · /TeamTask · /TeamTask <id>',
         '🧠 /memory — 记忆统计 · /memory <关键词> — 搜索事实',
         '🧬 /skill-evo — 查看/处理技能演化队列',

@@ -13,6 +13,7 @@
 - 执行命令（`/stop`、`/compact` 等）：`scripts/daemon-exec-commands.js`
 - 会话存储：`scripts/daemon-session-store.js`
 - 默认配置：`scripts/daemon-default.yaml`
+- Provider/蒸馏模型配置：`scripts/providers.js`（`/provider`、`/distill-model`）
 - 维护手册：`scripts/docs/maintenance-manual.md`
 
 ## 多引擎（Claude/Codex）定位
