@@ -53,6 +53,11 @@ The plugin includes full daemon support for mobile access via Telegram and Feish
 2. The daemon auto-starts on each Claude session (if configured)
 3. Use `/last` on your phone to quickly resume the most recent session
 
+Behavior note:
+- Auto-start is triggered by Claude `SessionStart`.
+- Daemon is started as a detached process.
+- Plugin mode does not auto-register launchd/task-scheduler/systemd service.
+
 **Mobile Session Commands:**
 | Command | Description |
 |---------|-------------|
@@ -67,12 +72,15 @@ The plugin includes full daemon support for mobile access via Telegram and Feish
 | `/stop` | Interrupt current Claude task (ESC equivalent) |
 | `/undo` | Undo turns with file restoration (ESC×2 equivalent) |
 | `/model` | Interactive model switcher with auto-backup |
+| `/engine` | Show/switch default runtime engine (`claude`/`codex`) |
+| `/distill-model` | Show/update background distill model |
 | `/doctor` | Interactive diagnostics with one-tap fix buttons |
 | `/sh <cmd>` | Run shell command directly — bypasses Claude entirely |
 | `/fix` | Restore `daemon.yaml` from last backup |
 
 **Features:**
-- Full Claude Code engine on your phone (file editing, bash, code search)
+- Full Claude/Codex engine on your phone (file editing, bash, code search)
+- Engine routing by project (`project.engine: claude|codex`) with shared session continuity
 - **Remote Wake** — daemon runs in background; phone wakes up Claude Code on your computer
 - **File Transfer** — send files from computer to phone, or phone to computer (saved to `<project>/upload/`)
 - **Provider Relay** — route through any Anthropic-compatible relay for third-party models
@@ -123,13 +131,13 @@ Patterns and mirror observations can appear from your very first session, no war
 
 ## Requirements
 
-- Node.js >= 14
+- Node.js >= 22.5
 - Claude Code CLI installed
 - `js-yaml` npm package (install globally or in the plugin directory)
 
 ## Also Available As
 
-- **npm package**: `npm install -g metame-cli` — same features, plus `metame interview` for genesis
+- **npm package**: `npm install -g metame-cli` — same daemon/runtime features plus always-on 24/7 service mode
 - **Source**: https://github.com/Yaron9/MetaMe
 
 Both plugin and npm CLI share the same daemon code and feature set.

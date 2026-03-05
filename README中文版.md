@@ -195,21 +195,20 @@ heartbeat:
 
 ### 5. 会自我进化的技能系统
 
-MetaMe 的技能不是静态配置——它们会生长。
+MetaMe 当前的技能进化是“可审计队列流”，不是黑盒自动安装。
 
-- **自动发现**：任务失败或能力缺失时，skill-scout 自动搜索、安装、验证新技能。
-- **看一遍就会**：复杂的浏览器操作自动化不了？说一句"我来演示"，MetaMe 录制你的操作，自动转化为可复用的技能。
-- **任务后进化**：每次重要任务完成后，skill-evolution-manager 复盘哪里做得好、哪里踩了坑，然后精准更新相关技能。
-- **可组合**：技能串联成工作流。`deep-research` → `tech-writing` → `wechat-publisher`，每个技能都在真实使用中越来越强。
+- **信号采集**：任务结果/失败会写入 skill evolution 信号。
+- **冷热双路径**：`skill-evolution` 在任务热路径和心跳冷路径都运行。
+- **工作流提案**：重复多工具模式会聚合成 workflow sketch，并进入队列。
+- **人工审批闭环**：用 `/skill-evo list`、`/skill-evo approve <id>`、`/skill-evo done <id>`、`/skill-evo dismiss <id>` 管理。
+- **缺能力兜底**：缺工具/缺能力时，会优先走 `skill-manager` 指引，不盲猜。
 
 ```
-任务失败 → skill-scout 搜索技能 → 安装 → 重试 → 成功
-                                            ↓
-                              skill-evolution-manager
-                              将经验写回技能
+任务结果/失败 → 技能信号缓冲
+            → 热/冷路径进化
+            → 提案队列
+            → /skill-evo approve|done|dismiss
 ```
-
-这是工具库和有机体的区别。OpenClaw 有技能市场，MetaMe 的技能**从自己的失败中学习**。
 
 ---
 
@@ -229,8 +228,8 @@ metame
 
 | 步骤 | 操作 | 说明 |
 |------|------|------|
-| 1. 登录 Claude | 运行 `claude`，完成登录（Anthropic 账号或 API Key） | Claude Code 准备就绪 |
-| 2. 启动 MetaMe | 运行 `metame` | 打开一个加载了 MetaMe 的 Claude 会话 |
+| 1. 登录引擎 | Claude 用户运行 `claude`；Codex 用户先执行 `codex login` | 本地引擎可用 |
+| 2. 启动 MetaMe | 运行 `metame`（Claude）或 `metame codex`（Codex） | 打开一个加载了 MetaMe 的会话 |
 | 3. 认知访谈 | 直接聊天 — 首次运行会自动开始深度访谈 | 生成 `~/.claude_profile.yaml`（你的数字分身大脑） |
 | 4. 连接手机 | 对话中说"帮我设置手机访问"或"连接手机" | 交互式向导，配置 Telegram/飞书 Bot → `~/.metame/daemon.yaml` |
 | 5. 启动 daemon | `metame start` | 后台 daemon 启动，bot 上线 |
@@ -242,6 +241,68 @@ metame
 ```bash
 npm install -g metame-cli
 ```
+
+### 按用户类型安装
+
+**只用 Claude Code（插件路径，一键命令）：**
+```bash
+claude plugin install github:Yaron9/MetaMe/plugin
+```
+
+**只用 Claude Code（npm CLI 路径，一键命令）：**
+```bash
+npm install -g @anthropic-ai/claude-code metame-cli && claude && metame
+```
+
+**只用 Codex（CLI 路径，一键命令）：**
+```bash
+npm install -g @openai/codex metame-cli && codex login && metame codex
+```
+
+**Claude + Codex 混用（一键命令）：**
+```bash
+npm install -g @anthropic-ai/claude-code @openai/codex metame-cli
+```
+
+然后各登录一次：`claude`（Claude 登录）、`codex login`（Codex 登录），后续使用：
+- `metame` 走 Claude
+- `metame codex` 走 Codex
+
+> `metame-cli` 本身不绑定单一模型引擎，也不会内置 Claude/Codex。  
+> 它是统一入口层：你安装哪个引擎，就可以让 MetaMe 调哪个引擎。
+
+### 安装 FAQ
+
+- **插件模式能拉起 daemon 并支持手机访问吗？** 可以。插件在 `daemon.yaml` 已配置后，会在 Claude `SessionStart` 自动拉起 daemon；daemon 运行期间手机端可正常访问。
+- **`npm install -g metame-cli` 装的是 Claude 版还是 Codex 版？** 都不是。它只安装 MetaMe 本体；Claude/Codex 需要分别安装对应 CLI。
+- **只装一个引擎能不能用？** 可以。MetaMe 会在你已安装的引擎上运行；`/doctor` 对“非默认引擎缺失”只报告告警，不判故障。
+
+### 卸载（CLI 路径）
+
+```bash
+metame stop
+npm uninstall -g metame-cli
+```
+
+只用 Codex 的卸载：
+```bash
+npm uninstall -g metame-cli @openai/codex
+```
+
+只用 Claude 的卸载：
+```bash
+npm uninstall -g metame-cli @anthropic-ai/claude-code
+```
+
+可选清理数据：
+```bash
+rm -rf ~/.metame ~/.claude_profile.yaml
+```
+
+可选清理系统托管：
+- macOS：`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.metame.daemon.plist && rm -f ~/Library/LaunchAgents/com.metame.daemon.plist`
+- Windows：`schtasks /delete /tn "MetaMe-Daemon" /f`
+- Linux/WSL(systemd)：`systemctl --user disable --now metame && rm -f ~/.config/systemd/user/metame.service`
 
 > **托管后意味着什么？**
 > MetaMe 注册进系统任务调度器后，只要电脑不关机，哪怕锁屏、息屏、合盖休眠唤醒，它都会自动在后台运行。定时任务照常触发，手机消息照常收发。
@@ -299,10 +360,10 @@ systemctl --user start metame
 
 | 能力 | 说明 |
 |------|------|
-| **认知画像** | 跨会话学习你的思维方式。Schema 约束、800 token 预算、Haiku 自动蒸馏。任何值标 `# [LOCKED]` 即不可覆写。 |
+| **认知画像** | 跨会话学习你的思维方式。Schema 约束、800 token 预算、默认 Haiku 蒸馏（可通过 `/distill-model` 调整）。任何值标 `# [LOCKED]` 即不可覆写。 |
 | **分层记忆** | 五层记忆：长期事实（含 concept 标签）、会话摘要、会话索引、夜间反思回流（含 synthesized_insight）、全局索引/胶囊。全自动。 |
-| **手机桥接** | 通过 Telegram/飞书完整使用 Claude Code。有状态会话、双向文件互传、实时工具调用状态。 |
-| **技能进化** | 自愈技能系统。自动发现缺失技能、从浏览器录制中学习、每次任务后进化。技能越用越聪明。 |
+| **手机桥接** | 通过 Telegram/飞书完整使用 Claude/Codex。有状态会话、双向文件互传、实时工具调用状态。 |
+| **技能进化** | 队列化技能进化：采集任务信号、生成工作流提案，并通过 `/skill-evo` 显式审批/结案。 |
 | **心跳系统** | 三层可编程神经系统。Layer 0 内核永远在线（零配置）。Layer 1 系统自进化内置（蒸馏+记忆+技能+nightly+index）。Layer 2 自定义定时任务，支持 `require_idle`、`precondition`、`notify`、工作流。 |
 | **多 Agent** | 多项目独立群聊，`/agent bind` 一键配置，真正并行执行。 |
 | **浏览器自动化** | 内置 Playwright MCP，开箱即用。配合 Skill 实现发布、填表、抓取等自动化。 |
@@ -418,6 +479,8 @@ feishu:
 | `/undo <hash>` | 回退到指定 git checkpoint |
 | `/list` | 浏览和下载项目文件 |
 | `/model` | 切换模型（sonnet/opus/haiku） |
+| `/engine` | 查看/切换默认引擎（`claude`/`codex`） |
+| `/distill-model` | 查看/设置后台蒸馏模型（默认 `haiku`） |
 | `/mentor` | 导师模式控制：on/off/level/status |
 | `/activate` | 在新群里激活并绑定最近创建的 Agent |
 | `/agent bind <名称> [目录]` | 手动将群注册为专属 Agent |
@@ -436,6 +499,34 @@ feishu:
 | `/teamtask <task_id>` | 查看任务详情 |
 | `/teamtask resume <task_id>` | 续跑指定任务 |
 
+## Mentor 模式（背景 + 用法）
+
+Mentor 模式不是替你执行命令，而是提升你做决策和复盘的质量。
+
+- `/mentor on`：开启
+- `/mentor off`：关闭
+- `/mentor level <0-10>`：设置摩擦强度
+- `/mentor status`：查看当前状态
+
+运行时会发生什么：
+- 前置情绪熔断（带冷却）
+- 上下文内 zone 自适应提示（comfort/stretch/panic）
+- 高强度模式下，对大段代码输出登记“反思债务”
+
+等级映射：
+- `0-3`：`gentle`
+- `4-7`：`active`
+- `8-10`：`intense`
+
+## Hook 优化（默认开启）
+
+MetaMe 启动时会自动安装并维护两个核心 Hook：
+
+- `UserPromptSubmit`（`scripts/signal-capture.js`）：分层过滤后采集高价值偏好/任务信号。
+- `Stop`（`scripts/hooks/stop-session-capture.js`）：记录会话结束与工具失败信号，带 watermark 保护。
+
+Hook 安装失败不会阻断会话；MetaMe 会记录日志并继续运行。
+
 ## 工作原理
 
 ```
@@ -444,7 +535,7 @@ feishu:
 └─────────────┘                           │  （你的电脑，7×24）           │
                                           │                              │
                                           │   ┌──────────────┐           │
-                                          │   │ Claude Code   │           │
+                                          │   │ Claude/Codex  │           │
                                           │   │（同一引擎）    │           │
                                           │   └──────────────┘           │
                                           │                              │
@@ -491,11 +582,11 @@ feishu:
 | Daemon CPU（心跳间隙闲置） | ~0% — 事件循环休眠状态 |
 | 认知画像注入 | ~800 token/会话（200k 上下文的 0.4%） |
 | Dispatch 延迟（Unix Socket） | <100ms |
-| 记忆巩固（每会话） | ~1,500–2,000 token 输入 + ~50–300 token 输出（Haiku） |
-| 会话摘要生成（每会话） | ~400–900 token 输入 + ≤250 token 输出（Haiku） |
+| 记忆巩固（每会话） | ~1,500–2,000 token 输入 + ~50–300 token 输出（蒸馏模型可配） |
+| 会话摘要生成（每会话） | ~400–900 token 输入 + ≤250 token 输出（蒸馏模型可配） |
 | 手机命令（`/stop`、`/list`、`/undo`） | 0 token |
 
-> 记忆巩固和会话摘要均由后台 Haiku（`--model haiku`）处理。输入经代码硬截：skeleton 文本 ≤ 3,000 字符，摘要输出 ≤ 500 字符。两者均非每条消息触发——记忆巩固按心跳调度并受 idle/precondition 守卫控制，摘要在进入睡眠态时对每个闲置会话只生成一次。
+> 记忆巩固和会话摘要由后台蒸馏模型处理（`/distill-model`，默认 `haiku`）。输入经代码硬截：skeleton 文本 ≤ 3,000 字符，摘要输出 ≤ 500 字符。两者均非每条消息触发——记忆巩固按心跳调度并受 idle/precondition 守卫控制，摘要在进入睡眠态时对每个闲置会话只生成一次。
 
 ## 插件版
 
@@ -507,9 +598,13 @@ claude plugin install github:Yaron9/MetaMe/plugin
 
 包含：认知画像注入、daemon（Telegram/飞书）、心跳任务、分层记忆、全部手机端命令、斜杠命令（`/metame:evolve`、`/metame:daemon`、`/metame:refresh` 等）。
 
-**与 npm CLI 的关键差异：** 插件版 daemon 在 Claude Code 打开时启动、关闭时停止，**不会** 24/7 常驻后台。如需手机随时发消息（Claude Code 关闭时也能收到），需用 npm CLI + `metame daemon install-launchd`。
+**当前实际行为（与代码一致）：**
+- 插件在 Claude `SessionStart` 时自动拉起 daemon（前提：已存在 `~/.metame/daemon.yaml`）。
+- daemon 以 detached 方式运行；daemon 存活期间，手机端可正常访问。
+- 插件路径**不会**自动注册系统服务（launchd / task scheduler / systemd）。重启后需再次打开 Claude 或手动启动 daemon。
 
-不想装全局 npm 包且只需要 Claude Code 打开时的手机访问，用插件版。需要 24/7 常驻、`metame` 命令和首次采访，用 npm CLI（`metame-cli`）。
+想要零 npm 全局安装、偏 Claude 内嵌体验，用插件版。  
+想要明确的系统托管与 CLI 优先运维，用 npm CLI（`metame-cli`）。
 
 ## 参与贡献
 

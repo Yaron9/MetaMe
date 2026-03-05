@@ -462,10 +462,83 @@ describe('daemon-admin-commands distill model controls', () => {
   });
 });
 
+describe('daemon-admin-commands /doctor', () => {
+  it('does not fail codex-only environments when default engine is codex', async () => {
+    const sent = [];
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        execSync: (cmd) => {
+          if (String(cmd).includes('claude')) throw new Error('claude not found');
+          if (String(cmd).includes('codex')) return '/usr/local/bin/codex\n';
+          return '';
+        },
+        getDefaultEngine: () => 'codex',
+      }
+    );
+    const bot = { sendMessage: async (_chatId, text) => { sent.push(String(text)); } };
+
+    const res = await handleAdminCommand({
+      bot,
+      chatId: 'mobile-user-doctor-1',
+      text: '/doctor',
+      config: {},
+      state: { tasks: {}, budget: { tokens_used: 0 } },
+    });
+
+    assert.equal(res.handled, true);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0], /默认引擎: codex/);
+    assert.match(sent[0], /Codex CLI/);
+    assert.doesNotMatch(sent[0], /默认引擎是 codex，但 Codex CLI 不可用/);
+  });
+
+  it('accepts custom model names when using custom provider', async (t) => {
+    const sent = [];
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-doctor-cfg-'));
+    t.after(() => {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    });
+    const configFile = path.join(tmpDir, 'daemon.yaml');
+    const yaml = require('js-yaml');
+    fs.writeFileSync(configFile, yaml.dump({ daemon: { model: 'gpt-5-mini' } }), 'utf8');
+    const providerStub = {
+      getActiveName: () => 'relay',
+      getDistillModel: () => 'gpt-5.1-codex-mini',
+    };
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        CONFIG_FILE: configFile,
+        providerMod: providerStub,
+        yaml,
+      }
+    );
+    const bot = { sendMessage: async (_chatId, text) => { sent.push(String(text)); } };
+
+    const res = await handleAdminCommand({
+      bot,
+      chatId: 'mobile-user-doctor-2',
+      text: '/doctor',
+      config: {},
+      state: { tasks: {}, budget: { tokens_used: 0 } },
+    });
+
+    assert.equal(res.handled, true);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0], /✅ 模型: gpt-5-mini/);
+    assert.match(sent[0], /✅ Provider: relay \(custom\)/);
+    assert.doesNotMatch(sent[0], /模型: gpt-5-mini \(无效\)/);
+  });
+});
+
 describe('daemon-admin-commands /mentor', () => {
-  it('toggles mentor and adjusts level/mode', async () => {
+  it('toggles mentor and adjusts level/mode', async (t) => {
     const sent = [];
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-mentor-cmd-'));
+    t.after(() => {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    });
     const configFile = path.join(tmpDir, 'daemon.yaml');
     const yaml = require('js-yaml');
     const initial = { daemon: { model: 'opus' } };
@@ -507,7 +580,5 @@ describe('daemon-admin-commands /mentor', () => {
     assert.equal(finalCfg.daemon.mentor.enabled, true);
     assert.equal(finalCfg.daemon.mentor.friction_level, 9);
     assert.equal(finalCfg.daemon.mentor.mode, 'intense');
-
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 });

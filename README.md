@@ -203,23 +203,19 @@ Chain skills into multi-step workflows — research → write → publish — fu
 
 ### 5. Skills That Evolve Themselves
 
-MetaMe has a living skill ecosystem. Skills aren't static configs — they grow.
+MetaMe's current skill loop is queue-driven and reviewable (not magic black-box automation).
 
-- **Auto-discovery**: When a task fails or a capability is missing, MetaMe's skill-scout automatically searches for, installs, and verifies new skills.
-- **Learning by watching**: Can't automate a complex browser workflow? Say "我来演示" and MetaMe records your actions, then converts them into a reusable skill.
-- **Post-task evolution**: After every significant task, the skill-evolution-manager reviews what worked and what didn't, then surgically updates the relevant skills with new knowledge.
-- **Workflow pattern discovery**: MetaMe silently tracks your repeated multi-tool workflows (e.g. "search Twitter → summarize → post to Feishu"). When a pattern is detected 4+ times, it proposes creating a dedicated skill — one tap to approve, zero manual effort.
-- **Composable**: Skills chain together in workflows. A `deep-research` skill feeds into `tech-writing`, which feeds into `wechat-publisher` — each one improving from real usage.
+- **Signal capture**: task outcomes and failures are captured into evolution signals.
+- **Hot/cold evolution**: `skill-evolution` runs on task hot path and heartbeat cold path.
+- **Workflow proposals**: repeated multi-tool patterns are merged into workflow sketches and queued as proposals.
+- **Human approval gate**: review and operate with `/skill-evo list`, `/skill-evo approve <id>`, `/skill-evo done <id>`, `/skill-evo dismiss <id>`.
+- **Skill manager fallback**: when capability is missing, runtime routes to `skill-manager` skill guidance instead of blind guessing.
 
 ```
-Task fails → skill-scout finds a skill → installs → retries → succeeds
-                                                      ↓
-                                      skill-evolution-manager
-                                      updates skill with lessons learned
-
-Repeated workflow detected → workflow sketch accumulated
-                                       ↓ (4+ occurrences)
-                            proposal → /skill-evo approve → auto-create skill
+task outcome/failure → skill signal buffer
+                     → hot/cold evolution
+                     → proposal queue
+                     → /skill-evo approve|done|dismiss
 ```
 
 ---
@@ -242,8 +238,8 @@ metame
 
 | Step | What to do | What happens |
 |------|-----------|-------------|
-| 1. Log in to Claude | Run `claude` and complete the login (Anthropic account or API key) | Claude Code is ready to use |
-| 2. Launch MetaMe | Run `metame` | Opens a Claude session with MetaMe loaded |
+| 1. Log in to your engine | Run `claude` (Claude user) or `codex login` (Codex user) | Your local CLI engine is ready |
+| 2. Launch MetaMe | Run `metame` (Claude) or `metame codex` (Codex) | Opens a MetaMe-initialized session |
 | 3. Genesis Interview | Just chat — MetaMe will automatically start a deep soul interview on first run | Builds `~/.claude_profile.yaml` (6-dimension cognitive profile) |
 | 4. Connect phone | Say "help me set up mobile access" or "connect my phone" | Interactive wizard for Telegram/Feishu bot setup → `~/.metame/daemon.yaml` |
 | 5. Start daemon | `metame start` | Background daemon launches, bot goes online |
@@ -255,6 +251,68 @@ metame
 ```bash
 npm install -g metame-cli
 ```
+
+### Install Path By User Type
+
+**Claude Code only (plugin path, one-liner):**
+```bash
+claude plugin install github:Yaron9/MetaMe/plugin
+```
+
+**Claude Code only (npm CLI path, one-liner):**
+```bash
+npm install -g @anthropic-ai/claude-code metame-cli && claude && metame
+```
+
+**Codex only (CLI path, one-liner):**
+```bash
+npm install -g @openai/codex metame-cli && codex login && metame codex
+```
+
+**Claude + Codex (one-liner):**
+```bash
+npm install -g @anthropic-ai/claude-code @openai/codex metame-cli
+```
+
+Then run `claude` once (Claude login), `codex login` once (Codex login), and use:
+- `metame` for Claude
+- `metame codex` for Codex
+
+> `metame-cli` is engine-agnostic. It does not bundle Claude or Codex.  
+> You install the engine(s) separately, and MetaMe routes/launches them.
+
+### Install FAQ
+
+- **Does Claude plugin mode support daemon + phone access?** Yes. Plugin mode can start the daemon (via `SessionStart` after `daemon.yaml` exists), and phone access works while the daemon is running.
+- **Does `npm install -g metame-cli` install Claude or Codex?** No. It only installs MetaMe. Install `@anthropic-ai/claude-code` and/or `@openai/codex` separately.
+- **If I only install one engine, does MetaMe still work?** Yes. MetaMe will run on the installed engine. `/doctor` marks the non-default missing engine as warning, not hard failure.
+
+### Uninstall (CLI Path)
+
+```bash
+metame stop
+npm uninstall -g metame-cli
+```
+
+Codex-only cleanup:
+```bash
+npm uninstall -g metame-cli @openai/codex
+```
+
+Claude-only cleanup:
+```bash
+npm uninstall -g metame-cli @anthropic-ai/claude-code
+```
+
+Optional data cleanup:
+```bash
+rm -rf ~/.metame ~/.claude_profile.yaml
+```
+
+Optional service cleanup:
+- macOS: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.metame.daemon.plist && rm -f ~/Library/LaunchAgents/com.metame.daemon.plist`
+- Windows: `schtasks /delete /tn "MetaMe-Daemon" /f`
+- Linux/WSL(systemd): `systemctl --user disable --now metame && rm -f ~/.config/systemd/user/metame.service`
 
 > **What does system registration mean?**
 > Once registered, MetaMe runs in the background automatically — screen locked, lid closed, woken from sleep — as long as the machine is on. Scheduled tasks fire on time. No terminal window needed.
@@ -312,8 +370,8 @@ systemctl --user start metame
 |-----------|-------------|
 | **Cognitive Profile** | 6-dimension soul schema (Values, Drive, Cognition Style, Stress & Shadow, Relational, Identity Narrative). 67 fields, tier-locked, 800-token budget. First-time Genesis Interview builds your profile from scratch. |
 | **Layered Memory** | Five-tier memory: long-term facts (+ concept labels), session summaries (continuity bridge), session index (topic tags), nightly reflection (distill + write-back), memory index (global lookup). All automatic. |
-| **Mobile Bridge** | Full Claude Code via Telegram/Feishu. Stateful sessions, file transfer both ways, real-time streaming status. |
-| **Skill Evolution** | Self-healing skill system. Auto-discovers missing skills, learns from browser recordings, evolves after every task. Detects repeated multi-tool workflows and proposes new skills automatically. Skills get smarter over time. |
+| **Mobile Bridge** | Full Claude/Codex via Telegram/Feishu. Stateful sessions, file transfer both ways, real-time streaming status. |
+| **Skill Evolution** | Queue-driven skill evolution: captures task signals, generates workflow proposals, and supports explicit approval/resolve via `/skill-evo` commands. |
 | **Token Budget** | Daily token usage tracking with per-category breakdown. Configurable daily limit, automatic 80% warning threshold, usage history with rollover. |
 | **Auto-Provisioning** | First run deploys default CLAUDE.md, documentation, and `dispatch_to` to `~/.metame/`. Subsequent runs sync scripts without overwriting user config. |
 | **Heartbeat System** | Three-layer programmable nervous system. Layer 0 kernel always-on (zero config). Layer 1 system evolution built-in (5 tasks: distill + memory + skills + nightly reflection + memory index). Layer 2 your custom scheduled tasks with `require_idle`, `precondition`, `notify`, workflows. |
@@ -431,6 +489,7 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 | `/undo <hash>` | Roll back to a specific git checkpoint |
 | `/list` | Browse & download project files |
 | `/model` | Switch model (sonnet/opus/haiku) |
+| `/engine` | Show/switch default engine (`claude`/`codex`) |
 | `/distill-model` | Show/update background distill model (default: `haiku`) |
 | `/mentor` | Mentor mode control: on/off/level/status |
 | `/activate` | Activate and bind the most recently created pending agent in a new group |
@@ -450,6 +509,34 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 | `/teamtask <task_id>` | View task detail |
 | `/teamtask resume <task_id>` | Resume a task |
 
+## Mentor Mode (Why + How)
+
+Mentor Mode is designed for users who want MetaMe to actively improve decision quality, not just execute commands.
+
+- `/mentor on` — enable mentor hooks
+- `/mentor off` — disable mentor hooks
+- `/mentor level <0-10>` — set friction level
+- `/mentor status` — show current mode/level
+
+Runtime behavior:
+- Pre-flight emotion breaker (cooldown-aware)
+- Context-time mentor prompts (zone-aware: comfort/stretch/panic)
+- Reflection debt registration on heavy code outputs (intense mode)
+
+Level mapping:
+- `0-3` → `gentle`
+- `4-7` → `active`
+- `8-10` → `intense`
+
+## Hook Optimizations (Default On)
+
+MetaMe installs and maintains two core Claude hooks automatically on launch:
+
+- `UserPromptSubmit` hook (`scripts/signal-capture.js`): captures high-signal preference/task traces with layered filtering.
+- `Stop` hook (`scripts/hooks/stop-session-capture.js`): records session-end/tool-failure signals with watermark protection.
+
+If hook installation fails, MetaMe logs and continues the session (non-blocking fallback).
+
 ## How It Works
 
 ```
@@ -458,8 +545,8 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 └─────────────┘                           │   (your machine, 24/7)       │
                                           │                              │
                                           │   ┌──────────────┐           │
-                                          │   │ Claude Code   │           │
-                                          │   │ (same engine) │           │
+                                          │   │ Claude/Codex  │           │
+                                          │   │ (same runtime)│           │
                                           │   └──────────────┘           │
                                           │                              │
                                           │   ~/.claude_profile          │
@@ -526,9 +613,13 @@ claude plugin install github:Yaron9/MetaMe/plugin
 
 Includes: cognitive profile injection, daemon (Telegram/Feishu), heartbeat tasks, layered memory, all mobile commands, slash commands (`/metame:evolve`, `/metame:daemon`, `/metame:refresh`, etc.).
 
-**One key difference from the npm CLI:** the plugin daemon starts when you open Claude Code and stops when you close it. It does not run 24/7 in the background. For always-on mobile access (receiving messages while Claude Code is closed), use the npm CLI with `metame daemon install-launchd`.
+**Current behavior (code-aligned):**
+- Plugin auto-starts daemon on Claude `SessionStart` (if `~/.metame/daemon.yaml` exists).
+- Daemon runs detached; phone access works while daemon is running.
+- Plugin path does **not** auto-register OS service (launchd/task-scheduler/systemd). After reboot, open Claude once or run daemon start manually.
 
-Use the plugin if you prefer not to install a global npm package and only need mobile access while Claude Code is open. Use the npm CLI (`metame-cli`) for 24/7 daemon, the `metame` command, and first-run interview.
+Use the plugin if you want zero npm-global setup and Claude-integrated bootstrap.  
+Use npm CLI (`metame-cli`) if you want explicit system-service management and CLI-first operations.
 
 ## Contributing
 

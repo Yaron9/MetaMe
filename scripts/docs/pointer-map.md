@@ -5,6 +5,7 @@
 ## 快速入口
 
 - 主入口：`index.js`
+- CLI 双入口：`metame`（Claude）/`metame codex [args]`（Codex）
 - Daemon 主循环：`scripts/daemon.js`
 - 多引擎 runtime 适配层：`scripts/daemon-engine-runtime.js`
 - 会话执行引擎（Claude/Codex 共用入口）：`scripts/daemon-claude-engine.js`
@@ -35,6 +36,10 @@
 - 会话命令与兼容边界：
   - `scripts/daemon-exec-commands.js`
   - 关键点：`/stop` 引擎中性；`/compact` 在 codex 会话返回“暂不支持”
+
+- 运行时引擎切换与诊断：
+  - `scripts/daemon-admin-commands.js`
+  - 关键点：`/engine` 切换默认引擎；`/doctor` 按默认引擎检查 CLI 可用性（Claude/Codex）并兼容自定义 provider 模型名
 
 ## Mentor Mode（Step 1-4）定位
 

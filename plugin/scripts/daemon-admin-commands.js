@@ -142,6 +142,16 @@ function createAdminCommandHandler(deps) {
     return mentor;
   }
 
+  function hasCli(execSyncFn, bin) {
+    try {
+      const cmd = process.platform === 'win32' ? `where ${bin}` : `which ${bin}`;
+      execSyncFn(cmd, { encoding: 'utf8' });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async function handleAdminCommand(ctx) {
     const { bot, chatId, text } = ctx;
     const state = ctx.state || {};
@@ -891,6 +901,10 @@ function createAdminCommandHandler(deps) {
       const validModels = ['sonnet', 'opus', 'haiku'];
       const checks = [];
       let issues = 0;
+      const activeProvider = providerMod && typeof providerMod.getActiveName === 'function'
+        ? providerMod.getActiveName()
+        : 'anthropic';
+      const isCustomProvider = activeProvider !== 'anthropic';
 
       let cfg = null;
       try {
@@ -902,20 +916,33 @@ function createAdminCommandHandler(deps) {
       }
 
       const m = (cfg && cfg.daemon && cfg.daemon.model) || 'opus';
-      if (validModels.includes(m)) {
+      const modelOk = isCustomProvider
+        ? /^[a-zA-Z0-9._-]{2,80}$/.test(String(m || '').trim())
+        : validModels.includes(m);
+      if (modelOk) {
         checks.push(`✅ 模型: ${m}`);
       } else {
-        checks.push(`❌ 模型: ${m} (无效)`);
+        checks.push(`❌ 模型: ${m} (${isCustomProvider ? '格式无效' : '无效'})`);
         issues++;
       }
 
-      try {
-        execSync(process.platform === 'win32' ? 'where claude' : 'which claude', { encoding: 'utf8' });
-        checks.push('✅ Claude CLI');
-      } catch {
-        checks.push('❌ Claude CLI 未找到');
+      const hasClaude = hasCli(execSync, 'claude');
+      const hasCodex = hasCli(execSync, 'codex');
+      checks.push(hasClaude ? '✅ Claude CLI' : '⚠️ Claude CLI 未找到');
+      checks.push(hasCodex ? '✅ Codex CLI' : '⚠️ Codex CLI 未找到');
+
+      const currentEngine = getDefaultEngine() === 'codex' ? 'codex' : 'claude';
+      if (currentEngine === 'claude' && !hasClaude) {
+        checks.push('❌ 当前默认引擎是 claude，但 Claude CLI 不可用');
         issues++;
       }
+      if (currentEngine === 'codex' && !hasCodex) {
+        checks.push('❌ 当前默认引擎是 codex，但 Codex CLI 不可用');
+        issues++;
+      }
+
+      checks.push(`✅ 默认引擎: ${currentEngine}`);
+      checks.push(`✅ Provider: ${activeProvider}${isCustomProvider ? ' (custom)' : ''}`);
 
       const bakFile = CONFIG_FILE + '.bak';
       const hasBak = fs.existsSync(bakFile);

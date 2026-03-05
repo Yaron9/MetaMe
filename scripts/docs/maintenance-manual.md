@@ -24,10 +24,11 @@ feishu:
     "oc_xxx": "reviewer"
 ```
 
-### 电脑端（本期不新增 MetaMe CLI 子命令）
+### 电脑端（CLI）
 
-- 直接用原生命令：`claude` / `codex`
-- `metame` CLI 不做 `metame codex` 子命令分流
+- Claude 入口：`metame`（等价启动 Claude + MetaMe 初始化）
+- Codex 入口：`metame codex [args]`
+- 也可直接用原生命令：`claude` / `codex`
 
 ## 2. Agent 创建与引擎写入
 
@@ -59,10 +60,17 @@ feishu:
 - `/compact`：
   - Claude 会话：正常压缩
   - Codex 会话：返回“暂不支持，请继续同会话”
+- `/engine`：
+  - 查询当前默认引擎：`/engine`
+  - 切换默认引擎：`/engine claude` 或 `/engine codex`
 - `/distill-model`：
   - 查询当前蒸馏模型：`/distill-model`
   - 设置蒸馏模型：`/distill-model gpt-5.1-codex-mini`
   - 也支持严格自然语言：`把蒸馏模型改成 5.1mini`
+- `/doctor`：
+  - 同时检查 Claude/Codex CLI 可用性
+  - 仅在“当前默认引擎对应 CLI 不可用”时判为故障
+  - 自定义 provider 下允许任意合法模型名（不再强制 sonnet/opus/haiku）
 
 ## 5. 运行时文件与状态
 
