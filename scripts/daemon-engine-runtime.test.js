@@ -76,6 +76,13 @@ describe('daemon-engine-runtime parsers', () => {
 });
 
 describe('daemon-engine-runtime error classification', () => {
+  it('returns null for empty inputs', () => {
+    assert.equal(_private.classifyEngineError(''), null);
+    assert.equal(_private.classifyEngineError(null), null);
+    assert.equal(_private.classifyEngineError(undefined), null);
+    assert.equal(_private.classifyEngineError('   '), null);
+  });
+
   it('classifies auth errors', () => {
     const out = _private.classifyEngineError('Unauthorized: please login');
     assert.equal(out.code, 'AUTH_REQUIRED');

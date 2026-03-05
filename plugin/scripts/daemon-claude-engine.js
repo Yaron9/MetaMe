@@ -1530,6 +1530,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       shouldRetryCodexResumeFallback,
       formatEngineSpawnError,
       adaptDaemonHintForEngine,
+      canRetryCodexResume,
+      markCodexResumeRetried,
+      CODEX_RESUME_RETRY_WINDOW_MS,
     },
   };
 }

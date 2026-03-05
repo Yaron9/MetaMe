@@ -100,6 +100,24 @@ describe('daemon-claude-engine private helpers', () => {
     }), false);
   });
 
+  it('enforces codex resume retry window by chat id', () => {
+    const state = { sessions: {} };
+    const engine = createEngineWithState(state);
+    const key = 'chat-resume-window';
+    const originalNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+    try {
+      assert.equal(engine._private.canRetryCodexResume(key), true);
+      engine._private.markCodexResumeRetried(key);
+      assert.equal(engine._private.canRetryCodexResume(key), false);
+      now += engine._private.CODEX_RESUME_RETRY_WINDOW_MS + 1;
+      assert.equal(engine._private.canRetryCodexResume(key), true);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
   it('formats codex ENOENT into actionable hint', () => {
     const state = { sessions: {} };
     const engine = createEngineWithState(state);
