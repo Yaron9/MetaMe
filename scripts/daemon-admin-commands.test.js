@@ -438,6 +438,28 @@ describe('daemon-admin-commands distill model controls', () => {
     assert.equal(sent.length, 0);
     assert.equal(providerStub.getDistillModel(), 'haiku');
   });
+
+  it('does not trigger when model is only mentioned without set intent', async () => {
+    const sent = [];
+    const providerStub = createProviderStub();
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      { providerMod: providerStub }
+    );
+    const bot = { sendMessage: async (_chatId, text) => { sent.push(String(text)); } };
+
+    const res = await handleAdminCommand({
+      bot,
+      chatId: 'mobile-user-distill-5',
+      text: '今天蒸馏总结里提到了 gpt-5-mini，先不用改',
+      config: {},
+      state: { tasks: {} },
+    });
+
+    assert.equal(res.handled, false);
+    assert.equal(sent.length, 0);
+    assert.equal(providerStub.getDistillModel(), 'haiku');
+  });
 });
 
 describe('daemon-admin-commands /mentor', () => {

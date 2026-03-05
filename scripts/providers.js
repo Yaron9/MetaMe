@@ -21,10 +21,6 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const HOME = os.homedir();
-const METAME_DIR = path.join(HOME, '.metame');
-const PROVIDERS_FILE = path.join(METAME_DIR, 'providers.yaml');
-
 const yaml = require('./resolve-yaml');
 
 const DEFAULT_DISTILL_MODEL = 'haiku';
@@ -84,13 +80,49 @@ function defaultConfig() {
 // LOAD / SAVE (cached — file rarely changes)
 // ---------------------------------------------------------
 let _providersCache = null;
+let _providersCachePath = '';
+let _providersCacheStamp = '';
 
-function loadProviders() {
-  if (_providersCache) return _providersCache;
+function getProvidersFilePath() {
+  const home = process.env.HOME || os.homedir();
+  return path.join(home, '.metame', 'providers.yaml');
+}
+
+function computeFileStamp(filePath) {
   try {
-    if (!fs.existsSync(PROVIDERS_FILE)) { _providersCache = defaultConfig(); return _providersCache; }
-    const data = yaml.load(fs.readFileSync(PROVIDERS_FILE, 'utf8'));
-    if (!data || typeof data !== 'object') { _providersCache = defaultConfig(); return _providersCache; }
+    if (!fs.existsSync(filePath)) return 'missing';
+    const st = fs.statSync(filePath);
+    return `${Math.trunc(st.mtimeMs)}:${st.size}`;
+  } catch {
+    return 'error';
+  }
+}
+
+function loadProviders(options = {}) {
+  const force = !!(options && options.force);
+  const providersFile = getProvidersFilePath();
+  const currentStamp = computeFileStamp(providersFile);
+  if (_providersCachePath && _providersCachePath !== providersFile) {
+    _providersCache = null;
+    _providersCacheStamp = '';
+  }
+  if (!force && _providersCache && _providersCachePath === providersFile && _providersCacheStamp === currentStamp) {
+    return _providersCache;
+  }
+  try {
+    if (!fs.existsSync(providersFile)) {
+      _providersCachePath = providersFile;
+      _providersCacheStamp = currentStamp;
+      _providersCache = defaultConfig();
+      return _providersCache;
+    }
+    const data = yaml.load(fs.readFileSync(providersFile, 'utf8'));
+    if (!data || typeof data !== 'object') {
+      _providersCachePath = providersFile;
+      _providersCacheStamp = currentStamp;
+      _providersCache = defaultConfig();
+      return _providersCache;
+    }
     if (!data.providers) data.providers = {};
     if (!data.providers.anthropic) data.providers.anthropic = { label: 'Anthropic (Official)' };
     _providersCache = {
@@ -102,17 +134,25 @@ function loadProviders() {
         try { return normalizeDistillModel(data.distill_model, { allowEmpty: true }); } catch { return null; }
       })(),
     };
+    _providersCachePath = providersFile;
+    _providersCacheStamp = currentStamp;
     return _providersCache;
   } catch {
+    _providersCachePath = providersFile;
+    _providersCacheStamp = currentStamp;
     _providersCache = defaultConfig();
     return _providersCache;
   }
 }
 
 function saveProviders(config) {
-  if (!fs.existsSync(METAME_DIR)) fs.mkdirSync(METAME_DIR, { recursive: true });
-  fs.writeFileSync(PROVIDERS_FILE, yaml.dump(config, { lineWidth: -1 }), 'utf8');
-  _providersCache = null; // invalidate on write
+  const providersFile = getProvidersFilePath();
+  const metameDir = path.dirname(providersFile);
+  if (!fs.existsSync(metameDir)) fs.mkdirSync(metameDir, { recursive: true });
+  fs.writeFileSync(providersFile, yaml.dump(config, { lineWidth: -1 }), 'utf8');
+  _providersCache = null;
+  _providersCachePath = providersFile;
+  _providersCacheStamp = '';
 }
 
 // ---------------------------------------------------------
@@ -268,14 +308,23 @@ function listFormatted() {
 // Claude subprocess helper (shared by distill.js + skill-evolution.js)
 // ---------------------------------------------------------
 /**
+ * Historical name: now this helper calls the configured distill model,
+ * not necessarily Haiku.
+ */
+function callHaiku(input, extraEnv, timeout, options = {}) {
+  return callDistillModel(input, extraEnv, timeout, options);
+}
+
+/**
  * Call `claude -p --model <distill_model>` as a subprocess with extra env vars.
  * Deletes CLAUDECODE from env to prevent recursive session detection.
  */
-function callHaiku(input, extraEnv, timeout, options = {}) {
+function callDistillModel(input, extraEnv, timeout, options = {}) {
   const { execFile } = require('child_process');
   const env = { ...process.env, ...extraEnv, METAME_INTERNAL_PROMPT: '1' };
   delete env.CLAUDECODE;
-  const config = loadProviders();
+  // Force refresh to pick up cross-process edits to providers.yaml immediately.
+  const config = loadProviders({ force: true });
   const model = resolveDistillModel(config, options.model);
   return new Promise((resolve, reject) => {
     const proc = execFile(
@@ -298,9 +347,7 @@ function callHaiku(input, extraEnv, timeout, options = {}) {
 }
 
 // ---------------------------------------------------------
-// EXPORTS
-// ---------------------------------------------------------
-module.exports = {
+const api = {
   loadProviders,
   saveProviders,
   buildEnv,
@@ -318,6 +365,16 @@ module.exports = {
   setDistillModel,
   normalizeDistillModel,
   listFormatted,
+  callDistillModel,
   callHaiku,
-  PROVIDERS_FILE,
+  getProvidersFilePath,
 };
+
+Object.defineProperty(api, 'PROVIDERS_FILE', {
+  enumerable: true,
+  get: () => getProvidersFilePath(),
+});
+
+// EXPORTS
+// ---------------------------------------------------------
+module.exports = api;

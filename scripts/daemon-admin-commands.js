@@ -107,15 +107,18 @@ function createAdminCommandHandler(deps) {
     const text = String(input || '').trim();
     if (!text || text.startsWith('/')) return null;
     if (!/(蒸馏|distill|提炼|提纯)/i.test(text)) return null;
-    if (!/(改成|改为|设为|设置|切到|切换到|换成|改用|使用|用|set|switch|use)/i.test(text)) return null;
+    const setVerb = '(?:改成|改为|设为|设置|切到|切换到|换成|改用|使用|用|set|switch|use)';
+    if (!(new RegExp(setVerb, 'i')).test(text)) return null;
 
-    const explicitModel = text.match(/(?:模型|model)\s*(?:改成|改为|设为|设置|切到|切换到|换成|改用|使用|用|to|is)?\s*[:：]?\s*([a-zA-Z0-9._-]{2,80})/i);
+    const explicitModel = text.match(new RegExp(`(?:蒸馏模型|模型|distill\\s*model|model)\\s*(?:${setVerb}|to|is)?\\s*[:：]?\\s*([a-zA-Z0-9._-]{2,80})`, 'i'));
     if (explicitModel) return { model: explicitModel[1] };
 
-    const quotedModel = text.match(/[“"'「]([a-zA-Z0-9._-]{2,80})[”"'」]/);
-    if (quotedModel) return { model: quotedModel[1] };
+    if (/(蒸馏模型|模型|distill\s*model|model)/i.test(text)) {
+      const quotedModel = text.match(/[“"'「]([a-zA-Z0-9._-]{2,80})[”"'」]/);
+      if (quotedModel) return { model: quotedModel[1] };
+    }
 
-    const knownToken = text.match(/\b(gpt-5\.1-codex-mini|gpt-5-mini|haiku|sonnet|opus|5\.1mini|5mini|codex-mini)\b/i);
+    const knownToken = text.match(new RegExp(`${setVerb}\\s*(?:为|成|到|to)?\\s*[:：]?\\s*(gpt-5\\.1-codex-mini|gpt-5-mini|haiku|sonnet|opus|5\\.1mini|5mini|codex-mini)\\b`, 'i'));
     if (knownToken) return { model: knownToken[1] };
 
     return null;

@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const yaml = require('./resolve-yaml');
 
 function loadProvidersWithHome(home) {
   process.env.HOME = home;
@@ -39,6 +40,18 @@ describe('providers distill model config', () => {
     delete require.cache[require.resolve('./providers')];
     const providersReloaded = require('./providers');
     assert.equal(providersReloaded.getDistillModel(), 'gpt-5.1-codex-mini');
+  });
+
+  it('reloads distill model after external providers.yaml change', () => {
+    const providers = loadProvidersWithHome(tmpHome);
+    providers.setDistillModel('haiku');
+    const cfgPath = providers.PROVIDERS_FILE;
+    const cfg = yaml.load(fs.readFileSync(cfgPath, 'utf8')) || {};
+    cfg.distill_model = 'gpt-5-mini';
+    fs.writeFileSync(cfgPath, yaml.dump(cfg, { lineWidth: -1 }), 'utf8');
+    const bumped = new Date(Date.now() + 1500);
+    fs.utimesSync(cfgPath, bumped, bumped);
+    assert.equal(providers.getDistillModel(), 'gpt-5-mini');
   });
 
   it('rejects malformed model name', () => {
