@@ -209,8 +209,9 @@ function createExecCommandHandler(deps) {
       const proc = activeProcesses.get(chatId);
       if (proc && proc.child) {
         proc.aborted = true;
-        try { process.kill(-proc.child.pid, 'SIGINT'); } catch { proc.child.kill('SIGINT'); }
-        await bot.sendMessage(chatId, '⏹ Stopping Claude...');
+        const signal = proc.killSignal || 'SIGTERM';
+        try { process.kill(-proc.child.pid, signal); } catch { proc.child.kill(signal); }
+        await bot.sendMessage(chatId, '⏹ Stopping current engine task...');
       } else {
         await bot.sendMessage(chatId, 'No active task to stop.');
       }
@@ -228,7 +229,8 @@ function createExecCommandHandler(deps) {
       const proc = activeProcesses.get(chatId);
       if (proc && proc.child) {
         proc.aborted = true;
-        try { process.kill(-proc.child.pid, 'SIGINT'); } catch { proc.child.kill('SIGINT'); }
+        const signal = proc.killSignal || 'SIGTERM';
+        try { process.kill(-proc.child.pid, signal); } catch { proc.child.kill(signal); }
       }
       const session = getSession(chatId);
       const name = session ? getSessionName(session.id) : null;
@@ -242,6 +244,10 @@ function createExecCommandHandler(deps) {
       const session = getSession(chatId);
       if (!session || !session.started) {
         await bot.sendMessage(chatId, '❌ No active session to compact.');
+        return true;
+      }
+      if (String(session.engine || '').toLowerCase() === 'codex') {
+        await bot.sendMessage(chatId, '⚠️ Codex 会话暂不支持 /compact，请继续在同一会话里对话。');
         return true;
       }
       await bot.sendMessage(chatId, '🗜 Compacting session...');
@@ -316,7 +322,7 @@ function createExecCommandHandler(deps) {
       // Step 4: Create new session with the summary
       const model = daemonCfg.model || 'opus';
       const oldName = getSessionName(session.id);
-      const newSession = createSession(chatId, session.cwd, oldName ? oldName + ' (compacted)' : '');
+      const newSession = createSession(chatId, session.cwd, oldName ? oldName + ' (compacted)' : '', session.engine || 'claude');
       const initArgs = ['-p', '--session-id', newSession.id, '--model', model];
       if (daemonCfg.dangerously_skip_permissions) initArgs.push('--dangerously-skip-permissions');
       const preamble = buildProfilePreamble();

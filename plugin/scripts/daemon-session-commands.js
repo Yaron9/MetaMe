@@ -28,6 +28,20 @@ function createSessionCommandHandler(deps) {
     sessionLabel,
   } = deps;
 
+  function normalizeEngineName(name) {
+    return String(name || '').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+  }
+
+  function inferEngineByCwd(cfg, cwd) {
+    if (!cfg || !cfg.projects || !cwd) return null;
+    const target = normalizeCwd(cwd);
+    for (const proj of Object.values(cfg.projects || {})) {
+      if (!proj || !proj.cwd) continue;
+      if (normalizeCwd(proj.cwd) === target) return normalizeEngineName(proj.engine);
+    }
+    return null;
+  }
+
   async function handleSessionCommand(ctx) {
     const { bot, chatId, text } = ctx;
 
@@ -61,7 +75,7 @@ function createSessionCommandHandler(deps) {
         const boundProj = boundKey && newCfg.projects && newCfg.projects[boundKey];
         if (boundProj && boundProj.cwd) {
           const boundCwd = normalizeCwd(boundProj.cwd);
-          const session = createSession(chatId, boundCwd, '');
+          const session = createSession(chatId, boundCwd, '', String(boundProj.engine || '').toLowerCase() === 'codex' ? 'codex' : 'claude');
           await bot.sendMessage(chatId, `✅ 新会话已创建\nWorkdir: ${session.cwd}`);
           return true;
         }
@@ -87,7 +101,13 @@ function createSessionCommandHandler(deps) {
           return true;
         }
       }
-      const session = createSession(chatId, dirPath, sessionName || '');
+      const cfgForEngine = loadConfig();
+      const mapForEngine = { ...(cfgForEngine.telegram ? cfgForEngine.telegram.chat_agent_map : {}), ...(cfgForEngine.feishu ? cfgForEngine.feishu.chat_agent_map : {}) };
+      const mappedKeyForEngine = mapForEngine[String(chatId)];
+      const mappedProjForEngine = mappedKeyForEngine && cfgForEngine.projects ? cfgForEngine.projects[mappedKeyForEngine] : null;
+      const currentEngine = normalizeEngineName(getSession(chatId) && getSession(chatId).engine);
+      const sessionEngine = normalizeEngineName((mappedProjForEngine && mappedProjForEngine.engine) || currentEngine);
+      const session = createSession(chatId, dirPath, sessionName || '', sessionEngine);
       const label = sessionName ? `[${sessionName}]` : '';
       await bot.sendMessage(chatId, `New session ${label}\nWorkdir: ${session.cwd}`);
       return true;
@@ -142,11 +162,15 @@ function createSessionCommandHandler(deps) {
       if (!s) {
         // Last resort: use __continue__ to resume whatever Claude thinks is last
         const state2 = loadState();
+        const cfgForEngine = loadConfig();
+        const currentEngine = normalizeEngineName(state2.sessions[chatId] && state2.sessions[chatId].engine);
+        const engineByCwd = inferEngineByCwd(cfgForEngine, curCwd || HOME);
         state2.sessions[chatId] = {
           id: '__continue__',
           cwd: curCwd || HOME,
           created: new Date().toISOString(),
           started: true,
+          engine: engineByCwd || currentEngine,
         };
         saveState(state2);
         await bot.sendMessage(chatId, `⚡ Resuming last session in ${path.basename(curCwd || HOME)}`);
@@ -154,10 +178,14 @@ function createSessionCommandHandler(deps) {
       }
 
       const state2 = loadState();
+      const cfgForEngine = loadConfig();
+      const currentEngine = normalizeEngineName(state2.sessions[chatId] && state2.sessions[chatId].engine);
+      const engineByCwd = inferEngineByCwd(cfgForEngine, s.projectPath || HOME);
       state2.sessions[chatId] = {
         id: s.sessionId,
         cwd: s.projectPath || HOME,
         started: true,
+        engine: engineByCwd || currentEngine,
       };
       saveState(state2);
       // Display: name/summary + id on separate lines
@@ -223,9 +251,12 @@ function createSessionCommandHandler(deps) {
 
     // /sessions — compact list, tap to see details, then tap to switch
     if (text === '/sessions') {
+      const currentEngine = normalizeEngineName(getSession(chatId) && getSession(chatId).engine);
+      const codexLimitTip = '⚠️ 当前为 Codex 会话：`/sessions` 列表暂仅展示 Claude 本地会话，Codex 会话暂不可见。';
       const allSessions = listRecentSessions(15);
       if (allSessions.length === 0) {
-        await bot.sendMessage(chatId, 'No sessions found. Try /new first.');
+        const base = 'No sessions found. Try /new first.';
+        await bot.sendMessage(chatId, currentEngine === 'codex' ? `${base}\n\n${codexLimitTip}` : base);
         return true;
       }
       if (bot.sendButtons) {
@@ -236,7 +267,11 @@ function createSessionCommandHandler(deps) {
         allSessions.forEach((s, i) => {
           msg += sessionRichLabel(s, i + 1, _tags1) + '\n';
         });
+        if (currentEngine === 'codex') msg += `\n${codexLimitTip}\n`;
         await bot.sendMessage(chatId, msg);
+      }
+      if (bot.sendButtons && currentEngine === 'codex') {
+        await bot.sendMessage(chatId, codexLimitTip);
       }
       return true;
     }
@@ -348,10 +383,14 @@ function createSessionCommandHandler(deps) {
           const target = candidates[0];
           // Switch to that session (like /resume) AND its directory
           const state2 = loadState();
+          const cfgForEngine = loadConfig();
+          const currentEngine = normalizeEngineName(state2.sessions[chatId] && state2.sessions[chatId].engine);
+          const engineByCwd = inferEngineByCwd(cfgForEngine, target.projectPath);
           state2.sessions[chatId] = {
             id: target.sessionId,
             cwd: target.projectPath,
             started: true,
+            engine: engineByCwd || currentEngine,
           };
           saveState(state2);
           const name = target.customTitle || target.summary || '';
@@ -378,19 +417,26 @@ function createSessionCommandHandler(deps) {
       if (recentInDir.length > 0 && recentInDir[0].sessionId) {
         // Attach to existing session in this directory
         const target = recentInDir[0];
+        const cfgForEngine = loadConfig();
+        const engineByCwd = inferEngineByCwd(cfgForEngine, newCwd);
         state2.sessions[chatId] = {
           id: target.sessionId,
           cwd: newCwd,
           started: true,
+          engine: engineByCwd || normalizeEngineName(state2.sessions[chatId] && state2.sessions[chatId].engine),
         };
         saveState(state2);
         const label = target.customTitle || target.summary?.slice(0, 30) || target.sessionId.slice(0, 8);
         await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)}\n🔄 Attached: ${label}`);
       } else if (!state2.sessions[chatId]) {
-        createSession(chatId, newCwd);
+        const cfgForEngine = loadConfig();
+        const engineByCwd = inferEngineByCwd(cfgForEngine, newCwd);
+        const currentEngine = normalizeEngineName(getSession(chatId) && getSession(chatId).engine);
+        createSession(chatId, newCwd, '', engineByCwd || currentEngine);
         await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)} (new session)`);
       } else {
         state2.sessions[chatId].cwd = newCwd;
+        if (!state2.sessions[chatId].engine) state2.sessions[chatId].engine = 'claude';
         saveState(state2);
         await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)}`);
       }

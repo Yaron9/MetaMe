@@ -144,6 +144,7 @@ const { createFileBrowser } = require('./daemon-file-browser');
 const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lifecycle');
 const { createNotifier } = require('./daemon-notify');
 const { createClaudeEngine } = require('./daemon-claude-engine');
+const { createEngineRuntimeFactory } = require('./daemon-engine-runtime');
 const { createCommandRouter } = require('./daemon-command-router');
 const { createTaskScheduler } = require('./daemon-task-scheduler');
 const { createAgentTools } = require('./daemon-agent-tools');
@@ -1118,13 +1119,10 @@ const {
 /**
  * Attach chatId to the most recent session in projCwd, or create a new one.
  */
-function attachOrCreateSession(chatId, projCwd, name) {
-  const state = loadState();
+function attachOrCreateSession(chatId, projCwd, name, engine = 'claude') {
   // Virtual chatIds (_agent_* / _scope_*) are isolated from real user chats.
   // This avoids cross-context session collisions between user chat and dispatch flows.
-  const newSess = createSession(chatId, projCwd, name || '');
-  state.sessions[chatId] = { id: newSess.id, cwd: projCwd, started: false };
-  saveState(state);
+  createSession(chatId, projCwd, name || '', engine);
 }
 
 /**
@@ -1273,7 +1271,7 @@ const {
 watchSessionFiles(); // 热加载：手机端新建 session 后桌面无需重启
 
 // Active Claude processes per chat (for /stop)
-const activeProcesses = new Map(); // chatId -> { child, aborted }
+const activeProcesses = new Map(); // chatId -> { child, aborted, engine, killSignal }
 
 // Activity tracking for idle/sleep detection
 let lastInteractionTime = Date.now(); // updated on every incoming message
@@ -1310,13 +1308,19 @@ function isUserIdle() {
   return activeProcesses.size === 0;
 }
 
-// Fix3: persist child PIDs so next daemon startup can kill orphans
-const ACTIVE_PIDS_FILE = path.join(HOME, '.metame', 'active_claude_pids.json');
+// Persist child PIDs so next daemon startup can kill orphans
+const ACTIVE_PIDS_FILE = path.join(HOME, '.metame', 'active_agent_pids.json');
 function saveActivePids() {
   try {
     const pids = {};
     for (const [chatId, proc] of activeProcesses) {
-      if (proc.child && proc.child.pid) pids[chatId] = proc.child.pid;
+      if (proc.child && proc.child.pid) {
+        pids[chatId] = {
+          pid: proc.child.pid,
+          engine: proc.engine || 'claude',
+          killSignal: proc.killSignal || 'SIGTERM',
+        };
+      }
     }
     fs.writeFileSync(ACTIVE_PIDS_FILE, JSON.stringify(pids), 'utf8');
   } catch { }
@@ -1330,21 +1334,33 @@ function killOrphanPids() {
   try {
     if (!fs.existsSync(ACTIVE_PIDS_FILE)) return;
     const pids = JSON.parse(fs.readFileSync(ACTIVE_PIDS_FILE, 'utf8'));
-    for (const [chatId, pid] of Object.entries(pids)) {
+    for (const [chatId, rec] of Object.entries(pids)) {
       try {
-        // Safety: only kill if PID still belongs to a claude process (prevent PID reuse accidents)
+        const pid = typeof rec === 'number' ? rec : Number(rec && rec.pid);
+        if (!Number.isFinite(pid) || pid <= 0) continue;
+        // Safety: only kill if PID still belongs to a known agent process (prevent PID reuse accidents)
         const comm = getProcessName(pid);
-        if (!comm || !comm.includes('claude')) {
-          log('WARN', `Skipping PID ${pid} (chatId: ${chatId}): process is "${comm}", not claude`);
+        const isKnownAgent = !!comm && (comm.includes('claude') || comm.includes('codex'));
+        if (!isKnownAgent) {
+          log('WARN', `Skipping PID ${pid} (chatId: ${chatId}): process is "${comm}", not claude/codex`);
           continue;
         }
         process.kill(pid, 'SIGKILL');
-        log('INFO', `Killed orphan claude PID ${pid} (chatId: ${chatId})`);
+        log('INFO', `Killed orphan agent PID ${pid} (chatId: ${chatId})`);
       } catch { }
     }
     fs.unlinkSync(ACTIVE_PIDS_FILE);
   } catch { }
 }
+
+const getEngineRuntime = createEngineRuntimeFactory({
+  fs,
+  path,
+  HOME,
+  execSync,
+  CLAUDE_BIN,
+  getActiveProviderEnv,
+});
 
 const {
   checkPrecondition,
@@ -1481,6 +1497,7 @@ const { spawnClaudeAsync, askClaude } = createClaudeEngine({
   touchInteraction,
   statusThrottleMs: STATUS_THROTTLE_MS,
   fallbackThrottleMs: FALLBACK_THROTTLE_MS,
+  getEngineRuntime,
 });
 
 const agentTools = createAgentTools({
@@ -1830,10 +1847,10 @@ async function main() {
     if (feishuBridge) feishuBridge.stop();
     // Stop QMD semantic search daemon if it was started
     try { require('./qmd-client').stopDaemon(); } catch { /* ignore */ }
-    // Kill all tracked claude process groups before exiting (covers sub-agents too)
+    // Kill all tracked engine process groups before exiting (covers sub-agents too)
     for (const [cid, proc] of activeProcesses) {
       try { process.kill(-proc.child.pid, 'SIGKILL'); } catch { try { proc.child.kill('SIGKILL'); } catch { } }
-      log('INFO', `Shutdown: killed claude process group for chatId ${cid}`);
+      log('INFO', `Shutdown: killed engine process group for chatId ${cid}`);
     }
     activeProcesses.clear();
     try { if (fs.existsSync(ACTIVE_PIDS_FILE)) fs.unlinkSync(ACTIVE_PIDS_FILE); } catch { }

@@ -88,7 +88,7 @@ function syncDirFiles(srcDir, destDir, { fileList, chmod } = {}) {
 // Auto-deploy bundled scripts to ~/.metame/
 // IMPORTANT: daemon.yaml is USER CONFIG — never overwrite it. Only daemon-default.yaml (template) is synced.
 const scriptsDir = path.join(__dirname, 'scripts');
-const BUNDLED_BASE_SCRIPTS = ['platform.js', 'signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js', 'skill-evolution.js', 'memory.js', 'memory-extract.js', 'memory-search.js', 'memory-gc.js', 'qmd-client.js', 'session-summarize.js', 'check-macos-control-capabilities.sh', 'usage-classifier.js', 'task-board.js', 'memory-nightly-reflect.js', 'memory-index.js', 'skill-changelog.js'];
+const BUNDLED_BASE_SCRIPTS = ['platform.js', 'signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'migrate-v2.js', 'daemon.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js', 'skill-evolution.js', 'memory.js', 'memory-extract.js', 'memory-search.js', 'memory-gc.js', 'qmd-client.js', 'session-summarize.js', 'mentor-engine.js', 'check-macos-control-capabilities.sh', 'usage-classifier.js', 'task-board.js', 'memory-nightly-reflect.js', 'memory-index.js', 'skill-changelog.js'];
 const DAEMON_MODULE_SCRIPTS = (() => {
   try {
     return fs.readdirSync(scriptsDir).filter((f) => /^daemon-[\w-]+\.js$/.test(f));
@@ -124,6 +124,8 @@ if (scriptsUpdated) {
 syncDirFiles(path.join(__dirname, 'scripts', 'docs'), path.join(METAME_DIR, 'docs'));
 // Bin: CLI tools (dispatch_to etc.)
 syncDirFiles(path.join(__dirname, 'scripts', 'bin'), path.join(METAME_DIR, 'bin'), { chmod: 0o755 });
+// Hooks: Claude Code event hooks (Stop, PostToolUse, etc.)
+syncDirFiles(path.join(__dirname, 'scripts', 'hooks'), path.join(METAME_DIR, 'hooks'));
 
 // ---------------------------------------------------------
 // Deploy bundled skills to ~/.claude/skills/
@@ -160,6 +162,29 @@ if (fs.existsSync(bundledSkillsDir)) {
     }
   } catch {
     // Non-fatal
+  }
+}
+
+// Ensure ~/.codex/skills and ~/.agents/skills are symlinks to ~/.claude/skills
+// This keeps skill evolution unified across all engines.
+for (const altDir of [
+  path.join(HOME_DIR, '.codex', 'skills'),
+  path.join(HOME_DIR, '.agents', 'skills'),
+]) {
+  try {
+    const parentDir = path.dirname(altDir);
+    if (!fs.existsSync(parentDir)) continue; // engine not installed, skip
+    const stat = fs.lstatSync(altDir);
+    if (stat.isSymbolicLink()) continue; // already a symlink, good
+    // Physical directory exists — replace with symlink
+    fs.rmSync(altDir, { recursive: true, force: true });
+    fs.symlinkSync(CLAUDE_SKILLS_DIR, altDir);
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      // Directory doesn't exist — create symlink
+      try { fs.symlinkSync(CLAUDE_SKILLS_DIR, altDir); } catch { /* non-fatal */ }
+    }
+    // Other errors: non-fatal, skip
   }
 }
 
@@ -231,6 +256,8 @@ function ensureHookInstalled() {
       entry.hooks?.some(h => h.command && h.command.includes('signal-capture.js'))
     );
 
+    let modified = false;
+
     if (!stillInstalled) {
       if (!settings.hooks) settings.hooks = {};
       if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
@@ -241,9 +268,33 @@ function ensureHookInstalled() {
           command: hookCommand
         }]
       });
-
-      fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2), 'utf8');
+      modified = true;
       console.log(`${icon("hook")} MetaMe: Signal capture hook installed.`);
+    }
+
+    // Ensure Stop hook (session-logger + tool-failure capture) is installed
+    const stopHookScript = path.join(METAME_DIR, 'hooks', 'stop-session-capture.js').replace(/\\/g, '/');
+    const stopHookCommand = `node "${stopHookScript}"`;
+    const stopHookInstalled = (settings.hooks?.Stop || []).some(entry =>
+      entry.hooks?.some(h => h.command && h.command.includes('stop-session-capture.js'))
+    );
+
+    if (!stopHookInstalled) {
+      if (!settings.hooks) settings.hooks = {};
+      if (!settings.hooks.Stop) settings.hooks.Stop = [];
+
+      settings.hooks.Stop.push({
+        hooks: [{
+          type: 'command',
+          command: stopHookCommand
+        }]
+      });
+      modified = true;
+      console.log(`${icon("hook")} MetaMe: Stop session capture hook installed.`);
+    }
+
+    if (modified) {
+      fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2), 'utf8');
     }
   } catch (e) {
     // Non-fatal: hook install failure shouldn't block launch
@@ -743,7 +794,8 @@ const GLOBAL_MARKER_END = '<!-- METAME-GLOBAL:END -->';
 // Build dynamic Agent dispatch table from daemon.yaml projects.
 // Only include agents whose cwd actually exists on disk — test/stale agents
 // with deleted paths are automatically excluded, no manual cleanup needed.
-let dispatchTable = '';
+// The table is written to ~/.metame/docs/dispatch-table.md (NOT inlined into CLAUDE.md).
+const DISPATCH_TABLE_PATH = path.join(METAME_DIR, 'docs', 'dispatch-table.md');
 try {
   const daemonYamlPath = path.join(os.homedir(), '.metame', 'daemon.yaml');
   if (fs.existsSync(daemonYamlPath)) {
@@ -752,13 +804,29 @@ try {
     const rows = Object.entries(projects)
       .filter(([, p]) => {
         if (!p || !p.name || !p.cwd) return false;
-        // Expand ~ to home directory
         const expandedCwd = String(p.cwd).replace(/^~/, os.homedir());
         return fs.existsSync(expandedCwd);
       })
       .map(([key, p]) => `| \`${key}\` | ${p.name} |`);
     if (rows.length > 0) {
-      dispatchTable = '\n\n| project_key | 昵称 |\n|-------------|------|\n' + rows.join('\n') + '\n\n`--new` 强制新建会话（用户说"新开会话"时加此参数）。';
+      const tableContent = [
+        '# Agent Dispatch 路由表',
+        '',
+        '> 自动生成，来源：daemon.yaml。勿手动编辑。',
+        '',
+        '| project_key | 昵称 |',
+        '|-------------|------|',
+        ...rows,
+        '',
+        '## 使用方法',
+        '```bash',
+        '~/.metame/bin/dispatch_to [--new] <project_key> "内容"',
+        '```',
+        '`--new` 强制新建会话（用户说"新开会话"时加此参数）。',
+        '新增 Agent：`/agent bind <名称> <工作目录>`',
+      ].join('\n') + '\n';
+      fs.mkdirSync(path.dirname(DISPATCH_TABLE_PATH), { recursive: true });
+      fs.writeFileSync(DISPATCH_TABLE_PATH, tableContent);
     }
   }
 } catch { /* daemon.yaml missing or invalid — skip dispatch table */ }
@@ -771,11 +839,11 @@ const KERNEL_BODY = PROTOCOL_NORMAL
 
 const CAPABILITY_SECTIONS = [
   '## Agent Dispatch',
-  `"告诉X/让X" → \`~/.metame/bin/dispatch_to <project_key> "内容"\`，手机端 \`/dispatch to <key> <消息>\`。` + dispatchTable,
-  '新增 Agent：`/agent bind <名称> <工作目录>`',
+  '识别到"告诉X/让X/通知X"等转发意图时 → 先 `cat ~/.metame/docs/dispatch-table.md` 获取路由表（昵称→project_key），再执行转发。不要凭记忆猜测昵称对应关系。',
   '',
   '## Agent 创建与管理',
   '用户问创建/管理/绑定 Agent 时 → 先 `cat ~/.metame/docs/agent-guide.md` 再回答。',
+  '用户问代码结构/升级进度/脚本入口时 → 先 `cat ~/.metame/docs/pointer-map.md` 再回答。',
   '',
   '## 手机端文件交互',
   '用户要文件（"发给我"/"发过来"/"导出"）→ 先 `cat ~/.metame/docs/file-transfer.md` 再执行。',
@@ -1836,7 +1904,12 @@ WantedBy=default.target
   }
 
   // Unknown subcommand
-  console.log(`${icon("book")} MetaMe Daemon Commands:`);
+  console.log(`${icon("book")} MetaMe Commands:`);
+  console.log("   metame                        — launch Claude with MetaMe init");
+  console.log("   metame codex [args]           — launch Codex with MetaMe init");
+  console.log("   metame continue               — resume latest session");
+  console.log("");
+  console.log(`${icon("book")} Daemon Commands:`);
   console.log("   metame start                  — start background daemon");
   console.log("   metame stop                   — stop daemon");
   console.log("   metame status                 — show status & budget");
@@ -1854,7 +1927,43 @@ WantedBy=default.target
 }
 
 // ---------------------------------------------------------
-// 5.8 CONTINUE/SYNC — resume latest session from terminal
+// 5.8 CODEX — launch Codex with MetaMe initialization
+// ---------------------------------------------------------
+const isCodex = process.argv[2] === 'codex';
+if (isCodex) {
+  // spawn() resolves PATH automatically; error event handles missing binary
+  const codexBin = 'codex';
+
+  // Build codex args: remaining user args after 'codex'
+  const codexUserArgs = process.argv.slice(3);
+  let codexArgs;
+  if (codexUserArgs.length === 0) {
+    // Interactive mode: `codex --full-auto`
+    codexArgs = ['--full-auto'];
+  } else {
+    // Non-interactive: `codex exec --full-auto <user args>`
+    codexArgs = ['exec', '--full-auto', ...codexUserArgs];
+  }
+
+  const codexChild = spawn(codexBin, codexArgs, {
+    stdio: 'inherit',
+    cwd: process.cwd(),
+    env: { ...process.env, METAME_ACTIVE_SESSION: 'true' },
+  });
+
+  codexChild.on('error', () => {
+    console.error(`\n${icon("fail")} Error: Could not launch 'codex'.`);
+    console.error("   Please install: npm install -g @openai/codex");
+  });
+  codexChild.on('close', (code) => process.exit(code || 0));
+
+  // Background distillation
+  spawnDistillBackground();
+  return;
+}
+
+// ---------------------------------------------------------
+// 5.9 CONTINUE/SYNC — resume latest session from terminal
 // ---------------------------------------------------------
 // Usage: exit Claude first, then run `metame continue` from terminal.
 // Finds the most recent session and launches Claude with --resume.

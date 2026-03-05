@@ -1,6 +1,8 @@
 'use strict';
 
 const { classifyChatUsage } = require('./usage-classifier');
+const { deriveProjectInfo } = require('./utils');
+const { createEngineRuntimeFactory, normalizeEngineName } = require('./daemon-engine-runtime');
 
 function createClaudeEngine(deps) {
   const {
@@ -40,14 +42,86 @@ function createClaudeEngine(deps) {
     touchInteraction,
     statusThrottleMs = 3000,
     fallbackThrottleMs = 8000,
+    getEngineRuntime: injectedGetEngineRuntime,
   } = deps;
+  let mentorEngine = null;
+  try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
+  let sessionAnalytics = null;
+  try { sessionAnalytics = require('./session-analytics'); } catch { /* optional */ }
+
+  const getEngineRuntime = typeof injectedGetEngineRuntime === 'function'
+    ? injectedGetEngineRuntime
+    : createEngineRuntimeFactory({ fs, path, HOME, CLAUDE_BIN, getActiveProviderEnv });
 
   // On Windows, .cmd files need shell to spawn; use COMSPEC to avoid conda PATH issues
   function spawn(cmd, args, options) {
-    if (process.platform === 'win32' && cmd === CLAUDE_BIN) {
+    const lowerCmd = String(cmd || '').toLowerCase();
+    if (process.platform === 'win32' && (cmd === CLAUDE_BIN || lowerCmd.endsWith('\\claude.cmd') || lowerCmd.endsWith('\\codex.cmd'))) {
       return _spawn(cmd, args, { ...options, shell: process.env.COMSPEC || true });
     }
     return _spawn(cmd, args, options);
+  }
+
+  let _sessionPatchQueue = Promise.resolve();
+  function patchSessionSerialized(chatId, patchFn) {
+    _sessionPatchQueue = _sessionPatchQueue.then(() => {
+      const state = loadState();
+      if (!state.sessions) state.sessions = {};
+      const cur = state.sessions[chatId] || {};
+      const next = typeof patchFn === 'function' ? patchFn(cur) : cur;
+      state.sessions[chatId] = next && typeof next === 'object' ? next : cur;
+      saveState(state);
+    }).catch((e) => {
+      log('WARN', `patchSessionSerialized failed: ${e.message}`);
+    });
+    return _sessionPatchQueue;
+  }
+
+  const CODEX_RESUME_RETRY_WINDOW_MS = 10 * 60 * 1000;
+  const _codexResumeRetryTs = new Map(); // chatId -> last retry ts
+
+  function canRetryCodexResume(chatId) {
+    const key = String(chatId || '');
+    if (!key) return false;
+    const last = Number(_codexResumeRetryTs.get(key) || 0);
+    if (!last) return true;
+    return (Date.now() - last) > CODEX_RESUME_RETRY_WINDOW_MS;
+  }
+
+  function markCodexResumeRetried(chatId) {
+    const key = String(chatId || '');
+    if (!key) return;
+    _codexResumeRetryTs.set(key, Date.now());
+  }
+
+  function shouldRetryCodexResumeFallback({ runtimeName, wasResumeAttempt, output, error, errorCode, canRetry }) {
+    return runtimeName === 'codex'
+      && !!wasResumeAttempt
+      && !!error
+      && (!output || !!errorCode)
+      && !!canRetry;
+  }
+
+  function formatEngineSpawnError(err, runtime) {
+    if (!err) return 'Unknown spawn error';
+    const rt = runtime || { name: 'claude' };
+    if (err.code === 'ENOENT') {
+      if (rt.name === 'codex') {
+        return 'Codex CLI 未安装。请先运行: npm install -g @openai/codex';
+      }
+      return 'Claude CLI 未安装或不在 PATH。请先确认 `claude` 可执行。';
+    }
+    return err.message || String(err);
+  }
+
+  function adaptDaemonHintForEngine(daemonHint, engineName) {
+    if (normalizeEngineName(engineName) === 'claude') return daemonHint;
+    let out = String(daemonHint || '');
+    // Keep this replacement conservative: only unwrap the known outer wrapper.
+    out = out.replace('[System hints - DO NOT mention these to user:', 'System hints (internal, do not mention to user):');
+    // The current daemonHint template ends with a single trailing `]`.
+    out = out.replace(/\]\s*$/, '');
+    return out;
   }
 
   const SESSION_CWD_VALIDATION_TTL_MS = 30 * 1000;
@@ -192,6 +266,82 @@ function createClaudeEngine(deps) {
     return null;
   }
 
+  function resolveMentorMode(cfg = {}) {
+    const mode = String(cfg.mode || '').trim().toLowerCase();
+    if (mode === 'gentle' || mode === 'active' || mode === 'intense') return mode;
+    const level = Number(cfg.friction_level);
+    if (Number.isFinite(level)) {
+      if (level >= 8) return 'intense';
+      if (level >= 4) return 'active';
+    }
+    return 'gentle';
+  }
+
+  function extractUserText(content) {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return '';
+    for (const item of content) {
+      if (item && item.type === 'text' && item.text) return item.text;
+    }
+    return '';
+  }
+
+  function collectRecentSessionSignals(sessionId, limit = 6) {
+    const out = { recentMessages: [], sessionStartTime: null };
+    if (!sessionId || typeof findSessionFile !== 'function') return out;
+    const file = findSessionFile(sessionId);
+    if (!file || !fs.existsSync(file)) return out;
+
+    try {
+      const raw = fs.readFileSync(file, 'utf8');
+      const lines = raw.split('\n').filter(Boolean).slice(-800);
+      let current = null;
+      for (const line of lines) {
+        let entry;
+        try { entry = JSON.parse(line); } catch { continue; }
+        if (!out.sessionStartTime && entry.timestamp) out.sessionStartTime = entry.timestamp;
+
+        if (entry.type === 'user' && entry.message) {
+          if (current) out.recentMessages.push(current);
+          current = {
+            text: extractUserText(entry.message.content),
+            tool_calls: 0,
+          };
+        } else if (entry.type === 'assistant' && current && entry.message && Array.isArray(entry.message.content)) {
+          for (const item of entry.message.content) {
+            if (item && item.type === 'tool_use') current.tool_calls++;
+          }
+        }
+      }
+      if (current) out.recentMessages.push(current);
+      if (out.recentMessages.length > limit) {
+        out.recentMessages = out.recentMessages.slice(-limit);
+      }
+    } catch {
+      return out;
+    }
+    return out;
+  }
+
+  function countCodeLines(output) {
+    const text = String(output || '');
+    if (!text.trim()) return 0;
+    const lines = text.split('\n');
+    let inFence = false;
+    let count = 0;
+    let sawFence = false;
+    for (const line of lines) {
+      if (/^\s*```/.test(line)) {
+        sawFence = true;
+        inFence = !inFence;
+        continue;
+      }
+      if (inFence && line.trim()) count++;
+    }
+    if (!sawFence) return 0;
+    return count;
+  }
+
   function isMacAutomationIntent(prompt) {
     const text = String(prompt || '').trim();
     if (!text) return false;
@@ -243,21 +393,24 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
   }
 
   /**
-   * Spawn claude as async child process (non-blocking).
+   * Spawn Claude as async child process (non-blocking).
+   * Intentionally Claude-only: used by naming/fallback helper paths that
+   * should not depend on project runtime adapter selection.
    * Returns { output, error } after process exits.
    */
   function spawnClaudeAsync(args, input, cwd, timeoutMs = 300000, metameProject = '') {
     return new Promise((resolve) => {
+      const env = {
+        ...process.env,
+        ...getActiveProviderEnv(),
+        METAME_INTERNAL_PROMPT: '1',
+        METAME_PROJECT: metameProject || '',
+      };
+      delete env.CLAUDECODE;
       const child = spawn(CLAUDE_BIN, args, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          ...getActiveProviderEnv(),
-          CLAUDECODE: undefined,
-          METAME_INTERNAL_PROMPT: '1',
-          METAME_PROJECT: metameProject || ''
-        },
+        env,
       });
 
       let stdout = '';
@@ -288,7 +441,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       child.on('error', (err) => {
         clearTimeout(timer);
-        resolve({ output: null, error: err.message });
+        resolve({ output: null, error: formatEngineSpawnError(err, { name: 'claude' }) });
       });
 
       // Write input and close stdin
@@ -317,57 +470,77 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
   };
 
   /**
-   * Spawn claude with streaming output (stream-json mode).
-   * Calls onStatus callback when tool usage is detected.
-   * Returns { output, error } after process exits.
+   * Spawn engine with streaming output. Parser comes from runtime adapter.
+   * Returns { output, error, files, toolUsageLog, usage, sessionId }.
    */
-  function spawnClaudeStreaming(args, input, cwd, onStatus, timeoutMs = 600000, chatId = null, metameProject = '') {
+  function spawnClaudeStreaming(
+    args,
+    input,
+    cwd,
+    onStatus,
+    timeoutMs = 600000,
+    chatId = null,
+    metameProject = '',
+    runtime = null,
+    onSession = null,
+  ) {
     return new Promise((resolve) => {
-      // Add stream-json output format (requires --verbose)
-      const streamArgs = [...args, '--output-format', 'stream-json', '--verbose'];
-
-      const child = spawn(CLAUDE_BIN, streamArgs, {
+      let settled = false;
+      const finalize = (payload) => {
+        if (settled) return;
+        settled = true;
+        resolve(payload);
+      };
+      const rt = runtime || getEngineRuntime('claude');
+      const streamArgs = rt.name === 'claude'
+        ? [...args, '--output-format', 'stream-json', '--verbose']
+        : args;
+      const child = spawn(rt.binary, streamArgs, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
-        detached: process.platform !== 'win32', // process groups are POSIX-only
-        env: {
-          ...process.env,
-          ...getActiveProviderEnv(),
-          CLAUDECODE: undefined,
-          METAME_PROJECT: metameProject || ''
-        },
+        detached: process.platform !== 'win32',
+        env: rt.buildEnv({ metameProject }),
       });
 
-      // Track active process for /stop
       if (chatId) {
-        activeProcesses.set(chatId, { child, aborted: false, startedAt: Date.now() });
-        saveActivePids(); // Fix3: persist PID to disk
+        activeProcesses.set(chatId, {
+          child,
+          aborted: false,
+          startedAt: Date.now(),
+          engine: rt.name,
+          killSignal: rt.killSignal || 'SIGTERM',
+        });
+        saveActivePids();
       }
 
       let buffer = '';
       let stderr = '';
       let killed = false;
-      let killedReason = 'idle'; // 'idle' | 'ceiling'
+      let killedReason = 'idle';
       let finalResult = '';
+      let finalUsage = null;
+      let observedSessionId = '';
+      let classifiedError = null;
       let lastStatusTime = 0;
       const STATUS_THROTTLE = statusThrottleMs;
-      const writtenFiles = []; // Track files created/modified by Write tool
-      const toolUsageLog = []; // Track all tool invocations for skill evolution
+      const writtenFiles = [];
+      const toolUsageLog = [];
 
-      // ── 自适应超时：5min 无输出判卡死（工具执行中延长至25min）+ 1h 绝对上限 ──
-      const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
-      const TOOL_EXEC_TIMEOUT_MS = 25 * 60 * 1000; // 工具执行中（如音频合成）允许更长等待
-      const HARD_CEILING_MS = 60 * 60 * 1000;
+      const engineTimeouts = rt.timeouts || {};
+      const IDLE_TIMEOUT_MS = engineTimeouts.idleMs || (5 * 60 * 1000);
+      const TOOL_EXEC_TIMEOUT_MS = engineTimeouts.toolMs || (25 * 60 * 1000);
+      const HARD_CEILING_MS = engineTimeouts.ceilingMs || (60 * 60 * 1000);
       const startTime = Date.now();
-      let waitingForTool = false; // 是否在等待工具返回
+      let waitingForTool = false;
 
       let sigkillTimer = null;
       function killChild(reason) {
         if (killed) return;
         killed = true;
         killedReason = reason;
-        log('WARN', `Claude ${reason} timeout for chatId ${chatId} — killing process group`);
-        try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
+        log('WARN', `[${rt.name}] ${reason} timeout for chatId ${chatId} — killing process group`);
+        const sig = rt.killSignal || 'SIGTERM';
+        try { process.kill(-child.pid, sig); } catch { child.kill(sig); }
         sigkillTimer = setTimeout(() => {
           try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { } }
         }, 5000);
@@ -382,7 +555,6 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         idleTimer = setTimeout(() => killChild('idle'), timeout);
       }
 
-      // ── 进度里程碑：2min 首报，之后每 5min 一次 ──
       let toolCallCount = 0;
       let lastMilestoneMin = 0;
       const milestoneTimer = setInterval(() => {
@@ -403,137 +575,134 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         }
       }, 30000);
 
+      function parseEventsFromLine(line) {
+        try {
+          return rt.parseStreamEvent(line) || [];
+        } catch {
+          return [];
+        }
+      }
+
       child.stdout.on('data', (data) => {
         resetIdleTimer();
         buffer += data.toString();
-
-        // Process complete JSON lines
         const lines = buffer.split('\n');
-        buffer = lines.pop() || ''; // Keep incomplete line in buffer
+        buffer = lines.pop() || '';
 
         for (const line of lines) {
           if (!line.trim()) continue;
-          try {
-            const event = JSON.parse(line);
-
-            // Extract final result text
-            if (event.type === 'assistant' && event.message?.content) {
-              const textBlocks = event.message.content.filter(b => b.type === 'text');
-              if (textBlocks.length > 0) {
-                finalResult = textBlocks.map(b => b.text).join('\n');
+          const events = parseEventsFromLine(line);
+          for (const event of events) {
+            if (!event || !event.type) continue;
+            if (event.type === 'session' && event.sessionId) {
+              observedSessionId = String(event.sessionId);
+              if (typeof onSession === 'function') {
+                Promise.resolve(onSession(observedSessionId)).catch(() => { });
               }
+              continue;
             }
-
-            // 工具返回 → 恢复正常 idle timeout
-            if (event.type === 'content_block_start' || event.type === 'content_block_delta' ||
-                (event.type === 'assistant' && !event.message?.content?.some(b => b.type === 'tool_use'))) {
+            if (event.type === 'error') {
+              classifiedError = event;
+              continue;
+            }
+            if (event.type === 'text' && event.text) {
+              finalResult = String(event.text);
               if (waitingForTool) {
                 waitingForTool = false;
                 resetIdleTimer();
               }
+              continue;
             }
-
-            // Detect tool usage and send status
-            if (event.type === 'assistant' && event.message?.content) {
-              for (const block of event.message.content) {
-                if (block.type === 'tool_use') {
-                  toolCallCount++;
-                  // 进入工具等待状态，延长 idle timeout
-                  waitingForTool = true;
-                  resetIdleTimer();
-                  const toolName = block.name || 'Tool';
-
-                  // Track tool usage for skill evolution
-                  const toolEntry = { tool: toolName };
-                  if (toolName === 'Skill' && block.input?.skill) toolEntry.skill = block.input.skill;
-                  else if (block.input?.command) toolEntry.context = block.input.command.slice(0, 50);
-                  else if (block.input?.file_path) toolEntry.context = path.basename(block.input.file_path);
-                  if (toolUsageLog.length < 50) toolUsageLog.push(toolEntry);
-
-                  // Track files written by Write tool
-                  if (toolName === 'Write' && block.input?.file_path) {
-                    const filePath = block.input.file_path;
-                    if (!writtenFiles.includes(filePath)) {
-                      writtenFiles.push(filePath);
-                    }
-                  }
-
-                  const now = Date.now();
-                  if (now - lastStatusTime >= STATUS_THROTTLE) {
-                    lastStatusTime = now;
-                    const emoji = TOOL_EMOJI[toolName] || TOOL_EMOJI.default;
-
-                    // Resolve display name and context for MCP/Skill/Task tools
-                    let displayName = toolName;
-                    let displayEmoji = emoji;
-                    let context = '';
-
-                    if (toolName === 'Skill' && block.input?.skill) {
-                      // Skill invocation: show skill name
-                      context = block.input.skill;
-                    } else if (toolName === 'Task' && block.input?.description) {
-                      // Agent task: show description
-                      context = block.input.description.slice(0, 30);
-                    } else if (toolName.startsWith('mcp__')) {
-                      // MCP tool: mcp__server__action → "MCP server: action"
-                      const parts = toolName.split('__');
-                      const server = parts[1] || 'unknown';
-                      const action = parts.slice(2).join('_') || '';
-                      if (server === 'playwright') {
-                        displayEmoji = '🌐';
-                        displayName = 'Browser';
-                        context = action.replace(/_/g, ' ');
-                      } else {
-                        displayEmoji = '🔗';
-                        displayName = `MCP:${server}`;
-                        context = action.replace(/_/g, ' ').slice(0, 25);
-                      }
-                    } else if (block.input) {
-                      // Standard tools: extract brief context
-                      if (block.input.file_path) {
-                        // Insert zero-width space before extension to prevent link parsing
-                        const basename = path.basename(block.input.file_path);
-                        const dotIdx = basename.lastIndexOf('.');
-                        context = dotIdx > 0 ? basename.slice(0, dotIdx) + '\u200B' + basename.slice(dotIdx) : basename;
-                      } else if (block.input.command) {
-                        context = block.input.command.slice(0, 30);
-                        if (block.input.command.length > 30) context += '...';
-                      } else if (block.input.pattern) {
-                        context = block.input.pattern.slice(0, 20);
-                      } else if (block.input.query) {
-                        context = block.input.query.slice(0, 25);
-                      } else if (block.input.url) {
-                        try {
-                          context = new URL(block.input.url).hostname;
-                        } catch { context = 'web'; }
-                      }
-                    }
-
-                    const status = context
-                      ? `${displayEmoji} ${displayName}: 「${context}」`
-                      : `${displayEmoji} ${displayName}...`;
-
-                    if (onStatus) {
-                      onStatus(status).catch(() => { });
-                    }
-                  }
-                }
+            if (event.type === 'done') {
+              finalUsage = event.usage || null;
+              if (waitingForTool) {
+                waitingForTool = false;
+                resetIdleTimer();
               }
+              continue;
+            }
+            if (event.type === 'tool_result') {
+              if (waitingForTool) {
+                waitingForTool = false;
+                resetIdleTimer();
+              }
+              continue;
+            }
+            if (event.type !== 'tool_use') continue;
+
+            toolCallCount++;
+            waitingForTool = true;
+            resetIdleTimer();
+            const toolName = event.toolName || 'Tool';
+            const toolInput = event.toolInput || {};
+
+            const toolEntry = { tool: toolName };
+            if (toolName === 'Skill' && toolInput.skill) toolEntry.skill = toolInput.skill;
+            else if (toolInput.command) toolEntry.context = String(toolInput.command).slice(0, 50);
+            else if (toolInput.file_path) toolEntry.context = path.basename(String(toolInput.file_path));
+            if (toolUsageLog.length < 50) toolUsageLog.push(toolEntry);
+
+            if (toolName === 'Write' && toolInput.file_path) {
+              const filePath = String(toolInput.file_path);
+              if (!writtenFiles.includes(filePath)) writtenFiles.push(filePath);
             }
 
-            // Also check for result message type
-            if (event.type === 'result' && event.result) {
-              finalResult = event.result;
+            const now = Date.now();
+            if (now - lastStatusTime < STATUS_THROTTLE) continue;
+            lastStatusTime = now;
+
+            const emoji = TOOL_EMOJI[toolName] || TOOL_EMOJI.default;
+            let displayName = toolName;
+            let displayEmoji = emoji;
+            let context = '';
+
+            if (toolName === 'Skill' && toolInput.skill) {
+              context = toolInput.skill;
+            } else if (toolName === 'Task' && toolInput.description) {
+              context = String(toolInput.description).slice(0, 30);
+            } else if (toolName.startsWith('mcp__')) {
+              const parts = toolName.split('__');
+              const server = parts[1] || 'unknown';
+              const action = parts.slice(2).join('_') || '';
+              if (server === 'playwright') {
+                displayEmoji = '🌐';
+                displayName = 'Browser';
+                context = action.replace(/_/g, ' ');
+              } else {
+                displayEmoji = '🔗';
+                displayName = `MCP:${server}`;
+                context = action.replace(/_/g, ' ').slice(0, 25);
+              }
+            } else if (toolInput.file_path) {
+              const basename = path.basename(String(toolInput.file_path));
+              const dotIdx = basename.lastIndexOf('.');
+              context = dotIdx > 0 ? basename.slice(0, dotIdx) + '\u200B' + basename.slice(dotIdx) : basename;
+            } else if (toolInput.command) {
+              context = String(toolInput.command).slice(0, 30);
+              if (String(toolInput.command).length > 30) context += '...';
+            } else if (toolInput.pattern) {
+              context = String(toolInput.pattern).slice(0, 20);
+            } else if (toolInput.query) {
+              context = String(toolInput.query).slice(0, 25);
+            } else if (toolInput.url) {
+              try { context = new URL(toolInput.url).hostname; } catch { context = 'web'; }
             }
-          } catch {
-            // Not valid JSON, ignore
+
+            const status = context
+              ? `${displayEmoji} ${displayName}: 「${context}」`
+              : `${displayEmoji} ${displayName}...`;
+            if (onStatus) onStatus(status).catch(() => { });
           }
         }
       });
 
       child.stderr.on('data', (data) => {
         resetIdleTimer();
-        stderr += data.toString();
+        const chunk = data.toString();
+        stderr += chunk;
+        if (!classifiedError && typeof rt.classifyError === 'function') {
+          classifiedError = rt.classifyError(chunk);
+        }
       });
 
       child.on('close', (code) => {
@@ -542,34 +711,41 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         clearTimeout(sigkillTimer);
         clearInterval(milestoneTimer);
 
-        // Process any remaining buffer
         if (buffer.trim()) {
-          try {
-            const event = JSON.parse(buffer);
-            if (event.type === 'result' && event.result) {
-              finalResult = event.result;
-            }
-          } catch { /* ignore */ }
+          const events = parseEventsFromLine(buffer.trim());
+          for (const event of events) {
+            if (event.type === 'text' && event.text) finalResult = String(event.text);
+            if (event.type === 'done') finalUsage = event.usage || null;
+            if (event.type === 'session' && event.sessionId) observedSessionId = String(event.sessionId);
+            if (event.type === 'error') classifiedError = event;
+          }
         }
 
-        // Clean up active process tracking
         const proc = chatId ? activeProcesses.get(chatId) : null;
         const wasAborted = proc && proc.aborted;
-        if (chatId) { activeProcesses.delete(chatId); saveActivePids(); } // Fix3
+        if (chatId) { activeProcesses.delete(chatId); saveActivePids(); }
 
         if (wasAborted) {
-          resolve({ output: finalResult || null, error: 'Stopped by user', files: writtenFiles, toolUsageLog });
-        } else if (killed) {
-          const elapsed = Math.round((Date.now() - startTime) / 60000);
-          const reason = killedReason === 'ceiling'
-            ? `⏱ 已运行 ${elapsed} 分钟，达到上限（1 小时）`
-            : `⏱ 已 5 分钟无输出，判定卡死（共运行 ${elapsed} 分钟）`;
-          resolve({ output: finalResult || null, error: reason, timedOut: true, files: writtenFiles, toolUsageLog });
-        } else if (code !== 0) {
-          resolve({ output: finalResult || null, error: stderr || `Exit code ${code}`, files: writtenFiles, toolUsageLog });
-        } else {
-          resolve({ output: finalResult || '', error: null, files: writtenFiles, toolUsageLog });
+          finalize({ output: finalResult || null, error: 'Stopped by user', files: writtenFiles, toolUsageLog, usage: finalUsage, sessionId: observedSessionId || '' });
+          return;
         }
+        if (killed) {
+          const elapsed = Math.round((Date.now() - startTime) / 60000);
+          const idleMin = Math.max(1, Math.round(IDLE_TIMEOUT_MS / 60000));
+          const reason = killedReason === 'ceiling'
+            ? `⏱ 已运行 ${elapsed} 分钟，达到上限（${Math.round(HARD_CEILING_MS / 60000)} 分钟）`
+            : `⏱ 已 ${idleMin} 分钟无输出，判定卡死（共运行 ${elapsed} 分钟）`;
+          finalize({ output: finalResult || null, error: reason, timedOut: true, files: writtenFiles, toolUsageLog, usage: finalUsage, sessionId: observedSessionId || '' });
+          return;
+        }
+        if (code !== 0) {
+          const engineErr = classifiedError && classifiedError.message
+            ? classifiedError.message
+            : (stderr || `Exit code ${code}`);
+          finalize({ output: finalResult || null, error: engineErr, errorCode: classifiedError ? classifiedError.code : undefined, files: writtenFiles, toolUsageLog, usage: finalUsage, sessionId: observedSessionId || '' });
+          return;
+        }
+        finalize({ output: finalResult || '', error: null, files: writtenFiles, toolUsageLog, usage: finalUsage, sessionId: observedSessionId || '' });
       });
 
       child.on('error', (err) => {
@@ -577,13 +753,28 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         clearTimeout(ceilingTimer);
         clearTimeout(sigkillTimer);
         clearInterval(milestoneTimer);
-        if (chatId) { activeProcesses.delete(chatId); saveActivePids(); } // Fix3
-        resolve({ output: null, error: err.message, files: [], toolUsageLog: [] });
+        if (chatId) { activeProcesses.delete(chatId); saveActivePids(); }
+        finalize({ output: null, error: formatEngineSpawnError(err, rt), files: [], toolUsageLog: [], usage: null, sessionId: '' });
       });
 
-      // Write input and close stdin
-      child.stdin.write(input);
-      child.stdin.end();
+      try {
+        child.stdin.write(input);
+        child.stdin.end();
+      } catch (e) {
+        clearTimeout(idleTimer);
+        clearTimeout(ceilingTimer);
+        clearTimeout(sigkillTimer);
+        clearInterval(milestoneTimer);
+        if (chatId) { activeProcesses.delete(chatId); saveActivePids(); }
+        try { child.stdin.destroy(); } catch { /* ignore */ }
+        try {
+          const sig = rt.killSignal || 'SIGTERM';
+          process.kill(-child.pid, sig);
+        } catch {
+          try { child.kill(rt.killSignal || 'SIGTERM'); } catch { /* ignore */ }
+        }
+        finalize({ output: null, error: e.message, files: [], toolUsageLog: [], usage: null, sessionId: '' });
+      }
     });
   }
 
@@ -593,7 +784,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     if (!messageId || !session || !session.id) return;
     const st = loadState();
     if (!st.msg_sessions) st.msg_sessions = {};
-    st.msg_sessions[messageId] = { id: session.id, cwd: session.cwd };
+    st.msg_sessions[messageId] = { id: session.id, cwd: session.cwd, engine: session.engine || 'claude' };
     const keys = Object.keys(st.msg_sessions);
     if (keys.length > 200) {
       for (const k of keys.slice(0, keys.length - 200)) delete st.msg_sessions[k];
@@ -660,7 +851,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     if (agentMatch) {
       const { key, proj, rest } = agentMatch;
       const projCwd = normalizeCwd(proj.cwd);
-      attachOrCreateSession(chatId, projCwd, proj.name || key);
+      attachOrCreateSession(chatId, projCwd, proj.name || key, normalizeEngineName(proj.engine));
       log('INFO', `Agent switch via nickname: ${key} (${projCwd})`);
       if (!rest) {
         // Pure nickname call — confirm switch and stop
@@ -683,6 +874,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
     const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
     const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
+    const boundEngineName = normalizeEngineName(boundProject && boundProject.engine);
 
     if (!session) {
       if (boundCwd) {
@@ -695,12 +887,13 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             id: target.sessionId,
             cwd: boundCwd,
             started: true,
+            engine: boundEngineName,
           };
           saveState(state);
           session = state.sessions[chatId];
           log('INFO', `Auto-attached ${chatId} to bound-session: ${target.sessionId.slice(0, 8)} (${path.basename(boundCwd)})`);
         } else {
-          session = createSession(chatId, boundCwd, boundProject && boundProject.name ? boundProject.name : '');
+          session = createSession(chatId, boundCwd, boundProject && boundProject.name ? boundProject.name : '', boundEngineName);
           log('INFO', `Created fresh session for bound workspace: ${path.basename(boundCwd)}`);
         }
       } else {
@@ -713,48 +906,78 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             id: target.sessionId,
             cwd: target.projectPath,
             started: true,
+            engine: 'claude',
           };
           saveState(state);
           session = state.sessions[chatId];
           log('INFO', `Auto-attached ${chatId} to recent session: ${target.sessionId.slice(0, 8)} (${path.basename(target.projectPath)})`);
         } else {
-          session = createSession(chatId);
+          session = createSession(chatId, undefined, '', boundEngineName);
         }
       }
     }
 
+    const engineName = normalizeEngineName(
+      (boundProject && boundProject.engine)
+      || (session && session.engine)
+      || 'claude'
+    );
+    const runtime = getEngineRuntime(engineName);
+    session.engine = engineName;
+    if (!getSession(chatId) || getSession(chatId).engine !== engineName) {
+      await patchSessionSerialized(chatId, (cur) => ({
+        ...cur,
+        engine: engineName,
+        cwd: session.cwd || cur.cwd || HOME,
+      }));
+    }
+
     // Safety guard: prevent stale state from resuming another workspace's session.
-    if (session && session.started && session.id && session.id !== '__continue__' && session.cwd) {
+    if (engineName === 'claude' && session && session.started && session.id && session.id !== '__continue__' && session.cwd) {
       const sessionCwd = normalizeCwd(session.cwd);
       const existsInCwd = isSessionInCwd(session.id, sessionCwd);
       if (!existsInCwd) {
         log('WARN', `Session mismatch detected for ${chatId}: ${session.id.slice(0, 8)} not found in ${sessionCwd}; creating fresh session`);
-        session = createSession(chatId, sessionCwd, boundProject && boundProject.name ? boundProject.name : '');
+        session = createSession(chatId, sessionCwd, boundProject && boundProject.name ? boundProject.name : '', engineName);
       }
     }
 
-    // Build claude command
-    const args = ['-p'];
     const daemonCfg = loadConfig().daemon || {};
-    const model = daemonCfg.model || 'opus';
-    args.push('--model', model);
-    if (readOnly) {
-      // Read-only mode for non-operator users: query/chat only, no write/edit/execute
-      const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Task'];
-      for (const tool of READ_ONLY_TOOLS) args.push('--allowedTools', tool);
-    } else if (daemonCfg.dangerously_skip_permissions) {
-      args.push('--dangerously-skip-permissions');
-    } else {
-      const sessionAllowed = daemonCfg.session_allowed_tools || [];
-      for (const tool of sessionAllowed) args.push('--allowedTools', tool);
+    const mentorCfg = (daemonCfg.mentor && typeof daemonCfg.mentor === 'object') ? daemonCfg.mentor : {};
+    const mentorEnabled = !!(mentorEngine && mentorCfg.enabled);
+    const excludeAgents = new Set(
+      (Array.isArray(mentorCfg.exclude_agents) ? mentorCfg.exclude_agents : [])
+        .map(x => String(x || '').trim())
+        .filter(Boolean)
+    );
+    const chatAgentKey = boundProjectKey || 'personal';
+    const mentorExcluded = excludeAgents.has(chatAgentKey);
+    let mentorSuppressed = false;
+
+    // Mentor pre-flight breaker: first hit sends a short reassurance; cooldown does not block normal answers.
+    if (mentorEnabled && !mentorExcluded) {
+      try {
+        const breaker = mentorEngine.checkEmotionBreaker(prompt, mentorCfg);
+        if (breaker && breaker.tripped) {
+          mentorSuppressed = true;
+          if (breaker.reason !== 'cooldown_active' && breaker.response) {
+            await bot.sendMessage(chatId, breaker.response).catch(() => { });
+          }
+        }
+      } catch (e) {
+        log('WARN', `Mentor breaker failed: ${e.message}`);
+      }
     }
-    if (session.id === '__continue__') {
-      args.push('--continue');
-    } else if (session.started) {
-      args.push('--resume', session.id);
-    } else {
-      args.push('--session-id', session.id);
-    }
+
+    // Build engine command
+    const model = (boundProject && boundProject.model) || daemonCfg.model || runtime.defaultModel;
+    const args = runtime.buildArgs({
+      model,
+      readOnly,
+      daemonCfg,
+      session,
+      cwd: session.cwd,
+    });
 
     // Memory & Knowledge Injection (RAG)
     let memoryHint = '';
@@ -810,11 +1033,13 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
     // ZPD: build competence hint from brain profile
     let zdpHint = '';
+    let brainDoc = null;
     if (!session.started) {
       try {
         const brainPath = path.join(HOME, '.claude_profile.yaml');
         if (fs.existsSync(brainPath)) {
           const brain = yaml.load(fs.readFileSync(brainPath, 'utf8'));
+          brainDoc = brain;
           const cmap = brain && brain.user_competence_map;
           if (cmap && typeof cmap === 'object' && Object.keys(cmap).length > 0) {
             const lines = Object.entries(cmap)
@@ -824,6 +1049,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           }
         }
       } catch { /* non-critical */ }
+    }
+    if (!brainDoc) {
+      try {
+        const brainPath = path.join(HOME, '.claude_profile.yaml');
+        if (fs.existsSync(brainPath)) brainDoc = yaml.load(fs.readFileSync(brainPath, 'utf8')) || {};
+      } catch { /* ignore */ }
     }
 
     // Inject daemon hints only on first message of a session
@@ -851,7 +1082,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
    - Add at END of response: [[FILE:/absolute/path/to/file]]
    - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
    - Multiple files: use multiple [[FILE:...]] tags${zdpHint ? '\n   Explanation depth (ZPD):\n' + zdpHint : ''}${taskRules}]`;
-    }
+   }
+
+    daemonHint = adaptDaemonHintForEngine(daemonHint, runtime.name);
 
     const routedPrompt = skill ? `/${skill} ${prompt}` : prompt;
 
@@ -887,9 +1120,61 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       } catch { /* non-critical */ }
     }
 
+    // Mentor context hook: inject after memoryHint, before langGuard.
+    let mentorHint = '';
+    if (mentorEnabled && !mentorExcluded && !mentorSuppressed) {
+      try {
+        const signals = collectRecentSessionSignals(session.id, 6);
+        let skeleton = null;
+        if (sessionAnalytics && typeof sessionAnalytics.extractSkeleton === 'function') {
+          const file = findSessionFile(session.id);
+          if (file && fs.existsSync(file)) {
+            const st = fs.statSync(file);
+            if (st.size <= 2 * 1024 * 1024) {
+              skeleton = sessionAnalytics.extractSkeleton(file);
+            }
+          }
+        }
+        const zone = skeleton && mentorEngine.computeZone
+          ? mentorEngine.computeZone(skeleton).zone
+          : 'stretch';
+        const sessionState = {
+          zone,
+          recentMessages: signals.recentMessages,
+          cwd: session.cwd,
+          skeleton,
+          sessionStartTime: signals.sessionStartTime || new Date().toISOString(),
+          topic: String(prompt || '').slice(0, 120),
+          currentTopic: String(prompt || '').slice(0, 120),
+          lastUserMessage: String(prompt || '').slice(0, 200),
+        };
+        const built = mentorEngine.buildMentorPrompt(sessionState, brainDoc || {}, mentorCfg);
+        if (built && String(built).trim()) mentorHint = `\n\n${String(built).trim()}`;
+
+        // Collect reflection debt: if user returns to same project+topic, inject recall prompt.
+        // Suppressed by quiet_until (user explicitly asked for silence), but NOT by expert skip
+        // (even experts may not have reviewed AI-generated code).
+        const quietUntil = brainDoc && brainDoc.growth ? brainDoc.growth.quiet_until : null;
+        const quietMs = quietUntil ? new Date(quietUntil).getTime() : 0;
+        const isQuiet = quietMs && quietMs > Date.now();
+        if (!isQuiet && mentorEngine.collectDebt) {
+          const info = deriveProjectInfo(session && session.cwd ? session.cwd : '');
+          const projectId = info && info.project_id ? info.project_id : '';
+          if (projectId) {
+            const debt = mentorEngine.collectDebt(projectId, String(prompt || '').slice(0, 120));
+            if (debt && debt.prompt) {
+              mentorHint += `\n\n[Reflection debt] ${debt.prompt}`;
+            }
+          }
+        }
+      } catch (e) {
+        log('WARN', `Mentor prompt build failed: ${e.message}`);
+      }
+    }
+
     // Always append a compact language guard to prevent accidental Korean/Japanese responses
     const langGuard = '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
-    const fullPrompt = routedPrompt + daemonHint + macAutomationHint + summaryHint + memoryHint + langGuard;
+    const fullPrompt = routedPrompt + daemonHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
 
     // Git checkpoint before Claude modifies files (for /undo)
     // Pass the user prompt as label so checkpoint list is human-readable
@@ -915,9 +1200,101 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       } catch { /* ignore status update failures */ }
     };
 
-    let output, error, files, toolUsageLog, timedOut;
+    const wasCodexResumeAttempt = runtime.name === 'codex'
+      && !!(session && session.started && session.id && session.id !== '__continue__');
+    const onSession = async (nextSessionId) => {
+      const safeNextId = String(nextSessionId || '').trim();
+      if (!safeNextId) return;
+      const prevSessionId = session && session.id ? String(session.id) : '';
+      const wasStarted = !!(session && session.started);
+      session = {
+        ...session,
+        id: safeNextId,
+        engine: runtime.name,
+        started: true,
+      };
+      await patchSessionSerialized(chatId, (cur) => ({
+        ...cur,
+        id: safeNextId,
+        cwd: session.cwd || cur.cwd || HOME,
+        engine: runtime.name,
+        started: true,
+      }));
+      if (runtime.name === 'codex' && wasStarted && prevSessionId && prevSessionId !== safeNextId && prevSessionId !== '__continue__') {
+        log('WARN', `Codex thread migrated for ${chatId}: ${prevSessionId.slice(0, 8)} -> ${safeNextId.slice(0, 8)}`);
+      }
+    };
+
+    let output, error, errorCode, files, toolUsageLog, timedOut, usage, sessionId;
     try {
-      ({ output, error, timedOut, files, toolUsageLog } = await spawnClaudeStreaming(args, fullPrompt, session.cwd, onStatus, 600000, chatId, boundProjectKey || ''));
+      ({
+        output,
+        error,
+        errorCode,
+        timedOut,
+        files,
+        toolUsageLog,
+        usage,
+        sessionId,
+      } = await spawnClaudeStreaming(
+        args,
+        fullPrompt,
+        session.cwd,
+        onStatus,
+        600000,
+        chatId,
+        boundProjectKey || '',
+        runtime,
+        onSession,
+      ));
+
+      if (sessionId) await onSession(sessionId);
+
+      if (shouldRetryCodexResumeFallback({
+        runtimeName: runtime.name,
+        wasResumeAttempt: wasCodexResumeAttempt,
+        output,
+        error,
+        errorCode,
+        canRetry: canRetryCodexResume(chatId),
+      })) {
+        markCodexResumeRetried(chatId);
+        log('WARN', `Codex resume failed for ${chatId}, retrying once with fresh exec: ${String(error).slice(0, 120)}`);
+        session = createSession(
+          chatId,
+          session.cwd,
+          boundProject && boundProject.name ? boundProject.name : '',
+          'codex'
+        );
+        const retryArgs = runtime.buildArgs({
+          model,
+          readOnly,
+          daemonCfg,
+          session,
+          cwd: session.cwd,
+        });
+        ({
+          output,
+          error,
+          errorCode,
+          timedOut,
+          files,
+          toolUsageLog,
+          usage,
+          sessionId,
+        } = await spawnClaudeStreaming(
+          retryArgs,
+          fullPrompt,
+          session.cwd,
+          onStatus,
+          600000,
+          chatId,
+          boundProjectKey || '',
+          runtime,
+          onSession,
+        ));
+        if (sessionId) await onSession(sessionId);
+      }
     } catch (spawnErr) {
       clearInterval(typingTimer);
       if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => { });
@@ -941,6 +1318,24 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     // Clean up status message
     if (statusMsgId && bot.deleteMessage) {
       bot.deleteMessage(chatId, statusMsgId).catch(() => { });
+    }
+
+    // Mentor post-flight debt registration (intense mode only).
+    if (mentorEnabled && !mentorExcluded && !mentorSuppressed && mentorEngine && typeof mentorEngine.registerDebt === 'function' && output) {
+      try {
+        const mode = resolveMentorMode(mentorCfg);
+        if (mode === 'intense') {
+          const codeLines = countCodeLines(output);
+          if (codeLines > 30) {
+            const info = deriveProjectInfo(session && session.cwd ? session.cwd : '');
+            const projectId = info && info.project_id ? info.project_id : 'proj_default';
+            mentorEngine.registerDebt(projectId, String(prompt || '').slice(0, 120), codeLines);
+            log('INFO', `[MENTOR] Registered reflection debt (${projectId}, lines=${codeLines})`);
+          }
+        }
+      } catch (e) {
+        log('WARN', `Mentor post-flight failed: ${e.message}`);
+      }
     }
 
     // When Claude completes with no text output (pure tool work), send a done notice
@@ -968,19 +1363,22 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     }
 
     if (output) {
+      if (runtime.name === 'codex') _codexResumeRetryTs.delete(String(chatId));
       // Detect provider/model errors disguised as output (e.g., "model not found", API errors)
-      const activeProvCheck = providerMod ? providerMod.getActiveName() : 'anthropic';
-      const builtinModelsCheck = ['sonnet', 'opus', 'haiku'];
-      const looksLikeError = output.length < 300 && /\b(not found|invalid model|unauthorized|401|403|404|error|failed)\b/i.test(output);
-      if (looksLikeError && (activeProvCheck !== 'anthropic' || !builtinModelsCheck.includes(model))) {
-        try {
-          config = fallbackToDefaultProvider(`output looks like error for ${activeProvCheck}/${model}`);
-          await bot.sendMessage(chatId, `⚠️ ${activeProvCheck}/${model} 疑似失败，已回退到 anthropic/opus\n输出: ${output.slice(0, 150)}`);
-        } catch (fbErr) {
-          log('ERROR', `Fallback failed: ${fbErr.message}`);
-          await bot.sendMarkdown(chatId, output);
+      if (runtime.name === 'claude') {
+        const activeProvCheck = providerMod ? providerMod.getActiveName() : 'anthropic';
+        const builtinModelsCheck = ['sonnet', 'opus', 'haiku'];
+        const looksLikeError = output.length < 300 && /\b(not found|invalid model|unauthorized|401|403|404|error|failed)\b/i.test(output);
+        if (looksLikeError && (activeProvCheck !== 'anthropic' || !builtinModelsCheck.includes(model))) {
+          try {
+            config = fallbackToDefaultProvider(`output looks like error for ${activeProvCheck}/${model}`);
+            await bot.sendMessage(chatId, `⚠️ ${activeProvCheck}/${model} 疑似失败，已回退到 anthropic/opus\n输出: ${output.slice(0, 150)}`);
+          } catch (fbErr) {
+            log('ERROR', `Fallback failed: ${fbErr.message}`);
+            await bot.sendMarkdown(chatId, output);
+          }
+          return { ok: false, error: output };
         }
-        return { ok: false, error: output };
       }
 
       // Mark session as started after first successful call
@@ -1041,28 +1439,42 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       }
 
       // Auto-name: if this was the first message and session has no name, generate one
-      if (wasNew && !getSessionName(session.id)) {
+      if (runtime.name === 'claude' && wasNew && !getSessionName(session.id)) {
         autoNameSession(chatId, session.id, prompt, session.cwd).catch(() => { });
       }
       return { ok: !timedOut };
     } else {
       const errMsg = error || 'Unknown error';
-      log('ERROR', `askClaude failed for ${chatId}: ${errMsg.slice(0, 300)}`);
+      const userErrMsg = (errorCode === 'AUTH_REQUIRED' || errorCode === 'RATE_LIMIT')
+        ? errMsg
+        : `Error: ${errMsg.slice(0, 200)}`;
+      log('ERROR', `ask${runtime.name === 'codex' ? 'Codex' : 'Claude'} failed for ${chatId}: ${errMsg.slice(0, 300)} (${errorCode || 'NO_CODE'})`);
 
-      // If session not found (expired/deleted), create new and retry once
-      if (errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use')) {
+      // If session not found (expired/deleted), create new and retry once (Claude path)
+      if (runtime.name === 'claude' && (errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use'))) {
         log('WARN', `Session ${session.id} unusable (${errMsg.includes('already in use') ? 'locked' : 'not found'}), creating new`);
-        session = createSession(chatId, session.cwd);
+        session = createSession(chatId, session.cwd, '', runtime.name);
 
-        const retryArgs = ['-p', '--session-id', session.id];
-        if (daemonCfg.dangerously_skip_permissions) {
-          retryArgs.push('--dangerously-skip-permissions');
-        } else {
-          const sessionAllowed = daemonCfg.session_allowed_tools || [];
-          for (const tool of sessionAllowed) retryArgs.push('--allowedTools', tool);
-        }
+        const retryArgs = runtime.buildArgs({
+          model,
+          readOnly,
+          daemonCfg,
+          session,
+          cwd: session.cwd,
+        });
 
-        const retry = await spawnClaudeStreaming(retryArgs, prompt, session.cwd, onStatus);
+        const retry = await spawnClaudeStreaming(
+          retryArgs,
+          fullPrompt,
+          session.cwd,
+          onStatus,
+          600000,
+          chatId,
+          boundProjectKey || '',
+          runtime,
+          onSession,
+        );
+        if (retry.sessionId) await onSession(retry.sessionId);
         if (retry.output) {
           markSessionStarted(chatId);
           const { markedFiles: retryMarked, cleanOutput: retryClean } = parseFileMarkers(retry.output);
@@ -1071,25 +1483,29 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           return { ok: true };
         } else {
           log('ERROR', `askClaude retry failed: ${(retry.error || '').slice(0, 200)}`);
-          try { await bot.sendMessage(chatId, `Error: ${(retry.error || '').slice(0, 200)}`); } catch { /* */ }
+          try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
           return { ok: false, error: retry.error || errMsg };
         }
       } else {
-        // Auto-fallback: if custom provider/model fails, revert to anthropic + opus
-        const activeProv = providerMod ? providerMod.getActiveName() : 'anthropic';
-        const builtinModels = ['sonnet', 'opus', 'haiku'];
-        if (activeProv !== 'anthropic' || !builtinModels.includes(model)) {
-          try {
-            config = fallbackToDefaultProvider(`${activeProv}/${model} error: ${errMsg.slice(0, 100)}`);
-            await bot.sendMessage(chatId, `⚠️ ${activeProv}/${model} 失败，已回退到 anthropic/opus\n原因: ${errMsg.slice(0, 100)}`);
-          } catch (fallbackErr) {
-            log('ERROR', `Fallback failed: ${fallbackErr.message}`);
-            try { await bot.sendMessage(chatId, `Error: ${errMsg.slice(0, 200)}`); } catch { /* */ }
+        // Auto-fallback: if custom provider/model fails, revert to anthropic + opus (Claude path only)
+        if (runtime.name === 'claude') {
+          const activeProv = providerMod ? providerMod.getActiveName() : 'anthropic';
+          const builtinModels = ['sonnet', 'opus', 'haiku'];
+          if (activeProv !== 'anthropic' || !builtinModels.includes(model)) {
+            try {
+              config = fallbackToDefaultProvider(`${activeProv}/${model} error: ${errMsg.slice(0, 100)}`);
+              await bot.sendMessage(chatId, `⚠️ ${activeProv}/${model} 失败，已回退到 anthropic/opus\n原因: ${errMsg.slice(0, 100)}`);
+            } catch (fallbackErr) {
+              log('ERROR', `Fallback failed: ${fallbackErr.message}`);
+              try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
+            }
+          } else {
+            try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
           }
         } else {
-          try { await bot.sendMessage(chatId, `Error: ${errMsg.slice(0, 200)}`); } catch { /* */ }
+          try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
         }
-        return { ok: false, error: errMsg };
+        return { ok: false, error: errMsg, errorCode };
       }
     }
 
@@ -1109,6 +1525,15 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     spawnClaudeStreaming,
     trackMsgSession,
     askClaude,
+    _private: {
+      patchSessionSerialized,
+      shouldRetryCodexResumeFallback,
+      formatEngineSpawnError,
+      adaptDaemonHintForEngine,
+      canRetryCodexResume,
+      markCodexResumeRetried,
+      CODEX_RESUME_RETRY_WINDOW_MS,
+    },
   };
 }
 

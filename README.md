@@ -38,10 +38,17 @@ metame
 
 ---
 
-> ### 🚀 v1.4.33 — 6-Dimension Soul Schema + Nightly Reflection + Auto-Provisioning
+> ### 🚀 v1.4.34 — Mentor Mode Step 4 + Distiller/Memory Closed Loop
 >
+> - **Multi-engine runtime adapter (MVP)**: daemon now supports engine routing by project (`project.engine`) with shared execution flow for Claude/Codex.
+> - **Codex session continuity**: supports `exec`/`resume`, thread id backfill, one-shot resume fallback (max once per 10 minutes per chat), and auth/rate-limit error mapping.
+> - **Agent engine inference**: natural-language agent creation can infer `codex`; default `claude` keeps zero-regression (no `engine` field persisted).
 > - **6-dimension soul schema**: cognitive profile upgraded from key-value pairs to a structured 67-field model covering Values, Drive, Cognition Style, Stress & Shadow, Relational, and Identity Narrative — with tier-based lock protection.
-> - **Nightly reflection**: every night, hot-zone facts are distilled into searchable decision logs and lessons learned.
+> - **Mentor mode hooks**: pre-flight emotion breaker, context-time mentor prompt, and post-flight reflection debt registration are wired into daemon flow.
+> - **Distiller Step 4**: competence signals now merge into `user_competence_map` (upgrade-by-default, downgrade only with explicit evidence).
+> - **Memory extraction labels**: `memory-extract` writes concept labels into `fact_labels` (linked by fact id from `saveFacts().savedFacts`).
+> - **Nightly closed loop**: nightly reflection writes back `synthesized_insight` facts and generates `knowledge_capsule` documents + facts.
+> - **Postmortem artifacts**: significant sessions now produce `postmortem` markdown and `bug_lesson` facts.
 > - **Memory index**: auto-generated global index of all memory documents for instant retrieval.
 > - **Auto-provisioning**: first run automatically deploys default CLAUDE.md, docs, and `dispatch_to` — zero manual setup.
 > - **Token budget tracking**: daily token usage monitoring with per-category breakdown and 80% warning threshold.
@@ -69,9 +76,10 @@ $ metame
 Link Established. What are we building?
 ```
 
-### 2. Full Claude Code From Your Phone
+### 2. Full Claude/Codex Sessions From Your Phone
 
-Your Mac runs a daemon. Your phone sends messages via Telegram or Feishu. Same Claude Code engine — same tools, same files, same session.
+Your Mac runs a daemon. Your phone sends messages via Telegram or Feishu.
+Engine is selected per project (`project.engine: claude|codex`) — same tools, same files, same session continuity.
 
 ```
 You (phone):  Fix the auth bug in api/login.ts
@@ -87,7 +95,7 @@ Start on your laptop, continue on the train. `/stop` to interrupt, `/undo` to ro
 MetaMe's memory system runs automatically in the background — no prompts, no manual saves. Five layers, fully autonomous.
 
 **Layer 1 — Long-term Facts**
-When you go idle, MetaMe runs memory consolidation: extracts key decisions, patterns, and knowledge from your sessions into a persistent facts store. These are semantically recalled on every session start.
+When you go idle, MetaMe runs memory consolidation: extracts key decisions, patterns, and knowledge from your sessions into a persistent facts store. Facts can also carry concept labels (`fact_labels`) for faster cross-domain retrieval.
 
 **Layer 2 — Session Continuity**
 Resuming a conversation after 2+ hours? MetaMe injects a brief summary of what you were working on last time — so you pick up where you left off without re-explaining context.
@@ -96,10 +104,10 @@ Resuming a conversation after 2+ hours? MetaMe injects a brief summary of what y
 Every session gets tagged with topics and intent. This powers future session routing: when you reference "that thing we worked on last week", MetaMe knows where to look.
 
 **Layer 4 — Nightly Reflection**
-Every night at 01:00, MetaMe reviews your most-accessed facts from the past week and distills them into high-level decision logs and operational lessons — searchable documents that grow your personal knowledge base over time.
+Every night at 01:00, MetaMe reviews your most-accessed facts from the past week and distills them into high-level decision logs and operational lessons. Distilled outputs are also written back to `memory.db` as `synthesized_insight`, enabling retrieval in future sessions.
 
 **Layer 5 — Memory Index**
-At 01:30, an auto-generated global index (`INDEX.md`) maps every memory document across all categories. This serves as a fast lookup table so MetaMe always knows where to find relevant context.
+At 01:30, an auto-generated global index (`INDEX.md`) maps every memory document across all categories (including capsules and postmortems). This serves as a fast lookup table so MetaMe always knows where to find relevant context.
 
 ```
 [Background, while you sleep]
@@ -133,9 +141,9 @@ Five tasks shipped out of the box. They are precondition-gated and run only when
 
 ```yaml
 - cognitive-distill   # 4h · has signals? → distill preferences into profile
-- memory-extract      # 4h · scan sessions → extract long-term facts + topic tags
+- memory-extract      # 4h · scan sessions → extract long-term facts + concept labels
 - skill-evolve        # 6h · has signals? → evolve skills from task outcomes
-- nightly-reflect     # 01:00 daily · hot facts → decision logs + lessons learned
+- nightly-reflect     # 01:00 daily · hot facts → decisions/lessons + synthesized facts + capsules
 - memory-index        # 01:30 daily · regenerate global memory index
 ```
 
@@ -303,7 +311,7 @@ systemctl --user start metame
 | Capability | What It Does |
 |-----------|-------------|
 | **Cognitive Profile** | 6-dimension soul schema (Values, Drive, Cognition Style, Stress & Shadow, Relational, Identity Narrative). 67 fields, tier-locked, 800-token budget. First-time Genesis Interview builds your profile from scratch. |
-| **Layered Memory** | Five-tier memory: long-term facts (semantic recall), session summaries (continuity bridge), session index (topic tags), nightly reflection (decision/lesson distillation), memory index (global lookup). All automatic. |
+| **Layered Memory** | Five-tier memory: long-term facts (+ concept labels), session summaries (continuity bridge), session index (topic tags), nightly reflection (distill + write-back), memory index (global lookup). All automatic. |
 | **Mobile Bridge** | Full Claude Code via Telegram/Feishu. Stateful sessions, file transfer both ways, real-time streaming status. |
 | **Skill Evolution** | Self-healing skill system. Auto-discovers missing skills, learns from browser recordings, evolves after every task. Detects repeated multi-tool workflows and proposes new skills automatically. Skills get smarter over time. |
 | **Token Budget** | Daily token usage tracking with per-category breakdown. Configurable daily limit, automatic 80% warning threshold, usage history with rollover. |
@@ -314,6 +322,7 @@ systemctl --user start metame
 | **Cross-Platform** | Native support for macOS and Windows. Platform abstraction layer handles spawn, IPC, process management, and terminal encoding automatically. |
 | **Provider Relay** | Route through any Anthropic-compatible API. Use GPT-4, DeepSeek, Gemini — zero config file mutation. |
 | **Metacognition** | Detects behavioral patterns (decision style, comfort zones, goal drift) and injects mirror observations. Zero extra API cost. |
+| **Mentor Mode** | `/mentor on|off|level|status` controls friction mode. Emotion breaker, zone-adaptive mentor prompts, and reflection debt run as optional hooks. |
 | **Multi-User ACL** | Role-based permission system (admin / member / stranger). Share bots with teammates safely. Dynamic user management via `/user` commands with hot-reload config. |
 | **Team Task** | Multi-agent task board for cross-agent collaboration. Agents can create, assign, and track tasks across workspaces. N-agent session scoping for parallel team workflows. |
 | **Emergency Tools** | `/doctor` diagnostics, `/mac` macOS control helpers, `/sh` raw shell, `/fix` config restore, `/undo` git-based rollback. |
@@ -422,6 +431,8 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 | `/undo <hash>` | Roll back to a specific git checkpoint |
 | `/list` | Browse & download project files |
 | `/model` | Switch model (sonnet/opus/haiku) |
+| `/distill-model` | Show/update background distill model (default: `haiku`) |
+| `/mentor` | Mentor mode control: on/off/level/status |
 | `/activate` | Activate and bind the most recently created pending agent in a new group |
 | `/agent bind <name> [dir]` | Manually register group as dedicated agent |
 | `/mac` | macOS control helper: permissions check/open + AppleScript/JXA execution |
@@ -468,11 +479,18 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 
 - **Profile** (`~/.claude_profile.yaml`): 6-dimension soul schema. Injected into every Claude session via `CLAUDE.md`.
 - **Daemon**: Background process handling Telegram/Feishu messages, heartbeat tasks, Unix socket dispatch, and idle/sleep transitions.
-- **Distillation**: Heartbeat task (4h, signal-gated) that updates your cognitive profile.
-- **Memory Extract**: Heartbeat task (4h, idle-gated) that extracts long-term facts and session topic tags.
-- **Nightly Reflection**: Daily at 01:00. Distills hot-zone facts into decision logs and operational lessons.
+- **Runtime Adapter** (`scripts/daemon-engine-runtime.js`): normalizes engine args/env/event parsing across Claude/Codex.
+- **Distillation**: Heartbeat task (4h, signal-gated) that updates your cognitive profile, merges competence signals, and emits postmortems for significant sessions.
+- **Memory Extract**: Heartbeat task (4h, idle-gated) that extracts long-term facts, then writes concept labels (`fact_labels`) linked by fact id.
+- **Nightly Reflection**: Daily at 01:00. Distills hot-zone facts into decision logs/lessons, writes back `synthesized_insight`, and generates knowledge capsules.
 - **Memory Index**: Daily at 01:30. Regenerates the global memory index for fast retrieval.
 - **Session Summarize**: Generates a brief summary for idle sessions. Injected as context when resuming after a 2h+ gap.
+
+## Scripts Docs Pointer Map
+
+Use `scripts/docs/pointer-map.md` as the source-of-truth map for script entry points and Step 1-4 landing zones (`session-analytics` / `mentor-engine` / `daemon-claude-engine` / `distill` / `memory-extract` / `memory-nightly-reflect`).
+
+For day-2 operations and troubleshooting (engine routing, codex login/rate-limit, compact boundary), use `scripts/docs/maintenance-manual.md`.
 
 ## Security
 
@@ -493,10 +511,10 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 | Cognitive profile injection | ~800 tokens/session (0.4% of 200k context) |
 | Dispatch latency (Unix socket) | <100ms |
 | Memory consolidation (per session) | ~1,500–2,000 tokens input + ~50–300 tokens output (Haiku) |
-| Session summary (per session) | ~400–900 tokens input + ≤250 tokens output (Haiku) |
+| Session summary (per session) | ~400–900 tokens input + ≤250 tokens output (distill model configurable) |
 | Mobile commands (`/stop`, `/list`, `/undo`) | 0 tokens |
 
-> Both memory consolidation and session summarization run in the background via Haiku (`--model haiku`). Input is capped by code: skeleton text ≤ 3,000 chars, summary output ≤ 500 chars. Neither runs per-message — memory consolidation follows heartbeat schedule with idle/precondition guards, and summaries trigger once per idle session on sleep-mode transitions.
+> Memory consolidation and session summarization run in the background via the configured distill model (`/distill-model`, default `haiku`). Input is capped by code: skeleton text ≤ 3,000 chars, summary output ≤ 500 chars. Neither runs per-message — memory consolidation follows heartbeat schedule with idle/precondition guards, and summaries trigger once per idle session on sleep-mode transitions.
 
 ## Plugin
 

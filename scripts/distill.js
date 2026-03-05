@@ -3,7 +3,7 @@
 /**
  * MetaMe Passive Distiller
  *
- * Reads raw signal buffer, calls Claude (haiku, non-interactive)
+ * Reads raw signal buffer, calls Claude (configured distill model, non-interactive)
  * to extract persistent preferences/identity, merges into profile.
  *
  * Runs automatically before each MetaMe session launch.
@@ -15,9 +15,12 @@ const os = require('os');
 const { callHaiku, buildDistillEnv } = require('./providers');
 
 const HOME = os.homedir();
+const METAME_DIR = path.join(HOME, '.metame');
 const BUFFER_FILE = path.join(HOME, '.metame', 'raw_signals.jsonl');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const LOCK_FILE = path.join(HOME, '.metame', 'distill.lock');
+const MEMORY_DIR = path.join(METAME_DIR, 'memory');
+const POSTMORTEM_DIR = path.join(MEMORY_DIR, 'postmortems');
 
 const { hasKey, isLocked, getTier, getDefinition, getWritableKeysForPrompt, estimateTokens, TOKEN_BUDGET } = require('./schema');
 const { loadPending, savePending, upsertPending, getPromotable, removePromoted, expireStale } = require('./pending-traits');
@@ -36,6 +39,248 @@ let distillEnv = {};
 try {
   distillEnv = buildDistillEnv();
 } catch { /* providers not configured — use defaults */ }
+
+const COMPETENCE_SCORE = {
+  beginner: 1,
+  intermediate: 2,
+  expert: 3,
+};
+
+function normalizeCompetenceLevel(level) {
+  const v = String(level || '').trim().toLowerCase();
+  if (v === 'beginner' || v === 'intermediate' || v === 'expert') return v;
+  return null;
+}
+
+function normalizeDomainName(domain) {
+  const raw = String(domain || '').trim();
+  if (!raw) return '';
+  return raw.replace(/\s+/g, ' ').slice(0, 40);
+}
+
+function mergeCompetenceMap(currentMap, competenceSignals) {
+  const next = {
+    ...(currentMap && typeof currentMap === 'object' && !Array.isArray(currentMap) ? currentMap : {}),
+  };
+  const signals = Array.isArray(competenceSignals) ? competenceSignals : [];
+  let changed = false;
+
+  for (const signal of signals) {
+    const domain = normalizeDomainName(signal && signal.domain);
+    const level = normalizeCompetenceLevel(signal && signal.level);
+    if (!domain || !level) continue;
+
+    const oldLevel = normalizeCompetenceLevel(next[domain]);
+    if (!oldLevel) {
+      next[domain] = level;
+      changed = true;
+      continue;
+    }
+
+    const oldScore = COMPETENCE_SCORE[oldLevel] || 0;
+    const newScore = COMPETENCE_SCORE[level] || 0;
+    if (newScore >= oldScore) {
+      if (newScore > oldScore) {
+        next[domain] = level;
+        changed = true;
+      }
+      continue;
+    }
+
+    // Downgrade is only allowed with explicit downgrade evidence.
+    const downgradeEvidence = String(signal && signal.downgrade_evidence ? signal.downgrade_evidence : '').trim();
+    if (downgradeEvidence) {
+      next[domain] = level;
+      changed = true;
+    }
+  }
+
+  const entries = Object.entries(next);
+  if (entries.length <= 20) return { map: next, changed };
+
+  // Keep top-20 by level score to avoid unbounded growth.
+  entries.sort((a, b) => (COMPETENCE_SCORE[b[1]] || 0) - (COMPETENCE_SCORE[a[1]] || 0));
+  const compact = Object.fromEntries(entries.slice(0, 20));
+  return { map: compact, changed: true };
+}
+
+function sanitizeSlug(input, fallback = 'session') {
+  const v = String(input || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fff_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  if (!v) return fallback;
+  return v.slice(0, 48);
+}
+
+function stripMd(text) {
+  return String(text || '').replace(/[#*_`>\[\]\(\)]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function appendPostmortemSkillSignal(skillName, skeleton, reasons, filePath) {
+  let skillEvolution = null;
+  try { skillEvolution = require('./skill-evolution'); } catch { /* optional */ }
+  if (!skillEvolution || typeof skillEvolution.appendSkillSignal !== 'function') return;
+  const name = String(skillName || '').trim();
+  if (!name) return;
+  try {
+    skillEvolution.appendSkillSignal({
+      ts: new Date().toISOString(),
+      type: 'postmortem_lesson',
+      prompt: skeleton && skeleton.intent ? skeleton.intent : '',
+      output: `postmortem:${name}`,
+      error: null,
+      skills_invoked: [name],
+      has_tool_failure: Number(skeleton && skeleton.tool_error_count) > 0,
+      tool_usage: [],
+      files_modified: [],
+      cwd: skeleton && skeleton.project_path ? skeleton.project_path : '',
+      metadata: {
+        source: 'distill-postmortem',
+        reasons,
+        postmortem_file: filePath,
+      },
+    });
+  } catch { /* non-fatal */ }
+}
+
+async function maybeGeneratePostmortemArtifact(skeleton, sessionPath) {
+  if (!sessionAnalytics || !skeleton || !sessionPath) return null;
+  const detector = sessionAnalytics.detectSignificantSession;
+  if (typeof detector !== 'function') return null;
+
+  const sig = detector(skeleton);
+  if (!sig || !sig.significant) return null;
+
+  let evidence = null;
+  try {
+    if (typeof sessionAnalytics.extractEvidence === 'function') {
+      evidence = sessionAnalytics.extractEvidence(sessionPath, 3200);
+    }
+  } catch { /* non-fatal */ }
+
+  const promptInput = JSON.stringify({
+    skeleton: {
+      session_id: skeleton.session_id,
+      duration_min: skeleton.duration_min,
+      tool_error_count: skeleton.tool_error_count,
+      retry_sequences: skeleton.retry_sequences,
+      git_diff_lines: skeleton.git_diff_lines,
+      error_recovered: skeleton.error_recovered,
+      intent: skeleton.intent,
+      project: skeleton.project,
+      project_id: skeleton.project_id,
+    },
+    reasons: sig.reasons,
+    evidence,
+  }, null, 2).slice(0, 5200);
+
+  const pmPrompt = `你是工程复盘助手。根据会话骨架和证据生成一份简洁 postmortem。
+
+输入(JSON):
+${promptInput}
+
+输出 JSON：
+{
+  "title":"简短标题",
+  "problem":"遇到的问题（1句）",
+  "root_cause":"根因（1句）",
+  "fix":"修复方案（1句）",
+  "lesson":"可复用教训（1句）",
+  "skill":"可选，若明显涉及某技能则写 skill 名，否则空字符串"
+}
+
+规则：
+- 只基于输入，不要虚构
+- 每个字段 20-180 字
+- 只输出 JSON`;
+
+  let raw = '';
+  try {
+    raw = await callHaiku(pmPrompt, distillEnv, 60000);
+  } catch {
+    return null;
+  }
+
+  let parsed = null;
+  try {
+    const cleaned = String(raw).replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    parsed = JSON.parse(cleaned);
+  } catch {
+    return null;
+  }
+
+  const title = String(parsed && parsed.title ? parsed.title : '').trim();
+  const problem = String(parsed && parsed.problem ? parsed.problem : '').trim();
+  const rootCause = String(parsed && parsed.root_cause ? parsed.root_cause : '').trim();
+  const fix = String(parsed && parsed.fix ? parsed.fix : '').trim();
+  const lesson = String(parsed && parsed.lesson ? parsed.lesson : '').trim();
+  if (!title || !problem || !rootCause || !fix || !lesson) return null;
+
+  fs.mkdirSync(POSTMORTEM_DIR, { recursive: true });
+  const day = new Date().toISOString().slice(0, 10);
+  const topicSlug = sanitizeSlug(skeleton.intent || title, `session-${String(skeleton.session_id || '').slice(0, 8)}`);
+  const filePath = path.join(POSTMORTEM_DIR, `${day}-${topicSlug}.md`);
+  const markdown = [
+    `# ${title}`,
+    '',
+    `- date: ${day}`,
+    `- session_id: ${skeleton.session_id || 'unknown'}`,
+    `- project: ${skeleton.project || 'unknown'}`,
+    `- project_id: ${skeleton.project_id || 'unknown'}`,
+    `- reasons: ${(sig.reasons || []).join(', ') || 'n/a'}`,
+    '',
+    '## 问题',
+    problem,
+    '',
+    '## 根因',
+    rootCause,
+    '',
+    '## 解法',
+    fix,
+    '',
+    '## 教训',
+    lesson,
+    '',
+  ].join('\n');
+  fs.writeFileSync(filePath, markdown, 'utf8');
+
+  let memory = null;
+  try {
+    memory = require('./memory');
+  } catch { /* optional */ }
+
+  if (memory && typeof memory.saveFacts === 'function') {
+    const value = stripMd(`问题:${problem} 根因:${rootCause} 解法:${fix} 教训:${lesson}`).slice(0, 280);
+    if (value.length >= 20) {
+      const entityProject = sanitizeSlug(skeleton.project || 'unknown', 'unknown');
+      const fallbackScope = skeleton.session_id
+        ? `sess_${String(skeleton.session_id).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24)}`
+        : null;
+      try {
+        memory.saveFacts(
+          skeleton.session_id || `pm-${Date.now()}`,
+          skeleton.project || 'unknown',
+          [{
+            entity: `postmortem.${entityProject}`,
+            relation: 'bug_lesson',
+            value,
+            confidence: 'high',
+            tags: ['postmortem'],
+          }],
+          { scope: skeleton.project_id || fallbackScope }
+        );
+      } catch { /* non-fatal */ }
+    }
+    try { memory.close(); } catch { /* non-fatal */ }
+  }
+
+  appendPostmortemSkillSignal(parsed && parsed.skill, skeleton, sig.reasons || [], filePath);
+
+  return { file: filePath, reasons: sig.reasons || [] };
+}
 
 function selectSignalBatch(lines) {
   const parsed = [];
@@ -176,6 +421,7 @@ async function distill() {
     let sessionContext = '';
     let skeleton = null;
     let sessionSummary = null;
+    let targetSessionPath = null;
     if (sessionAnalytics) {
       try {
         let targetSession = null;
@@ -189,6 +435,7 @@ async function distill() {
         }
         if (targetSession) {
           skeleton = sessionAnalytics.extractSkeleton(targetSession.path);
+          targetSessionPath = targetSession.path;
           sessionContext = sessionAnalytics.formatForPrompt(skeleton);
           // For long sessions, extract pivot points
           sessionSummary = sessionAnalytics.summarizeSession(skeleton, targetSession.path);
@@ -364,11 +611,16 @@ BEHAVIORAL ANALYSIS — _behavior block (always output, use null if insufficient
   friction: []                   # max 3 keywords describing pain points
   goal_alignment: aligned | partial | drifted | null
   drift_note: "max 30 char explanation" or null
+  competence_signals:            # optional, max 5
+    - domain: "领域名"
+      level: beginner | intermediate | expert
+      evidence: "触发证据"
+      downgrade_evidence: "只有在明确降级时填写，否则省略"
 ${sessionContext ? '\nHint: high tool_calls + routine messages → zone likely higher. If DECLARED_GOALS exist, assess goal_alignment.' : ''}
 OUTPUT — respond with ONLY a YAML code block. If nothing worth saving AND no behavior: respond with exactly NO_UPDATE.
 Do NOT repeat existing unchanged values.`;
 
-    // 6. Call Claude in print mode with haiku (+ provider env for relay support)
+    // 6. Call Claude in print mode with configured distill model (+ provider env for relay support)
     let result;
     try {
       result = await callHaiku(distillPrompt, distillEnv, 60000);
@@ -384,9 +636,23 @@ Do NOT repeat existing unchanged values.`;
 
     // 7. Parse result
     if (!result || result === 'NO_UPDATE') {
+      if (skeleton && sessionAnalytics) {
+        try { sessionAnalytics.markAnalyzed(skeleton.session_id); } catch { /* non-fatal */ }
+      }
       ackSignals = true;
       finalize();
-      return { updated: false, behavior: null, summary: `Analyzed ${signals.length} messages — no persistent insights found.` };
+      let postmortem = null;
+      try {
+        postmortem = await maybeGeneratePostmortemArtifact(skeleton, targetSessionPath);
+      } catch { /* non-fatal */ }
+      return {
+        updated: false,
+        behavior: null,
+        skeleton,
+        postmortem,
+        signalCount: signals.length,
+        summary: `Analyzed ${signals.length} messages — no persistent insights found.`,
+      };
     }
 
     // Extract YAML block from response — require explicit code block, no fallback
@@ -420,20 +686,11 @@ Do NOT repeat existing unchanged values.`;
 
       // Schema whitelist filter: drop any keys not in schema or locked
       const filtered = filterBySchema(updates);
-      if (Object.keys(filtered).length === 0 && !behavior) {
+      const extractedFieldCount = Object.keys(filtered).length;
+      if (extractedFieldCount === 0 && !behavior) {
         ackSignals = true;
         finalize();
         return { updated: false, behavior: null, summary: `Analyzed ${signals.length} messages — all extracted fields rejected by schema.` };
-      }
-
-      // If only behavior detected but no profile updates
-      if (Object.keys(filtered).length === 0 && behavior) {
-        ackSignals = true;
-        finalize();
-        if (skeleton && sessionAnalytics) {
-          try { sessionAnalytics.markAnalyzed(skeleton.session_id); } catch { }
-        }
-        return { updated: false, behavior, skeleton, signalCount: signals.length, summary: `Analyzed ${signals.length} messages — behavior logged, no profile changes.` };
       }
 
       const profile = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
@@ -451,13 +708,44 @@ Do NOT repeat existing unchanged values.`;
       const merged = strategicMerge(profile, filtered, lockedKeys, pendingTraits, confidenceMap, sourceMap);
       savePending(pendingTraits);
 
+      // Merge competence signals into user_competence_map (upgrade by default).
+      const competenceSignals = Array.isArray(behavior && behavior.competence_signals)
+        ? behavior.competence_signals
+        : [];
+      const mergedCompetence = mergeCompetenceMap(merged.user_competence_map, competenceSignals);
+      if (mergedCompetence.changed) {
+        merged.user_competence_map = mergedCompetence.map;
+      }
+
+      if (extractedFieldCount === 0 && !mergedCompetence.changed) {
+        if (skeleton && sessionAnalytics) {
+          try { sessionAnalytics.markAnalyzed(skeleton.session_id); } catch { }
+        }
+        ackSignals = true;
+        finalize();
+        let postmortem = null;
+        try {
+          postmortem = await maybeGeneratePostmortemArtifact(skeleton, targetSessionPath);
+        } catch { /* non-fatal */ }
+        return {
+          updated: false,
+          behavior,
+          skeleton,
+          postmortem,
+          signalCount: signals.length,
+          summary: `Analyzed ${signals.length} messages — behavior logged, no profile changes.`,
+        };
+      }
+
       // Add distillation log entry (keep last 10, compact format)
       if (!merged.evolution) merged.evolution = {};
       if (!merged.evolution.auto_distill) merged.evolution.auto_distill = [];
+      const changedFields = Object.keys(filtered);
+      if (mergedCompetence.changed) changedFields.push('user_competence_map');
       merged.evolution.auto_distill.push({
         ts: new Date().toISOString(),
         signals: signals.length,
-        fields: Object.keys(filtered).join(', ')
+        fields: changedFields.join(', ')
       });
       // Cap at 10 entries
       if (merged.evolution.auto_distill.length > 10) {
@@ -507,13 +795,19 @@ Do NOT repeat existing unchanged values.`;
 
       ackSignals = true;
       finalize();
+      let postmortem = null;
+      try {
+        postmortem = await maybeGeneratePostmortemArtifact(skeleton, targetSessionPath);
+      } catch { /* non-fatal */ }
+      const absorbedCount = changedFields.length;
       return {
         updated: true,
         behavior,
         skeleton,
         sessionSummary,
+        postmortem,
         signalCount: signals.length,
-        summary: `${Object.keys(filtered).length} new trait${Object.keys(filtered).length > 1 ? 's' : ''} absorbed. (${tokens} tokens)`
+        summary: `${absorbedCount} new trait${absorbedCount > 1 ? 's' : ''} absorbed. (${tokens} tokens)`
       };
 
     } catch (err) {
@@ -1077,7 +1371,18 @@ If no clear patterns found: respond with exactly NO_PATTERNS`;
 }
 
 // Export for use in index.js
-module.exports = { distill, writeSessionLog, bootstrapSessionLog, detectPatterns };
+module.exports = {
+  distill,
+  writeSessionLog,
+  bootstrapSessionLog,
+  detectPatterns,
+  _private: {
+    mergeCompetenceMap,
+    normalizeCompetenceLevel,
+    normalizeDomainName,
+    sanitizeSlug,
+  },
+};
 
 // Also allow direct execution
 if (require.main === module) {

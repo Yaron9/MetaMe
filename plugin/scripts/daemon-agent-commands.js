@@ -30,6 +30,22 @@ function createAgentCommandHandler(deps) {
     agentBindTtlMs,
   } = deps;
 
+  function normalizeEngineName(name) {
+    return String(name || '').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+  }
+
+  function inferEngineByCwd(cfg, cwd) {
+    if (!cfg || !cfg.projects || !cwd) return null;
+    const targetCwd = normalizeCwd(cwd);
+    for (const proj of Object.values(cfg.projects || {})) {
+      if (!proj || !proj.cwd) continue;
+      if (normalizeCwd(proj.cwd) === targetCwd) {
+        return normalizeEngineName(proj.engine);
+      }
+    }
+    return null;
+  }
+
   // Pending activations have no TTL — they persist until consumed.
   // The creating chatId is stored to prevent self-activation.
 
@@ -127,7 +143,12 @@ function createAgentCommandHandler(deps) {
       const action = res.data.isNewProject ? '绑定成功' : '重新绑定';
       const displayCwd = String(res.data.cwd || '').replace(HOME, '~');
       if (res.data.cwd && typeof attachOrCreateSession === 'function') {
-        attachOrCreateSession(chatId, normalizeCwd(res.data.cwd), p.name || agentName || res.data.projectKey || '');
+        attachOrCreateSession(
+          chatId,
+          normalizeCwd(res.data.cwd),
+          p.name || agentName || res.data.projectKey || '',
+          p.engine || 'claude'
+        );
       }
       await bot.sendMessage(chatId, `${icon} ${p.name || agentName} ${action}\n目录: ${displayCwd}`);
       return { ok: true, data: res.data };
@@ -140,7 +161,7 @@ function createAgentCommandHandler(deps) {
     }
     const fallbackCwd = (fallback.data && fallback.data.cwd) || agentCwd;
     if (fallbackCwd && typeof attachOrCreateSession === 'function') {
-      attachOrCreateSession(chatId, normalizeCwd(fallbackCwd), agentName || '');
+      attachOrCreateSession(chatId, normalizeCwd(fallbackCwd), agentName || '', 'claude');
     }
     return {
       ok: true,
@@ -163,9 +184,9 @@ function createAgentCommandHandler(deps) {
 
   async function createAgentViaUnifiedApi(chatId, name, dir, roleDesc, opts = {}) {
     // Default: skip binding the creating chat — let the target group activate via /activate
-    const { skipChatBinding = true } = opts;
+    const { skipChatBinding = true, engine = null } = opts;
     if (agentTools && typeof agentTools.createNewWorkspaceAgent === 'function') {
-      const res = await agentTools.createNewWorkspaceAgent(name, dir, roleDesc, chatId, { skipChatBinding });
+      const res = await agentTools.createNewWorkspaceAgent(name, dir, roleDesc, chatId, { skipChatBinding, engine });
       if (res.ok && skipChatBinding && res.data && res.data.projectKey) {
         storePendingActivation(res.data.projectKey, name, res.data.cwd, chatId);
       }
@@ -273,10 +294,14 @@ function createAgentCommandHandler(deps) {
       const cwd = fullMatch.projectPath || (getSession(chatId) && getSession(chatId).cwd) || HOME;
 
       const state2 = loadState();
+      const cfgForEngine = loadConfig();
+      const engineByTargetCwd = inferEngineByCwd(cfgForEngine, cwd);
+      const currentEngine = normalizeEngineName(state2.sessions[chatId] && state2.sessions[chatId].engine);
       state2.sessions[chatId] = {
         id: sessionId,
         cwd,
         started: true,
+        engine: engineByTargetCwd || currentEngine,
       };
       saveState(state2);
       const name = fullMatch.customTitle;
@@ -546,4 +571,6 @@ function createAgentCommandHandler(deps) {
   return { handleAgentCommand };
 }
 
-module.exports = { createAgentCommandHandler };
+module.exports = {
+  createAgentCommandHandler,
+};

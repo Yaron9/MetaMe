@@ -122,6 +122,17 @@ function getDb() {
     )
   `);
 
+  // Optional concept label side-table (non-invasive, no ALTER on facts schema)
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS fact_labels (
+      fact_id     TEXT NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+      label       TEXT NOT NULL,
+      domain      TEXT,
+      created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (fact_id, label)
+    )
+  `);
+
   // FTS5 index for facts (separate from sessions_fts, zero compatibility risk)
   try {
     _db.exec(`
@@ -159,6 +170,8 @@ function getDb() {
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_entity  ON facts(entity)'); } catch {}
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_entity_relation ON facts(entity, relation)'); } catch {}
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_project ON facts(project)'); } catch {}
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_fact_labels_label ON fact_labels(label)'); } catch {}
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_fact_labels_domain ON fact_labels(domain)'); } catch {}
 
   // Backward-compatible migration for old DBs without `scope`
   try { _db.exec('ALTER TABLE facts ADD COLUMN scope TEXT DEFAULT NULL'); } catch {}
@@ -370,6 +383,42 @@ function saveFacts(sessionId, project, facts, { scope = null } = {}) {
   if (conflicts > 0) log('WARN', `[MEMORY] ${conflicts} conflict(s) detected`);
 
   return { saved, skipped, superseded, conflicts, savedFacts };
+}
+
+/**
+ * Save concept labels for facts (side-table).
+ *
+ * @param {Array<{fact_id:string,label:string,domain?:string}>} rows
+ * @returns {{ saved: number, skipped: number }}
+ */
+function saveFactLabels(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return { saved: 0, skipped: 0 };
+  const db = getDb();
+  const upsert = db.prepare(`
+    INSERT INTO fact_labels (fact_id, label, domain)
+    VALUES (?, ?, ?)
+    ON CONFLICT(fact_id, label) DO UPDATE SET
+      domain = COALESCE(excluded.domain, fact_labels.domain)
+  `);
+
+  let saved = 0;
+  let skipped = 0;
+  for (const row of rows) {
+    const factId = String(row && row.fact_id ? row.fact_id : '').trim();
+    const label = String(row && row.label ? row.label : '').trim();
+    const domainRaw = row && row.domain != null ? String(row.domain).trim() : '';
+    const domain = domainRaw || null;
+    if (!factId || !label) { skipped++; continue; }
+    if (label.length > 60) { skipped++; continue; }
+    if (domain && domain.length > 60) { skipped++; continue; }
+    try {
+      upsert.run(factId, label, domain);
+      saved++;
+    } catch {
+      skipped++;
+    }
+  }
+  return { saved, skipped };
 }
 
 /**
@@ -613,12 +662,46 @@ function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
     }
     const ftsResults = db.prepare(sql).all(...params);
     if (ftsResults.length > 0) {
+      // Supplement with fact_labels matches (concepts written by memory-extract).
+      const ftsIds = new Set(ftsResults.map(r => r.id));
+      const remaining = limit - ftsResults.length;
+      if (remaining > 0) {
+        try {
+          const labelLike = '%' + query.trim() + '%';
+          let labelSql = `
+            SELECT DISTINCT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at
+            FROM fact_labels fl JOIN facts f ON f.id = fl.fact_id
+            WHERE fl.label LIKE ?
+              AND f.superseded_by IS NULL
+              AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))`;
+          const labelParams = [labelLike];
+          if (scope && project) {
+            labelSql += ` AND ((f.scope = ? OR f.scope = '*') OR (f.scope IS NULL AND (f.project = ? OR f.project = '*')))`;
+            labelParams.push(scope, project);
+          } else if (scope) {
+            labelSql += ` AND (f.scope = ? OR f.scope = '*')`;
+            labelParams.push(scope);
+          } else if (project) {
+            labelSql += ` AND (f.project = ? OR f.project = '*')`;
+            labelParams.push(project);
+          }
+          labelSql += ` LIMIT ?`;
+          labelParams.push(remaining + ftsResults.length);
+          const labelRows = db.prepare(labelSql).all(...labelParams);
+          for (const row of labelRows) {
+            if (!ftsIds.has(row.id) && ftsResults.length < limit) {
+              ftsIds.add(row.id);
+              ftsResults.push(row);
+            }
+          }
+        } catch { /* fact_labels table may not exist yet */ }
+      }
       _trackSearch(ftsResults.map(r => r.id));
       return ftsResults;
     }
   } catch { /* FTS error, fall through */ }
 
-  // LIKE fallback
+  // LIKE fallback (also check fact_labels)
   const like = '%' + query.trim() + '%';
   const likeSql = scope && project
     ? `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
@@ -651,6 +734,39 @@ function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
       : project
         ? db.prepare(likeSql).all(like, like, like, project, limit)
         : db.prepare(likeSql).all(like, like, like, limit);
+  // Supplement LIKE results with fact_labels matches.
+  if (likeResults.length < limit) {
+    try {
+      const labelLike = '%' + query.trim() + '%';
+      const likeIds = new Set(likeResults.map(r => r.id));
+      let labelSql2 = `
+        SELECT DISTINCT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at
+        FROM fact_labels fl JOIN facts f ON f.id = fl.fact_id
+        WHERE fl.label LIKE ?
+          AND f.superseded_by IS NULL
+          AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))`;
+      const labelParams2 = [labelLike];
+      if (scope && project) {
+        labelSql2 += ` AND ((f.scope = ? OR f.scope = '*') OR (f.scope IS NULL AND (f.project = ? OR f.project = '*')))`;
+        labelParams2.push(scope, project);
+      } else if (scope) {
+        labelSql2 += ` AND (f.scope = ? OR f.scope = '*')`;
+        labelParams2.push(scope);
+      } else if (project) {
+        labelSql2 += ` AND (f.project = ? OR f.project = '*')`;
+        labelParams2.push(project);
+      }
+      labelSql2 += ` LIMIT ?`;
+      labelParams2.push(limit);
+      const labelRows = db.prepare(labelSql2).all(...labelParams2);
+      for (const row of labelRows) {
+        if (!likeIds.has(row.id) && likeResults.length < limit) {
+          likeIds.add(row.id);
+          likeResults.push(row);
+        }
+      }
+    } catch { /* fact_labels table may not exist yet */ }
+  }
   if (likeResults.length > 0) _trackSearch(likeResults.map(r => r.id));
   return likeResults;
 }
@@ -839,4 +955,19 @@ function forceClose() {
   if (_db) { _db.close(); _db = null; }
 }
 
-module.exports = { saveSession, saveFacts, searchFacts, searchFactsAsync, searchSessions, recentSessions, getSession, stats, acquire, release, close, forceClose, DB_PATH };
+module.exports = {
+  saveSession,
+  saveFacts,
+  saveFactLabels,
+  searchFacts,
+  searchFactsAsync,
+  searchSessions,
+  recentSessions,
+  getSession,
+  stats,
+  acquire,
+  release,
+  close,
+  forceClose,
+  DB_PATH,
+};

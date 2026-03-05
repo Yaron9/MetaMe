@@ -432,13 +432,14 @@ function createSessionStore(deps) {
     return state.sessions[chatId] || null;
   }
 
-  function createSession(chatId, cwd, name) {
+  function createSession(chatId, cwd, name, engine = 'claude') {
     const state = loadState();
     const sessionId = crypto.randomUUID();
     state.sessions[chatId] = {
       id: sessionId,
       cwd: cwd || HOME,
       started: false,
+      engine: String(engine || 'claude').trim().toLowerCase() === 'codex' ? 'codex' : 'claude',
     };
     saveState(state);
     invalidateSessionCache();
