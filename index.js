@@ -776,6 +776,7 @@ const CAPABILITY_SECTIONS = [
   '',
   '## Agent 创建与管理',
   '用户问创建/管理/绑定 Agent 时 → 先 `cat ~/.metame/docs/agent-guide.md` 再回答。',
+  '用户问代码结构/升级进度/脚本入口时 → 先 `cat ~/.metame/docs/pointer-map.md` 再回答。',
   '',
   '## 手机端文件交互',
   '用户要文件（"发给我"/"发过来"/"导出"）→ 先 `cat ~/.metame/docs/file-transfer.md` 再执行。',
