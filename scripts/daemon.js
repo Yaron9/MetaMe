@@ -35,7 +35,7 @@ process.on('uncaughtException', (err) => {
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync, execFileSync, spawn } = require('child_process');
+const { execSync, execFileSync, execFile, spawn } = require('child_process');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
@@ -206,9 +206,10 @@ const {
   cpExtractTimestamp,
   cpDisplayLabel,
   gitCheckpoint,
+  gitCheckpointAsync,
   listCheckpoints,
   cleanupCheckpoints,
-} = createCheckpointUtils({ execSync, path, log });
+} = createCheckpointUtils({ execSync, execFile, path, log });
 
 // ---------------------------------------------------------
 // CONFIG & STATE
@@ -1540,6 +1541,7 @@ const { spawnClaudeAsync, askClaude } = createClaudeEngine({
   writeSessionName,
   markSessionStarted,
   gitCheckpoint,
+  gitCheckpointAsync,
   recordTokens,
   skillEvolution,
   touchInteraction,

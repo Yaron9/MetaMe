@@ -18,7 +18,7 @@ function createSessionStore(deps) {
   const _sessionFileCache = new Map(); // sessionId -> { path, ts }
   let _sessionCache = null;
   let _sessionCacheTime = 0;
-  const SESSION_CACHE_TTL = 10000; // 10s
+  const SESSION_CACHE_TTL = 30000; // 30s — scan is expensive, 10s was too frequent
 
   function findSessionFile(sessionId) {
     if (!sessionId || !fs.existsSync(CLAUDE_PROJECTS_DIR)) return null;

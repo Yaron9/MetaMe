@@ -37,6 +37,7 @@ function createClaudeEngine(deps) {
     writeSessionName,
     markSessionStarted,
     gitCheckpoint,
+    gitCheckpointAsync,
     recordTokens,
     skillEvolution,
     touchInteraction,
@@ -946,7 +947,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       }
     }
 
-    const daemonCfg = loadConfig().daemon || {};
+    const daemonCfg = (config && config.daemon) || {};
     const mentorCfg = (daemonCfg.mentor && typeof daemonCfg.mentor === 'object') ? daemonCfg.mentor : {};
     const mentorEnabled = !!(mentorEngine && mentorCfg.enabled);
     const excludeAgents = new Set(
@@ -1184,9 +1185,10 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       : '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
     const fullPrompt = routedPrompt + daemonHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
 
-    // Git checkpoint before Claude modifies files (for /undo)
-    // Pass the user prompt as label so checkpoint list is human-readable
-    gitCheckpoint(session.cwd, prompt);
+    // Git checkpoint before Claude modifies files (for /undo).
+    // Run async (fire-and-forget) to avoid blocking Claude spawn by ~600ms.
+    // Completes well before Claude's first file write (~2s after spawn).
+    (gitCheckpointAsync || gitCheckpoint)(session.cwd, prompt).catch?.(() => {});
 
     // Use streaming mode to show progress
     // Telegram: edit status msg in-place; Feishu: edit or fallback to new messages

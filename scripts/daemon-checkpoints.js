@@ -1,7 +1,9 @@
 'use strict';
 
 function createCheckpointUtils(deps) {
-  const { execSync, path, log } = deps;
+  const { execSync, execFile, path, log } = deps;
+  const { promisify } = require('util');
+  const execFileAsync = execFile ? promisify(execFile) : null;
 
   const CHECKPOINT_PREFIX = '[metame-checkpoint]';
   const MAX_CHECKPOINTS = 20;
@@ -55,6 +57,29 @@ function createCheckpointUtils(deps) {
     }
   }
 
+  // Async version: runs git commands without blocking the event loop.
+  // Call fire-and-forget before spawning Claude; completes well before Claude's first file write.
+  async function gitCheckpointAsync(cwd, label) {
+    if (!execFileAsync) return gitCheckpoint(cwd, label); // fallback
+    try {
+      await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd, timeout: 3000 });
+      await execFileAsync('git', ['add', '-A'], { cwd, timeout: 5000 });
+      const { stdout: status } = await execFileAsync('git', ['status', '--porcelain'], { cwd, encoding: 'utf8', timeout: 5000 });
+      if (!status.trim()) return null;
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const safeLabel = label
+        ? ' Before: ' + label.replace(/["\n\r]/g, ' ').slice(0, 60).trim()
+        : '';
+      const msg = `${CHECKPOINT_PREFIX}${safeLabel} (${ts})`;
+      await execFileAsync('git', ['commit', '-m', msg, '--no-verify'], { cwd, timeout: 10000 });
+      const { stdout: hash } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8', timeout: 3000 });
+      log('INFO', `Git checkpoint: ${hash.trim().slice(0, 8)} in ${path.basename(cwd)}${safeLabel}`);
+      return hash.trim();
+    } catch {
+      return null;
+    }
+  }
+
   function listCheckpoints(cwd, limit = 20) {
     try {
       const raw = execSync(
@@ -81,6 +106,7 @@ function createCheckpointUtils(deps) {
     cpExtractTimestamp,
     cpDisplayLabel,
     gitCheckpoint,
+    gitCheckpointAsync,
     listCheckpoints,
     cleanupCheckpoints,
   };
