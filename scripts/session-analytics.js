@@ -23,6 +23,88 @@ let _stateDb = null;
 let _stmtIsProcessed = null;
 let _stmtMarkProcessed = null;
 
+function normalizeTsMs(ts) {
+  if (!ts) return 0;
+  const n = new Date(ts).getTime();
+  return Number.isFinite(n) ? n : 0;
+}
+
+function extractUserText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    for (const item of content) {
+      if (item && item.type === 'text' && item.text) return item.text;
+    }
+  }
+  return '';
+}
+
+function extractToolResultText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.map(c => {
+    if (typeof c === 'string') return c;
+    if (c && typeof c.text === 'string') return c.text;
+    return '';
+  }).join(' ');
+}
+
+function tokenizeForRepetition(text) {
+  const input = String(text || '').toLowerCase();
+  if (!input) return new Set();
+
+  const out = new Set();
+  const ascii = input.match(/[a-z0-9_./-]{2,}/g) || [];
+  for (const t of ascii) out.add(t);
+
+  const hanRuns = input.match(/[\u4e00-\u9fff]{2,}/g) || [];
+  for (const run of hanRuns) {
+    if (run.length === 2) out.add(run);
+    else {
+      for (let i = 0; i < run.length - 1; i++) out.add(run.slice(i, i + 2));
+    }
+  }
+  return out;
+}
+
+function overlapRate3(a, b, c) {
+  if (!a.size || !b.size || !c.size) return 0;
+  const union = new Set([...a, ...b, ...c]);
+  if (!union.size) return 0;
+  let common = 0;
+  for (const t of a) {
+    if (b.has(t) && c.has(t)) common++;
+  }
+  return common / union.size;
+}
+
+function parseGitDiffLines(text) {
+  const src = String(text || '');
+  if (!src) return 0;
+
+  let best = 0;
+  // Matches: "2 files changed, 40 insertions(+), 20 deletions(-)"
+  const shortstat = src.match(/(\d+)\s+insertions?\(\+\)(?:,\s*(\d+)\s+deletions?\(-\))?/i);
+  if (shortstat) {
+    const ins = Number(shortstat[1]) || 0;
+    const del = Number(shortstat[2]) || 0;
+    best = Math.max(best, ins + del);
+  }
+
+  // Matches numstat lines: "12\t3\tsrc/file.js"
+  const rows = src.split('\n');
+  let numstatTotal = 0;
+  for (const row of rows) {
+    const m = row.match(/^\s*(\d+|-)\s+(\d+|-)\s+.+$/);
+    if (!m) continue;
+    const ins = m[1] === '-' ? 0 : (Number(m[1]) || 0);
+    const del = m[2] === '-' ? 0 : (Number(m[2]) || 0);
+    numstatTotal += ins + del;
+  }
+  best = Math.max(best, numstatTotal);
+  return best;
+}
+
 /**
  * Initialize analytics state DB.
  */
@@ -180,16 +262,88 @@ function extractSkeleton(jsonlPath) {
     branch: null,
     file_dirs: new Set(),
     intent: null,
+    inter_message_gaps: [],
+    tool_error_count: 0,
+    retry_sequences: 0,
+    longest_pause_sec: 0,
+    avg_pause_sec: 0,
+    semantic_repetition: 0,
+    file_churn: 0,
+    git_diff_lines: 0,
+    error_recovered: false,
+  };
+
+  const userTsMs = [];
+  const userTexts = [];
+  const toolUseById = new Map();
+  let lastToolName = null;
+  let seenToolError = false;
+  let seenToolSuccessAfterError = false;
+  const fileStates = new Map(); // 0/undefined: clean, 1: modified, 2: rolled back after modify
+
+  const markFileModified = (filePath) => {
+    if (!filePath || typeof filePath !== 'string') return;
+    const prev = fileStates.get(filePath) || 0;
+    if (prev === 2) skeleton.file_churn++;
+    fileStates.set(filePath, 1);
+  };
+
+  const markFileRolledBack = (filePath) => {
+    if (!filePath || typeof filePath !== 'string') return;
+    const prev = fileStates.get(filePath) || 0;
+    if (prev === 1) fileStates.set(filePath, 2);
+  };
+
+  const markAllRolledBack = () => {
+    for (const [k, v] of fileStates.entries()) {
+      if (v === 1) fileStates.set(k, 2);
+    }
+  };
+
+  const parseRollbackTargets = (cmd) => {
+    const out = [];
+    const text = String(cmd || '').trim();
+    if (!text) return out;
+
+    const checkout = text.match(/\bgit\s+checkout\s+--\s+(.+)$/i);
+    if (checkout && checkout[1]) {
+      for (const t of checkout[1].trim().split(/\s+/)) out.push(t.replace(/^['"]|['"]$/g, ''));
+    }
+    const restore = text.match(/\bgit\s+restore\b(?:\s+--\S+)*\s+(.+)$/i);
+    if (restore && restore[1]) {
+      for (const t of restore[1].trim().split(/\s+/)) out.push(t.replace(/^['"]|['"]$/g, ''));
+    }
+    return out.filter(Boolean);
+  };
+
+  const registerToolResult = (result, toolUseId = '') => {
+    if (!result || typeof result !== 'object') return;
+    const isErr = !!result.is_error;
+    if (isErr) {
+      skeleton.tool_error_count++;
+      seenToolError = true;
+    } else if (seenToolError) {
+      seenToolSuccessAfterError = true;
+    }
+
+    const text = extractToolResultText(result.content);
+    const toolMeta = toolUseById.get(String(toolUseId || ''));
+    const fromDiffCmd = !!(toolMeta && /\bgit\s+diff\b/i.test(String(toolMeta.command || '')));
+    if (fromDiffCmd || /\bfiles?\s+changed\b/i.test(text) || /^\s*(\d+|-)\s+(\d+|-)\s+.+$/m.test(text)) {
+      skeleton.git_diff_lines = Math.max(skeleton.git_diff_lines, parseGitDiffLines(text));
+    }
   };
 
   for (const line of lines) {
     if (!line.trim()) continue;
 
-    // Fast pre-filter: only parse lines that look like user or assistant messages
+    // Fast pre-filter: parse user/assistant/tool_result entries only
     if (!line.includes('"type":"user"') &&
         !line.includes('"type":"assistant"') &&
+        !line.includes('"type":"tool_result"') &&
         !line.includes('"type": "user"') &&
-        !line.includes('"type": "assistant"')) {
+        !line.includes('"type": "assistant"') &&
+        !line.includes('"type": "tool_result"')) {
       continue;
     }
 
@@ -222,18 +376,22 @@ function extractSkeleton(jsonlPath) {
 
       const content = msg.content;
       // Handle both string and array content
-      let userText = '';
-      if (typeof content === 'string') {
-        userText = content;
-        skeleton.user_snippets.push(content.slice(0, 100));
+      const userText = extractUserText(content);
+      if (userText) {
+        skeleton.user_snippets.push(userText.slice(0, 100));
         skeleton.message_count++;
-      } else if (Array.isArray(content)) {
+      }
+      if (userText) userTexts.push(userText);
+      if (ts) {
+        const ms = normalizeTsMs(ts);
+        if (ms > 0) userTsMs.push(ms);
+      }
+
+      // Some transcripts embed tool_result inside user blocks.
+      if (Array.isArray(content)) {
         for (const item of content) {
-          if (item.type === 'text' && item.text) {
-            userText = item.text;
-            skeleton.user_snippets.push(item.text.slice(0, 100));
-            skeleton.message_count++;
-            break; // One snippet per user message
+          if (item && item.type === 'tool_result') {
+            registerToolResult(item, item.tool_use_id || '');
           }
         }
       }
@@ -257,6 +415,14 @@ function extractSkeleton(jsonlPath) {
             const name = item.name || 'unknown';
             skeleton.tool_counts[name] = (skeleton.tool_counts[name] || 0) + 1;
             skeleton.total_tool_calls++;
+            if (name === lastToolName) skeleton.retry_sequences++;
+            lastToolName = name;
+            if (item.id) {
+              toolUseById.set(String(item.id), {
+                name,
+                command: item.input && typeof item.input.command === 'string' ? item.input.command : '',
+              });
+            }
 
             // Extract file directories from Read/Edit/Write operations
             if ((name === 'Read' || name === 'Edit' || name === 'Write') &&
@@ -265,6 +431,12 @@ function extractSkeleton(jsonlPath) {
               const segments = dirPath.split(path.sep).filter(Boolean);
               const shortDir = segments.slice(-2).join('/');
               if (shortDir) skeleton.file_dirs.add(shortDir);
+              if (name === 'Edit' || name === 'Write') {
+                markFileModified(item.input.file_path);
+              }
+            }
+            if (name === 'MultiEdit' && item.input && typeof item.input.file_path === 'string') {
+              markFileModified(item.input.file_path);
             }
 
             // Detect git commits from Bash tool calls
@@ -273,10 +445,22 @@ function extractSkeleton(jsonlPath) {
               if (cmd.includes('git commit') || cmd.includes('git push')) {
                 skeleton.git_committed = true;
               }
+              if (/\bgit\s+reset\s+--hard\b/i.test(cmd) || /\bgit\s+checkout\s+--\s*\./i.test(cmd)) {
+                markAllRolledBack();
+              } else {
+                const targets = parseRollbackTargets(cmd);
+                for (const t of targets) {
+                  if (t === '.' || t === '*') markAllRolledBack();
+                  else markFileRolledBack(t);
+                }
+              }
             }
           }
         }
       }
+    } else if (type === 'tool_result') {
+      const result = entry.message || {};
+      registerToolResult(result, result.tool_use_id || '');
     }
   }
 
@@ -290,6 +474,30 @@ function extractSkeleton(jsonlPath) {
   // Convert Sets to arrays for serialization
   skeleton.models = [...skeleton.models];
   skeleton.file_dirs = [...skeleton.file_dirs].slice(0, 5);
+
+  // Inter-message gaps (sec), filter long breaks (>2h)
+  for (let i = 1; i < userTsMs.length; i++) {
+    const sec = Math.round((userTsMs[i] - userTsMs[i - 1]) / 1000);
+    if (sec > 0 && sec <= 2 * 60 * 60) skeleton.inter_message_gaps.push(sec);
+  }
+  if (skeleton.inter_message_gaps.length > 0) {
+    const sum = skeleton.inter_message_gaps.reduce((a, b) => a + b, 0);
+    skeleton.longest_pause_sec = Math.max(...skeleton.inter_message_gaps);
+    skeleton.avg_pause_sec = Math.round(sum / skeleton.inter_message_gaps.length);
+  }
+
+  // Semantic repetition: max overlap across sliding windows of 3 user messages.
+  if (userTexts.length >= 3) {
+    let maxOverlap = 0;
+    for (let i = 2; i < userTexts.length; i++) {
+      const a = tokenizeForRepetition(userTexts[i - 2]);
+      const b = tokenizeForRepetition(userTexts[i - 1]);
+      const c = tokenizeForRepetition(userTexts[i]);
+      maxOverlap = Math.max(maxOverlap, overlapRate3(a, b, c));
+    }
+    skeleton.semantic_repetition = Number(maxOverlap.toFixed(3));
+  }
+  skeleton.error_recovered = !!(seenToolError && seenToolSuccessAfterError);
 
   // Cap user snippets at 10
   if (skeleton.user_snippets.length > 10) {
@@ -663,6 +871,30 @@ function summarizeSession(skeleton, jsonlPath) {
   };
 }
 
+/**
+ * Decide whether a session should trigger postmortem generation.
+ * Purely numeric heuristics — no semantic inference.
+ */
+function detectSignificantSession(skeleton) {
+  if (!skeleton || typeof skeleton !== 'object') {
+    return { significant: false, reasons: [] };
+  }
+  const reasons = [];
+  const diffLines = Number(skeleton.git_diff_lines || 0);
+  const toolErrors = Number(skeleton.tool_error_count || 0);
+  const retries = Number(skeleton.retry_sequences || 0);
+  const durationMin = Number(skeleton.duration_min || 0);
+  const recovered = !!skeleton.error_recovered;
+
+  if (diffLines > 50 && toolErrors > 0 && recovered) {
+    reasons.push('large_change_with_error_recovery');
+  }
+  if (durationMin > 60 && retries > 5) {
+    reasons.push('long_debug_retry_loop');
+  }
+  return { significant: reasons.length > 0, reasons };
+}
+
 module.exports = {
   findLatestUnanalyzedSession,
   findSessionById,
@@ -673,6 +905,7 @@ module.exports = {
   formatForPrompt,
   formatGoalContext,
   summarizeSession,
+  detectSignificantSession,
   markAnalyzed,
   markFactsExtracted,
 };

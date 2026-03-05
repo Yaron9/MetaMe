@@ -122,6 +122,17 @@ function getDb() {
     )
   `);
 
+  // Optional concept label side-table (non-invasive, no ALTER on facts schema)
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS fact_labels (
+      fact_id     TEXT NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+      label       TEXT NOT NULL,
+      domain      TEXT,
+      created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (fact_id, label)
+    )
+  `);
+
   // FTS5 index for facts (separate from sessions_fts, zero compatibility risk)
   try {
     _db.exec(`
@@ -159,6 +170,8 @@ function getDb() {
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_entity  ON facts(entity)'); } catch {}
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_entity_relation ON facts(entity, relation)'); } catch {}
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_project ON facts(project)'); } catch {}
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_fact_labels_label ON fact_labels(label)'); } catch {}
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_fact_labels_domain ON fact_labels(domain)'); } catch {}
 
   // Backward-compatible migration for old DBs without `scope`
   try { _db.exec('ALTER TABLE facts ADD COLUMN scope TEXT DEFAULT NULL'); } catch {}
