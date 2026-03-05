@@ -43,7 +43,15 @@ const FACT_EXTRACTION_PROMPT = `你是精准的知识提取引擎。从以下会
 {
   "session_name": "用3-5个词极其精简地概括这起会话的主题（例如：优化微信登录架构、排查Redis连接泄漏、配置Nginx反向代理）",
   "facts": [
-    {"entity":"主体(点号层级如MetaMe.daemon.askClaude)","relation":"类型","value":"脱离上下文可独立理解的一句话","confidence":"high或medium","tags":["最多3个标签"]}
+    {
+      "entity":"主体(点号层级如MetaMe.daemon.askClaude)",
+      "relation":"类型",
+      "value":"脱离上下文可独立理解的一句话",
+      "confidence":"high或medium",
+      "tags":["最多3个标签"],
+      "concepts":["最多3个抽象概念标签，如流量控制/背压/解耦"],
+      "domain":"可选领域标签，如backend/frontend/devops"
+    }
   ]
 }
 
@@ -53,6 +61,7 @@ const FACT_EXTRACTION_PROMPT = `你是精准的知识提取引擎。从以下会
 - value长度20-200字
 - entity用英文点号路径，value可用中文
 - medium confidence必须有非空tags
+- concepts 可为空；若存在，最多3个，必须是抽象概念词而非文件名
 - 优先引用证据里的具体锚点（文件名、命令、报错关键词）；没有锚点时不要硬编
 - 没有值得提取的事实时 facts 返回 []
 
@@ -96,6 +105,68 @@ function saveSessionTag(sessionId, sessionName, facts) {
       console.log(`[memory-extract] Failed to save session tag: ${e.message}`);
     }
   }
+}
+
+function normalizeConceptList(input) {
+  if (!Array.isArray(input)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const raw of input) {
+    const v = String(raw || '').trim();
+    if (!v || v.length > 40) continue;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
+function normalizeDomain(input) {
+  const v = String(input || '').trim();
+  if (!v) return null;
+  return v.length > 40 ? v.slice(0, 40) : v;
+}
+
+function factFingerprint(fact) {
+  if (!fact || typeof fact !== 'object') return '';
+  const entity = String(fact.entity || '').trim();
+  const relation = String(fact.relation || '').trim();
+  const value = String(fact.value || '').trim().slice(0, 100);
+  if (!entity || !relation || !value) return '';
+  return `${entity}||${relation}||${value}`;
+}
+
+function buildFactLabelRows(extractedFacts, savedFacts) {
+  const source = Array.isArray(extractedFacts) ? extractedFacts : [];
+  const saved = Array.isArray(savedFacts) ? savedFacts : [];
+  if (source.length === 0 || saved.length === 0) return [];
+
+  const byFp = new Map();
+  for (const fact of source) {
+    const fp = factFingerprint(fact);
+    if (!fp) continue;
+    if (!byFp.has(fp)) byFp.set(fp, fact);
+  }
+
+  const rows = [];
+  const dedup = new Set();
+  for (const sf of saved) {
+    const fp = factFingerprint(sf);
+    if (!fp) continue;
+    const src = byFp.get(fp);
+    if (!src) continue;
+    const concepts = normalizeConceptList(src.concepts);
+    if (concepts.length === 0) continue;
+    const domain = normalizeDomain(src.domain);
+    for (const label of concepts) {
+      const rowKey = `${sf.id}::${label}`;
+      if (dedup.has(rowKey)) continue;
+      dedup.add(rowKey);
+      rows.push({ fact_id: sf.id, label, domain });
+    }
+  }
+  return rows;
 }
 
 const VAGUE_PATTERNS = [
@@ -144,7 +215,13 @@ async function extractFacts(skeleton, evidence, distillEnv) {
     return true;
   });
 
-  return { ok: true, facts: filteredFacts, session_name };
+  const normalizedFacts = filteredFacts.map(f => ({
+    ...f,
+    concepts: normalizeConceptList(f.concepts),
+    domain: normalizeDomain(f.domain),
+  }));
+
+  return { ok: true, facts: normalizedFacts, session_name };
 }
 
 /**
@@ -235,16 +312,25 @@ async function run() {
           const fallbackScope = skeleton.session_id
             ? `sess_${String(skeleton.session_id).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24)}`
             : null;
-          const { saved, skipped, superseded } = memory.saveFacts(
+          const { saved, skipped, superseded, savedFacts } = memory.saveFacts(
             skeleton.session_id,
             skeleton.project || 'unknown',
             facts,
             { scope: skeleton.project_id || fallbackScope }
           );
+          let labelsSaved = 0;
+          if (typeof memory.saveFactLabels === 'function' && Array.isArray(savedFacts) && savedFacts.length > 0) {
+            const labelRows = buildFactLabelRows(facts, savedFacts);
+            if (labelRows.length > 0) {
+              const labelResult = memory.saveFactLabels(labelRows);
+              labelsSaved = Number(labelResult && labelResult.saved) || 0;
+            }
+          }
           totalSaved += saved;
           totalSkipped += skipped;
           const superMsg = superseded > 0 ? `, ${superseded} superseded` : '';
-          console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)}: ${saved} facts saved, ${skipped} skipped${superMsg}`);
+          const labelMsg = labelsSaved > 0 ? `, ${labelsSaved} labels` : '';
+          console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)}: ${saved} facts saved, ${skipped} skipped${superMsg}${labelMsg}`);
         } else {
           console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)} (${session_name}): no facts extracted`);
         }
@@ -276,4 +362,13 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run, extractFacts };
+module.exports = {
+  run,
+  extractFacts,
+  _private: {
+    normalizeConceptList,
+    normalizeDomain,
+    buildFactLabelRows,
+    factFingerprint,
+  },
+};

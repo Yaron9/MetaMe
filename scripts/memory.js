@@ -386,6 +386,42 @@ function saveFacts(sessionId, project, facts, { scope = null } = {}) {
 }
 
 /**
+ * Save concept labels for facts (side-table).
+ *
+ * @param {Array<{fact_id:string,label:string,domain?:string}>} rows
+ * @returns {{ saved: number, skipped: number }}
+ */
+function saveFactLabels(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return { saved: 0, skipped: 0 };
+  const db = getDb();
+  const upsert = db.prepare(`
+    INSERT INTO fact_labels (fact_id, label, domain)
+    VALUES (?, ?, ?)
+    ON CONFLICT(fact_id, label) DO UPDATE SET
+      domain = COALESCE(excluded.domain, fact_labels.domain)
+  `);
+
+  let saved = 0;
+  let skipped = 0;
+  for (const row of rows) {
+    const factId = String(row && row.fact_id ? row.fact_id : '').trim();
+    const label = String(row && row.label ? row.label : '').trim();
+    const domainRaw = row && row.domain != null ? String(row.domain).trim() : '';
+    const domain = domainRaw || null;
+    if (!factId || !label) { skipped++; continue; }
+    if (label.length > 60) { skipped++; continue; }
+    if (domain && domain.length > 60) { skipped++; continue; }
+    try {
+      upsert.run(factId, label, domain);
+      saved++;
+    } catch {
+      skipped++;
+    }
+  }
+  return { saved, skipped };
+}
+
+/**
  * Increment search_count and last_searched_at for a list of fact IDs.
  * Semantics: "this fact appeared in search results" — NOT "this fact was useful".
  * High search_count = frequently retrieved. Low/zero = candidate for pruning.
@@ -852,4 +888,19 @@ function forceClose() {
   if (_db) { _db.close(); _db = null; }
 }
 
-module.exports = { saveSession, saveFacts, searchFacts, searchFactsAsync, searchSessions, recentSessions, getSession, stats, acquire, release, close, forceClose, DB_PATH };
+module.exports = {
+  saveSession,
+  saveFacts,
+  saveFactLabels,
+  searchFacts,
+  searchFactsAsync,
+  searchSessions,
+  recentSessions,
+  getSession,
+  stats,
+  acquire,
+  release,
+  close,
+  forceClose,
+  DB_PATH,
+};

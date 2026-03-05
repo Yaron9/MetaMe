@@ -26,15 +26,17 @@ const REFLECT_LOG_FILE = path.join(METAME_DIR, 'memory_reflect_log.jsonl');
 const MEMORY_DIR = path.join(HOME, '.metame', 'memory');
 const DECISIONS_DIR = path.join(MEMORY_DIR, 'decisions');
 const LESSONS_DIR = path.join(MEMORY_DIR, 'lessons');
+const CAPSULES_DIR = path.join(MEMORY_DIR, 'capsules');
 
 // Hot zone thresholds
 const MIN_SEARCH_COUNT = 3;
 const WINDOW_DAYS = 7;
 const MAX_FACTS = 20;
 const LOCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+const EXCLUDED_RELATIONS = ['project_milestone', 'synthesized_insight', 'knowledge_capsule', 'bug_lesson'];
 
 // Ensure output directories exist at startup
-[MEMORY_DIR, DECISIONS_DIR, LESSONS_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
+[MEMORY_DIR, DECISIONS_DIR, LESSONS_DIR, CAPSULES_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
 
 /**
  * Load callHaiku + buildDistillEnv from deployed path, fallback to scripts dir.
@@ -107,18 +109,19 @@ function writeReflectLog(record) {
  * Returns array of plain objects.
  */
 function queryHotFacts(db) {
+  const relationPlaceholders = EXCLUDED_RELATIONS.map(() => '?').join(', ');
   const stmt = db.prepare(`
-    SELECT entity, relation, value, confidence, search_count, created_at
+    SELECT id, entity, relation, value, confidence, search_count, created_at
     FROM facts
     WHERE search_count >= ${MIN_SEARCH_COUNT}
       AND created_at >= datetime('now', '-${WINDOW_DAYS} days')
       AND superseded_by IS NULL
       AND (conflict_status IS NULL OR conflict_status = 'OK')
-      AND relation != 'project_milestone'
+      AND relation NOT IN (${relationPlaceholders})
     ORDER BY search_count DESC, created_at DESC
     LIMIT ${MAX_FACTS}
   `);
-  return stmt.all();
+  return stmt.all(...EXCLUDED_RELATIONS);
 }
 
 /**
@@ -138,6 +141,101 @@ facts_analyzed: ${factsCount}
 ---
 
 ${sections}
+`;
+  fs.writeFileSync(filePath, content, 'utf8');
+}
+
+function sanitizeSlug(input, fallback = 'capsule') {
+  const v = String(input || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fff_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  if (!v) return fallback;
+  return v.slice(0, 50);
+}
+
+function stripMd(text) {
+  return String(text || '').replace(/[#*_`>\[\]\(\)]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function buildSynthesizedFacts(today, decisions, lessons) {
+  const all = []
+    .concat(Array.isArray(decisions) ? decisions : [])
+    .concat(Array.isArray(lessons) ? lessons : []);
+  const out = [];
+  for (const item of all) {
+    const title = String(item && item.title ? item.title : '').trim();
+    const content = String(item && item.content ? item.content : '').trim();
+    if (!title || !content) continue;
+    const value = stripMd(`${title}: ${content}`).slice(0, 280);
+    if (value.length < 20) continue;
+    out.push({
+      entity: `nightly.reflect.${today}`,
+      relation: 'synthesized_insight',
+      value,
+      confidence: 'high',
+      tags: ['nightly', 'reflection'],
+    });
+  }
+  return out;
+}
+
+function entityPrefix(entity) {
+  const src = String(entity || '').trim();
+  if (!src) return '';
+  const parts = src.split('.').map(s => s.trim()).filter(Boolean);
+  if (parts.length === 0) return '';
+  if (parts.length === 1) return parts[0];
+  return `${parts[0]}.${parts[1]}`;
+}
+
+function collectCapsuleGroups(facts, minGroupSize = 3) {
+  const groups = new Map();
+  for (const fact of Array.isArray(facts) ? facts : []) {
+    const prefix = entityPrefix(fact && fact.entity);
+    if (!prefix) continue;
+    if (!groups.has(prefix)) groups.set(prefix, []);
+    groups.get(prefix).push(fact);
+  }
+  return [...groups.entries()]
+    .map(([prefix, items]) => ({ prefix, items }))
+    .filter(g => g.items.length >= minGroupSize)
+    .sort((a, b) => b.items.length - a.items.length);
+}
+
+function parseJsonFromLlm(raw) {
+  const text = String(raw || '');
+  const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+  if (!cleaned) return null;
+  try { return JSON.parse(cleaned); } catch { return null; }
+}
+
+function writeCapsuleFile(filePath, capsule, facts, today, prefix) {
+  const related = Array.isArray(capsule.related_concepts) ? capsule.related_concepts.slice(0, 8) : [];
+  const supporting = Array.isArray(capsule.supporting_facts) ? capsule.supporting_facts.slice(0, 8) : [];
+  const content = `---
+date: ${today}
+source: nightly-reflect
+type: knowledge-capsule
+entity_prefix: ${prefix}
+facts_analyzed: ${Array.isArray(facts) ? facts.length : 0}
+---
+
+# ${capsule.title}
+
+## 核心结论
+${capsule.core_conclusion}
+
+## 适用场景
+${capsule.applicable_scenarios}
+
+## 关联概念
+${related.length > 0 ? related.map(x => `- ${x}`).join('\n') : '- (none)'}
+
+## 支撑事实
+${supporting.length > 0 ? supporting.map(x => `- ${x}`).join('\n') : '- (none)'}
 `;
   fs.writeFileSync(filePath, content, 'utf8');
 }
@@ -238,12 +336,9 @@ Rules:
     }
 
     // Parse Haiku response
-    let parsed;
-    try {
-      const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      parsed = JSON.parse(cleaned);
-    } catch (e) {
-      console.log(`[NIGHTLY-REFLECT] Failed to parse Haiku output: ${e.message}`);
+    const parsed = parseJsonFromLlm(raw);
+    if (!parsed || typeof parsed !== 'object') {
+      console.log('[NIGHTLY-REFLECT] Failed to parse Haiku output.');
       writeReflectLog({ status: 'error', reason: 'parse_failed', facts_found: hotFacts.length });
       return;
     }
@@ -265,12 +360,92 @@ Rules:
       console.log(`[NIGHTLY-REFLECT] Lessons written: ${lessonFile}`);
     }
 
+    let synthesizedSaved = 0;
+    let capsulesWritten = 0;
+    let capsuleFactsSaved = 0;
+    let memory = null;
+    try {
+      try { memory = require('./memory'); } catch { /* optional */ }
+
+      // 3B: write distilled insights back into memory.db for closed-loop retrieval.
+      if (memory && typeof memory.saveFacts === 'function') {
+        const synthesizedFacts = buildSynthesizedFacts(today, decisions, lessons);
+        if (synthesizedFacts.length > 0) {
+          const writeRes = memory.saveFacts(`nightly-reflect-${today}`, '*', synthesizedFacts, { scope: '*' });
+          synthesizedSaved = Number(writeRes && writeRes.saved) || 0;
+        }
+      }
+
+      // 3C: knowledge capsule aggregation by entity prefix.
+      const capsuleGroups = collectCapsuleGroups(hotFacts, 3).slice(0, 3);
+      for (const group of capsuleGroups) {
+        const groupFacts = group.items.map(f => ({
+          entity: f.entity,
+          relation: f.relation,
+          value: f.value,
+          search_count: f.search_count,
+        }));
+        const capsulePrompt = `你是知识胶囊生成器。请将同一主题下的事实聚合成结构化胶囊。
+
+entity_prefix: ${group.prefix}
+facts(json): ${JSON.stringify(groupFacts, null, 2).slice(0, 5000)}
+
+输出 JSON：
+{
+  "title":"标题",
+  "core_conclusion":"一句核心结论",
+  "applicable_scenarios":"适用场景（1-2句）",
+  "related_concepts":["概念1","概念2"],
+  "supporting_facts":["支撑点1","支撑点2"]
+}
+
+规则：
+- 只基于输入事实，不虚构
+- 每个字段简洁具体
+- 仅输出 JSON`;
+
+        let capsule = null;
+        try {
+          const rawCapsule = await Promise.race([
+            callHaiku(capsulePrompt, distillEnv, 60000),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 65000)),
+          ]);
+          capsule = parseJsonFromLlm(rawCapsule);
+        } catch { /* non-fatal */ }
+        if (!capsule || !capsule.title || !capsule.core_conclusion || !capsule.applicable_scenarios) continue;
+
+        const capsuleSlug = sanitizeSlug(group.prefix.replace(/\./g, '-'), 'capsule');
+        const capsuleFile = path.join(CAPSULES_DIR, `${capsuleSlug}-${today}.md`);
+        writeCapsuleFile(capsuleFile, capsule, group.items, today, group.prefix);
+        capsulesWritten++;
+
+        if (memory && typeof memory.saveFacts === 'function') {
+          const capsuleValue = stripMd(`${capsule.title}: ${capsule.core_conclusion}`).slice(0, 280);
+          if (capsuleValue.length >= 20) {
+            const saveCapsule = memory.saveFacts(`capsule-${today}-${capsuleSlug}`, '*', [{
+              entity: `capsule.${group.prefix.replace(/\./g, '_')}`,
+              relation: 'knowledge_capsule',
+              value: capsuleValue,
+              confidence: 'high',
+              tags: ['capsule'],
+            }], { scope: '*' });
+            capsuleFactsSaved += Number(saveCapsule && saveCapsule.saved) || 0;
+          }
+        }
+      }
+    } finally {
+      try { if (memory && typeof memory.close === 'function') memory.close(); } catch { /* non-fatal */ }
+    }
+
     // Write audit log
     writeReflectLog({
       status: 'success',
       facts_analyzed: hotFacts.length,
       decisions_written: decisions.length,
       lessons_written: lessons.length,
+      synthesized_insights_saved: synthesizedSaved,
+      capsules_written: capsulesWritten,
+      capsule_facts_saved: capsuleFactsSaved,
       decision_file: decisions.length > 0 ? decisionFile : null,
       lesson_file: lessons.length > 0 ? lessonFile : null,
     });
@@ -296,4 +471,14 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run };
+module.exports = {
+  run,
+  _private: {
+    queryHotFacts,
+    buildSynthesizedFacts,
+    collectCapsuleGroups,
+    entityPrefix,
+    parseJsonFromLlm,
+    EXCLUDED_RELATIONS,
+  },
+};
