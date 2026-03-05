@@ -7,3 +7,6 @@ implementation_plan.md
 walkthrough.md
 test/
 src/test/
+scripts/*.test.js
+scripts/test_daemon.js
+scripts/hooks/test-*.js

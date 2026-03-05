@@ -38,20 +38,16 @@ metame
 
 ---
 
-> ### 🚀 v1.4.34 — Mentor Mode Step 4 + Distiller/Memory Closed Loop
+> ### 🚀 v1.5.0 — Dynamic Engine Default + Distill Coupling
 >
-> - **Multi-engine runtime adapter (MVP)**: daemon now supports engine routing by project (`project.engine`) with shared execution flow for Claude/Codex.
-> - **Codex session continuity**: supports `exec`/`resume`, thread id backfill, one-shot resume fallback (max once per 10 minutes per chat), and auth/rate-limit error mapping.
-> - **Agent engine inference**: natural-language agent creation can infer `codex`; default `claude` keeps zero-regression (no `engine` field persisted).
-> - **6-dimension soul schema**: cognitive profile upgraded from key-value pairs to a structured 67-field model covering Values, Drive, Cognition Style, Stress & Shadow, Relational, and Identity Narrative — with tier-based lock protection.
-> - **Mentor mode hooks**: pre-flight emotion breaker, context-time mentor prompt, and post-flight reflection debt registration are wired into daemon flow.
-> - **Distiller Step 4**: competence signals now merge into `user_competence_map` (upgrade-by-default, downgrade only with explicit evidence).
-> - **Memory extraction labels**: `memory-extract` writes concept labels into `fact_labels` (linked by fact id from `saveFacts().savedFacts`).
-> - **Nightly closed loop**: nightly reflection writes back `synthesized_insight` facts and generates `knowledge_capsule` documents + facts.
-> - **Postmortem artifacts**: significant sessions now produce `postmortem` markdown and `bug_lesson` facts.
-> - **Memory index**: auto-generated global index of all memory documents for instant retrieval.
-> - **Auto-provisioning**: first run automatically deploys default CLAUDE.md, docs, and `dispatch_to` — zero manual setup.
-> - **Token budget tracking**: daily token usage monitoring with per-category breakdown and 80% warning threshold.
+> - **Dynamic default engine**: auto-detects installed CLI (claude/codex) at startup; pure-codex users work out of the box with zero config.
+> - **`/engine` command**: switch global default engine from mobile (`/engine codex`), with three-layer priority: `project.engine > /engine setting > auto-detect`.
+> - **Engine–distill coupling**: switching engine auto-pairs the distill model (claude→haiku, codex→gpt-5.1-codex-mini) and distill binary.
+> - **Engine-aware distill**: `callDistillModel` now routes through the correct CLI binary and parses codex JSON stream output.
+> - **`/doctor` engine checks**: health check now validates CLI availability against the configured default engine.
+> - **Multi-engine runtime adapter**: daemon supports engine routing by project (`project.engine`) with shared execution flow for Claude/Codex.
+> - **Codex session continuity**: supports `exec`/`resume`, thread id backfill, one-shot resume fallback, and auth/rate-limit error mapping.
+> - **Mentor mode hooks**: pre-flight emotion breaker, context-time mentor prompt, and post-flight reflection debt registration.
 > - **Multi-user ACL**: role-based permissions (admin / member / stranger) with binding protection.
 > - **Windows native support**: cross-platform path handling, Named Pipes IPC, GBK-safe encoding.
 >

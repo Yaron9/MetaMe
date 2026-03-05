@@ -33,22 +33,31 @@ projects:
 
 heartbeat:
   tasks:
-    # 认知蒸馏：有偏好信号才触发，4小时冷却，仅在用户闲置时执行
+    # 认知蒸馏：有偏好信号才触发，2小时冷却，仅在用户闲置时执行
     - name: cognitive-distill
       type: script
       command: node ~/.metame/distill.js
-      interval: 4h
+      interval: 2h
       precondition: "test -s ~/.metame/raw_signals.jsonl"
       require_idle: true
       notify: false
       enabled: true
 
-    # 记忆提取：扫描未分析 session，提取长期事实和会话标签，4小时冷却（与 cognitive-distill 对齐）
+    # 记忆提取：扫描未分析 session，提取长期事实和会话标签，4小时冷却
     - name: memory-extract
       type: script
       command: node ~/.metame/memory-extract.js
       interval: 4h
-      timeout: 600
+      timeout: 1800
+      require_idle: true
+      notify: false
+      enabled: true
+
+    # 记忆垃圾回收：每天 02:00 清理过期/重复记忆
+    - name: memory-gc
+      type: script
+      command: node ~/.metame/memory-gc.js
+      at: "02:00"
       require_idle: true
       notify: false
       enabled: true
@@ -59,6 +68,15 @@ heartbeat:
       command: node ~/.metame/skill-evolution.js
       interval: 6h
       precondition: "test -s ~/.metame/skill_signals.jsonl"
+      require_idle: true
+      notify: false
+      enabled: true
+
+    # 自我反思：每天 23:00 扫描纠错信号，提炼成长模式
+    - name: self-reflect
+      type: script
+      command: node ~/.metame/self-reflect.js
+      at: "23:00"
       require_idle: true
       notify: false
       enabled: true

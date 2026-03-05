@@ -1,6 +1,6 @@
 {
     "name": "metame-cli",
-    "version": "1.4.34",
+    "version": "1.5.0",
     "description": "The Cognitive Profile Layer for Claude Code. Knows how you think, not just what you said.",
     "main": "index.js",
     "bin": {
@@ -8,7 +8,10 @@
     },
     "files": [
         "index.js",
-        "scripts/"
+        "scripts/",
+        "!scripts/*.test.js",
+        "!scripts/test_daemon.js",
+        "!scripts/hooks/test-*.js"
     ],
     "scripts": {
         "test": "node --test scripts/*.test.js",

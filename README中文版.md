@@ -38,16 +38,16 @@ metame
 
 ---
 
-> ### 🚀 v1.4.34 — Mentor Mode Step 4 + 蒸馏/记忆闭环
+> ### 🚀 v1.5.0 — 动态默认引擎 + 蒸馏联动
 >
-> - **多引擎 runtime 适配（MVP）**：daemon 已支持按 `project.engine` 进行 Claude/Codex 路由，执行链路统一。
-> - **Codex 会话连续性**：支持 `exec`/`resume`、`thread_id` 回写、resume 失败一次性自动重试（每 chat 10 分钟最多一次）、认证/限流错误映射。
-> - **Agent 引擎推断**：自然语言创建 Agent 时可识别 `codex`；默认 `claude` 保持零回归（不写 `engine` 字段）。
-> - **Mentor Mode Hook 接入**：预检情绪熔断、上下文摩擦注入、后置反思债务三段 Hook 已接入 daemon 执行链。
-> - **Distiller Step 4**：蒸馏结果支持 `competence_signals` 合并到 `user_competence_map`（默认只升不降，降级需显式证据）。
-> - **记忆标签闭环**：`memory-extract` 使用 `saveFacts().savedFacts` 的 id 回写 `fact_labels`。
-> - **nightly 回流闭环**：夜间反思回写 `synthesized_insight`，并生成知识胶囊 `knowledge_capsule`（文档 + facts）。
-> - **自动 postmortem**：显著会话自动生成复盘文档，并回写 `bug_lesson`。
+> - **动态默认引擎**：启动时自动检测已安装的 CLI（claude/codex），纯 codex 用户零配置即可运行。
+> - **`/engine` 命令**：手机端一键切换全局默认引擎（`/engine codex`），三层优先级：`project.engine > /engine 设置 > 自动检测`。
+> - **引擎–蒸馏联动**：切引擎自动切配套蒸馏模型（claude→haiku, codex→gpt-5.1-codex-mini）和执行二进制。
+> - **引擎感知蒸馏**：`callDistillModel` 根据当前引擎选择正确的 CLI 和参数，解析 codex JSON stream 输出。
+> - **`/doctor` 引擎检查**：健康检查增加 CLI 可用性与当前引擎的一致性校验。
+> - **多引擎 runtime 适配**：daemon 按 `project.engine` 进行 Claude/Codex 路由，执行链路统一。
+> - **Codex 会话连续性**：支持 `exec`/`resume`、thread id 回写、resume 失败自动重试、认证/限流错误映射。
+> - **Mentor Mode Hook**：预检情绪熔断、上下文摩擦注入、后置反思债务。
 > - **多用户 ACL / Team Task / 跨平台支持**：保持现有能力并与新链路兼容。
 >
 > 零配置，开箱即用。
