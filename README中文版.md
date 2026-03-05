@@ -40,6 +40,9 @@ metame
 
 > ### 🚀 v1.4.34 — Mentor Mode Step 4 + 蒸馏/记忆闭环
 >
+> - **多引擎 runtime 适配（MVP）**：daemon 已支持按 `project.engine` 进行 Claude/Codex 路由，执行链路统一。
+> - **Codex 会话连续性**：支持 `exec`/`resume`、`thread_id` 回写、resume 失败一次性自动重试（每 chat 10 分钟最多一次）、认证/限流错误映射。
+> - **Agent 引擎推断**：自然语言创建 Agent 时可识别 `codex`；默认 `claude` 保持零回归（不写 `engine` 字段）。
 > - **Mentor Mode Hook 接入**：预检情绪熔断、上下文摩擦注入、后置反思债务三段 Hook 已接入 daemon 执行链。
 > - **Distiller Step 4**：蒸馏结果支持 `competence_signals` 合并到 `user_competence_map`（默认只升不降，降级需显式证据）。
 > - **记忆标签闭环**：`memory-extract` 使用 `saveFacts().savedFacts` 的 id 回写 `fact_labels`。
@@ -66,9 +69,9 @@ $ metame
 连接建立。我们今天要做什么？
 ```
 
-### 2. 手机上完整的 Claude Code
+### 2. 手机上完整的 Claude/Codex 会话
 
-你的 Mac 跑一个 daemon，手机通过 Telegram 或飞书发消息，背后是同一个 Claude Code 引擎——同样的工具、同样的文件、同一个会话。
+你的 Mac 跑一个 daemon，手机通过 Telegram 或飞书发消息。底层引擎按 `project.engine`（`claude`/`codex`）选择——同样的工具、同样的文件、同一个会话连续性。
 
 ```
 你（手机）：修一下 api/login.ts 的鉴权 bug
@@ -407,6 +410,7 @@ feishu:
 | 命令 | 作用 |
 |------|------|
 | `/last` | 恢复最近会话 |
+| `/continue` | 接续电脑端最近工作会话（等价 `/cd last`） |
 | `/new` | 新建会话（项目选择器） |
 | `/resume` | 从会话列表选择 |
 | `/stop` | 中断当前任务（ESC） |
@@ -458,6 +462,7 @@ feishu:
 
 - **画像**（`~/.claude_profile.yaml`）：你的认知指纹，通过 `CLAUDE.md` 注入每个 Claude 会话。
 - **Daemon**（`scripts/daemon.js`）：后台进程，处理消息、心跳任务、Unix socket 分发，以及 idle/sleep 状态切换。
+- **Runtime Adapter**（`scripts/daemon-engine-runtime.js`）：统一 Claude/Codex 的参数构建、环境变量与流式事件归一化。
 - **蒸馏**（`scripts/distill.js`）：心跳任务（默认 4h，信号守卫），更新画像并合并能力信号；显著会话可生成 postmortem + `bug_lesson`。
 - **记忆提取**（`scripts/memory-extract.js`）：心跳任务（默认 4h，闲置守卫），提取长期事实并写入 `fact_labels`。
 - **夜间反思**（`scripts/memory-nightly-reflect.js`）：每日 01:00，蒸馏热事实并回写 `synthesized_insight`，生成知识胶囊。
@@ -467,6 +472,8 @@ feishu:
 ## Scripts/Docs 指针地图
 
 脚本入口与 Step 1-4 升级落点请看：`scripts/docs/pointer-map.md`。
+
+日常运维与故障排查（引擎路由、codex 认证/限流、`/compact` 边界）请看：`scripts/docs/maintenance-manual.md`。
 
 ## 安全
 

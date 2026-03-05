@@ -6,10 +6,34 @@
 
 - 主入口：`index.js`
 - Daemon 主循环：`scripts/daemon.js`
-- Claude 执行引擎：`scripts/daemon-claude-engine.js`
+- 多引擎 runtime 适配层：`scripts/daemon-engine-runtime.js`
+- 会话执行引擎（Claude/Codex 共用入口）：`scripts/daemon-claude-engine.js`
 - 管理命令：`scripts/daemon-admin-commands.js`
 - 命令路由：`scripts/daemon-command-router.js`
+- 执行命令（`/stop`、`/compact` 等）：`scripts/daemon-exec-commands.js`
+- 会话存储：`scripts/daemon-session-store.js`
 - 默认配置：`scripts/daemon-default.yaml`
+- 维护手册：`scripts/docs/maintenance-manual.md`
+
+## 多引擎（Claude/Codex）定位
+
+- Runtime 工厂与事件归一化：
+  - `scripts/daemon-engine-runtime.js`
+  - 关键点：`normalizeEngineName()`、`buildClaudeArgs()`、`buildCodexArgs()`、`parseCodexStreamEvent()`
+
+- 会话与引擎选择：
+  - `scripts/daemon-claude-engine.js`
+  - 关键点：`askClaude()` 按 `project.engine`/session 选择 runtime；`patchSessionSerialized()` 串行回写 session
+  - Codex 规则：`exec`/`resume`、10 分钟窗口内一次自动重试、`thread_id` 迁移回写
+
+- 路由与 Agent 创建：
+  - `scripts/daemon-command-router.js`
+  - `scripts/daemon-agent-tools.js`
+  - 关键点：自然语言提取 `codex` 关键词；默认 `claude` 不写 `engine` 字段，仅 `codex` 持久化 `engine: codex`
+
+- 会话命令与兼容边界：
+  - `scripts/daemon-exec-commands.js`
+  - 关键点：`/stop` 引擎中性；`/compact` 在 codex 会话返回“暂不支持”
 
 ## Mentor Mode（Step 1-4）定位
 
@@ -40,6 +64,7 @@
 - 画像：`~/.claude_profile.yaml`
 - 记忆数据库：`~/.metame/memory.db`
 - 会话标签：`~/.metame/session_tags.json`
+- 进程 PID 记录：`~/.metame/active_agent_pids.json`
 - 夜间反思文档：`~/.metame/memory/decisions/`、`~/.metame/memory/lessons/`
 - 知识胶囊：`~/.metame/memory/capsules/`
 - 复盘文档：`~/.metame/memory/postmortems/`
@@ -47,8 +72,8 @@
 ## 诊断顺序（推荐）
 
 1. 先看配置：`~/.metame/daemon.yaml` 与 `scripts/daemon-default.yaml`
-2. 再看命令入口：`scripts/daemon-admin-commands.js`、`scripts/daemon-command-router.js`
-3. 再看执行链路：`scripts/daemon-claude-engine.js` → `scripts/mentor-engine.js`
+2. 再看命令入口：`scripts/daemon-admin-commands.js`、`scripts/daemon-command-router.js`、`scripts/daemon-exec-commands.js`
+3. 再看执行链路：`scripts/daemon-engine-runtime.js` → `scripts/daemon-claude-engine.js` → `scripts/mentor-engine.js`
 4. 最后看离线任务：`scripts/distill.js`、`scripts/memory-extract.js`、`scripts/memory-nightly-reflect.js`
 
 ## 同步提示
