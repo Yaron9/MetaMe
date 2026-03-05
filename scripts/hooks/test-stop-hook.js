@@ -162,7 +162,8 @@ console.log('=== Test: Stop Hook Invocation ===\n');
 
 const start = Date.now();
 try {
-  execSync(`echo '${hookInput.replace(/'/g, "'\\''")}' | node ${HOOK_SCRIPT}`, {
+  execSync(`node ${HOOK_SCRIPT}`, {
+    input: hookInput,
     timeout: 5000,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -212,7 +213,8 @@ console.log('=== Test: Idempotency (re-run same transcript) ===\n');
 const signalLinesBefore2 = countLines(SKILL_SIGNALS);
 
 try {
-  execSync(`echo '${hookInput.replace(/'/g, "'\\''")}' | node ${HOOK_SCRIPT}`, {
+  execSync(`node ${HOOK_SCRIPT}`, {
+    input: hookInput,
     timeout: 5000,
     stdio: ['pipe', 'pipe', 'pipe'],
   });

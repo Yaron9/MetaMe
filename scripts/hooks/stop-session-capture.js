@@ -65,8 +65,11 @@ process.stdin.on('end', () => {
     const readSize = Math.min(stat.size, TAIL_BYTES);
     const buf = Buffer.alloc(readSize);
     const fd = fs.openSync(transcriptPath, 'r');
-    fs.readSync(fd, buf, 0, readSize, Math.max(0, stat.size - readSize));
-    fs.closeSync(fd);
+    try {
+      fs.readSync(fd, buf, 0, readSize, Math.max(0, stat.size - readSize));
+    } finally {
+      fs.closeSync(fd);
+    }
 
     const tail = buf.toString('utf8');
     // The first line may be truncated (we read from mid-file), skip it.
@@ -75,9 +78,8 @@ process.stdin.on('end', () => {
       lines.shift();
     }
 
-    // Load last watermark to avoid re-capturing errors from previous turns.
-    const watermark = loadWatermark(data.session_id);
-
+    // Single-pass: build tool_use_id → tool_name map + collect error signals.
+    const toolNameMap = new Map();
     const newSignals = [];
 
     for (const line of lines) {
@@ -88,6 +90,11 @@ process.stdin.on('end', () => {
         if (!msg || !Array.isArray(msg.content)) continue;
 
         for (const block of msg.content) {
+          // Index tool_use entries for name lookup.
+          if (block.type === 'tool_use' && block.id) {
+            toolNameMap.set(block.id, block.name || 'unknown');
+          }
+          // Collect tool failures.
           if (
             block.type === 'tool_result' &&
             block.is_error === true &&
@@ -96,26 +103,20 @@ process.stdin.on('end', () => {
           ) {
             capturedIds.add(block.tool_use_id);
 
-            // Find the corresponding tool_use to get the tool name.
-            // We do a best-effort lookup within the same tail window.
-            const toolName = findToolName(lines, block.tool_use_id);
-
             const errorContent = typeof block.content === 'string'
               ? block.content
               : Array.isArray(block.content)
                 ? block.content.map(c => (typeof c === 'string' ? c : c.text || '')).join('\n')
                 : JSON.stringify(block.content);
 
-            const signal = {
+            newSignals.push({
               ts: now,
               type: 'tool_failure',
-              tool: toolName,
               tool_use_id: block.tool_use_id,
               error: errorContent.slice(0, 500),
               session_id: data.session_id || null,
               cwd: data.cwd || null,
-            };
-            newSignals.push(signal);
+            });
           }
         }
       } catch {
@@ -123,44 +124,58 @@ process.stdin.on('end', () => {
       }
     }
 
-    // Deduplicate against watermark: only write signals with tool_use_ids not seen before.
-    const fresh = watermark
-      ? newSignals.filter(s => !watermark.has(s.tool_use_id))
-      : newSignals;
-
-    for (const signal of fresh) {
-      appendWithCap(SKILL_SIGNALS, signal, MAX_SKILL_SIGNALS_LINES);
+    // Resolve tool names from the map built in the same pass.
+    for (const signal of newSignals) {
+      signal.tool = toolNameMap.get(signal.tool_use_id) || 'unknown';
     }
 
-    // Save watermark: all tool_use_ids we've now captured for this session.
-    if (fresh.length > 0) {
-      saveWatermark(data.session_id, capturedIds);
+    // Only load watermark and write signals if there are failures to process.
+    if (newSignals.length > 0) {
+      const watermark = loadWatermark(data.session_id);
+      const fresh = watermark
+        ? newSignals.filter(s => !watermark.has(s.tool_use_id))
+        : newSignals;
+
+      if (fresh.length > 0) {
+        // Batch append: single write for all signals.
+        const batch = fresh.map(s => JSON.stringify(s)).join('\n') + '\n';
+        fs.appendFileSync(SKILL_SIGNALS, batch);
+        capFileIfNeeded(SKILL_SIGNALS, MAX_SKILL_SIGNALS_LINES);
+        saveWatermark(data.session_id, capturedIds);
+      }
     }
 
-  } catch {
-    // Never block the user's workflow.
+    // Probabilistic cleanup of stale watermark files (1 in 50 invocations).
+    if (Math.random() < 0.02) {
+      cleanOldWatermarks(7 * 24 * 60 * 60 * 1000);
+    }
+
+  } catch (e) {
+    // Never block the user's workflow. Log to stderr for diagnostics.
+    try { process.stderr.write(`[metame-stop-hook] ${e.message}\n`); } catch {}
   }
   process.exit(0);
 });
 
 /**
- * Append a JSON entry to a file, capping total lines.
- * Uses simple append for speed; cap check is amortized (every 100 writes).
+ * Append a JSON entry to a file, then check cap.
  */
 function appendWithCap(filePath, entry, maxLines) {
-  const line = JSON.stringify(entry) + '\n';
-  fs.appendFileSync(filePath, line);
+  fs.appendFileSync(filePath, JSON.stringify(entry) + '\n');
+  capFileIfNeeded(filePath, maxLines);
+}
 
-  // Amortized cap: only check line count occasionally.
+/**
+ * Amortized cap check: only trim when file size suggests overflow.
+ */
+function capFileIfNeeded(filePath, maxLines) {
   try {
     const stat = fs.statSync(filePath);
-    // Rough heuristic: average line ~200 bytes. Only trim if file is suspiciously large.
     if (stat.size > maxLines * 250) {
       const content = fs.readFileSync(filePath, 'utf8');
       const allLines = content.split('\n').filter(Boolean);
       if (allLines.length > maxLines) {
-        const trimmed = allLines.slice(-maxLines);
-        fs.writeFileSync(filePath, trimmed.join('\n') + '\n');
+        fs.writeFileSync(filePath, allLines.slice(-maxLines).join('\n') + '\n');
       }
     }
   } catch {
@@ -169,25 +184,21 @@ function appendWithCap(filePath, entry, maxLines) {
 }
 
 /**
- * Find the tool name for a given tool_use_id by scanning the tail lines.
+ * Delete watermark files older than maxAge (ms).
  */
-function findToolName(lines, toolUseId) {
-  for (const line of lines) {
-    if (!line.includes(toolUseId)) continue;
-    try {
-      const entry = JSON.parse(line);
-      const msg = entry.message;
-      if (!msg || !Array.isArray(msg.content)) continue;
-      for (const block of msg.content) {
-        if (block.type === 'tool_use' && block.id === toolUseId) {
-          return block.name || 'unknown';
-        }
-      }
-    } catch {
-      // Skip.
+function cleanOldWatermarks(maxAge) {
+  const wmDir = path.join(METAME_DIR, '.hook_watermarks');
+  try {
+    const now = Date.now();
+    for (const file of fs.readdirSync(wmDir)) {
+      if (!file.endsWith('.json')) continue;
+      const filePath = path.join(wmDir, file);
+      try {
+        const age = now - fs.statSync(filePath).mtimeMs;
+        if (age > maxAge) fs.unlinkSync(filePath);
+      } catch { /* skip individual file errors */ }
     }
-  }
-  return 'unknown';
+  } catch { /* wmDir doesn't exist yet — normal */ }
 }
 
 /**
