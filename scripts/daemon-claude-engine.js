@@ -883,17 +883,34 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
     if (!session) {
       if (boundCwd) {
-        // Agent-bound chats: use __continue__ so Claude's own --continue flag resumes the latest
-        // session in boundCwd natively. This avoids a full scanAllSessions() directory scan.
-        // After the first turn, onSession() replaces __continue__ with the resolved real session ID.
-        await patchSessionSerialized(chatId, () => ({
-          id: '__continue__',
-          cwd: boundCwd,
-          started: true,
-          engine: boundEngineName,
-        }));
-        session = getSession(chatId) || { id: '__continue__', cwd: boundCwd, started: true, engine: boundEngineName };
-        log('INFO', `Auto-attach ${chatId} → __continue__ in ${path.basename(boundCwd)}`);
+        if (normalizeEngineName(boundEngineName) === 'claude') {
+          // Claude supports --continue natively: skip the expensive scanAllSessions() scan.
+          // After the first turn, onSession() replaces __continue__ with the resolved real session ID.
+          await patchSessionSerialized(chatId, () => ({
+            id: '__continue__',
+            cwd: boundCwd,
+            started: true,
+            engine: boundEngineName,
+          }));
+          session = getSession(chatId) || { id: '__continue__', cwd: boundCwd, started: true, engine: boundEngineName };
+          log('INFO', `Auto-attach ${chatId} → __continue__ in ${path.basename(boundCwd)}`);
+        } else {
+          // Codex (and other engines) have no --continue equivalent; must resolve the real session ID.
+          const recentInBound = listRecentSessions(1, boundCwd);
+          if (recentInBound.length > 0 && recentInBound[0].sessionId) {
+            const target = recentInBound[0];
+            await patchSessionSerialized(chatId, () => ({
+              id: target.sessionId,
+              cwd: boundCwd,
+              started: true,
+              engine: boundEngineName,
+            }));
+            session = getSession(chatId) || { id: target.sessionId, cwd: boundCwd, started: true, engine: boundEngineName };
+            log('INFO', `Auto-attached ${chatId} to bound-session: ${target.sessionId.slice(0, 8)} (${path.basename(boundCwd)})`);
+          } else {
+            session = createSession(chatId, boundCwd, boundProject && boundProject.name ? boundProject.name : '', boundEngineName);
+          }
+        }
       } else {
         // Non-bound chats: scan for most recent session (only happens once post-restart).
         const recent = listRecentSessions(1);
