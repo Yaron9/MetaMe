@@ -16,6 +16,15 @@
 在手机端（飞书/Telegram），直接说即可，daemon 会自动处理：
 > 创建一个 Agent，目录是 ~/projects/my-bot
 
+引擎选择（手机端自然语言）：
+- 默认不写引擎时，使用 Claude（配置里不落 `engine` 字段）
+- 句子里带 `codex` 关键词时，自动写入 `engine: codex`
+
+示例：
+> 创建一个 codex agent，目录是 ~/projects/reviewer
+
+> 用 codex 建一个代码审查 agent，目录 ~/projects/pr-review
+
 在桌面 Claude Code 终端，需要手动操作：
 1. 创建项目目录和 CLAUDE.md（角色定义）
 2. 编辑 `~/.metame/daemon.yaml`，在 `projects` 下新增：

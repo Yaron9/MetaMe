@@ -178,6 +178,13 @@ function createCommandRouter(deps) {
     return '';
   }
 
+  function inferAgentEngineFromText(input) {
+    const text = String(input || '').trim().toLowerCase();
+    if (!text) return null;
+    if (/\bcodex\b/.test(text) || /柯德|科德|codex\s*agent/.test(text)) return 'codex';
+    return null;
+  }
+
   function isLikelyDirectAgentAction(input) {
     const text = String(input || '').trim();
     return /^(?:请|帮我|麻烦|给我|给这个群|给当前群|在这个群|把这个群|把当前群|将这个群|这个群|当前群|本群|群里|我想|我要|我需要|创建|新建|新增|搞一个|加一个|create|bind|绑定|列出|查看|显示|有哪些|解绑|取消绑定|断开绑定|修改|调整)/i.test(text);
@@ -435,14 +442,19 @@ function createCommandRouter(deps) {
       }
       const agentName = deriveAgentName(input, workspaceDir);
       const roleDelta = deriveCreateRoleDelta(input);
+      const inferredEngine = inferAgentEngineFromText(input);
       // Always skip binding creating chat — new group activates via /activate
-      const res = await agentTools.createNewWorkspaceAgent(agentName, workspaceDir, roleDelta, chatId, { skipChatBinding: true });
+      const res = await agentTools.createNewWorkspaceAgent(agentName, workspaceDir, roleDelta, chatId, {
+        skipChatBinding: true,
+        engine: inferredEngine,
+      });
       if (!res.ok) {
         await bot.sendMessage(chatId, `❌ 创建 Agent 失败: ${res.error}`);
         return true;
       }
       const data = res.data || {};
       const projName = projectNameFromResult(data, agentName);
+      const engineTip = data.project && data.project.engine ? `\n引擎: ${data.project.engine}` : '';
       if (data.projectKey && pendingActivations) {
         pendingActivations.set(data.projectKey, {
           agentKey: data.projectKey, agentName: projName, cwd: data.cwd,
@@ -450,7 +462,7 @@ function createCommandRouter(deps) {
         });
       }
       await bot.sendMessage(chatId,
-        `✅ Agent「${projName}」已创建\n目录: ${data.cwd || '（未知）'}\n\n` +
+        `✅ Agent「${projName}」已创建\n目录: ${data.cwd || '（未知）'}${engineTip}\n\n` +
         `**下一步**: 在新群里发送 \`/activate\` 完成绑定（30分钟内有效）`
       );
       return true;
@@ -458,14 +470,15 @@ function createCommandRouter(deps) {
 
     if (wantsBind) {
       const agentName = deriveAgentName(input, workspaceDir);
-      const res = await agentTools.bindAgentToChat(chatId, agentName, workspaceDir || null);
+      const inferredEngine = inferAgentEngineFromText(input);
+      const res = await agentTools.bindAgentToChat(chatId, agentName, workspaceDir || null, { engine: inferredEngine });
       if (!res.ok) {
         await bot.sendMessage(chatId, `❌ 绑定失败: ${res.error}`);
         return true;
       }
       const data = res.data || {};
       const projName = projectNameFromResult(data, agentName);
-      if (data.cwd) attachOrCreateSession(chatId, normalizeCwd(data.cwd), projName);
+      if (data.cwd) attachOrCreateSession(chatId, normalizeCwd(data.cwd), projName, (data.project && data.project.engine) || 'claude');
       await bot.sendMessage(chatId, `✅ 已绑定 Agent\n名称: ${projName}\n目录: ${data.cwd || '（未知）'}`);
       return true;
     }
@@ -504,8 +517,10 @@ function createCommandRouter(deps) {
       const proj = config.projects[mappedKey];
       const projCwd = normalizeCwd(proj.cwd);
       const cur = loadState().sessions?.[chatId];
-      if (!cur || cur.cwd !== projCwd) {
-        attachOrCreateSession(chatId, projCwd, proj.name || mappedKey);
+      const curEngine = String((cur && cur.engine) || 'claude').toLowerCase();
+      const projEngine = String((proj && proj.engine) || 'claude').toLowerCase();
+      if (!cur || cur.cwd !== projCwd || curEngine !== projEngine) {
+        attachOrCreateSession(chatId, projCwd, proj.name || mappedKey, proj.engine || 'claude');
       }
     }
 
@@ -604,7 +619,7 @@ function createCommandRouter(deps) {
       if (quickAgent && !quickAgent.rest) {
         const { key, proj } = quickAgent;
         const projCwd = normalizeCwd(proj.cwd);
-        attachOrCreateSession(chatId, projCwd, proj.name || key);
+        attachOrCreateSession(chatId, projCwd, proj.name || key, proj.engine || 'claude');
         log('INFO', `Agent switch via nickname: ${key} (${projCwd})`);
         await bot.sendMessage(chatId, `${proj.icon || '🤖'} ${proj.name || key} 在线`);
         return;

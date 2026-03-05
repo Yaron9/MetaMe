@@ -61,7 +61,7 @@ function createSessionCommandHandler(deps) {
         const boundProj = boundKey && newCfg.projects && newCfg.projects[boundKey];
         if (boundProj && boundProj.cwd) {
           const boundCwd = normalizeCwd(boundProj.cwd);
-          const session = createSession(chatId, boundCwd, '');
+          const session = createSession(chatId, boundCwd, '', String(boundProj.engine || '').toLowerCase() === 'codex' ? 'codex' : 'claude');
           await bot.sendMessage(chatId, `✅ 新会话已创建\nWorkdir: ${session.cwd}`);
           return true;
         }
@@ -87,7 +87,13 @@ function createSessionCommandHandler(deps) {
           return true;
         }
       }
-      const session = createSession(chatId, dirPath, sessionName || '');
+      const cfgForEngine = loadConfig();
+      const mapForEngine = { ...(cfgForEngine.telegram ? cfgForEngine.telegram.chat_agent_map : {}), ...(cfgForEngine.feishu ? cfgForEngine.feishu.chat_agent_map : {}) };
+      const mappedKeyForEngine = mapForEngine[String(chatId)];
+      const mappedProjForEngine = mappedKeyForEngine && cfgForEngine.projects ? cfgForEngine.projects[mappedKeyForEngine] : null;
+      const currentEngine = (getSession(chatId) && getSession(chatId).engine) || 'claude';
+      const sessionEngine = String((mappedProjForEngine && mappedProjForEngine.engine) || currentEngine || '').toLowerCase() === 'codex' ? 'codex' : 'claude';
+      const session = createSession(chatId, dirPath, sessionName || '', sessionEngine);
       const label = sessionName ? `[${sessionName}]` : '';
       await bot.sendMessage(chatId, `New session ${label}\nWorkdir: ${session.cwd}`);
       return true;
@@ -142,11 +148,13 @@ function createSessionCommandHandler(deps) {
       if (!s) {
         // Last resort: use __continue__ to resume whatever Claude thinks is last
         const state2 = loadState();
+        const currentEngine = (state2.sessions[chatId] && state2.sessions[chatId].engine) || 'claude';
         state2.sessions[chatId] = {
           id: '__continue__',
           cwd: curCwd || HOME,
           created: new Date().toISOString(),
           started: true,
+          engine: currentEngine,
         };
         saveState(state2);
         await bot.sendMessage(chatId, `⚡ Resuming last session in ${path.basename(curCwd || HOME)}`);
@@ -154,10 +162,12 @@ function createSessionCommandHandler(deps) {
       }
 
       const state2 = loadState();
+      const currentEngine = (state2.sessions[chatId] && state2.sessions[chatId].engine) || 'claude';
       state2.sessions[chatId] = {
         id: s.sessionId,
         cwd: s.projectPath || HOME,
         started: true,
+        engine: currentEngine,
       };
       saveState(state2);
       // Display: name/summary + id on separate lines
@@ -348,10 +358,12 @@ function createSessionCommandHandler(deps) {
           const target = candidates[0];
           // Switch to that session (like /resume) AND its directory
           const state2 = loadState();
+          const currentEngine = (state2.sessions[chatId] && state2.sessions[chatId].engine) || 'claude';
           state2.sessions[chatId] = {
             id: target.sessionId,
             cwd: target.projectPath,
             started: true,
+            engine: currentEngine,
           };
           saveState(state2);
           const name = target.customTitle || target.summary || '';
@@ -382,15 +394,18 @@ function createSessionCommandHandler(deps) {
           id: target.sessionId,
           cwd: newCwd,
           started: true,
+          engine: (state2.sessions[chatId] && state2.sessions[chatId].engine) || 'claude',
         };
         saveState(state2);
         const label = target.customTitle || target.summary?.slice(0, 30) || target.sessionId.slice(0, 8);
         await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)}\n🔄 Attached: ${label}`);
       } else if (!state2.sessions[chatId]) {
-        createSession(chatId, newCwd);
+        const currentEngine = (getSession(chatId) && getSession(chatId).engine) || 'claude';
+        createSession(chatId, newCwd, '', currentEngine);
         await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)} (new session)`);
       } else {
         state2.sessions[chatId].cwd = newCwd;
+        if (!state2.sessions[chatId].engine) state2.sessions[chatId].engine = 'claude';
         saveState(state2);
         await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)}`);
       }

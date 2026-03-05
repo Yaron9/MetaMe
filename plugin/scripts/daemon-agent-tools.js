@@ -31,13 +31,17 @@ function createAgentTools(deps) {
     return (String(agentName || '').replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() || String(chatId));
   }
 
+  function normalizeEngine(engine) {
+    return String(engine || '').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+  }
+
   function ensureAdapterConfig(cfg, adapterKey) {
     if (!cfg[adapterKey]) cfg[adapterKey] = {};
     if (!cfg[adapterKey].allowed_chat_ids) cfg[adapterKey].allowed_chat_ids = [];
     if (!cfg[adapterKey].chat_agent_map) cfg[adapterKey].chat_agent_map = {};
   }
 
-  async function bindAgentToChat(chatId, agentName, workspaceDir, { force = false } = {}) {
+  async function bindAgentToChat(chatId, agentName, workspaceDir, { force = false, engine = null } = {}) {
     try {
       const safeName = sanitizeText(agentName, 120);
       if (!safeName) return { ok: false, error: 'agentName is required' };
@@ -49,6 +53,7 @@ function createAgentTools(deps) {
 
       const projectKey = toProjectKey(safeName, chatId);
       let resolvedDir = resolveWorkspaceDir(workspaceDir);
+      const normalizedEngine = engine ? normalizeEngine(engine) : null;
 
       if (!resolvedDir) {
         const existing = cfg.projects[projectKey];
@@ -80,7 +85,12 @@ function createAgentTools(deps) {
       cfg[adapterKey].chat_agent_map[String(chatId)] = projectKey;
       const existed = !!cfg.projects[projectKey];
       if (!existed) {
-        cfg.projects[projectKey] = { name: safeName, cwd: resolvedDir, nicknames: [safeName] };
+        cfg.projects[projectKey] = {
+          name: safeName,
+          cwd: resolvedDir,
+          nicknames: [safeName],
+          ...(normalizedEngine === 'codex' ? { engine: 'codex' } : {}),
+        };
       } else {
         const nicknames = Array.isArray(cfg.projects[projectKey].nicknames)
           ? cfg.projects[projectKey].nicknames
@@ -91,6 +101,7 @@ function createAgentTools(deps) {
           name: safeName,
           cwd: resolvedDir,
           nicknames,
+          ...(normalizedEngine === 'codex' ? { engine: 'codex' } : {}),
         };
       }
 
@@ -175,8 +186,9 @@ ${safeDelta}
     }
   }
 
-  async function createNewWorkspaceAgent(agentName, workspaceDir, roleDescription, chatId, { skipChatBinding = false } = {}) {
+  async function createNewWorkspaceAgent(agentName, workspaceDir, roleDescription, chatId, { skipChatBinding = false, engine = null } = {}) {
     let bindData;
+    const normalizedEngine = engine ? normalizeEngine(engine) : null;
 
     if (skipChatBinding) {
       // Create the project entry without touching chat_agent_map
@@ -192,7 +204,16 @@ ${safeDelta}
       const projectKey = toProjectKey(safeName, chatId);
       const existed = !!cfg.projects[projectKey];
       if (!existed) {
-        cfg.projects[projectKey] = { name: safeName, cwd: resolvedDir, nicknames: [safeName] };
+        cfg.projects[projectKey] = {
+          name: safeName,
+          cwd: resolvedDir,
+          nicknames: [safeName],
+          ...(normalizedEngine === 'codex' ? { engine: 'codex' } : {}),
+        };
+        writeConfigSafe(cfg);
+        backupConfig();
+      } else if (normalizedEngine === 'codex') {
+        cfg.projects[projectKey] = { ...cfg.projects[projectKey], engine: 'codex' };
         writeConfigSafe(cfg);
         backupConfig();
       }
@@ -204,7 +225,7 @@ ${safeDelta}
         project: cfg.projects[projectKey],
       };
     } else {
-      const bindResult = await bindAgentToChat(chatId, agentName, workspaceDir);
+      const bindResult = await bindAgentToChat(chatId, agentName, workspaceDir, { engine: normalizedEngine });
       if (!bindResult.ok) return bindResult;
       bindData = bindResult.data;
     }

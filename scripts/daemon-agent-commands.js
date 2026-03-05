@@ -127,7 +127,12 @@ function createAgentCommandHandler(deps) {
       const action = res.data.isNewProject ? '绑定成功' : '重新绑定';
       const displayCwd = String(res.data.cwd || '').replace(HOME, '~');
       if (res.data.cwd && typeof attachOrCreateSession === 'function') {
-        attachOrCreateSession(chatId, normalizeCwd(res.data.cwd), p.name || agentName || res.data.projectKey || '');
+        attachOrCreateSession(
+          chatId,
+          normalizeCwd(res.data.cwd),
+          p.name || agentName || res.data.projectKey || '',
+          p.engine || 'claude'
+        );
       }
       await bot.sendMessage(chatId, `${icon} ${p.name || agentName} ${action}\n目录: ${displayCwd}`);
       return { ok: true, data: res.data };
@@ -140,7 +145,7 @@ function createAgentCommandHandler(deps) {
     }
     const fallbackCwd = (fallback.data && fallback.data.cwd) || agentCwd;
     if (fallbackCwd && typeof attachOrCreateSession === 'function') {
-      attachOrCreateSession(chatId, normalizeCwd(fallbackCwd), agentName || '');
+      attachOrCreateSession(chatId, normalizeCwd(fallbackCwd), agentName || '', 'claude');
     }
     return {
       ok: true,
@@ -163,9 +168,9 @@ function createAgentCommandHandler(deps) {
 
   async function createAgentViaUnifiedApi(chatId, name, dir, roleDesc, opts = {}) {
     // Default: skip binding the creating chat — let the target group activate via /activate
-    const { skipChatBinding = true } = opts;
+    const { skipChatBinding = true, engine = null } = opts;
     if (agentTools && typeof agentTools.createNewWorkspaceAgent === 'function') {
-      const res = await agentTools.createNewWorkspaceAgent(name, dir, roleDesc, chatId, { skipChatBinding });
+      const res = await agentTools.createNewWorkspaceAgent(name, dir, roleDesc, chatId, { skipChatBinding, engine });
       if (res.ok && skipChatBinding && res.data && res.data.projectKey) {
         storePendingActivation(res.data.projectKey, name, res.data.cwd, chatId);
       }
@@ -273,10 +278,12 @@ function createAgentCommandHandler(deps) {
       const cwd = fullMatch.projectPath || (getSession(chatId) && getSession(chatId).cwd) || HOME;
 
       const state2 = loadState();
+      const currentEngine = (state2.sessions[chatId] && state2.sessions[chatId].engine) || 'claude';
       state2.sessions[chatId] = {
         id: sessionId,
         cwd,
         started: true,
+        engine: currentEngine,
       };
       saveState(state2);
       const name = fullMatch.customTitle;
