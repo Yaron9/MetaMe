@@ -1236,6 +1236,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       })) {
         markCodexResumeRetried(chatId);
         log('WARN', `Codex resume failed for ${chatId}, retrying once with fresh exec: ${String(error).slice(0, 120)}`);
+        // Notify user explicitly — silent context loss is worse than a visible warning.
+        await bot.sendMessage(chatId, '⚠️ Codex session 已过期，上下文丢失。正在以全新 session 重试，请在回复后补充必要背景。').catch(() => {});
         session = createSession(
           chatId,
           session.cwd,
@@ -1249,6 +1251,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           session,
           cwd: session.cwd,
         });
+        // Prepend a context-loss marker so Codex knows this is a fresh session mid-conversation.
+        const retryPrompt = `[Note: previous Codex session expired and could not be resumed. Treating this as a new session. User message follows:]\n\n${fullPrompt}`;
         ({
           output,
           error,
@@ -1260,7 +1264,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           sessionId,
         } = await spawnClaudeStreaming(
           retryArgs,
-          fullPrompt,
+          retryPrompt,
           session.cwd,
           onStatus,
           600000,
