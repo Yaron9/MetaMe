@@ -485,7 +485,36 @@ function createAgentCommandHandler(deps) {
             }
           }
         }
-        // No pending activation at all — guide to manual bind
+        // No pending activation — fall back to scanning daemon.yaml for unbound projects
+        const allBoundKeys = new Set(Object.values({
+          ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}),
+          ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}),
+        }));
+        const unboundProjects = Object.entries(cfg.projects || {})
+          .filter(([key, p]) => p && p.cwd && !allBoundKeys.has(key))
+          .map(([key, p]) => ({ key, name: p.name || key, cwd: p.cwd, icon: p.icon || '🤖' }));
+
+        if (unboundProjects.length === 1) {
+          // Exactly one unbound project — auto-bind using project KEY (not display name)
+          // to ensure toProjectKey() resolves to the correct existing key in daemon.yaml
+          const proj = unboundProjects[0];
+          const bindRes2 = await bindViaUnifiedApi(bot, chatId, proj.key, proj.cwd);
+          if (bindRes2.ok) pendingActivations && pendingActivations.delete(proj.key);
+          return true;
+        }
+
+        if (unboundProjects.length > 1) {
+          // Multiple unbound projects — show pick list using project keys
+          const lines = ['请选择要激活的 Agent：', ''];
+          for (const p of unboundProjects) {
+            lines.push(`${p.icon} ${p.name}  →  \`/agent bind ${p.key} ${p.cwd}\``);
+          }
+          lines.push('\n发送对应命令即可绑定此群。');
+          await bot.sendMessage(chatId, lines.join('\n'));
+          return true;
+        }
+
+        // Truly nothing to activate
         await bot.sendMessage(chatId,
           '没有待激活的 Agent。\n\n如果已创建过 Agent，直接用:\n`/agent bind <名称> <目录>`\n即可绑定，不需要重新创建。'
         );

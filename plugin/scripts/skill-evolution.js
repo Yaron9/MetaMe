@@ -878,7 +878,7 @@ function saveWorkflowSketches(yaml, data) {
  * - New IDs (null): generate ID, add to sketches (respecting max cap)
  * Returns merged sketches array.
  */
-function mergeWorkflowSketches(existing, clustered, policy) {
+function mergeWorkflowSketches(existing, clustered, maxSketches) {
   const sketchMap = new Map();
   for (const s of existing) sketchMap.set(s.id, { ...s });
 
@@ -916,9 +916,9 @@ function mergeWorkflowSketches(existing, clustered, policy) {
 
   // Enforce max sketches: keep most recently seen
   let sketches = [...sketchMap.values()];
-  if (sketches.length > policy.workflow_max_sketches) {
+  if (sketches.length > maxSketches) {
     sketches.sort((a, b) => new Date(b.last_seen || 0).getTime() - new Date(a.last_seen || 0).getTime());
-    sketches = sketches.slice(0, policy.workflow_max_sketches);
+    sketches = sketches.slice(0, maxSketches);
   }
 
   return sketches;
@@ -972,7 +972,7 @@ async function discoverWorkflows(signals, distillEnv) {
     if (!Array.isArray(clustered) || clustered.length === 0) return;
 
     // Merge into persisted sketches
-    sketchData.sketches = mergeWorkflowSketches(sketchData.sketches, clustered, policy);
+    sketchData.sketches = mergeWorkflowSketches(sketchData.sketches, clustered, policy.workflow_max_sketches);
 
     // Purge stale sketches (not seen within workflow_stale_days, not proposed)
     const staleCutoff = Date.now() - policy.workflow_stale_days * 24 * 60 * 60 * 1000;
@@ -1060,14 +1060,21 @@ function saveEvolutionQueue(yaml, queue) {
   } catch {}
 }
 
+// Per-type dedup field: type → function(queueItem, newEntry) → bool
+// Add a new entry here whenever a new queue type with its own dedup key is introduced.
+const QUEUE_DEDUP_MATCH = {
+  skill_gap:         (i, e) => (i.search_hint || '') === (e.search_hint || ''),
+  workflow_proposal: (i, e) => (i.workflow_sketch_id || '') === (e.workflow_sketch_id || ''),
+};
+
 function addToQueue(queue, entry) {
-  // Dedup pending entries by core key. Skill gaps also include search_hint so unrelated gaps don't collapse.
+  // Dedup pending entries by core key, with per-type extra field matching.
+  const dedupFn = QUEUE_DEDUP_MATCH[entry.type];
   const existing = queue.items.find(i =>
     i.type === entry.type &&
     i.skill_name === entry.skill_name &&
     i.status === 'pending' &&
-    (entry.type !== 'skill_gap' || (i.search_hint || '') === (entry.search_hint || '')) &&
-    (entry.type !== 'workflow_proposal' || (i.workflow_sketch_id || '') === (entry.workflow_sketch_id || ''))
+    (!dedupFn || dedupFn(i, entry))
   );
 
   if (existing) {
@@ -1180,7 +1187,9 @@ function listQueueItems({ status = null, limit = 20 } = {}) {
   try { yaml = require('js-yaml'); } catch { return []; }
   const queue = loadEvolutionQueue(yaml);
   const items = Array.isArray(queue.items) ? queue.items : [];
-  const filtered = status ? items.filter(i => i.status === status) : items;
+  // status can be a single string or an array of strings
+  const statuses = Array.isArray(status) ? status : (status ? [status] : null);
+  const filtered = statuses ? items.filter(i => statuses.includes(i.status)) : items;
   return filtered
     .slice()
     .sort((a, b) => new Date(b.last_seen || b.detected || 0).getTime() - new Date(a.last_seen || a.detected || 0).getTime())

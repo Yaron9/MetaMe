@@ -761,7 +761,9 @@ function createTaskScheduler(deps) {
       }
 
       // Skill evolution: check queue and notify user of actionable items
-      if (skillEvolution) {
+      // Can be disabled via daemon.yaml: skill_evolution_notify: false
+      const skillEvolutionNotifyEnabled = !config.daemon || config.daemon.skill_evolution_notify !== false;
+      if (skillEvolution && skillEvolutionNotifyEnabled) {
         try {
           const notifications = skillEvolution.checkEvolutionQueue();
           for (const item of notifications) {

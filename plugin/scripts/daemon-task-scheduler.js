@@ -222,13 +222,12 @@ function createTaskScheduler(deps) {
         const filePath = testMatch[1].trim().replace(/["']/g, '');
         const fs = require('fs');
         try {
-          const stat = fs.statSync(filePath);
-          if (stat.size > 0) {
-            const content = fs.readFileSync(filePath, 'utf8').trim();
+          const content = fs.readFileSync(filePath, 'utf8').trim();
+          if (content.length > 0) {
             log('INFO', `Precondition passed for ${task.name} (${content.split('\n').length} lines)`);
             return { pass: true, context: content };
           }
-        } catch { /* file doesn't exist */ }
+        } catch { /* file doesn't exist or unreadable */ }
         log('INFO', `Precondition failed for ${task.name}: file empty or missing`);
         return { pass: false, context: '' };
       }
@@ -634,11 +633,22 @@ function createTaskScheduler(deps) {
     return found || null;
   }
 
-  function startHeartbeat(config, notifyFn) {
+  function startHeartbeat(config, notifyFn, notifyPersonalFn) {
     const { all: tasks } = getAllTasks(config);
 
     const enabledTasks = tasks.filter(t => t.enabled !== false);
     const checkIntervalSec = (config.daemon && config.daemon.heartbeat_check_interval) || 60;
+
+    // Helper: compute next run time, falling back to 2-tick backoff on error.
+    function safeNextRun(taskName, schedule, now) {
+      try {
+        return { next: nextRunAfter(schedule, now), failed: false };
+      } catch (e) {
+        log('ERROR', `nextRunAfter failed for "${taskName}": ${e.message}`);
+        return { next: now + checkIntervalSec * 2 * 1000, failed: true };
+      }
+    }
+
     const taskSchedules = new Map();
     const runnableTasks = [];
     for (const task of enabledTasks) {
@@ -721,24 +731,14 @@ function createTaskScheduler(deps) {
 
           if (runningTasks.has(task.name)) {
             // Task is still running; skip this cycle and keep full interval cadence.
-            try {
-              nextRun[task.name] = nextRunAfter(schedule, currentTime);
-            } catch (schedErr) {
-              nextRun[task.name] = currentTime + checkIntervalSec * 2 * 1000;
-              log('ERROR', `nextRunAfter (running guard) failed for "${task.name}": ${schedErr.message}`);
-            }
+            nextRun[task.name] = safeNextRun(task.name, schedule, currentTime).next;
             log('WARN', `Task ${task.name} still running — skipping this interval`);
             continue;
           }
 
-          try {
-            nextRun[task.name] = nextRunAfter(schedule, currentTime);
-          } catch (schedErr) {
-            // If next-run calculation fails, back off by at least 2 ticks to prevent infinite loop
-            nextRun[task.name] = currentTime + checkIntervalSec * 2 * 1000;
-            log('ERROR', `nextRunAfter failed for "${task.name}": ${schedErr.message} — backing off`);
-            continue;
-          }
+          const { next: nextRunTime, failed: schedFailed } = safeNextRun(task.name, schedule, currentTime);
+          nextRun[task.name] = nextRunTime;
+          if (schedFailed) continue; // back off, skip execution this cycle
           runningTasks.add(task.name);
           // executeTask now returns a Promise (async, non-blocking, process-group kill)
           Promise.resolve(executeTask(task, config))
@@ -761,7 +761,9 @@ function createTaskScheduler(deps) {
       }
 
       // Skill evolution: check queue and notify user of actionable items
-      if (skillEvolution) {
+      // Can be disabled via daemon.yaml: skill_evolution_notify: false
+      const skillEvolutionNotifyEnabled = !config.daemon || config.daemon.skill_evolution_notify !== false;
+      if (skillEvolution && skillEvolutionNotifyEnabled) {
         try {
           const notifications = skillEvolution.checkEvolutionQueue();
           for (const item of notifications) {
@@ -785,7 +787,9 @@ function createTaskScheduler(deps) {
             } else if (msg && item.id) {
               msg += `${idHint}\n处理: \`/skill-evo done ${item.id}\` 或 \`/skill-evo dismiss ${item.id}\``;
             } else if (msg) msg += idHint;
-            if (msg && notifyFn) notifyFn(msg);
+            // Skill notifications go only to personal chats, not agent group chats
+            const skillNotifyFn = notifyPersonalFn || notifyFn;
+            if (msg && skillNotifyFn) skillNotifyFn(msg);
           }
         } catch (e) { log('WARN', `Skill evolution queue check failed: ${e.message}`); }
       }

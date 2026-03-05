@@ -94,7 +94,7 @@ function classifyTaskUsage(task, context = {}, opts = {}) {
 
   if (!joined) return fallbackCategory;
   if (/\bteam[-_\s]?task\b|团队|协作|handoff|dispatch/.test(joined)) return 'team_task';
-  if (/\bskill[-_\s]?(?:evo|evolution|manager|scout)\b|技能演化/.test(joined)) return 'skill_evolution';
+  if (/\bskill[-_\s]?(?:evo|evolution|manager)\b|技能演化/.test(joined)) return 'skill_evolution';
   if (/\bmemory(?:-extract)?\b|记忆|facts?|recall|retriev|rag/.test(joined)) return 'memory';
   if (/\bdistill\b|\bcognition\b|认知|反思|洞察/.test(joined)) return 'cognition';
   if (/\bheartbeat\b|提醒|定时|cron|every\s+\d/.test(joined)) return 'heartbeat';

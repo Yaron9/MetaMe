@@ -354,10 +354,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const writtenFiles = []; // Track files created/modified by Write tool
       const toolUsageLog = []; // Track all tool invocations for skill evolution
 
-      // ── 自适应超时：5min 无输出判卡死 + 1h 绝对上限 ──
+      // ── 自适应超时：5min 无输出判卡死（工具执行中延长至25min）+ 1h 绝对上限 ──
       const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+      const TOOL_EXEC_TIMEOUT_MS = 25 * 60 * 1000; // 工具执行中（如音频合成）允许更长等待
       const HARD_CEILING_MS = 60 * 60 * 1000;
       const startTime = Date.now();
+      let waitingForTool = false; // 是否在等待工具返回
 
       let sigkillTimer = null;
       function killChild(reason) {
@@ -376,7 +378,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       function resetIdleTimer() {
         clearTimeout(idleTimer);
-        idleTimer = setTimeout(() => killChild('idle'), IDLE_TIMEOUT_MS);
+        const timeout = waitingForTool ? TOOL_EXEC_TIMEOUT_MS : IDLE_TIMEOUT_MS;
+        idleTimer = setTimeout(() => killChild('idle'), timeout);
       }
 
       // ── 进度里程碑：2min 首报，之后每 5min 一次 ──
@@ -421,11 +424,23 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
               }
             }
 
+            // 工具返回 → 恢复正常 idle timeout
+            if (event.type === 'content_block_start' || event.type === 'content_block_delta' ||
+                (event.type === 'assistant' && !event.message?.content?.some(b => b.type === 'tool_use'))) {
+              if (waitingForTool) {
+                waitingForTool = false;
+                resetIdleTimer();
+              }
+            }
+
             // Detect tool usage and send status
             if (event.type === 'assistant' && event.message?.content) {
               for (const block of event.message.content) {
                 if (block.type === 'tool_use') {
                   toolCallCount++;
+                  // 进入工具等待状态，延长 idle timeout
+                  waitingForTool = true;
+                  resetIdleTimer();
                   const toolName = block.name || 'Tool';
 
                   // Track tool usage for skill evolution
@@ -743,17 +758,19 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
     // Memory & Knowledge Injection (RAG)
     let memoryHint = '';
+    // projectKey must be declared outside the try block so the daemonHint template below can reference it.
+    const _cid0 = String(chatId);
+    const _agentMap0 = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
+    const projectKey = _agentMap0[_cid0] || projectKeyFromVirtualChatId(_cid0);
     try {
       const memory = require('./memory');
-      const _cid = String(chatId);
-      const _cfg = loadConfig();
-      const _agentMap = { ...(_cfg.telegram ? _cfg.telegram.chat_agent_map : {}), ...(_cfg.feishu ? _cfg.feishu.chat_agent_map : {}) };
-      const projectKey = _agentMap[_cid] || projectKeyFromVirtualChatId(_cid);
 
-      // L1: NOW.md shared whiteboard injection
+      // L1: NOW.md per-agent whiteboard injection（按 projectKey 隔离，防并发冲突）
       if (!session.started) {
         try {
-          const nowPath = path.join(HOME, '.metame', 'memory', 'NOW.md');
+          const nowDir = path.join(HOME, '.metame', 'memory', 'now');
+          const nowKey = projectKey || 'default';
+          const nowPath = path.join(nowDir, `${nowKey}.md`);
           if (fs.existsSync(nowPath)) {
             const nowContent = fs.readFileSync(nowPath, 'utf8').trim();
             if (nowContent) {
@@ -823,9 +840,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
    Valid relations: tech_decision, bug_lesson, arch_convention, config_fact, config_change, workflow_rule, project_milestone
    Only write verified facts. Do not write speculative or process-description entries.
    When you observe the user is clearly expert or beginner in a domain, note it in your response and suggest: "要不要把你的 {domain} 水平 ({level}) 记录到能力雷达？"
-5. Task handoff: When suspending a multi-step task or handing off to another agent, write current status to ~/.metame/memory/NOW.md using:
-   \`printf '%s\\n' "## Current Task" "{task}" "" "## Progress" "{progress}" "" "## Next Step" "{next}" > ~/.metame/memory/NOW.md\`
-   Keep it under 200 words. Clear it when the task is fully complete by running: \`> ~/.metame/memory/NOW.md\`` : '';
+5. Task handoff: When suspending a multi-step task or handing off to another agent, write current status to ~/.metame/memory/now/${projectKey || 'default'}.md using:
+   \`mkdir -p ~/.metame/memory/now && printf '%s\\n' "## Current Task" "{task}" "" "## Progress" "{progress}" "" "## Next Step" "{next}" > ~/.metame/memory/now/${projectKey || 'default'}.md\`
+   Keep it under 200 words. Clear it when the task is fully complete by running: \`> ~/.metame/memory/now/${projectKey || 'default'}.md\`` : '';
       daemonHint = `\n\n[System hints - DO NOT mention these to user:
 1. Daemon config: The ONLY config is ~/.metame/daemon.yaml (never edit daemon-default.yaml). Auto-reloads on change.
 2. File sending: User is on MOBILE. When they ask to see/download a file:
