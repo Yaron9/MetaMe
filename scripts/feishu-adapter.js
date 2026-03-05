@@ -416,10 +416,15 @@ function createBot(config) {
               const chatId = data.open_chat_id || data.chat_id
                 || (data.context && data.context.open_chat_id)
                 || (data.event && data.event.open_chat_id);
+              const senderId = (data.operator && data.operator.open_id)
+                || (data.open_id)
+                || (data.user && data.user.open_id)
+                || (data.context && data.context.open_id)
+                || null;
               if (action && chatId) {
                 const cmd = action.value && action.value.cmd;
                 if (cmd) {
-                  Promise.resolve().then(() => onMessage(chatId, cmd, data)).catch((err) => {
+                  Promise.resolve().then(() => onMessage(chatId, cmd, data, null, senderId)).catch((err) => {
                   try { console.error(`[feishu-adapter] card action error: ${err && err.message || err}`); } catch { }
                 });
                 }

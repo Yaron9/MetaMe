@@ -166,7 +166,7 @@ const ACTION_GROUPS = {
 const ROLE_DEFAULT_ACTIONS = {
   admin:   Object.keys(ACTION_GROUPS),       // 全部权限
   member:  ['query'],                         // 默认只能问答
-  stranger: [],                               // 无系统权限，但允许基础问答由 askClaude readOnly 处理
+  stranger: ['query'],                        // 仅基础问答（只读）
 };
 
 // 不可赋予 member 的 admin 专属 action
@@ -182,6 +182,7 @@ const ADMIN_ONLY_ACTIONS = new Set(['system', 'agent', 'config', 'admin_acl']);
  */
 function resolveUserCtx(senderId, config) {
   const userData = loadUsers();
+  const hasConfiguredUsers = !!(userData && userData.users && Object.keys(userData.users).length > 0);
 
   let role, name, allowedActions;
 
@@ -213,9 +214,25 @@ function resolveUserCtx(senderId, config) {
         name = senderId.slice(-6);
         allowedActions = ROLE_DEFAULT_ACTIONS.admin;
       } else {
-        role = userData.default_role || 'stranger';
-        name = senderId.slice(-6);
-        allowedActions = ROLE_DEFAULT_ACTIONS[role] || [];
+        if (!hasConfiguredUsers) {
+          // Bootstrap only once: persist the first seen sender as admin.
+          const next = {
+            default_role: userData.default_role || 'stranger',
+            users: { ...(userData.users || {}) },
+          };
+          next.users[senderId] = {
+            role: 'admin',
+            name: senderId.slice(-6),
+          };
+          try { saveUsers(next); } catch { /* non-fatal: fallback to in-memory role */ }
+          role = 'admin';
+          name = senderId.slice(-6);
+          allowedActions = ROLE_DEFAULT_ACTIONS.admin;
+        } else {
+          role = userData.default_role || 'stranger';
+          name = senderId.slice(-6);
+          allowedActions = ROLE_DEFAULT_ACTIONS[role] || [];
+        }
       }
     }
   }
@@ -313,7 +330,7 @@ function handleUserCommand(text, userCtx) {
 
   if (sub === 'add') {
     // /user add <open_id> <role> [name...]
-    const [, , , uid, role, ...nameParts] = args;
+    const [, , uid, role, ...nameParts] = args;
     if (!uid || !role) return { handled: true, reply: '用法: /user add <open_id> <role> [name]' };
     // [S2] open_id 格式校验
     if (!isValidOpenId(uid)) return { handled: true, reply: '❌ open_id 格式不合法（应为 10-64 位字母数字下划线）' };
@@ -328,7 +345,7 @@ function handleUserCommand(text, userCtx) {
   }
 
   if (sub === 'role') {
-    const [, , , uid, role] = args;
+    const [, , uid, role] = args;
     if (!uid || !role) return { handled: true, reply: '用法: /user role <open_id> <role>' };
     if (!isValidOpenId(uid)) return { handled: true, reply: '❌ open_id 格式不合法' };
     if (!['admin', 'member', 'stranger'].includes(role)) {
@@ -343,7 +360,7 @@ function handleUserCommand(text, userCtx) {
   }
 
   if (sub === 'grant') {
-    const [, , , uid, action] = args;
+    const [, , uid, action] = args;
     if (!uid || !action) return { handled: true, reply: '用法: /user grant <open_id> <action>' };
     if (!isValidOpenId(uid)) return { handled: true, reply: '❌ open_id 格式不合法' };
     if (ADMIN_ONLY_ACTIONS.has(action)) {
@@ -364,7 +381,7 @@ function handleUserCommand(text, userCtx) {
   }
 
   if (sub === 'revoke') {
-    const [, , , uid, action] = args;
+    const [, , uid, action] = args;
     if (!uid || !action) return { handled: true, reply: '用法: /user revoke <open_id> <action>' };
     if (!isValidOpenId(uid)) return { handled: true, reply: '❌ open_id 格式不合法' };
     const data = loadUsers();
@@ -376,7 +393,7 @@ function handleUserCommand(text, userCtx) {
   }
 
   if (sub === 'remove') {
-    const [, , , uid] = args;
+    const [, , uid] = args;
     if (!uid) return { handled: true, reply: '用法: /user remove <open_id>' };
     if (!isValidOpenId(uid)) return { handled: true, reply: '❌ open_id 格式不合法' };
     const data = loadUsers();

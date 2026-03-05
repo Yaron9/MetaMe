@@ -1,5 +1,8 @@
 'use strict';
 
+let userAcl = null;
+try { userAcl = require('./daemon-user-acl'); } catch { /* optional */ }
+
 function createBridgeStarter(deps) {
   const {
     fs,
@@ -14,6 +17,52 @@ function createBridgeStarter(deps) {
     handleCommand,
     pendingActivations,  // optional — used to show smart activation hint
   } = deps;
+
+  async function sendAclReply(bot, chatId, text) {
+    if (!text) return;
+    try {
+      if (bot.sendMarkdown) await bot.sendMarkdown(chatId, text);
+      else await bot.sendMessage(chatId, text.replace(/[*_`]/g, ''));
+    } catch { /* non-fatal */ }
+  }
+
+  function normalizeSenderId(senderId) {
+    if (senderId === undefined || senderId === null) return null;
+    const text = String(senderId).trim();
+    return text || null;
+  }
+
+  async function applyUserAcl({ bot, chatId, text, config, senderId, bypassAcl }) {
+    const trimmed = String(text || '').trim();
+    const normalizedSenderId = normalizeSenderId(senderId);
+    if (!trimmed || bypassAcl || !userAcl) {
+      return { blocked: false, readOnly: false, senderId: normalizedSenderId };
+    }
+
+    let userCtx;
+    try {
+      userCtx = userAcl.resolveUserCtx(normalizedSenderId, config || {});
+    } catch {
+      return { blocked: false, readOnly: false, senderId: normalizedSenderId };
+    }
+
+    const userCmd = userAcl.handleUserCommand(trimmed, userCtx);
+    if (userCmd && userCmd.handled) {
+      await sendAclReply(bot, chatId, userCmd.reply);
+      return { blocked: true, readOnly: !!userCtx.readOnly, senderId: normalizedSenderId };
+    }
+
+    const publicCmds = Array.isArray(userAcl.PUBLIC_COMMANDS) ? userAcl.PUBLIC_COMMANDS : [];
+    const isPublic = publicCmds.includes(trimmed.toLowerCase());
+    const action = userAcl.classifyCommandAction(trimmed);
+    const allowed = isPublic || (typeof userCtx.can === 'function' && userCtx.can(action));
+    if (!allowed) {
+      await sendAclReply(bot, chatId, `⚠️ 当前权限不足（角色: ${userCtx.role}）\n命令类型: ${action}\n请联系管理员授权。`);
+      return { blocked: true, readOnly: true, senderId: normalizedSenderId };
+    }
+
+    return { blocked: false, readOnly: !!userCtx.readOnly, senderId: normalizedSenderId };
+  }
 
   // Returns the best pending activation for a given chatId (excludes self-created)
   function getPendingActivationForChat(chatId) {
@@ -67,12 +116,26 @@ function createBridgeStarter(deps) {
             if (update.callback_query) {
               const cb = update.callback_query;
               const chatId = cb.message && cb.message.chat.id;
+              const senderId = cb.from && cb.from.id ? String(cb.from.id) : null;
               bot.answerCallback(cb.id).catch(() => { });
               if (chatId && cb.data) {
                 const liveCfg = loadConfig();
                 const allowedIds = (liveCfg.telegram && liveCfg.telegram.allowed_chat_ids) || [];
                 if (!allowedIds.includes(chatId)) continue;
-                handleCommand(bot, chatId, cb.data, liveCfg, executeTaskByName).catch(e => {
+                const isBindCmd = cb.data.startsWith('/agent bind')
+                  || cb.data.startsWith('/agent-bind-dir')
+                  || cb.data.startsWith('/browse bind')
+                  || cb.data === '/activate';
+                const acl = await applyUserAcl({
+                  bot,
+                  chatId,
+                  text: cb.data,
+                  config: liveCfg,
+                  senderId,
+                  bypassAcl: !allowedIds.includes(chatId) && !!isBindCmd,
+                });
+                if (acl.blocked) continue;
+                handleCommand(bot, chatId, cb.data, liveCfg, executeTaskByName, acl.senderId, acl.readOnly).catch(e => {
                   log('ERROR', `Telegram callback handler error: ${e.message}`);
                 });
               }
@@ -83,6 +146,7 @@ function createBridgeStarter(deps) {
 
             const msg = update.message;
             const chatId = msg.chat.id;
+            const senderId = msg.from && msg.from.id ? String(msg.from.id) : null;
 
             const liveCfg = loadConfig();
             const allowedIds = (liveCfg.telegram && liveCfg.telegram.allowed_chat_ids) || [];
@@ -93,7 +157,8 @@ function createBridgeStarter(deps) {
               || trimmedText.startsWith('/browse bind')
               || trimmedText === '/activate'
             );
-            if (!allowedIds.includes(chatId) && !isBindCmd) {
+            const isAllowedChat = allowedIds.includes(chatId);
+            if (!isAllowedChat && !isBindCmd) {
               log('WARN', `Rejected message from unauthorized chat: ${chatId}`);
               bot.sendMessage(chatId, unauthorizedMsg(chatId)).catch(() => {});
               continue;
@@ -108,6 +173,15 @@ function createBridgeStarter(deps) {
               const fileId = msg.document ? msg.document.file_id : msg.photo[msg.photo.length - 1].file_id;
               const fileName = msg.document ? msg.document.file_name : `photo_${Date.now()}.jpg`;
               const caption = msg.caption || '';
+              const acl = await applyUserAcl({
+                bot,
+                chatId,
+                text: caption || '[file-upload]',
+                config: liveCfg,
+                senderId,
+                bypassAcl: !isAllowedChat && !!isBindCmd,
+              });
+              if (acl.blocked) continue;
 
               const session = getSession(chatId);
               const cwd = session?.cwd || HOME;
@@ -123,7 +197,7 @@ function createBridgeStarter(deps) {
                   ? `User uploaded a file to the project: ${destPath}\nUser says: "${caption}"`
                   : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
 
-                handleCommand(bot, chatId, prompt, liveCfg, executeTaskByName).catch(e => {
+                handleCommand(bot, chatId, prompt, liveCfg, executeTaskByName, acl.senderId, acl.readOnly).catch(e => {
                   log('ERROR', `Telegram file handler error: ${e.message}`);
                 });
               } catch (err) {
@@ -134,7 +208,17 @@ function createBridgeStarter(deps) {
             }
 
             if (msg.text) {
-              handleCommand(bot, chatId, msg.text.trim(), liveCfg, executeTaskByName).catch(e => {
+              const text = msg.text.trim();
+              const acl = await applyUserAcl({
+                bot,
+                chatId,
+                text,
+                config: liveCfg,
+                senderId,
+                bypassAcl: !isAllowedChat && !!isBindCmd,
+              });
+              if (acl.blocked) continue;
+              handleCommand(bot, chatId, text, liveCfg, executeTaskByName, acl.senderId, acl.readOnly).catch(e => {
                 log('ERROR', `Telegram handler error: ${e.message}`);
               });
             }
@@ -182,27 +266,24 @@ function createBridgeStarter(deps) {
           || trimmedText.startsWith('/browse bind')
           || trimmedText === '/activate'
         );
-        if (!allowedIds.includes(chatId) && !isBindCmd) {
+        const isAllowedChat = allowedIds.includes(chatId);
+        if (!isAllowedChat && !isBindCmd) {
           log('WARN', `Feishu: rejected message from ${chatId}`);
           const msg = unauthorizedMsg(chatId);
           (bot.sendMarkdown ? bot.sendMarkdown(chatId, msg) : bot.sendMessage(chatId, msg)).catch(() => {});
           return;
         }
 
-        const operatorIds = (liveCfg.feishu && liveCfg.feishu.operator_ids) || [];
-        if (operatorIds.length > 0 && senderId && !operatorIds.includes(senderId) && !isBindCmd) {
-          log('INFO', `Feishu: read-only message from non-operator ${senderId} in ${chatId}: ${(text || '').slice(0, 50)}`);
-          if (text && text.startsWith('/')) {
-            await (bot.sendMarkdown ? bot.sendMarkdown(chatId, '⚠️ 该操作需要授权，请联系管理员。') : bot.sendMessage(chatId, '⚠️ 该操作需要授权，请联系管理员。'));
-            return;
-          }
-          if (text) {
-            await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, senderId, true);
-          }
-          return;
-        }
-
         if (fileInfo && fileInfo.fileKey) {
+          const acl = await applyUserAcl({
+            bot,
+            chatId,
+            text: text || '[file-upload]',
+            config: liveCfg,
+            senderId,
+            bypassAcl: !isAllowedChat && !!isBindCmd,
+          });
+          if (acl.blocked) return;
           log('INFO', `Feishu file from ${chatId}: ${fileInfo.fileName} (key: ${fileInfo.fileKey}, msgId: ${fileInfo.messageId}, type: ${fileInfo.msgType})`);
           const session = getSession(chatId);
           const cwd = session?.cwd || HOME;
@@ -218,7 +299,7 @@ function createBridgeStarter(deps) {
               ? `User uploaded a file to the project: ${destPath}\nUser says: "${text}"`
               : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
 
-            await handleCommand(bot, chatId, prompt, liveCfg, executeTaskByName);
+            await handleCommand(bot, chatId, prompt, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
           } catch (err) {
             log('ERROR', `Feishu file download failed: ${err.message}`);
             await bot.sendMessage(chatId, `❌ Download failed: ${err.message}`);
@@ -227,6 +308,15 @@ function createBridgeStarter(deps) {
         }
 
         if (text) {
+          const acl = await applyUserAcl({
+            bot,
+            chatId,
+            text,
+            config: liveCfg,
+            senderId,
+            bypassAcl: !isAllowedChat && !!isBindCmd,
+          });
+          if (acl.blocked) return;
           log('INFO', `Feishu message from ${chatId}: ${text.slice(0, 50)}`);
           const parentId = event?.message?.parent_id;
           if (parentId) {
@@ -238,7 +328,7 @@ function createBridgeStarter(deps) {
               log('INFO', `Session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
             }
           }
-          await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, senderId);
+          await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
         }
       });
 
