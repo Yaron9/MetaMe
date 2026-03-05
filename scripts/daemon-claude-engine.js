@@ -1034,7 +1034,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         if (built && String(built).trim()) mentorHint = `\n\n${String(built).trim()}`;
 
         // Collect reflection debt: if user returns to same project+topic, inject recall prompt.
-        if (mentorEngine.collectDebt) {
+        // Suppressed by quiet_until (user explicitly asked for silence), but NOT by expert skip
+        // (even experts may not have reviewed AI-generated code).
+        const quietUntil = brainDoc && brainDoc.growth ? brainDoc.growth.quiet_until : null;
+        const quietMs = quietUntil ? new Date(quietUntil).getTime() : 0;
+        const isQuiet = quietMs && quietMs > Date.now();
+        if (!isQuiet && mentorEngine.collectDebt) {
           const info = deriveProjectInfo(session && session.cwd ? session.cwd : '');
           const projectId = info && info.project_id ? info.project_id : '';
           if (projectId) {

@@ -668,14 +668,26 @@ function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
       if (remaining > 0) {
         try {
           const labelLike = '%' + query.trim() + '%';
-          const labelRows = db.prepare(`
+          let labelSql = `
             SELECT DISTINCT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at
             FROM fact_labels fl JOIN facts f ON f.id = fl.fact_id
             WHERE fl.label LIKE ?
               AND f.superseded_by IS NULL
-              AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
-            LIMIT ?
-          `).all(labelLike, remaining + ftsResults.length);
+              AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))`;
+          const labelParams = [labelLike];
+          if (scope && project) {
+            labelSql += ` AND ((f.scope = ? OR f.scope = '*') OR (f.scope IS NULL AND (f.project = ? OR f.project = '*')))`;
+            labelParams.push(scope, project);
+          } else if (scope) {
+            labelSql += ` AND (f.scope = ? OR f.scope = '*')`;
+            labelParams.push(scope);
+          } else if (project) {
+            labelSql += ` AND (f.project = ? OR f.project = '*')`;
+            labelParams.push(project);
+          }
+          labelSql += ` LIMIT ?`;
+          labelParams.push(remaining + ftsResults.length);
+          const labelRows = db.prepare(labelSql).all(...labelParams);
           for (const row of labelRows) {
             if (!ftsIds.has(row.id) && ftsResults.length < limit) {
               ftsIds.add(row.id);
@@ -727,14 +739,26 @@ function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
     try {
       const labelLike = '%' + query.trim() + '%';
       const likeIds = new Set(likeResults.map(r => r.id));
-      const labelRows = db.prepare(`
+      let labelSql2 = `
         SELECT DISTINCT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at
         FROM fact_labels fl JOIN facts f ON f.id = fl.fact_id
         WHERE fl.label LIKE ?
           AND f.superseded_by IS NULL
-          AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
-        LIMIT ?
-      `).all(labelLike, limit);
+          AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))`;
+      const labelParams2 = [labelLike];
+      if (scope && project) {
+        labelSql2 += ` AND ((f.scope = ? OR f.scope = '*') OR (f.scope IS NULL AND (f.project = ? OR f.project = '*')))`;
+        labelParams2.push(scope, project);
+      } else if (scope) {
+        labelSql2 += ` AND (f.scope = ? OR f.scope = '*')`;
+        labelParams2.push(scope);
+      } else if (project) {
+        labelSql2 += ` AND (f.project = ? OR f.project = '*')`;
+        labelParams2.push(project);
+      }
+      labelSql2 += ` LIMIT ?`;
+      labelParams2.push(limit);
+      const labelRows = db.prepare(labelSql2).all(...labelParams2);
       for (const row of labelRows) {
         if (!likeIds.has(row.id) && likeResults.length < limit) {
           likeIds.add(row.id);
