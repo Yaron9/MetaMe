@@ -335,6 +335,133 @@ describe('daemon-admin-commands /TeamTask', () => {
   });
 });
 
+describe('daemon-admin-commands distill model controls', () => {
+  function createProviderStub() {
+    let model = 'haiku';
+    return {
+      getDistillModel: () => model,
+      setDistillModel: (next) => {
+        const raw = String(next || '').trim();
+        if (!raw) throw new Error('蒸馏模型不能为空。');
+        if (raw.toLowerCase() === '5.1mini') {
+          model = 'gpt-5.1-codex-mini';
+          return;
+        }
+        if (!/^[a-zA-Z0-9._-]{2,80}$/.test(raw)) throw new Error('无效蒸馏模型');
+        model = raw;
+      },
+    };
+  }
+
+  it('shows current model via /distill-model', async () => {
+    const sent = [];
+    const providerStub = createProviderStub();
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      { providerMod: providerStub }
+    );
+    const bot = { sendMessage: async (_chatId, text) => { sent.push(String(text)); } };
+
+    const res = await handleAdminCommand({
+      bot,
+      chatId: 'mobile-user-distill-1',
+      text: '/distill-model',
+      config: {},
+      state: { tasks: {} },
+    });
+
+    assert.equal(res.handled, true);
+    assert.match(sent[0], /当前蒸馏模型: haiku/);
+  });
+
+  it('updates model via /distill-model <name>', async () => {
+    const sent = [];
+    const providerStub = createProviderStub();
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      { providerMod: providerStub }
+    );
+    const bot = { sendMessage: async (_chatId, text) => { sent.push(String(text)); } };
+
+    const res = await handleAdminCommand({
+      bot,
+      chatId: 'mobile-user-distill-2',
+      text: '/distill-model 5.1mini',
+      config: {},
+      state: { tasks: {} },
+    });
+
+    assert.equal(res.handled, true);
+    assert.match(sent[0], /gpt-5.1-codex-mini/);
+  });
+
+  it('updates model via strict natural-language intent', async () => {
+    const sent = [];
+    const providerStub = createProviderStub();
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      { providerMod: providerStub }
+    );
+    const bot = { sendMessage: async (_chatId, text) => { sent.push(String(text)); } };
+
+    const res = await handleAdminCommand({
+      bot,
+      chatId: 'mobile-user-distill-3',
+      text: '把蒸馏模型改成 5.1mini',
+      config: {},
+      state: { tasks: {} },
+    });
+
+    assert.equal(res.handled, true);
+    assert.match(sent[0], /已按自然语言请求更新蒸馏模型/);
+    assert.match(sent[0], /gpt-5.1-codex-mini/);
+  });
+
+  it('does not trigger on unrelated distill chat', async () => {
+    const sent = [];
+    const providerStub = createProviderStub();
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      { providerMod: providerStub }
+    );
+    const bot = { sendMessage: async (_chatId, text) => { sent.push(String(text)); } };
+
+    const res = await handleAdminCommand({
+      bot,
+      chatId: 'mobile-user-distill-4',
+      text: '蒸馏这个想法我觉得挺好',
+      config: {},
+      state: { tasks: {} },
+    });
+
+    assert.equal(res.handled, false);
+    assert.equal(sent.length, 0);
+    assert.equal(providerStub.getDistillModel(), 'haiku');
+  });
+
+  it('does not trigger when model is only mentioned without set intent', async () => {
+    const sent = [];
+    const providerStub = createProviderStub();
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      { providerMod: providerStub }
+    );
+    const bot = { sendMessage: async (_chatId, text) => { sent.push(String(text)); } };
+
+    const res = await handleAdminCommand({
+      bot,
+      chatId: 'mobile-user-distill-5',
+      text: '今天蒸馏总结里提到了 gpt-5-mini，先不用改',
+      config: {},
+      state: { tasks: {} },
+    });
+
+    assert.equal(res.handled, false);
+    assert.equal(sent.length, 0);
+    assert.equal(providerStub.getDistillModel(), 'haiku');
+  });
+});
+
 describe('daemon-admin-commands /mentor', () => {
   it('toggles mentor and adjusts level/mode', async () => {
     const sent = [];

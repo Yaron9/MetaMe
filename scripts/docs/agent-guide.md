@@ -16,6 +16,15 @@
 在手机端（飞书/Telegram），直接说即可，daemon 会自动处理：
 > 创建一个 Agent，目录是 ~/projects/my-bot
 
+引擎选择（手机端自然语言）：
+- 默认不写引擎时，使用 Claude（配置里不落 `engine` 字段）
+- 句子里带 `codex` 关键词时，自动写入 `engine: codex`
+
+示例：
+> 创建一个 codex agent，目录是 ~/projects/reviewer
+
+> 用 codex 建一个代码审查 agent，目录 ~/projects/pr-review
+
 在桌面 Claude Code 终端，需要手动操作：
 1. 创建项目目录和 CLAUDE.md（角色定义）
 2. 编辑 `~/.metame/daemon.yaml`，在 `projects` 下新增：
@@ -48,4 +57,6 @@
 ## 注意事项
 - 专属群（chat_agent_map 中的群）永远绑定同一个 Agent，不能通过昵称切换
 - 新群必须发 `/activate` 才能使用，未授权群会提示"此群未授权"
+- Codex 当前限制（MVP）：`/sessions` 列表暂只展示 Claude 本地会话，Codex 会话暂不可见
+- Codex 当前限制（MVP）：`/compact` 暂不支持，请继续在同一会话中对话
 - 需要定位脚本入口、升级步骤或文件落点时，先看 `~/.metame/docs/pointer-map.md`

@@ -40,6 +40,9 @@ metame
 
 > ### 🚀 v1.4.34 — Mentor Mode Step 4 + Distiller/Memory Closed Loop
 >
+> - **Multi-engine runtime adapter (MVP)**: daemon now supports engine routing by project (`project.engine`) with shared execution flow for Claude/Codex.
+> - **Codex session continuity**: supports `exec`/`resume`, thread id backfill, one-shot resume fallback (max once per 10 minutes per chat), and auth/rate-limit error mapping.
+> - **Agent engine inference**: natural-language agent creation can infer `codex`; default `claude` keeps zero-regression (no `engine` field persisted).
 > - **6-dimension soul schema**: cognitive profile upgraded from key-value pairs to a structured 67-field model covering Values, Drive, Cognition Style, Stress & Shadow, Relational, and Identity Narrative — with tier-based lock protection.
 > - **Mentor mode hooks**: pre-flight emotion breaker, context-time mentor prompt, and post-flight reflection debt registration are wired into daemon flow.
 > - **Distiller Step 4**: competence signals now merge into `user_competence_map` (upgrade-by-default, downgrade only with explicit evidence).
@@ -73,9 +76,10 @@ $ metame
 Link Established. What are we building?
 ```
 
-### 2. Full Claude Code From Your Phone
+### 2. Full Claude/Codex Sessions From Your Phone
 
-Your Mac runs a daemon. Your phone sends messages via Telegram or Feishu. Same Claude Code engine — same tools, same files, same session.
+Your Mac runs a daemon. Your phone sends messages via Telegram or Feishu.
+Engine is selected per project (`project.engine: claude|codex`) — same tools, same files, same session continuity.
 
 ```
 You (phone):  Fix the auth bug in api/login.ts
@@ -427,6 +431,7 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 | `/undo <hash>` | Roll back to a specific git checkpoint |
 | `/list` | Browse & download project files |
 | `/model` | Switch model (sonnet/opus/haiku) |
+| `/distill-model` | Show/update background distill model (default: `haiku`) |
 | `/mentor` | Mentor mode control: on/off/level/status |
 | `/activate` | Activate and bind the most recently created pending agent in a new group |
 | `/agent bind <name> [dir]` | Manually register group as dedicated agent |
@@ -474,6 +479,7 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 
 - **Profile** (`~/.claude_profile.yaml`): 6-dimension soul schema. Injected into every Claude session via `CLAUDE.md`.
 - **Daemon**: Background process handling Telegram/Feishu messages, heartbeat tasks, Unix socket dispatch, and idle/sleep transitions.
+- **Runtime Adapter** (`scripts/daemon-engine-runtime.js`): normalizes engine args/env/event parsing across Claude/Codex.
 - **Distillation**: Heartbeat task (4h, signal-gated) that updates your cognitive profile, merges competence signals, and emits postmortems for significant sessions.
 - **Memory Extract**: Heartbeat task (4h, idle-gated) that extracts long-term facts, then writes concept labels (`fact_labels`) linked by fact id.
 - **Nightly Reflection**: Daily at 01:00. Distills hot-zone facts into decision logs/lessons, writes back `synthesized_insight`, and generates knowledge capsules.
@@ -483,6 +489,8 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 ## Scripts Docs Pointer Map
 
 Use `scripts/docs/pointer-map.md` as the source-of-truth map for script entry points and Step 1-4 landing zones (`session-analytics` / `mentor-engine` / `daemon-claude-engine` / `distill` / `memory-extract` / `memory-nightly-reflect`).
+
+For day-2 operations and troubleshooting (engine routing, codex login/rate-limit, compact boundary), use `scripts/docs/maintenance-manual.md`.
 
 ## Security
 
@@ -503,10 +511,10 @@ Use `scripts/docs/pointer-map.md` as the source-of-truth map for script entry po
 | Cognitive profile injection | ~800 tokens/session (0.4% of 200k context) |
 | Dispatch latency (Unix socket) | <100ms |
 | Memory consolidation (per session) | ~1,500–2,000 tokens input + ~50–300 tokens output (Haiku) |
-| Session summary (per session) | ~400–900 tokens input + ≤250 tokens output (Haiku) |
+| Session summary (per session) | ~400–900 tokens input + ≤250 tokens output (distill model configurable) |
 | Mobile commands (`/stop`, `/list`, `/undo`) | 0 tokens |
 
-> Both memory consolidation and session summarization run in the background via Haiku (`--model haiku`). Input is capped by code: skeleton text ≤ 3,000 chars, summary output ≤ 500 chars. Neither runs per-message — memory consolidation follows heartbeat schedule with idle/precondition guards, and summaries trigger once per idle session on sleep-mode transitions.
+> Memory consolidation and session summarization run in the background via the configured distill model (`/distill-model`, default `haiku`). Input is capped by code: skeleton text ≤ 3,000 chars, summary output ≤ 500 chars. Neither runs per-message — memory consolidation follows heartbeat schedule with idle/precondition guards, and summaries trigger once per idle session on sleep-mode transitions.
 
 ## Plugin
 
