@@ -75,6 +75,25 @@ describe('daemon-engine-runtime parsers', () => {
   });
 });
 
+describe('daemon-engine-runtime error classification', () => {
+  it('classifies auth errors', () => {
+    const out = _private.classifyEngineError('Unauthorized: please login');
+    assert.equal(out.code, 'AUTH_REQUIRED');
+    assert.match(out.message, /codex login/i);
+  });
+
+  it('classifies rate limit errors', () => {
+    const out = _private.classifyEngineError('429 Too many requests');
+    assert.equal(out.code, 'RATE_LIMIT');
+  });
+
+  it('falls back to exec failure', () => {
+    const out = _private.classifyEngineError('spawn failed');
+    assert.equal(out.code, 'EXEC_FAILURE');
+    assert.equal(out.message, 'spawn failed');
+  });
+});
+
 describe('daemon-engine-runtime factory', () => {
   it('creates codex runtime with expected defaults', () => {
     const getRuntime = createEngineRuntimeFactory({
@@ -89,4 +108,3 @@ describe('daemon-engine-runtime factory', () => {
     assert.equal(codex.defaultModel, 'gpt-5-codex');
   });
 });
-

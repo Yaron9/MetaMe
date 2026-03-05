@@ -94,10 +94,32 @@ function createClaudeEngine(deps) {
     _codexResumeRetryTs.set(key, Date.now());
   }
 
+  function shouldRetryCodexResumeFallback({ runtimeName, wasResumeAttempt, output, error, errorCode, canRetry }) {
+    return runtimeName === 'codex'
+      && !!wasResumeAttempt
+      && !!error
+      && (!output || !!errorCode)
+      && !!canRetry;
+  }
+
+  function formatEngineSpawnError(err, runtime) {
+    if (!err) return 'Unknown spawn error';
+    const rt = runtime || { name: 'claude' };
+    if (err.code === 'ENOENT') {
+      if (rt.name === 'codex') {
+        return 'Codex CLI 未安装。请先运行: npm install -g @openai/codex';
+      }
+      return 'Claude CLI 未安装或不在 PATH。请先确认 `claude` 可执行。';
+    }
+    return err.message || String(err);
+  }
+
   function adaptDaemonHintForEngine(daemonHint, engineName) {
     if (normalizeEngineName(engineName) === 'claude') return daemonHint;
     let out = String(daemonHint || '');
+    // Keep this replacement conservative: only unwrap the known outer wrapper.
     out = out.replace('[System hints - DO NOT mention these to user:', 'System hints (internal, do not mention to user):');
+    // The current daemonHint template ends with a single trailing `]`.
     out = out.replace(/\]\s*$/, '');
     return out;
   }
@@ -371,7 +393,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
   }
 
   /**
-   * Spawn claude as async child process (non-blocking).
+   * Spawn Claude as async child process (non-blocking).
+   * Intentionally Claude-only: used by naming/fallback helper paths that
+   * should not depend on project runtime adapter selection.
    * Returns { output, error } after process exits.
    */
   function spawnClaudeAsync(args, input, cwd, timeoutMs = 300000, metameProject = '') {
@@ -417,7 +441,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       child.on('error', (err) => {
         clearTimeout(timer);
-        resolve({ output: null, error: err.message });
+        resolve({ output: null, error: formatEngineSpawnError(err, { name: 'claude' }) });
       });
 
       // Write input and close stdin
@@ -730,7 +754,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         clearTimeout(sigkillTimer);
         clearInterval(milestoneTimer);
         if (chatId) { activeProcesses.delete(chatId); saveActivePids(); }
-        finalize({ output: null, error: err.message, files: [], toolUsageLog: [], usage: null, sessionId: '' });
+        finalize({ output: null, error: formatEngineSpawnError(err, rt), files: [], toolUsageLog: [], usage: null, sessionId: '' });
       });
 
       try {
@@ -1226,7 +1250,14 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       if (sessionId) await onSession(sessionId);
 
-      if (runtime.name === 'codex' && wasCodexResumeAttempt && (error && (!output || errorCode)) && canRetryCodexResume(chatId)) {
+      if (shouldRetryCodexResumeFallback({
+        runtimeName: runtime.name,
+        wasResumeAttempt: wasCodexResumeAttempt,
+        output,
+        error,
+        errorCode,
+        canRetry: canRetryCodexResume(chatId),
+      })) {
         markCodexResumeRetried(chatId);
         log('WARN', `Codex resume failed for ${chatId}, retrying once with fresh exec: ${String(error).slice(0, 120)}`);
         session = createSession(
@@ -1494,6 +1525,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     spawnClaudeStreaming,
     trackMsgSession,
     askClaude,
+    _private: {
+      patchSessionSerialized,
+      shouldRetryCodexResumeFallback,
+      formatEngineSpawnError,
+      adaptDaemonHintForEngine,
+    },
   };
 }
 

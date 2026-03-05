@@ -181,7 +181,7 @@ function createCommandRouter(deps) {
   function inferAgentEngineFromText(input) {
     const text = String(input || '').trim().toLowerCase();
     if (!text) return null;
-    if (/\bcodex\b/.test(text) || /柯德|科德|codex\s*agent/.test(text)) return 'codex';
+    if (/\bcodex\b/.test(text) || /柯德|科德/.test(text)) return 'codex';
     return null;
   }
 

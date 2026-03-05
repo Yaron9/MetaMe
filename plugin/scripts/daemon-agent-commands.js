@@ -30,6 +30,22 @@ function createAgentCommandHandler(deps) {
     agentBindTtlMs,
   } = deps;
 
+  function normalizeEngineName(name) {
+    return String(name || '').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+  }
+
+  function inferEngineByCwd(cfg, cwd) {
+    if (!cfg || !cfg.projects || !cwd) return null;
+    const targetCwd = normalizeCwd(cwd);
+    for (const proj of Object.values(cfg.projects || {})) {
+      if (!proj || !proj.cwd) continue;
+      if (normalizeCwd(proj.cwd) === targetCwd) {
+        return normalizeEngineName(proj.engine);
+      }
+    }
+    return null;
+  }
+
   // Pending activations have no TTL — they persist until consumed.
   // The creating chatId is stored to prevent self-activation.
 
@@ -278,12 +294,14 @@ function createAgentCommandHandler(deps) {
       const cwd = fullMatch.projectPath || (getSession(chatId) && getSession(chatId).cwd) || HOME;
 
       const state2 = loadState();
-      const currentEngine = (state2.sessions[chatId] && state2.sessions[chatId].engine) || 'claude';
+      const cfgForEngine = loadConfig();
+      const engineByTargetCwd = inferEngineByCwd(cfgForEngine, cwd);
+      const currentEngine = normalizeEngineName(state2.sessions[chatId] && state2.sessions[chatId].engine);
       state2.sessions[chatId] = {
         id: sessionId,
         cwd,
         started: true,
-        engine: currentEngine,
+        engine: engineByTargetCwd || currentEngine,
       };
       saveState(state2);
       const name = fullMatch.customTitle;
@@ -553,4 +571,6 @@ function createAgentCommandHandler(deps) {
   return { handleAgentCommand };
 }
 
-module.exports = { createAgentCommandHandler };
+module.exports = {
+  createAgentCommandHandler,
+};
