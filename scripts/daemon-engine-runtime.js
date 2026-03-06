@@ -239,12 +239,16 @@ function buildCodexArgs(options = {}) {
   // -C (cwd) is only supported on fresh exec, not resume
   if (cwd && !isResume) args.push('-C', cwd);
 
-  if (readOnly) {
-    args.push('-s', 'read-only');
-  } else {
-    // Mobile sessions: user cannot click permission dialogs.
-    // Security relies on allowed_chat_ids whitelist, not tool restrictions.
-    args.push('--dangerously-bypass-approvals-and-sandbox');
+  // Permission flags are only valid on fresh exec, not resume.
+  // `codex exec resume` does not accept -s or --dangerously-bypass-approvals-and-sandbox.
+  if (!isResume) {
+    if (readOnly) {
+      args.push('-s', 'read-only');
+    } else {
+      // Mobile sessions: user cannot click permission dialogs.
+      // Security relies on allowed_chat_ids whitelist, not tool restrictions.
+      args.push('--dangerously-bypass-approvals-and-sandbox');
+    }
   }
 
   // "-" means prompt is read from stdin.
