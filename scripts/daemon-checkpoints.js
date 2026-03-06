@@ -37,19 +37,22 @@ function createCheckpointUtils(deps) {
     return message.replace(CHECKPOINT_PREFIX, '').trim();
   }
 
+  // On Windows, git.exe is a console app — windowsHide:true prevents flash
+  const WIN_HIDE = process.platform === 'win32' ? { windowsHide: true } : {};
+
   function gitCheckpoint(cwd, label) {
     try {
-      execSync('git rev-parse --is-inside-work-tree', { cwd, stdio: 'ignore' });
-      execSync('git add -A', { cwd, stdio: 'ignore', timeout: 5000 });
-      const status = execSync('git status --porcelain', { cwd, encoding: 'utf8', timeout: 5000 }).trim();
+      execSync('git rev-parse --is-inside-work-tree', { cwd, stdio: 'ignore', ...WIN_HIDE });
+      execSync('git add -A', { cwd, stdio: 'ignore', timeout: 5000, ...WIN_HIDE });
+      const status = execSync('git status --porcelain', { cwd, encoding: 'utf8', timeout: 5000, ...WIN_HIDE }).trim();
       if (!status) return null;
       const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
       const safeLabel = label
         ? ' Before: ' + label.replace(/["\n\r]/g, ' ').slice(0, 60).trim()
         : '';
       const msg = `${CHECKPOINT_PREFIX}${safeLabel} (${ts})`;
-      execSync(`git commit -m "${msg}" --no-verify`, { cwd, stdio: 'ignore', timeout: 10000 });
-      const hash = execSync('git rev-parse HEAD', { cwd, encoding: 'utf8', timeout: 3000 }).trim();
+      execSync(`git commit -m "${msg}" --no-verify`, { cwd, stdio: 'ignore', timeout: 10000, ...WIN_HIDE });
+      const hash = execSync('git rev-parse HEAD', { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }).trim();
       log('INFO', `Git checkpoint: ${hash.slice(0, 8)} in ${path.basename(cwd)}${safeLabel}`);
       return hash;
     } catch {
@@ -62,17 +65,17 @@ function createCheckpointUtils(deps) {
   async function gitCheckpointAsync(cwd, label) {
     if (!execFileAsync) return gitCheckpoint(cwd, label); // fallback
     try {
-      await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd, timeout: 3000 });
-      await execFileAsync('git', ['add', '-A'], { cwd, timeout: 5000 });
-      const { stdout: status } = await execFileAsync('git', ['status', '--porcelain'], { cwd, encoding: 'utf8', timeout: 5000 });
+      await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd, timeout: 3000, ...WIN_HIDE });
+      await execFileAsync('git', ['add', '-A'], { cwd, timeout: 5000, ...WIN_HIDE });
+      const { stdout: status } = await execFileAsync('git', ['status', '--porcelain'], { cwd, encoding: 'utf8', timeout: 5000, ...WIN_HIDE });
       if (!status.trim()) return null;
       const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
       const safeLabel = label
         ? ' Before: ' + label.replace(/["\n\r]/g, ' ').slice(0, 60).trim()
         : '';
       const msg = `${CHECKPOINT_PREFIX}${safeLabel} (${ts})`;
-      await execFileAsync('git', ['commit', '-m', msg, '--no-verify'], { cwd, timeout: 10000 });
-      const { stdout: hash } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8', timeout: 3000 });
+      await execFileAsync('git', ['commit', '-m', msg, '--no-verify'], { cwd, timeout: 10000, ...WIN_HIDE });
+      const { stdout: hash } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE });
       log('INFO', `Git checkpoint: ${hash.trim().slice(0, 8)} in ${path.basename(cwd)}${safeLabel}`);
       return hash.trim();
     } catch {
@@ -84,7 +87,7 @@ function createCheckpointUtils(deps) {
     try {
       const raw = execSync(
         `git log --fixed-strings --oneline --all --grep="${CHECKPOINT_PREFIX}" -n ${limit} --format="%H %s"`,
-        { cwd, encoding: 'utf8', timeout: 5000 }
+        { cwd, encoding: 'utf8', timeout: 5000, ...WIN_HIDE }
       ).trim();
       if (!raw) return [];
       return raw.split('\n').map(line => {

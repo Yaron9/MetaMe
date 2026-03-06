@@ -240,6 +240,7 @@ function createTaskScheduler(deps) {
         encoding: 'utf8',
         timeout: 15000,
         maxBuffer: 64 * 1024,
+        ...(process.platform === 'win32' ? { windowsHide: true } : {}),
       }).trim();
 
       if (!output) {
@@ -354,6 +355,7 @@ function createTaskScheduler(deps) {
           timeout: resolveTimeoutMs(task.timeout, 120),
           maxBuffer: 1024 * 1024,
           env: scriptEnv,
+          ...(process.platform === 'win32' ? { windowsHide: true } : {}),
         }).trim();
 
         // Parse token report from script stdout: last line matching __TOKENS__:<number>
