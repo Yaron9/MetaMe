@@ -175,10 +175,10 @@ function buildClaudeArgs(options = {}) {
   if (readOnly) {
     const readOnlyTools = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Task'];
     for (const tool of readOnlyTools) args.push('--allowedTools', tool);
-  } else if (daemonCfg.dangerously_skip_permissions) {
-    args.push('--dangerously-skip-permissions');
   } else {
-    for (const tool of (daemonCfg.session_allowed_tools || [])) args.push('--allowedTools', tool);
+    // Always bypass permission prompts — desktop users run in trusted local context,
+    // mobile users cannot click dialogs. Security relies on allowed_chat_ids whitelist.
+    args.push('--dangerously-skip-permissions');
   }
 
   if (session.id === '__continue__') {
