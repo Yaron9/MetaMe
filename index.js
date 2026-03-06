@@ -604,18 +604,45 @@ This step connects the bot to the user's PRIVATE chat — this is the admin chan
   6. Tell user to run \`metame start\` to activate.
 
 - If **Feishu:**
-  1. Guide through: open.feishu.cn/app → create app → get App ID + Secret → enable bot → add event subscription (long connection mode) → add permissions (im:message, im:message.p2p_msg:readonly, im:message.group_at_msg:readonly, im:message:send_as_bot, im:resource) → publish.
-     **${icon("warn")} 重要：** 在「事件订阅」页面，必须开启「接收消息 im.message.receive_v1」事件。然后在该事件的配置中，勾选「获取群组中所有消息」（否则 bot 在群聊中只能收到 @它 的消息，无法接收普通群消息）。
-  2. Ask user to paste App ID and App Secret.
-  3. Write \`app_id\` and \`app_secret\` into \`~/.metame/daemon.yaml\` under \`feishu:\` section, set \`enabled: true\`.
-  4. Tell user: "Now open Feishu and send any message to your new bot (private chat), then tell me you're done."
-  5. After user confirms, auto-fetch the chat ID:
+  Walk the user through these steps IN ORDER. Confirm each step before proceeding to the next.
+
+  **阶段一：创建应用，获取凭证（先拿到钥匙）**
+  1. 打开 open.feishu.cn → 开发者后台 → 创建企业自建应用，填写名称和描述（随意）。
+  2. 进入应用 →「凭证与基础信息」→ 复制 App ID 和 App Secret。
+  3. 进入「应用功能」→「机器人」→ 开启机器人功能（点击启用）。
+  4. 进入「权限管理」→ 依次搜索并开通以下权限：
+     - \`im:message\`
+     - \`im:message.p2p_msg:readonly\`
+     - \`im:message.group_at_msg:readonly\`
+     - \`im:message:send_as_bot\`
+     - \`im:resource\`
+  5. Ask user to paste their App ID and App Secret.
+  6. Write \`app_id\` and \`app_secret\` into \`~/.metame/daemon.yaml\` under \`feishu:\` section, set \`enabled: true\`.
+
+  **阶段二：启动 daemon，建立长连接（必须先跑起来）**
+  7. Tell user to run \`metame start\`.
+  8. Run \`metame status\` and confirm the output contains "Feishu bot connected". **${icon("warn")} 必须看到这行才能继续** — 飞书控制台只有在检测到活跃连接后才允许保存事件配置。
+
+  **阶段三：飞书控制台完成事件订阅（回去点保存）**
+  9. 回到飞书开放平台 →「事件与回调」→「事件配置」→ 选择「使用长连接接收事件」。
+  10. 点击「添加事件」→ 搜索并添加「接收消息 im.message.receive_v1」。
+  11. **${icon("warn")} 关键：** 点击该事件右侧「申请权限」→ 勾选「获取群组中所有消息」。不勾选则 bot 在群聊中只能收到 @ 它的消息。
+  12. 点击「保存配置」。此时控制台检测长连接，daemon 已在线，保存会通过。
+  13. 进入「版本管理与发布」→ 创建版本 → 申请发布（企业自建应用可直接发布，无需审核）。
+
+  **阶段四：获取 chat_id，完成私聊绑定**
+  14. Tell user: 在飞书里搜索刚创建的机器人名称，打开私聊，发送任意一条消息（如"你好"）。
+  15. After user confirms, auto-fetch the private chat ID:
      \`\`\`bash
-     TOKEN=$(curl -s -X POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal -H "Content-Type: application/json" -d '{"app_id":"<APP_ID>","app_secret":"<APP_SECRET>"}' | jq -r '.tenant_access_token')
-     curl -s -H "Authorization: Bearer $TOKEN" https://open.feishu.cn/open-apis/im/v1/chats | jq '.data.items[] | {chat_id, name, chat_type}'
+     TOKEN=$(curl -s -X POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal \\
+       -H "Content-Type: application/json" \\
+       -d '{"app_id":"<APP_ID>","app_secret":"<APP_SECRET>"}' | jq -r '.tenant_access_token')
+     curl -s -H "Authorization: Bearer $TOKEN" \\
+       "https://open.feishu.cn/open-apis/im/v1/chats?chat_type=p2p" | jq '.data.items[] | {chat_id, name}'
      \`\`\`
-  6. Write the discovered \`chat_id\`(s) into \`allowed_chat_ids\` in \`~/.metame/daemon.yaml\`.
-  7. Tell user to run \`metame start\` to activate.
+  16. Write the discovered \`chat_id\` into \`allowed_chat_ids\` in \`~/.metame/daemon.yaml\`.
+  17. Run \`metame stop && metame start\` to reload config.
+  18. Tell user to send a message in the Feishu private chat — they should receive a reply from MetaMe. Setup complete.
 
 - If **Skip:** Say "No problem. You can run \`metame daemon init\` anytime to set this up later." Then begin normal work.
 
