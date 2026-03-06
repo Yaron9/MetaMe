@@ -2,7 +2,7 @@
 
 const { classifyChatUsage } = require('./usage-classifier');
 const { deriveProjectInfo } = require('./utils');
-const { createEngineRuntimeFactory, normalizeEngineName } = require('./daemon-engine-runtime');
+const { createEngineRuntimeFactory, normalizeEngineName, ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
 
 function createClaudeEngine(deps) {
   const {
@@ -890,8 +890,10 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       }
     }
 
-    // Build engine command
-    const model = (boundProject && boundProject.model) || daemonCfg.model || runtime.defaultModel;
+    // Build engine command — prefer per-engine model, fall back to legacy daemon.model
+    const engineModels = daemonCfg.models || {};
+    const engineModel = engineModels[runtime.name] || daemonCfg.model || runtime.defaultModel;
+    const model = (boundProject && boundProject.model) || engineModel;
     const args = runtime.buildArgs({
       model,
       readOnly,
@@ -1433,7 +1435,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         // Auto-fallback: if custom provider/model fails, revert to anthropic + opus (Claude path only)
         if (runtime.name === 'claude') {
           const activeProv = providerMod ? providerMod.getActiveName() : 'anthropic';
-          const builtinModels = ['sonnet', 'opus', 'haiku'];
+          const builtinModels = ENGINE_MODEL_CONFIG.claude.options;
           if (activeProv !== 'anthropic' || !builtinModels.includes(model)) {
             try {
               config = fallbackToDefaultProvider(`${activeProv}/${model} error: ${errMsg.slice(0, 100)}`);
