@@ -42,6 +42,7 @@ const METAME_DIR = path.join(HOME, '.metame');
 const CONFIG_FILE = path.join(METAME_DIR, 'daemon.yaml');
 const STATE_FILE = path.join(METAME_DIR, 'daemon_state.json');
 const PID_FILE = path.join(METAME_DIR, 'daemon.pid');
+const LOCK_FILE = path.join(METAME_DIR, 'daemon.lock');
 const LOG_FILE = path.join(METAME_DIR, 'daemon.log');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const DISPATCH_DIR = path.join(METAME_DIR, 'dispatch');
@@ -1755,6 +1756,55 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+let daemonLockFd = null;
+function isPidAlive(pid) {
+  if (!pid || Number.isNaN(pid)) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acquireDaemonLock() {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      daemonLockFd = fs.openSync(LOCK_FILE, 'wx');
+      fs.writeFileSync(daemonLockFd, JSON.stringify({
+        pid: process.pid,
+        started_at: new Date().toISOString(),
+      }), 'utf8');
+      return true;
+    } catch (e) {
+      if (e.code !== 'EEXIST') {
+        log('ERROR', `Failed to acquire daemon lock: ${e.message}`);
+        return false;
+      }
+      try {
+        const raw = fs.readFileSync(LOCK_FILE, 'utf8');
+        const meta = JSON.parse(raw || '{}');
+        if (isPidAlive(parseInt(meta.pid, 10))) {
+          log('WARN', `Another daemon instance owns lock (PID: ${meta.pid})`);
+          return false;
+        }
+      } catch {
+        // Ignore malformed lock metadata and treat as stale.
+      }
+      try { fs.unlinkSync(LOCK_FILE); } catch { /* ignore */ }
+    }
+  }
+  return false;
+}
+
+function releaseDaemonLock() {
+  try {
+    if (daemonLockFd !== null) fs.closeSync(daemonLockFd);
+  } catch { /* ignore */ }
+  daemonLockFd = null;
+  try { if (fs.existsSync(LOCK_FILE)) fs.unlinkSync(LOCK_FILE); } catch { /* ignore */ }
+}
+
 // ---------------------------------------------------------
 // MAIN
 // ---------------------------------------------------------
@@ -1804,6 +1854,11 @@ async function main() {
       }
     }
   }
+
+  if (!acquireDaemonLock()) {
+    process.exit(0);
+  }
+  process.on('exit', releaseDaemonLock);
 
   // Takeover: kill any existing daemon
   killExistingDaemon();
@@ -1967,6 +2022,7 @@ async function main() {
     activeProcesses.clear();
     try { if (fs.existsSync(ACTIVE_PIDS_FILE)) fs.unlinkSync(ACTIVE_PIDS_FILE); } catch { }
     cleanPid();
+    releaseDaemonLock();
     const s = loadState();
     s.pid = null;
     saveState(s);
