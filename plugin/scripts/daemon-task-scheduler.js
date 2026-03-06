@@ -202,12 +202,28 @@ function createTaskScheduler(deps) {
   // Max characters from precondition context to inject into prompts (prevents token bombs)
   const MAX_PRECONDITION_CHARS = 4000;
 
-  // On Windows, .cmd files need shell to spawn; use COMSPEC to avoid conda PATH issues
+  // On Windows, resolve .cmd → actual Node.js entry to avoid cmd.exe flash
+  function _resolveNodeEntry(cmdPath) {
+    try {
+      const content = require('fs').readFileSync(cmdPath, 'utf8');
+      const m = content.match(/"([^"]+\.js)"\s*%\*\s*$/m);
+      if (m) {
+        const entry = m[1].replace(/%dp0%/gi, require('path').dirname(cmdPath) + require('path').sep);
+        if (require('fs').existsSync(entry)) return entry;
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+
   function spawn(cmd, args, options) {
-    if (process.platform === 'win32' && cmd === CLAUDE_BIN) {
-      return _spawn(cmd, args, { ...options, shell: process.env.COMSPEC || true });
+    if (process.platform !== 'win32') return _spawn(cmd, args, options);
+    const lowerCmd = String(cmd || '').toLowerCase();
+    if (lowerCmd.endsWith('.cmd') || lowerCmd.endsWith('.bat') || lowerCmd === 'claude' || lowerCmd === 'codex') {
+      const entry = _resolveNodeEntry(cmd);
+      if (entry) return _spawn(process.execPath, [entry, ...args], { ...options, windowsHide: true });
+      return _spawn(cmd, args, { ...options, shell: process.env.COMSPEC || true, windowsHide: true });
     }
-    return _spawn(cmd, args, options);
+    return _spawn(cmd, args, { ...options, windowsHide: true });
   }
 
   function checkPrecondition(task) {
@@ -613,6 +629,7 @@ function createTaskScheduler(deps) {
           timeout: resolveTimeoutMs(step.timeout, 300),
           maxBuffer: 5 * 1024 * 1024,
           cwd,
+          ...(process.platform === 'win32' ? { windowsHide: true } : {}),
           env: {
             ...process.env,
             ...getDaemonProviderEnv(),

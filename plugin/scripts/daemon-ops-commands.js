@@ -61,7 +61,7 @@ function createOpsCommandHandler(deps) {
           return true;
         }
         let isGitRepo = false;
-        try { execSync('git rev-parse --is-inside-work-tree', { cwd, stdio: 'ignore', timeout: 3000 }); isGitRepo = true; } catch { }
+        try { execSync('git rev-parse --is-inside-work-tree', { cwd, stdio: 'ignore', timeout: 3000, ...(process.platform === 'win32' ? { windowsHide: true } : {}) }); isGitRepo = true; } catch { }
         const checkpoints = isGitRepo ? listCheckpoints(cwd) : [];
         const match = checkpoints.find(cp => cp.hash.startsWith(arg));
         if (!match) {
@@ -70,8 +70,9 @@ function createOpsCommandHandler(deps) {
         }
         try {
           let diffFiles = '';
-          try { diffFiles = execSync(`git diff --name-only HEAD ${match.hash}`, { cwd, encoding: 'utf8', timeout: 5000 }).trim(); } catch { }
-          execSync(`git reset --hard ${match.hash}`, { cwd, stdio: 'ignore', timeout: 10000 });
+          const _wh = process.platform === 'win32' ? { windowsHide: true } : {};
+          try { diffFiles = execSync(`git diff --name-only HEAD ${match.hash}`, { cwd, encoding: 'utf8', timeout: 5000, ..._wh }).trim(); } catch { }
+          execSync(`git reset --hard ${match.hash}`, { cwd, stdio: 'ignore', timeout: 10000, ..._wh });
           // Truncate context to checkpoint time (covers multi-turn rollback)
           truncateSessionToCheckpoint(session.id, match.message);
           const fileList = diffFiles ? diffFiles.split('\n').map(f => path.basename(f)).join(', ') : '';
@@ -199,7 +200,7 @@ function createOpsCommandHandler(deps) {
         const cwd2 = session2.cwd;
         if (cwd2) {
           let isGitRepo2 = false;
-          try { execSync('git rev-parse --is-inside-work-tree', { cwd: cwd2, stdio: 'ignore', timeout: 3000 }); isGitRepo2 = true; } catch { }
+          try { execSync('git rev-parse --is-inside-work-tree', { cwd: cwd2, stdio: 'ignore', timeout: 3000, ...(process.platform === 'win32' ? { windowsHide: true } : {}) }); isGitRepo2 = true; } catch { }
           if (isGitRepo2) {
             // Exclude safety checkpoints from matching to avoid confusion
             const checkpoints2 = listCheckpoints(cwd2).filter(cp => !cp.message.includes('[metame-safety]'));
@@ -208,11 +209,12 @@ function createOpsCommandHandler(deps) {
               : checkpoints2[0];
             if (cpMatch) {
               let diffFiles2 = '';
-              try { diffFiles2 = execSync(`git diff --name-only HEAD ${cpMatch.hash}`, { cwd: cwd2, encoding: 'utf8', timeout: 5000 }).trim(); } catch { }
+              const _wh2 = process.platform === 'win32' ? { windowsHide: true } : {};
+              try { diffFiles2 = execSync(`git diff --name-only HEAD ${cpMatch.hash}`, { cwd: cwd2, encoding: 'utf8', timeout: 5000, ..._wh2 }).trim(); } catch { }
               if (diffFiles2) {
                 // Save current state with distinct prefix (excluded from normal /undo list)
                 gitCheckpoint(cwd2, `[metame-safety] before rollback to: ${targetMsg.slice(0, 40)}`);
-                execSync(`git reset --hard ${cpMatch.hash}`, { cwd: cwd2, stdio: 'ignore', timeout: 10000 });
+                execSync(`git reset --hard ${cpMatch.hash}`, { cwd: cwd2, stdio: 'ignore', timeout: 10000, ..._wh2 });
                 gitMsg2 = `\n📁 ${diffFiles2.split('\n').length} 个文件已恢复`;
                 cleanupCheckpoints(cwd2);
               }
