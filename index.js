@@ -1952,31 +1952,26 @@ if (isCodex) {
   // Genesis: new user + interactive mode — trigger profile interview within the same Codex session.
   // CLAUDE.md (already written to disk above) contains the full genesis protocol; Codex reads it.
   // We pass the trigger as the opening [PROMPT] argument so genesis flows into normal work seamlessly.
-  const launchCodex = (initialPrompt) => {
-    const codexArgs = codexUserArgs.length === 0
-      ? (initialPrompt ? ['--full-auto', initialPrompt] : ['--full-auto'])
-      : ['exec', '--full-auto', ...codexUserArgs];
-    const child = spawnCodex(codexArgs, {
-      stdio: 'inherit',
-      cwd: process.cwd(),
-      env: { ...process.env, ...codexProviderEnv, METAME_ACTIVE_SESSION: 'true' },
-    });
-    let launchError = false;
-    child.on('error', (err) => {
-      launchError = true;
-      console.error(`\n${icon("fail")} Error: Could not launch 'codex': ${err.message}`);
-      console.error("   Please install: npm install -g @openai/codex");
-    });
-    child.on('close', (code) => process.exit(launchError ? 127 : (code || 0)));
-    spawnDistillBackground();
-  };
-
   if (!isKnownUser && codexUserArgs.length === 0) {
     console.log(`${icon("new")} New user detected — entering Genesis interview mode...`);
-    launchCodex(GENESIS_TRIGGER_PROMPT);
-  } else {
-    launchCodex();
   }
+
+  const codexArgs = codexUserArgs.length === 0
+    ? ['--full-auto']
+    : ['exec', '--full-auto', ...codexUserArgs];
+  const child = spawnCodex(codexArgs, {
+    stdio: 'inherit',
+    cwd: process.cwd(),
+    env: { ...process.env, ...codexProviderEnv, METAME_ACTIVE_SESSION: 'true' },
+  });
+  let launchError = false;
+  child.on('error', (err) => {
+    launchError = true;
+    console.error(`\n${icon("fail")} Error: Could not launch 'codex': ${err.message}`);
+    console.error("   Please install: npm install -g @openai/codex");
+  });
+  child.on('close', (code) => process.exit(launchError ? 127 : (code || 0)));
+  spawnDistillBackground();
   return;
 }
 
