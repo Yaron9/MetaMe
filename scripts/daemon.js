@@ -1768,7 +1768,9 @@ function isPidAlive(pid) {
 }
 
 function acquireDaemonLock() {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const restartFromPid = parseInt(process.env.METAME_RESTART_FROM_PID || '', 10);
+  const maxAttempts = restartFromPid ? 6 : 2;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       daemonLockFd = fs.openSync(LOCK_FILE, 'wx');
       fs.writeFileSync(daemonLockFd, JSON.stringify({
@@ -1784,7 +1786,22 @@ function acquireDaemonLock() {
       try {
         const raw = fs.readFileSync(LOCK_FILE, 'utf8');
         const meta = JSON.parse(raw || '{}');
-        if (isPidAlive(parseInt(meta.pid, 10))) {
+        const ownerPid = parseInt(meta.pid, 10);
+        if (isPidAlive(ownerPid)) {
+          // Restart handoff: allow child to wait for parent to exit and take over.
+          if (restartFromPid && ownerPid === restartFromPid) {
+            for (let i = 0; i < 30; i++) {
+              sleepSync(500);
+              if (!isPidAlive(ownerPid)) break;
+            }
+            if (isPidAlive(ownerPid)) {
+              log('WARN', `Restart handoff timed out, previous daemon still alive (PID: ${ownerPid})`);
+              if (attempt < maxAttempts - 1) continue;
+              return false;
+            }
+            try { fs.unlinkSync(LOCK_FILE); } catch { /* ignore */ }
+            continue;
+          }
           log('WARN', `Another daemon instance owns lock (PID: ${meta.pid})`);
           return false;
         }
@@ -1937,6 +1954,7 @@ async function main() {
           ...process.env,
           HOME,
           METAME_ROOT: process.env.METAME_ROOT || path.dirname(__filename),
+          METAME_RESTART_FROM_PID: String(process.pid),
         },
       });
       bg.unref();
@@ -2003,6 +2021,13 @@ async function main() {
   // Graceful shutdown
   const shutdown = async (opts = {}) => {
     if (shuttingDown) return;
+    if (opts.restartReason) {
+      const spawned = spawnReplacementDaemon(opts.restartReason);
+      if (!spawned) {
+        log('ERROR', `[RESTART] Abort shutdown: failed to spawn replacement (${opts.restartReason})`);
+        return;
+      }
+    }
     shuttingDown = true;
     log('INFO', 'Daemon shutting down...');
     await notifyActiveUsers('关闭').catch(() => {});
@@ -2026,9 +2051,6 @@ async function main() {
     const s = loadState();
     s.pid = null;
     saveState(s);
-    if (opts.restartReason) {
-      spawnReplacementDaemon(opts.restartReason);
-    }
     process.exit(0);
   };
 

@@ -1480,6 +1480,7 @@ if (isDaemon) {
   const DAEMON_CONFIG = path.join(METAME_DIR, 'daemon.yaml');
   const DAEMON_STATE = path.join(METAME_DIR, 'daemon_state.json');
   const DAEMON_PID = path.join(METAME_DIR, 'daemon.pid');
+  const DAEMON_LOCK = path.join(METAME_DIR, 'daemon.lock');
   const DAEMON_LOG = path.join(METAME_DIR, 'daemon.log');
   const DAEMON_DEFAULT = path.join(__dirname, 'scripts', 'daemon-default.yaml');
   const DAEMON_SCRIPT = path.join(METAME_DIR, 'daemon.js');
@@ -1856,14 +1857,26 @@ WantedBy=default.target
 
     // Check if running
     let isRunning = false;
+    let runningPid = null;
     if (fs.existsSync(DAEMON_PID)) {
       const pid = parseInt(fs.readFileSync(DAEMON_PID, 'utf8').trim(), 10);
-      try { process.kill(pid, 0); isRunning = true; } catch { /* dead */ }
+      try { process.kill(pid, 0); isRunning = true; runningPid = pid; } catch { /* dead */ }
+    }
+    if (!isRunning && fs.existsSync(DAEMON_LOCK)) {
+      try {
+        const lock = JSON.parse(fs.readFileSync(DAEMON_LOCK, 'utf8'));
+        const pid = parseInt(lock && lock.pid, 10);
+        if (pid) {
+          process.kill(pid, 0);
+          isRunning = true;
+          runningPid = pid;
+        }
+      } catch { /* lock stale or invalid */ }
     }
 
     console.log(`${icon("bot")} MetaMe Daemon: ${isRunning ? icon("green") + ' Running' : icon("red") + ' Stopped'}`);
     if (state.started_at) console.log(`   Started: ${state.started_at}`);
-    if (state.pid) console.log(`   PID: ${state.pid}`);
+    if (runningPid || state.pid) console.log(`   PID: ${runningPid || state.pid}`);
 
     // Budget
     const budget = state.budget || {};

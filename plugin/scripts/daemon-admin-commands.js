@@ -1091,7 +1091,8 @@ function createAdminCommandHandler(deps) {
 
       setDefaultEngine(arg); // also syncs distill model + daemon.model + providerMod.setEngine
       const distill = getDistillModel();
-      const syncedModel = (config.daemon && config.daemon.model) || (loadConfig().daemon && loadConfig().daemon.model) || arg;
+      const freshCfg = loadConfig();
+      const syncedModel = (freshCfg.daemon && freshCfg.daemon.model) || arg;
 
       // Auto-switch provider if the preferred one exists in providers.yaml
       let providerNote = '';
