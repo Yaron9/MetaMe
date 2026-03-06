@@ -9,6 +9,9 @@ const { IS_WIN } = require('./platform');
 let mentorEngine = null;
 try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
 
+// Maps engine name to its preferred provider key in providers.yaml
+const ENGINE_PREFERRED_PROVIDER = Object.freeze({ claude: 'anthropic', codex: 'openai' });
+
 function createAdminCommandHandler(deps) {
   const {
     fs,
@@ -35,6 +38,7 @@ function createAdminCommandHandler(deps) {
     saveState,
     getDefaultEngine = () => 'claude',
     setDefaultEngine = () => {},
+    getDistillModel = () => 'haiku',
   } = deps;
 
   function resolveProjectKey(targetName, projects) {
@@ -986,24 +990,26 @@ function createAdminCommandHandler(deps) {
       return { handled: true, config };
     }
 
-    // /model [name] — switch model (interactive, accepts any name for custom providers)
+    // /model [name] — switch session model (interactive, accepts any name for custom providers)
     if (text === '/model' || text.startsWith('/model ')) {
       const arg = text.slice(6).trim();
       const builtinModels = ['sonnet', 'opus', 'haiku'];
       const currentModel = (config.daemon && config.daemon.model) || 'opus';
       const activeProvider = providerMod ? providerMod.getActiveName() : 'anthropic';
       const isCustomProvider = activeProvider !== 'anthropic';
+      const distillModel = getDistillModel();
 
       if (!arg) {
         const hint = isCustomProvider ? `\n💡 ${activeProvider} 可输入任意模型名` : '';
+        const statusLine = `🤖 会话模型: ${currentModel}  [Provider: ${activeProvider}]\n🧪 后台轻量: ${distillModel}  (/distill-model 修改)${hint}`;
         if (bot.sendButtons) {
           const buttons = builtinModels.map(m => [{
             text: m === currentModel ? `${m} ✓` : m,
             callback_data: `/model ${m}`,
           }]);
-          await bot.sendButtons(chatId, `🤖 当前模型: ${currentModel}${hint}`, buttons);
+          await bot.sendButtons(chatId, statusLine, buttons);
         } else {
-          await bot.sendMessage(chatId, `🤖 当前模型: ${currentModel}\n可选: ${builtinModels.join(', ')}${hint}`);
+          await bot.sendMessage(chatId, `${statusLine}\n\n可选: ${builtinModels.join(', ')}`);
         }
         return { handled: true, config };
       }
@@ -1017,7 +1023,7 @@ function createAdminCommandHandler(deps) {
 
       const modelName = builtinModels.includes(normalizedArg) ? normalizedArg : arg;
       if (modelName === currentModel) {
-        await bot.sendMessage(chatId, `🤖 已经是 ${modelName}`);
+        await bot.sendMessage(chatId, `🤖 已经是 ${modelName}（后台轻量模型: ${distillModel}）`);
         return { handled: true, config };
       }
 
@@ -1028,7 +1034,7 @@ function createAdminCommandHandler(deps) {
         cfg.daemon.model = modelName;
         writeConfigSafe(cfg);
         config = loadConfig();
-        await bot.sendMessage(chatId, `✅ 模型已切换: ${currentModel} → ${modelName}`);
+        await bot.sendMessage(chatId, `✅ 会话模型: ${currentModel} → ${modelName}\n🧪 后台轻量模型: ${distillModel}（如需修改用 /distill-model）`);
       } catch (e) {
         await bot.sendMessage(chatId, `❌ 切换失败: ${e.message}`);
       }
@@ -1059,21 +1065,47 @@ function createAdminCommandHandler(deps) {
     }
 
     // /engine [name] — show or switch default engine (claude/codex)
+    // Switching engine auto-syncs: distill model + preferred provider (if available)
     if (text === '/engine' || text.startsWith('/engine ')) {
       const arg = text.slice('/engine'.length).trim().toLowerCase();
       if (!arg) {
         const cur = getDefaultEngine();
-        const distill = providerMod ? providerMod.getDistillModel() : '(unknown)';
-        await bot.sendMessage(chatId, `🔧 当前引擎: ${cur}\n🧪 蒸馏模型: ${distill}\n\n用法: /engine claude 或 /engine codex`);
+        const activeProvider = providerMod ? providerMod.getActiveName() : 'anthropic';
+        const distill = getDistillModel();
+        const currentModel = (config.daemon && config.daemon.model) || 'opus';
+        await bot.sendMessage(chatId, [
+          `🔧 引擎: ${cur}  |  Provider: ${activeProvider}`,
+          `🤖 会话模型: ${currentModel}  |  后台轻量: ${distill}`,
+          '',
+          '用法: /engine claude 或 /engine codex',
+          '切换引擎将自动同步 distill model 和首选 provider',
+        ].join('\n'));
         return { handled: true, config };
       }
       if (arg !== 'claude' && arg !== 'codex') {
         await bot.sendMessage(chatId, `❌ 不支持的引擎: ${arg}\n可选: claude, codex`);
         return { handled: true, config };
       }
-      setDefaultEngine(arg);
-      const distill = providerMod ? providerMod.getDistillModel() : '(unknown)';
-      await bot.sendMessage(chatId, `✅ 默认引擎: ${arg}\n🧪 蒸馏模型已同步: ${distill}`);
+
+      const preferredProvider = ENGINE_PREFERRED_PROVIDER[arg];
+
+      setDefaultEngine(arg); // also syncs distill model + providerMod.setEngine
+      const distill = getDistillModel();
+
+      // Auto-switch provider if the preferred one exists in providers.yaml
+      let providerNote = '';
+      if (providerMod && preferredProvider) {
+        try {
+          providerMod.setActive(preferredProvider);
+          providerNote = `\n🔌 Provider 已同步: ${preferredProvider}`;
+        } catch {
+          // Provider not configured — just inform
+          const cur = providerMod ? providerMod.getActiveName() : '';
+          providerNote = `\n🔌 Provider: ${cur}（如需切换请 /provider ${preferredProvider}）`;
+        }
+      }
+
+      await bot.sendMessage(chatId, `✅ 引擎已切换: ${arg}\n🧪 后台轻量模型: ${distill}${providerNote}`);
       return { handled: true, config };
     }
 

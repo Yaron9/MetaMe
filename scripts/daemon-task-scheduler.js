@@ -189,6 +189,7 @@ function createTaskScheduler(deps) {
     recordTokens,
     buildProfilePreamble,
     getDaemonProviderEnv,
+    getDistillModel,
     log,
     physiologicalHeartbeat,
     isUserIdle,
@@ -392,7 +393,7 @@ function createTaskScheduler(deps) {
     }
 
     const preamble = buildProfilePreamble();
-    const model = normalizeModel(task.model || 'haiku');
+    const model = normalizeModel(task.model || getDistillModel());
     // If precondition returned context data, append it to the prompt (truncated to prevent token bombs)
     let taskPrompt = task.prompt;
     if (precheck.context) {
@@ -570,7 +571,9 @@ function createTaskScheduler(deps) {
     const steps = task.steps || [];
     if (steps.length === 0) return { success: false, error: 'No steps defined', output: '' };
 
-    const model = normalizeModel(task.model || 'sonnet');
+    // Workflow tasks match the user's session model setting (same quality as interactive)
+    const sessionModel = (config && config.daemon && config.daemon.model) || 'sonnet';
+    const model = normalizeModel(task.model || sessionModel);
     const cwd = task.cwd ? task.cwd.replace(/^~/, HOME) : HOME;
     const sessionId = crypto.randomUUID();
     const outputs = [];
@@ -837,6 +840,7 @@ function createTaskScheduler(deps) {
 
 module.exports = {
   createTaskScheduler,
+  normalizeModel,
   _private: {
     parseAtTime,
     parseDays,

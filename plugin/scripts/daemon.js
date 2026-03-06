@@ -164,6 +164,11 @@ function getDaemonProviderEnv() {
   try { return providerMod.buildDaemonEnv(); } catch { return {}; }
 }
 
+function getDistillModel() {
+  if (!providerMod || typeof providerMod.getDistillModel !== 'function') return 'haiku';
+  try { return providerMod.getDistillModel(); } catch { return 'haiku'; }
+}
+
 function getActiveProviderEnv() {
   if (!providerMod) return {};
   try { return providerMod.buildActiveEnv(); } catch { return {}; }
@@ -1430,6 +1435,7 @@ const {
   recordTokens,
   buildProfilePreamble,
   getDaemonProviderEnv,
+  getDistillModel,
   log,
   physiologicalHeartbeat,
   isUserIdle,
@@ -1477,6 +1483,7 @@ const { handleAdminCommand } = createAdminCommandHandler({
   saveState,
   getDefaultEngine,
   setDefaultEngine,
+  getDistillModel,
 });
 
 const { handleSessionCommand } = createSessionCommandHandler({
@@ -1636,6 +1643,7 @@ const { handleExecCommand } = createExecCommandHandler({
   createSession,
   findSessionFile,
   loadConfig,
+  getDistillModel,
 });
 
 const { handleOpsCommand } = createOpsCommandHandler({

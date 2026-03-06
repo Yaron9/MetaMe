@@ -333,17 +333,15 @@ function callDistillModel(input, extraEnv, timeout, options = {}) {
     : ['-p', '--model', model, '--no-session-persistence'];
   // On Windows, bare binary names need shell:true to resolve .cmd wrappers.
   // For codex, also sanitize CODEX_HOME if it points to a non-existent path.
-  if (process.platform === 'win32') {
-    if (engine === 'codex' && env.CODEX_HOME) {
-      const { existsSync } = require('fs');
-      if (!existsSync(env.CODEX_HOME)) delete env.CODEX_HOME;
-    }
+  const isWin = process.platform === 'win32';
+  if (isWin && engine === 'codex' && env.CODEX_HOME && !fs.existsSync(env.CODEX_HOME)) {
+    delete env.CODEX_HOME;
   }
   const spawnOpts = {
     env,
     timeout,
     maxBuffer: 10 * 1024 * 1024,
-    ...(process.platform === 'win32' ? { shell: process.env.COMSPEC || true } : {}),
+    ...(isWin ? { shell: process.env.COMSPEC || true, windowsHide: true } : {}),
   };
   return new Promise((resolve, reject) => {
     const proc = execFile(
@@ -384,7 +382,7 @@ function callDistillModel(input, extraEnv, timeout, options = {}) {
 // ---------------------------------------------------------
 // ENGINE AWARENESS (set by daemon.js setDefaultEngine)
 // ---------------------------------------------------------
-let _currentEngine = 'claude';
+let _currentEngine = process.env.METAME_ENGINE === 'codex' ? 'codex' : 'claude';
 function setEngine(name) { _currentEngine = (name === 'codex') ? 'codex' : 'claude'; }
 function getEngine() { return _currentEngine; }
 

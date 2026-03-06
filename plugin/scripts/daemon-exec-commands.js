@@ -1,6 +1,7 @@
 'use strict';
 
 const { classifyTaskUsage } = require('./usage-classifier');
+const { normalizeModel } = require('./daemon-task-scheduler');
 
 function createExecCommandHandler(deps) {
   const {
@@ -23,6 +24,7 @@ function createExecCommandHandler(deps) {
     createSession,
     findSessionFile,
     loadConfig,
+    getDistillModel,
   } = deps;
 
   function truncateOutput(output, maxLen = 4000) {
@@ -178,7 +180,7 @@ function createExecCommandHandler(deps) {
       let taskPrompt = task.prompt;
       if (precheck.context) taskPrompt += `\n\n以下是相关原始数据:\n\`\`\`\n${precheck.context}\n\`\`\``;
       const fullPrompt = preamble + taskPrompt;
-      const model = task.model || 'haiku';
+      const model = normalizeModel(task.model || getDistillModel());
       const claudeArgs = ['-p', '--model', model, '--dangerously-skip-permissions'];
       for (const t of (task.allowedTools || [])) claudeArgs.push('--allowedTools', t);
 
@@ -304,9 +306,9 @@ function createExecCommandHandler(deps) {
         digest = entry + digest;
       }
 
-      // Step 3: Summarize with haiku (new process, no --resume, fast)
+      // Step 3: Summarize with distill model (new process, no --resume, fast)
       const daemonCfg = loadConfig().daemon || {};
-      const compactArgs = ['-p', '--model', 'haiku', '--no-session-persistence'];
+      const compactArgs = ['-p', '--model', getDistillModel(), '--no-session-persistence'];
       if (daemonCfg.dangerously_skip_permissions) compactArgs.push('--dangerously-skip-permissions');
       const { output, error } = await spawnClaudeAsync(
         compactArgs,
