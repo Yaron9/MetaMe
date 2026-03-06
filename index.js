@@ -1999,7 +1999,8 @@ if (isCodex) {
     console.error("   Please install: npm install -g @openai/codex");
   });
   child.on('close', (code) => process.exit(launchError ? 127 : (code || 0)));
-  spawnDistillBackground();
+  // Do NOT call spawnDistillBackground here — distill uses claude internally,
+  // which would pop up a spurious window for codex users.
   return;
 }
 
