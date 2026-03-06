@@ -21,6 +21,16 @@ function spawnClaude(args, options) {
   return spawn('claude', args, options);
 }
 
+function spawnCodex(args, options) {
+  if (process.platform === 'win32') {
+    return spawn('codex', args, {
+      ...options,
+      shell: process.env.COMSPEC || true,
+    });
+  }
+  return spawn('codex', args, options);
+}
+
 // Quick flags (before heavy init)
 const pkgVersion = require('./package.json').version;
 if (process.argv.includes('-V') || process.argv.includes('--version')) {
@@ -1946,7 +1956,7 @@ if (isCodex) {
     const codexArgs = codexUserArgs.length === 0
       ? (initialPrompt ? ['--full-auto', initialPrompt] : ['--full-auto'])
       : ['exec', '--full-auto', ...codexUserArgs];
-    const child = spawn('codex', codexArgs, {
+    const child = spawnCodex(codexArgs, {
       stdio: 'inherit',
       cwd: process.cwd(),
       env: { ...process.env, ...codexProviderEnv, METAME_ACTIVE_SESSION: 'true' },
