@@ -144,7 +144,7 @@ const { createFileBrowser } = require('./daemon-file-browser');
 const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lifecycle');
 const { createNotifier } = require('./daemon-notify');
 const { createClaudeEngine } = require('./daemon-claude-engine');
-const { createEngineRuntimeFactory, detectDefaultEngine, ENGINE_DISTILL_MAP } = require('./daemon-engine-runtime');
+const { createEngineRuntimeFactory, detectDefaultEngine, ENGINE_DISTILL_MAP, ENGINE_DEFAULT_MODEL } = require('./daemon-engine-runtime');
 const { createCommandRouter } = require('./daemon-command-router');
 const { createTaskScheduler } = require('./daemon-task-scheduler');
 const { createAgentTools } = require('./daemon-agent-tools');
@@ -1402,6 +1402,16 @@ function setDefaultEngine(engine) {
     if (typeof providerMod.setEngine === 'function') {
       try { providerMod.setEngine(engine); } catch { /* ignore */ }
     }
+  }
+  // Sync daemon.model to the engine's default model
+  const defaultModel = ENGINE_DEFAULT_MODEL[engine];
+  if (defaultModel) {
+    try {
+      const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
+      if (!cfg.daemon) cfg.daemon = {};
+      cfg.daemon.model = defaultModel;
+      writeConfigSafe(cfg);
+    } catch { /* ignore */ }
   }
 }
 

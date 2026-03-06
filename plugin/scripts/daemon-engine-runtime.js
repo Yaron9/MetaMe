@@ -56,6 +56,11 @@ const ENGINE_DISTILL_MAP = Object.freeze({
   codex: 'gpt-5.1-codex-mini',
 });
 
+const ENGINE_DEFAULT_MODEL = Object.freeze({
+  claude: 'sonnet',
+  codex: 'gpt-5.1-codex-mini',
+});
+
 function detectDefaultEngine(deps = {}) {
   for (const engine of ['claude', 'codex']) {
     const bin = resolveBinary(engine, deps);
@@ -270,6 +275,7 @@ module.exports = {
   resolveBinary,
   detectDefaultEngine,
   ENGINE_DISTILL_MAP,
+  ENGINE_DEFAULT_MODEL,
   _private: {
     classifyEngineError,
     parseClaudeStreamEvent,

@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 
+
 function createSessionStore(deps) {
   const {
     fs,
@@ -192,7 +193,8 @@ function createSessionStore(deps) {
             const fileMtime = stat.mtimeMs;
             const existing = sessionMap.get(sessionId);
             if (!existing || fileMtime > (existing.fileMtime || 0)) {
-              const projectPath = projPathCache.get(proj) || proj.slice(1).replace(/-/g, '/');
+              const projectPath = projPathCache.get(proj);
+              if (!projectPath) continue;
               sessionMap.set(sessionId, {
                 sessionId, projectPath, fileMtime,
                 modified: new Date(fileMtime).toISOString(),

@@ -1089,8 +1089,9 @@ function createAdminCommandHandler(deps) {
 
       const preferredProvider = ENGINE_PREFERRED_PROVIDER[arg];
 
-      setDefaultEngine(arg); // also syncs distill model + providerMod.setEngine
+      setDefaultEngine(arg); // also syncs distill model + daemon.model + providerMod.setEngine
       const distill = getDistillModel();
+      const syncedModel = (config.daemon && config.daemon.model) || (loadConfig().daemon && loadConfig().daemon.model) || arg;
 
       // Auto-switch provider if the preferred one exists in providers.yaml
       let providerNote = '';
@@ -1105,7 +1106,7 @@ function createAdminCommandHandler(deps) {
         }
       }
 
-      await bot.sendMessage(chatId, `✅ 引擎已切换: ${arg}\n🧪 后台轻量模型: ${distill}${providerNote}`);
+      await bot.sendMessage(chatId, `✅ 引擎已切换: ${arg}\n🤖 会话模型: ${syncedModel}\n🧪 后台轻量模型: ${distill}${providerNote}`);
       return { handled: true, config };
     }
 
