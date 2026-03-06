@@ -15,9 +15,10 @@ feishu-login-qr.png
 # Playwright MCP console logs
 .playwright-mcp/
 
-# Local working dirs
+# Local working dirs (never push)
 docs/
 !scripts/docs/
+task/
 tasks/
 upload/
 
