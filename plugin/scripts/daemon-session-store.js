@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 
+
 function createSessionStore(deps) {
   const {
     fs,
@@ -192,7 +193,8 @@ function createSessionStore(deps) {
             const fileMtime = stat.mtimeMs;
             const existing = sessionMap.get(sessionId);
             if (!existing || fileMtime > (existing.fileMtime || 0)) {
-              const projectPath = projPathCache.get(proj) || proj.slice(1).replace(/-/g, '/');
+              const projectPath = projPathCache.get(proj);
+              if (!projectPath) continue;
               sessionMap.set(sessionId, {
                 sessionId, projectPath, fileMtime,
                 modified: new Date(fileMtime).toISOString(),
@@ -427,25 +429,46 @@ function createSessionStore(deps) {
     }
   }
 
+  function sanitizeCwd(cwd) {
+    try {
+      const resolved = path.resolve(String(cwd || HOME));
+      if (process.platform === 'win32' && !/^[A-Za-z]:[\\\/]/i.test(resolved)) return HOME;
+      const stat = fs.statSync(resolved, { throwIfNoEntry: false });
+      if (!stat || !stat.isDirectory()) return HOME;
+      return resolved;
+    } catch { return HOME; }
+  }
+
   function getSession(chatId) {
     const state = loadState();
     return state.sessions[chatId] || null;
   }
 
+  function getSessionForEngine(chatId, engine) {
+    const raw = getSession(chatId);
+    if (!raw) return null;
+    const safeEngine = String(engine || 'claude').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+    if (!raw.engines) return { cwd: raw.cwd, engine: safeEngine, id: raw.id || null, started: !!raw.started };
+    const slot = raw.engines[safeEngine] || {};
+    return { cwd: raw.cwd, engine: safeEngine, id: slot.id || null, started: !!slot.started };
+  }
+
   function createSession(chatId, cwd, name, engine = 'claude') {
     const state = loadState();
+    const safeEngine = String(engine || 'claude').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+    const safeCwd = sanitizeCwd(cwd);
     const sessionId = crypto.randomUUID();
+    const existing = state.sessions[chatId] || {};
+    const existingEngines = existing.engines || {};
     state.sessions[chatId] = {
-      id: sessionId,
-      cwd: cwd || HOME,
-      started: false,
-      engine: String(engine || 'claude').trim().toLowerCase() === 'codex' ? 'codex' : 'claude',
+      cwd: safeCwd,
+      engines: { ...existingEngines, [safeEngine]: { id: sessionId, started: false } },
     };
     saveState(state);
     invalidateSessionCache();
-    if (name) writeSessionName(sessionId, cwd || HOME, name);
-    log('INFO', `New session for ${chatId}: ${sessionId}${name ? ' [' + name + ']' : ''} (cwd: ${state.sessions[chatId].cwd})`);
-    return { ...state.sessions[chatId], id: sessionId };
+    if (name) writeSessionName(sessionId, safeCwd, name);
+    log('INFO', `New session for ${chatId}: ${sessionId}${name ? ' [' + name + ']' : ''} (cwd: ${safeCwd}) [${safeEngine}]`);
+    return getSessionForEngine(chatId, safeEngine);
   }
 
   function getSessionName(sessionId) {
@@ -526,12 +549,18 @@ function createSessionStore(deps) {
     } catch { return null; }
   }
 
-  function markSessionStarted(chatId) {
+  function markSessionStarted(chatId, engine) {
     const state = loadState();
-    if (state.sessions[chatId]) {
-      state.sessions[chatId].started = true;
-      saveState(state);
+    const s = state.sessions[chatId];
+    if (!s) return;
+    if (s.engines) {
+      const safeEngine = String(engine || 'claude').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+      if (!s.engines[safeEngine]) s.engines[safeEngine] = {};
+      s.engines[safeEngine].started = true;
+    } else {
+      s.started = true; // old flat format
     }
+    saveState(state);
   }
 
   // Codex session validation via ~/.codex/state_5.sqlite
@@ -624,6 +653,7 @@ function createSessionStore(deps) {
     buildSessionCardElements,
     listProjectDirs,
     getSession,
+    getSessionForEngine,
     createSession,
     getSessionName,
     writeSessionName,
