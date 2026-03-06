@@ -535,32 +535,67 @@ function createSessionStore(deps) {
   }
 
   // Codex session validation via ~/.codex/state_5.sqlite
-  // Returns { valid, cwd, rolloutPath } or { valid: false }
+  // ─── Unified session validation ──────────────────────────────────────────
+  // Both engines store sessions locally; only the backend differs.
+  // Single entry point: isEngineSessionValid(engine, sessionId, cwd)
+
+  const SESSION_VALIDATE_TTL = 30000;
+  const _validateCache = new Map(); // `${engine}@@${sessionId}@@${cwd}` -> { valid, ts }
+
+  function _cacheValidation(key, valid) {
+    _validateCache.set(key, { valid: !!valid, ts: Date.now() });
+    if (_validateCache.size > 512) _validateCache.delete(_validateCache.keys().next().value);
+    return !!valid;
+  }
+
+  // Claude backend: JSONL files under ~/.claude/projects/<hash>/
+  function _isClaudeSessionValid(sessionId, cwd) {
+    const normCwd = path.resolve(cwd);
+    try {
+      const sessionFile = findSessionFile(sessionId);
+      if (!sessionFile) return false;
+      const projectDir = path.dirname(sessionFile);
+      const indexFile = path.join(projectDir, 'sessions-index.json');
+      if (fs.existsSync(indexFile)) {
+        const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+        const entries = Array.isArray(data && data.entries) ? data.entries : [];
+        const entry = entries.find(e => e && e.sessionId === sessionId);
+        if (entry && entry.projectPath) return path.resolve(entry.projectPath) === normCwd;
+        const anyPath = (entries.find(e => e && e.projectPath) || {}).projectPath;
+        if (anyPath) return path.resolve(anyPath) === normCwd;
+      }
+      // Weak fallback: Claude encodes cwd in dir name; only trust a positive match.
+      const expectedDir = '-' + normCwd.replace(/^\//, '').replace(/[\/_ ]/g, '-');
+      if (path.basename(projectDir) === expectedDir) return true;
+      return true; // cannot prove mismatch — keep session
+    } catch {
+      return true; // conservative: infra failure ≠ invalid session
+    }
+  }
+
+  // Codex backend: SQLite index at ~/.codex/state_5.sqlite
   const CODEX_DB = path.join(HOME, '.codex', 'state_5.sqlite');
-  const _codexSessionCache = new Map(); // sessionId -> { result, ts }
-  const CODEX_SESSION_CACHE_TTL = 30000;
-
-  function isCodexSessionValid(sessionId, expectedCwd) {
-    if (!sessionId) return false;
-    const cached = _codexSessionCache.get(sessionId);
-    if (cached && Date.now() - cached.ts < CODEX_SESSION_CACHE_TTL) return cached.result;
-
+  function _isCodexSessionValid(sessionId, cwd) {
     try {
       const { DatabaseSync } = require('node:sqlite');
       const db = new DatabaseSync(CODEX_DB, { readonly: true });
-      const row = db.prepare('SELECT cwd, rollout_path FROM threads WHERE id = ?').get(sessionId);
+      const row = db.prepare('SELECT cwd FROM threads WHERE id = ?').get(sessionId);
       db.close();
-      const result = row
-        ? { valid: true, cwd: row.cwd, rolloutPath: row.rollout_path }
-        : { valid: false };
-      if (result.valid && expectedCwd) {
-        result.valid = path.resolve(row.cwd) === path.resolve(expectedCwd);
-      }
-      _codexSessionCache.set(sessionId, { result, ts: Date.now() });
-      return result;
+      return !!row && path.resolve(row.cwd) === path.resolve(cwd);
     } catch {
-      return { valid: false };
+      return false;
     }
+  }
+
+  function isEngineSessionValid(engine, sessionId, cwd) {
+    if (!sessionId || !cwd || sessionId === '__continue__') return true;
+    const key = `${engine}@@${sessionId}@@${path.resolve(cwd)}`;
+    const cached = _validateCache.get(key);
+    if (cached && Date.now() - cached.ts < SESSION_VALIDATE_TTL) return cached.valid;
+    const valid = engine === 'codex'
+      ? _isCodexSessionValid(sessionId, cwd)
+      : _isClaudeSessionValid(sessionId, cwd);
+    return _cacheValidation(key, valid);
   }
 
   return {
@@ -582,7 +617,7 @@ function createSessionStore(deps) {
     writeSessionName,
     markSessionStarted,
     getSessionRecentContext,
-    isCodexSessionValid,
+    isEngineSessionValid,
   };
 }
 

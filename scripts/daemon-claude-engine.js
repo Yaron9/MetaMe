@@ -36,7 +36,7 @@ function createClaudeEngine(deps) {
     getSessionName,
     writeSessionName,
     markSessionStarted,
-    isCodexSessionValid,
+    isEngineSessionValid,
     gitCheckpoint,
     gitCheckpointAsync,
     recordTokens,
@@ -135,72 +135,6 @@ function createClaudeEngine(deps) {
     return out;
   }
 
-  const SESSION_CWD_VALIDATION_TTL_MS = 30 * 1000;
-  const _sessionCwdValidationCache = new Map(); // key: `${sessionId}@@${cwd}` -> { inCwd, ts }
-
-  function cacheSessionCwdValidation(cacheKey, inCwd) {
-    _sessionCwdValidationCache.set(cacheKey, { inCwd: !!inCwd, ts: Date.now() });
-    if (_sessionCwdValidationCache.size > 512) {
-      const firstKey = _sessionCwdValidationCache.keys().next().value;
-      if (firstKey) _sessionCwdValidationCache.delete(firstKey);
-    }
-    return !!inCwd;
-  }
-
-  function isSessionInCwd(sessionId, cwd) {
-    const safeSessionId = String(sessionId || '').trim();
-    if (!safeSessionId || !cwd) return false;
-
-    const normCwd = normalizeCwd(cwd);
-    const cacheKey = `${safeSessionId}@@${normCwd}`;
-    const cached = _sessionCwdValidationCache.get(cacheKey);
-    if (cached && (Date.now() - cached.ts) < SESSION_CWD_VALIDATION_TTL_MS) {
-      return !!cached.inCwd;
-    }
-
-    try {
-      // Fast path: locate the exact session file, then validate its indexed projectPath.
-      if (typeof findSessionFile === 'function') {
-        const sessionFile = findSessionFile(safeSessionId);
-        if (!sessionFile) return cacheSessionCwdValidation(cacheKey, false);
-
-        const projectDir = path.dirname(sessionFile);
-        const indexFile = path.join(projectDir, 'sessions-index.json');
-        if (fs.existsSync(indexFile)) {
-          const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
-          const entries = Array.isArray(data && data.entries) ? data.entries : [];
-          const entry = entries.find(e => e && e.sessionId === safeSessionId);
-          if (entry && entry.projectPath) {
-            return cacheSessionCwdValidation(cacheKey, normalizeCwd(entry.projectPath) === normCwd);
-          }
-          // sessions-index may lag behind new sessions; use project-level path from any entry.
-          const anyProjectPath = (entries.find(e => e && e.projectPath) || {}).projectPath;
-          if (anyProjectPath) {
-            return cacheSessionCwdValidation(cacheKey, normalizeCwd(anyProjectPath) === normCwd);
-          }
-        }
-
-        // Weak fallback: encode normCwd using Claude's folder convention and accept
-        // only positive match. If it doesn't match, keep current session to avoid
-        // false mismatches for paths with non-ASCII/special characters.
-        const expectedDirName = '-' + normCwd.replace(/^\//, '').replace(/[\/_ ]/g, '-');
-        const actualDirName = path.basename(projectDir);
-        if (actualDirName === expectedDirName) {
-          return cacheSessionCwdValidation(cacheKey, true);
-        }
-        // Unable to prove mismatch safely.
-        return cacheSessionCwdValidation(cacheKey, true);
-      }
-
-      // Ultimate fallback (legacy path): scoped scan in target cwd.
-      const recentInCwd = listRecentSessions(1000, normCwd);
-      const existsInCwd = recentInCwd.some(s => s.sessionId === safeSessionId);
-      return cacheSessionCwdValidation(cacheKey, existsInCwd);
-    } catch {
-      // Conservative fallback: if validation infra fails, avoid false negatives by preserving current session.
-      return cacheSessionCwdValidation(cacheKey, true);
-    }
-  }
 
   /**
    * Parse [[FILE:...]] markers from Claude output.
@@ -904,24 +838,14 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const runtime = getEngineRuntime(engineName);
     session.engine = engineName; // keep local copy for Codex resume detection below
 
-    // Safety guard: prevent stale state from resuming another workspace's session.
-    if (engineName === 'claude' && session && session.started && session.id && session.id !== '__continue__' && session.cwd) {
-      const sessionCwd = normalizeCwd(session.cwd);
-      const existsInCwd = isSessionInCwd(session.id, sessionCwd);
-      if (!existsInCwd) {
-        log('WARN', `Session mismatch detected for ${chatId}: ${session.id.slice(0, 8)} not found in ${sessionCwd}; creating fresh session`);
-        session = createSession(chatId, sessionCwd, boundProject && boundProject.name ? boundProject.name : '', engineName);
-      }
-    }
-
-    // Codex: pre-validate session via ~/.codex/state_5.sqlite before spawning.
-    // Avoids the expensive try→fail→retry cycle; notifies user upfront if session expired.
-    if (engineName === 'codex' && session && session.started && session.id && session.id !== '__continue__' && isCodexSessionValid) {
-      const check = isCodexSessionValid(session.id, session.cwd);
-      if (!check.valid) {
-        log('WARN', `Codex session ${session.id.slice(0, 8)} not found in SQLite for ${chatId}; creating fresh session`);
-        await bot.sendMessage(chatId, '⚠️ Codex session 已过期，将以全新 session 继续。').catch(() => {});
-        session = createSession(chatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', 'codex');
+    // Pre-spawn session validation: unified for all engines.
+    // Claude checks JSONL file existence; Codex checks SQLite. Same interface, different backend.
+    if (session && session.started && session.id && session.id !== '__continue__' && session.cwd && isEngineSessionValid) {
+      const valid = isEngineSessionValid(engineName, session.id, session.cwd);
+      if (!valid) {
+        log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${chatId}; creating fresh session`);
+        await bot.sendMessage(chatId, '⚠️ 上次 session 已失效，已自动开启新 session。').catch(() => {});
+        session = createSession(chatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', engineName);
       }
     }
 

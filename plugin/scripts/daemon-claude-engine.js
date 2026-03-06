@@ -36,7 +36,9 @@ function createClaudeEngine(deps) {
     getSessionName,
     writeSessionName,
     markSessionStarted,
+    isEngineSessionValid,
     gitCheckpoint,
+    gitCheckpointAsync,
     recordTokens,
     skillEvolution,
     touchInteraction,
@@ -66,19 +68,24 @@ function createClaudeEngine(deps) {
     return _spawn(cmd, args, options);
   }
 
-  let _sessionPatchQueue = Promise.resolve();
+  // Per-chatId patch queues: Agent A's writes never block Agent B.
+  const _patchQueues = new Map(); // chatId -> Promise
   function patchSessionSerialized(chatId, patchFn) {
-    _sessionPatchQueue = _sessionPatchQueue.then(() => {
+    const prev = _patchQueues.get(chatId) || Promise.resolve();
+    const next = prev.then(() => {
       const state = loadState();
       if (!state.sessions) state.sessions = {};
       const cur = state.sessions[chatId] || {};
-      const next = typeof patchFn === 'function' ? patchFn(cur) : cur;
-      state.sessions[chatId] = next && typeof next === 'object' ? next : cur;
+      const patched = typeof patchFn === 'function' ? patchFn(cur) : cur;
+      state.sessions[chatId] = patched && typeof patched === 'object' ? patched : cur;
       saveState(state);
     }).catch((e) => {
-      log('WARN', `patchSessionSerialized failed: ${e.message}`);
+      log('WARN', `patchSessionSerialized failed for ${chatId}: ${e.message}`);
     });
-    return _sessionPatchQueue;
+    _patchQueues.set(chatId, next);
+    // GC: remove resolved entries to prevent unbounded Map growth
+    next.then(() => { if (_patchQueues.get(chatId) === next) _patchQueues.delete(chatId); });
+    return next;
   }
 
   const CODEX_RESUME_RETRY_WINDOW_MS = 10 * 60 * 1000;
@@ -128,72 +135,6 @@ function createClaudeEngine(deps) {
     return out;
   }
 
-  const SESSION_CWD_VALIDATION_TTL_MS = 30 * 1000;
-  const _sessionCwdValidationCache = new Map(); // key: `${sessionId}@@${cwd}` -> { inCwd, ts }
-
-  function cacheSessionCwdValidation(cacheKey, inCwd) {
-    _sessionCwdValidationCache.set(cacheKey, { inCwd: !!inCwd, ts: Date.now() });
-    if (_sessionCwdValidationCache.size > 512) {
-      const firstKey = _sessionCwdValidationCache.keys().next().value;
-      if (firstKey) _sessionCwdValidationCache.delete(firstKey);
-    }
-    return !!inCwd;
-  }
-
-  function isSessionInCwd(sessionId, cwd) {
-    const safeSessionId = String(sessionId || '').trim();
-    if (!safeSessionId || !cwd) return false;
-
-    const normCwd = normalizeCwd(cwd);
-    const cacheKey = `${safeSessionId}@@${normCwd}`;
-    const cached = _sessionCwdValidationCache.get(cacheKey);
-    if (cached && (Date.now() - cached.ts) < SESSION_CWD_VALIDATION_TTL_MS) {
-      return !!cached.inCwd;
-    }
-
-    try {
-      // Fast path: locate the exact session file, then validate its indexed projectPath.
-      if (typeof findSessionFile === 'function') {
-        const sessionFile = findSessionFile(safeSessionId);
-        if (!sessionFile) return cacheSessionCwdValidation(cacheKey, false);
-
-        const projectDir = path.dirname(sessionFile);
-        const indexFile = path.join(projectDir, 'sessions-index.json');
-        if (fs.existsSync(indexFile)) {
-          const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
-          const entries = Array.isArray(data && data.entries) ? data.entries : [];
-          const entry = entries.find(e => e && e.sessionId === safeSessionId);
-          if (entry && entry.projectPath) {
-            return cacheSessionCwdValidation(cacheKey, normalizeCwd(entry.projectPath) === normCwd);
-          }
-          // sessions-index may lag behind new sessions; use project-level path from any entry.
-          const anyProjectPath = (entries.find(e => e && e.projectPath) || {}).projectPath;
-          if (anyProjectPath) {
-            return cacheSessionCwdValidation(cacheKey, normalizeCwd(anyProjectPath) === normCwd);
-          }
-        }
-
-        // Weak fallback: encode normCwd using Claude's folder convention and accept
-        // only positive match. If it doesn't match, keep current session to avoid
-        // false mismatches for paths with non-ASCII/special characters.
-        const expectedDirName = '-' + normCwd.replace(/^\//, '').replace(/[\/_ ]/g, '-');
-        const actualDirName = path.basename(projectDir);
-        if (actualDirName === expectedDirName) {
-          return cacheSessionCwdValidation(cacheKey, true);
-        }
-        // Unable to prove mismatch safely.
-        return cacheSessionCwdValidation(cacheKey, true);
-      }
-
-      // Ultimate fallback (legacy path): scoped scan in target cwd.
-      const recentInCwd = listRecentSessions(1000, normCwd);
-      const existsInCwd = recentInCwd.some(s => s.sessionId === safeSessionId);
-      return cacheSessionCwdValidation(cacheKey, existsInCwd);
-    } catch {
-      // Conservative fallback: if validation infra fails, avoid false negatives by preserving current session.
-      return cacheSessionCwdValidation(cacheKey, true);
-    }
-  }
 
   /**
    * Parse [[FILE:...]] markers from Claude output.
@@ -881,72 +822,34 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const boundEngineName = (boundProject && boundProject.engine) ? normalizeEngineName(boundProject.engine) : getDefaultEngine();
 
     if (!session) {
-      if (boundCwd) {
-        // Agent-bound chats must stay in their own workspace: never attach to another project's session.
-        const recentInBound = listRecentSessions(1, boundCwd);
-        if (recentInBound.length > 0 && recentInBound[0].sessionId) {
-          const target = recentInBound[0];
-          const state = loadState();
-          state.sessions[chatId] = {
-            id: target.sessionId,
-            cwd: boundCwd,
-            started: true,
-            engine: boundEngineName,
-          };
-          saveState(state);
-          session = state.sessions[chatId];
-          log('INFO', `Auto-attached ${chatId} to bound-session: ${target.sessionId.slice(0, 8)} (${path.basename(boundCwd)})`);
-        } else {
-          session = createSession(chatId, boundCwd, boundProject && boundProject.name ? boundProject.name : '', boundEngineName);
-          log('INFO', `Created fresh session for bound workspace: ${path.basename(boundCwd)}`);
-        }
-      } else {
-        // Non-bound chats keep legacy behavior: attach global recent, else create.
-        const recent = listRecentSessions(1);
-        if (recent.length > 0 && recent[0].sessionId && recent[0].projectPath) {
-          const target = recent[0];
-          const state = loadState();
-          state.sessions[chatId] = {
-            id: target.sessionId,
-            cwd: target.projectPath,
-            started: true,
-            engine: getDefaultEngine(),
-          };
-          saveState(state);
-          session = state.sessions[chatId];
-          log('INFO', `Auto-attached ${chatId} to recent session: ${target.sessionId.slice(0, 8)} (${path.basename(target.projectPath)})`);
-        } else {
-          session = createSession(chatId, undefined, '', boundEngineName);
-        }
-      }
+      // No saved state for this chatId: start a fresh session.
+      // Note: daemon_state.json persists across restarts, so this only happens on truly first use
+      // or after an explicit /new command. Auto-attaching to a recent session is intentionally
+      // avoided to prevent cross-agent contamination when multiple agents share cwd or cache.
+      session = createSession(chatId, boundCwd || undefined, boundProject && boundProject.name ? boundProject.name : '', boundEngineName);
     }
 
+    // Engine is determined from config only — bound agent config wins, then global default.
+    // No per-chatId engine state: switching engines uses /provider (changes global default)
+    // or agent config in daemon.yaml. This avoids a per-message state write.
     const engineName = normalizeEngineName(
-      (boundProject && boundProject.engine)
-      || (session && session.engine)
-      || getDefaultEngine()
+      (boundProject && boundProject.engine) || getDefaultEngine()
     );
     const runtime = getEngineRuntime(engineName);
-    session.engine = engineName;
-    if (!getSession(chatId) || getSession(chatId).engine !== engineName) {
-      await patchSessionSerialized(chatId, (cur) => ({
-        ...cur,
-        engine: engineName,
-        cwd: session.cwd || cur.cwd || HOME,
-      }));
-    }
+    session.engine = engineName; // keep local copy for Codex resume detection below
 
-    // Safety guard: prevent stale state from resuming another workspace's session.
-    if (engineName === 'claude' && session && session.started && session.id && session.id !== '__continue__' && session.cwd) {
-      const sessionCwd = normalizeCwd(session.cwd);
-      const existsInCwd = isSessionInCwd(session.id, sessionCwd);
-      if (!existsInCwd) {
-        log('WARN', `Session mismatch detected for ${chatId}: ${session.id.slice(0, 8)} not found in ${sessionCwd}; creating fresh session`);
-        session = createSession(chatId, sessionCwd, boundProject && boundProject.name ? boundProject.name : '', engineName);
+    // Pre-spawn session validation: unified for all engines.
+    // Claude checks JSONL file existence; Codex checks SQLite. Same interface, different backend.
+    if (session && session.started && session.id && session.id !== '__continue__' && session.cwd && isEngineSessionValid) {
+      const valid = isEngineSessionValid(engineName, session.id, session.cwd);
+      if (!valid) {
+        log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${chatId}; creating fresh session`);
+        await bot.sendMessage(chatId, '⚠️ 上次 session 已失效，已自动开启新 session。').catch(() => {});
+        session = createSession(chatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', engineName);
       }
     }
 
-    const daemonCfg = loadConfig().daemon || {};
+    const daemonCfg = (config && config.daemon) || {};
     const mentorCfg = (daemonCfg.mentor && typeof daemonCfg.mentor === 'object') ? daemonCfg.mentor : {};
     const mentorEnabled = !!(mentorEngine && mentorCfg.enabled);
     const excludeAgents = new Set(
@@ -1176,13 +1079,18 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       }
     }
 
-    // Always append a compact language guard to prevent accidental Korean/Japanese responses
-    const langGuard = '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
+    // Language guard: only inject on first message of a new session to avoid
+    // linearly growing token cost on every turn in long conversations.
+    // Claude Code preserves session context, so the guard persists after initial injection.
+    const langGuard = session.started
+      ? ''
+      : '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
     const fullPrompt = routedPrompt + daemonHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
 
-    // Git checkpoint before Claude modifies files (for /undo)
-    // Pass the user prompt as label so checkpoint list is human-readable
-    gitCheckpoint(session.cwd, prompt);
+    // Git checkpoint before Claude modifies files (for /undo).
+    // Run async (fire-and-forget) to avoid blocking Claude spawn by ~600ms.
+    // Completes well before Claude's first file write (~2s after spawn).
+    (gitCheckpointAsync || gitCheckpoint)(session.cwd, prompt).catch?.(() => {});
 
     // Use streaming mode to show progress
     // Telegram: edit status msg in-place; Feishu: edit or fallback to new messages
@@ -1264,6 +1172,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       })) {
         markCodexResumeRetried(chatId);
         log('WARN', `Codex resume failed for ${chatId}, retrying once with fresh exec: ${String(error).slice(0, 120)}`);
+        // Notify user explicitly — silent context loss is worse than a visible warning.
+        await bot.sendMessage(chatId, '⚠️ Codex session 已过期，上下文丢失。正在以全新 session 重试，请在回复后补充必要背景。').catch(() => {});
         session = createSession(
           chatId,
           session.cwd,
@@ -1277,6 +1187,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           session,
           cwd: session.cwd,
         });
+        // Prepend a context-loss marker so Codex knows this is a fresh session mid-conversation.
+        const retryPrompt = `[Note: previous Codex session expired and could not be resumed. Treating this as a new session. User message follows:]\n\n${fullPrompt}`;
         ({
           output,
           error,
@@ -1288,7 +1200,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           sessionId,
         } = await spawnClaudeStreaming(
           retryArgs,
-          fullPrompt,
+          retryPrompt,
           session.cwd,
           onStatus,
           600000,
