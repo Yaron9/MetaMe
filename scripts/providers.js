@@ -331,10 +331,24 @@ function callDistillModel(input, extraEnv, timeout, options = {}) {
   const args = engine === 'codex'
     ? ['exec', '--json', '-m', model, '--full-auto', '-']
     : ['-p', '--model', model, '--no-session-persistence'];
+  // On Windows, bare binary names need shell:true to resolve .cmd wrappers.
+  // For codex, also sanitize CODEX_HOME if it points to a non-existent path.
+  if (process.platform === 'win32') {
+    if (engine === 'codex' && env.CODEX_HOME) {
+      const { existsSync } = require('fs');
+      if (!existsSync(env.CODEX_HOME)) delete env.CODEX_HOME;
+    }
+  }
+  const spawnOpts = {
+    env,
+    timeout,
+    maxBuffer: 10 * 1024 * 1024,
+    ...(process.platform === 'win32' ? { shell: process.env.COMSPEC || true } : {}),
+  };
   return new Promise((resolve, reject) => {
     const proc = execFile(
       bin, args,
-      { env, timeout, maxBuffer: 10 * 1024 * 1024 },
+      spawnOpts,
       (err, stdout, stderr) => {
         if (err) {
           const detail = (stderr || stdout || '').trim().split('\n')[0];

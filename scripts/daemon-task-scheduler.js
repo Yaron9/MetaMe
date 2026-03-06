@@ -614,6 +614,7 @@ function createTaskScheduler(deps) {
             CLAUDECODE: undefined,
             METAME_INTERNAL_PROMPT: '1',
           },
+          ...(process.platform === 'win32' ? { shell: process.env.COMSPEC || true } : {}),
         }).trim();
         const tk = Math.ceil((prompt.length + output.length) / 4);
         totalTokens += tk;
