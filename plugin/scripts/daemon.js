@@ -2033,14 +2033,15 @@ async function main() {
   // Graceful shutdown
   const shutdown = async (opts = {}) => {
     if (shuttingDown) return;
+    shuttingDown = true;  // set immediately to prevent double-spawn race condition
     if (opts.restartReason) {
       const spawned = spawnReplacementDaemon(opts.restartReason);
       if (!spawned) {
         log('ERROR', `[RESTART] Abort shutdown: failed to spawn replacement (${opts.restartReason})`);
+        shuttingDown = false;
         return;
       }
     }
-    shuttingDown = true;
     log('INFO', 'Daemon shutting down...');
     await notifyActiveUsers('关闭').catch(() => {});
     runtimeWatchers.stop();
