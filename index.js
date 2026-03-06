@@ -644,19 +644,21 @@ if (fs.existsSync(PROJECT_FILE)) {
 }
 
 // Determine if this is a known (calibrated) user
+// Cache the parsed doc to avoid re-reading BRAIN_FILE in mirror/reflection sections below.
 const yaml = require('js-yaml');
 let isKnownUser = false;
+let _brainDoc = null;
 try {
   if (fs.existsSync(BRAIN_FILE)) {
-    const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
-    const id = doc.identity || {};
-    // Known if locale is set, OR if any other identity field was filled in
-    // (covers cases where genesis ran but locale wasn't explicitly set)
+    _brainDoc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
+    const id = _brainDoc.identity || {};
     const hasLocale = id.locale && id.locale !== 'null' && id.locale !== null;
-    const hasOtherFields = id.name || id.role || id.timezone || (doc.status && doc.status.focus && doc.status.focus !== 'Initializing');
-    if (hasLocale || hasOtherFields) {
-      isKnownUser = true;
-    }
+    // Exclude default placeholder values written by genesis scaffolding
+    const hasName = id.name && id.name !== 'Unknown' && id.name !== 'null';
+    const hasRole = id.role && id.role !== 'Unknown' && id.role !== 'null';
+    const hasOtherFields = hasName || hasRole || id.timezone ||
+      (_brainDoc.status && _brainDoc.status.focus && _brainDoc.status.focus !== 'Initializing');
+    if (hasLocale || hasOtherFields) isKnownUser = true;
   }
 } catch (e) {
   // Ignore error, treat as unknown
@@ -682,8 +684,8 @@ if (isKnownUser) {
 // ---------------------------------------------------------
 let mirrorLine = '';
 try {
-  if (isKnownUser && fs.existsSync(BRAIN_FILE)) {
-    const brainDoc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
+  if (isKnownUser && _brainDoc) {
+    const brainDoc = _brainDoc;
 
     // Check quiet mode
     const quietUntil = brainDoc.growth && brainDoc.growth.quiet_until;
@@ -743,8 +745,8 @@ try {
 // This ensures reflections don't fire every session.
 let reflectionLine = '';
 try {
-  if (isKnownUser && fs.existsSync(BRAIN_FILE)) {
-    const refDoc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
+  if (isKnownUser && _brainDoc) {
+    const refDoc = _brainDoc;
 
     // Check quiet mode
     const quietUntil = refDoc.growth && refDoc.growth.quiet_until;
@@ -1973,20 +1975,16 @@ if (isCodex) {
 
   // Codex reads AGENTS.md (not CLAUDE.md); create symlink so genesis protocol is visible.
   // Also ensure global ~/AGENTS.md → ~/.claude/CLAUDE.md for identity context.
+  // Use try-catch on symlinkSync directly (avoids TOCTOU race from existsSync pre-check).
   try {
-    const agentsMd = path.join(process.cwd(), 'AGENTS.md');
-    const claudeMd = path.join(process.cwd(), 'CLAUDE.md');
-    if (!fs.existsSync(agentsMd) && fs.existsSync(claudeMd)) {
-      fs.symlinkSync('CLAUDE.md', agentsMd);
-    }
-  } catch { /* non-critical */ }
+    if (fs.existsSync(path.join(process.cwd(), 'CLAUDE.md')))
+      fs.symlinkSync('CLAUDE.md', path.join(process.cwd(), 'AGENTS.md'));
+  } catch { /* EEXIST or other — non-critical */ }
   try {
-    const globalAgentsMd = path.join(HOME_DIR, 'AGENTS.md');
     const globalClaudeMd = path.join(HOME_DIR, '.claude', 'CLAUDE.md');
-    if (!fs.existsSync(globalAgentsMd) && fs.existsSync(globalClaudeMd)) {
-      fs.symlinkSync(globalClaudeMd, globalAgentsMd);
-    }
-  } catch { /* non-critical */ }
+    if (fs.existsSync(globalClaudeMd))
+      fs.symlinkSync(globalClaudeMd, path.join(HOME_DIR, 'AGENTS.md'));
+  } catch { /* EEXIST or other — non-critical */ }
 
   const child = spawnCodex(codexArgs, {
     stdio: 'inherit',
