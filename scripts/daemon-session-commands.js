@@ -14,6 +14,7 @@ function createSessionCommandHandler(deps) {
     sendBrowse,
     sendDirPicker,
     createSession,
+    getSessionForEngine,
     getCachedFile,
     getSession,
     listRecentSessions,
@@ -32,6 +33,17 @@ function createSessionCommandHandler(deps) {
   function normalizeEngineName(name) {
     const n = String(name || '').trim().toLowerCase();
     return n === 'codex' ? 'codex' : getDefaultEngine();
+  }
+
+  // Write per-engine session slot, preserving cwd and other engine slots.
+  function attachEngineSession(state, chatId, engine, sessionId, cwd) {
+    const existing = state.sessions[chatId] || {};
+    const existingEngines = existing.engines || {};
+    state.sessions[chatId] = {
+      ...existing,
+      cwd: cwd || existing.cwd || HOME,
+      engines: { ...existingEngines, [engine]: { id: sessionId, started: true } },
+    };
   }
 
   function inferEngineByCwd(cfg, cwd) {
@@ -107,7 +119,7 @@ function createSessionCommandHandler(deps) {
       const mapForEngine = { ...(cfgForEngine.telegram ? cfgForEngine.telegram.chat_agent_map : {}), ...(cfgForEngine.feishu ? cfgForEngine.feishu.chat_agent_map : {}) };
       const mappedKeyForEngine = mapForEngine[String(chatId)];
       const mappedProjForEngine = mappedKeyForEngine && cfgForEngine.projects ? cfgForEngine.projects[mappedKeyForEngine] : null;
-      const currentEngine = normalizeEngineName(getSession(chatId) && getSession(chatId).engine);
+      const currentEngine = getDefaultEngine();
       const sessionEngine = normalizeEngineName((mappedProjForEngine && mappedProjForEngine.engine) || currentEngine);
       const session = createSession(chatId, dirPath, sessionName || '', sessionEngine);
       const label = sessionName ? `[${sessionName}]` : '';
@@ -165,15 +177,8 @@ function createSessionCommandHandler(deps) {
         // Last resort: use __continue__ to resume whatever Claude thinks is last
         const state2 = loadState();
         const cfgForEngine = loadConfig();
-        const currentEngine = normalizeEngineName(state2.sessions[chatId] && state2.sessions[chatId].engine);
-        const engineByCwd = inferEngineByCwd(cfgForEngine, curCwd || HOME);
-        state2.sessions[chatId] = {
-          id: '__continue__',
-          cwd: curCwd || HOME,
-          created: new Date().toISOString(),
-          started: true,
-          engine: engineByCwd || currentEngine,
-        };
+        const engineByCwd = inferEngineByCwd(cfgForEngine, curCwd || HOME) || getDefaultEngine();
+        attachEngineSession(state2, chatId, engineByCwd, '__continue__', curCwd || HOME);
         saveState(state2);
         await bot.sendMessage(chatId, `⚡ Resuming last session in ${path.basename(curCwd || HOME)}`);
         return true;
@@ -181,14 +186,8 @@ function createSessionCommandHandler(deps) {
 
       const state2 = loadState();
       const cfgForEngine = loadConfig();
-      const currentEngine = normalizeEngineName(state2.sessions[chatId] && state2.sessions[chatId].engine);
-      const engineByCwd = inferEngineByCwd(cfgForEngine, s.projectPath || HOME);
-      state2.sessions[chatId] = {
-        id: s.sessionId,
-        cwd: s.projectPath || HOME,
-        started: true,
-        engine: engineByCwd || currentEngine,
-      };
+      const engineByCwd = inferEngineByCwd(cfgForEngine, s.projectPath || HOME) || getDefaultEngine();
+      attachEngineSession(state2, chatId, engineByCwd, s.sessionId, s.projectPath || HOME);
       saveState(state2);
       // Display: name/summary + id on separate lines
       const name = s.customTitle;
@@ -253,7 +252,7 @@ function createSessionCommandHandler(deps) {
 
     // /sessions — compact list, tap to see details, then tap to switch
     if (text === '/sessions') {
-      const currentEngine = normalizeEngineName(getSession(chatId) && getSession(chatId).engine);
+      const currentEngine = getDefaultEngine();
       const codexLimitTip = '⚠️ 当前为 Codex 会话：`/sessions` 列表暂仅展示 Claude 本地会话，Codex 会话暂不可见。';
       const allSessions = listRecentSessions(15);
       if (allSessions.length === 0) {
@@ -386,14 +385,8 @@ function createSessionCommandHandler(deps) {
           // Switch to that session (like /resume) AND its directory
           const state2 = loadState();
           const cfgForEngine = loadConfig();
-          const currentEngine = normalizeEngineName(state2.sessions[chatId] && state2.sessions[chatId].engine);
-          const engineByCwd = inferEngineByCwd(cfgForEngine, target.projectPath);
-          state2.sessions[chatId] = {
-            id: target.sessionId,
-            cwd: target.projectPath,
-            started: true,
-            engine: engineByCwd || currentEngine,
-          };
+          const engineByCwd = inferEngineByCwd(cfgForEngine, target.projectPath) || getDefaultEngine();
+          attachEngineSession(state2, chatId, engineByCwd, target.sessionId, target.projectPath);
           saveState(state2);
           const name = target.customTitle || target.summary || '';
           const label = name ? name.slice(0, 40) : target.sessionId.slice(0, 8);
@@ -420,25 +413,19 @@ function createSessionCommandHandler(deps) {
         // Attach to existing session in this directory
         const target = recentInDir[0];
         const cfgForEngine = loadConfig();
-        const engineByCwd = inferEngineByCwd(cfgForEngine, newCwd);
-        state2.sessions[chatId] = {
-          id: target.sessionId,
-          cwd: newCwd,
-          started: true,
-          engine: engineByCwd || normalizeEngineName(state2.sessions[chatId] && state2.sessions[chatId].engine),
-        };
+        const engineByCwd = inferEngineByCwd(cfgForEngine, newCwd) || getDefaultEngine();
+        attachEngineSession(state2, chatId, engineByCwd, target.sessionId, newCwd);
         saveState(state2);
         const label = target.customTitle || target.summary?.slice(0, 30) || target.sessionId.slice(0, 8);
         await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)}\n🔄 Attached: ${label}`);
       } else if (!state2.sessions[chatId]) {
         const cfgForEngine = loadConfig();
         const engineByCwd = inferEngineByCwd(cfgForEngine, newCwd);
-        const currentEngine = normalizeEngineName(getSession(chatId) && getSession(chatId).engine);
+        const currentEngine = getDefaultEngine();
         createSession(chatId, newCwd, '', engineByCwd || currentEngine);
         await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)} (new session)`);
       } else {
         state2.sessions[chatId].cwd = newCwd;
-        if (!state2.sessions[chatId].engine) state2.sessions[chatId].engine = getDefaultEngine();
         saveState(state2);
         await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)}`);
       }

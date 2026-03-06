@@ -32,6 +32,7 @@ function createClaudeEngine(deps) {
     findSessionFile,
     listRecentSessions,
     getSession,
+    getSessionForEngine,
     createSession,
     getSessionName,
     writeSessionName,
@@ -811,9 +812,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     // Skill routing: detect skill first, then decide session
     // BUT: skip skill routing if agent addressed by nickname OR chat already has an active session
     // (active conversation should never be hijacked by keyword-based skill matching)
-    let session = getSession(chatId);
-    const hasActiveSession = session && session.started;
-    const skill = (agentMatch || hasActiveSession) ? null : routeSkill(prompt);
+    const sessionRaw = getSession(chatId);
     const chatIdStr = String(chatId);
     const chatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
     const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
@@ -821,29 +820,35 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
     const boundEngineName = (boundProject && boundProject.engine) ? normalizeEngineName(boundProject.engine) : getDefaultEngine();
 
-    if (!session) {
-      // No saved state for this chatId: start a fresh session.
-      // Note: daemon_state.json persists across restarts, so this only happens on truly first use
-      // or after an explicit /new command. Auto-attaching to a recent session is intentionally
-      // avoided to prevent cross-agent contamination when multiple agents share cwd or cache.
-      session = createSession(chatId, boundCwd || undefined, boundProject && boundProject.name ? boundProject.name : '', boundEngineName);
-    }
-
     // Engine is determined from config only — bound agent config wins, then global default.
-    // No per-chatId engine state: switching engines uses /provider (changes global default)
-    // or agent config in daemon.yaml. This avoids a per-message state write.
     const engineName = normalizeEngineName(
       (boundProject && boundProject.engine) || getDefaultEngine()
     );
     const runtime = getEngineRuntime(engineName);
+
+    // hasActiveSession: does the current engine have an ongoing conversation?
+    const hasActiveSession = sessionRaw && (
+      sessionRaw.engines ? !!(sessionRaw.engines[engineName]?.started) : !!sessionRaw.started
+    );
+    const skill = (agentMatch || hasActiveSession) ? null : routeSkill(prompt);
+
+    if (!sessionRaw) {
+      // No saved state for this chatId: start a fresh session.
+      // Note: daemon_state.json persists across restarts, so this only happens on truly first use
+      // or after an explicit /new command.
+      createSession(chatId, boundCwd || undefined, boundProject && boundProject.name ? boundProject.name : '', boundEngineName);
+    }
+
+    // Resolve flat view for current engine (id + started are engine-specific; cwd is shared)
+    let session = getSessionForEngine(chatId, engineName) || { cwd: boundCwd || HOME, engine: engineName, id: null, started: false };
     session.engine = engineName; // keep local copy for Codex resume detection below
 
     // Pre-spawn session validation: unified for all engines.
     // Claude checks JSONL file existence; Codex checks SQLite. Same interface, different backend.
-    if (session && session.started && session.id && session.id !== '__continue__' && session.cwd) {
+    if (session.started && session.id && session.id !== '__continue__' && session.cwd) {
       const valid = isEngineSessionValid(engineName, session.id, session.cwd);
       if (!valid) {
-        log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${chatId}; creating fresh session`);
+        log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${chatId}; starting fresh ${engineName} session`);
         await bot.sendMessage(chatId, '⚠️ 上次 session 已失效，已自动开启新 session。').catch(() => {});
         session = createSession(chatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', engineName);
       }
@@ -1139,13 +1144,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         engine: runtime.name,
         started: true,
       };
-      await patchSessionSerialized(chatId, (cur) => ({
-        ...cur,
-        id: safeNextId,
-        cwd: session.cwd || cur.cwd || HOME,
-        engine: runtime.name,
-        started: true,
-      }));
+      await patchSessionSerialized(chatId, (cur) => {
+        const engines = { ...(cur.engines || {}) };
+        engines[runtime.name] = { ...(engines[runtime.name] || {}), id: safeNextId, started: true };
+        return { ...cur, cwd: session.cwd || cur.cwd || HOME, engines };
+      });
       if (runtime.name === 'codex' && wasStarted && prevSessionId && prevSessionId !== safeNextId && prevSessionId !== '__continue__') {
         log('WARN', `Codex thread migrated for ${chatId}: ${prevSessionId.slice(0, 8)} -> ${safeNextId.slice(0, 8)}`);
       }
@@ -1281,14 +1284,14 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         const doneMsg = await bot.sendMessage(chatId, `✉️ 已转达给 ${names}，处理中…`);
         if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session);
         const wasNew = !session.started;
-        if (wasNew) markSessionStarted(chatId);
+        if (wasNew) markSessionStarted(chatId, engineName);
         return { ok: true };
       }
       const filesDesc = files && files.length > 0 ? `\n修改了 ${files.length} 个文件` : '';
       const doneMsg = await bot.sendMessage(chatId, `✅ 完成${filesDesc}`);
       if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session);
       const wasNew = !session.started;
-      if (wasNew) markSessionStarted(chatId);
+      if (wasNew) markSessionStarted(chatId, engineName);
       return { ok: true };
     }
 
@@ -1313,7 +1316,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       // Mark session as started after first successful call
       const wasNew = !session.started;
-      if (wasNew) markSessionStarted(chatId);
+      if (wasNew) markSessionStarted(chatId, engineName);
 
       const estimated = Math.ceil((prompt.length + output.length) / 4);
       const chatCategory = classifyChatUsage(chatId, {
@@ -1406,7 +1409,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         );
         if (retry.sessionId) await onSession(retry.sessionId);
         if (retry.output) {
-          markSessionStarted(chatId);
+          markSessionStarted(chatId, runtime.name);
           const { markedFiles: retryMarked, cleanOutput: retryClean } = parseFileMarkers(retry.output);
           await bot.sendMarkdown(chatId, retryClean);
           await sendFileButtons(bot, chatId, mergeFileCollections(retryMarked, retry.files));
