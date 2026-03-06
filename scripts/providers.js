@@ -384,7 +384,7 @@ function callDistillModel(input, extraEnv, timeout, options = {}) {
 // ---------------------------------------------------------
 // ENGINE AWARENESS (set by daemon.js setDefaultEngine)
 // ---------------------------------------------------------
-let _currentEngine = 'claude';
+let _currentEngine = process.env.METAME_ENGINE === 'codex' ? 'codex' : 'claude';
 function setEngine(name) { _currentEngine = (name === 'codex') ? 'codex' : 'claude'; }
 function getEngine() { return _currentEngine; }
 
