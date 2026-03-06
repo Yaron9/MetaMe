@@ -564,8 +564,13 @@ function createSessionStore(deps) {
         if (anyPath) return path.resolve(anyPath) === normCwd;
       }
       // Weak fallback: Claude encodes cwd in dir name; only trust a positive match.
-      const expectedDir = '-' + normCwd.replace(/^\//, '').replace(/[\/_ ]/g, '-');
-      if (path.basename(projectDir) === expectedDir) return true;
+      // Unix: /home/user/project → -home-user-project
+      // Windows: D:\MetaMe → D--MetaMe (replaces : and \ with -)
+      const actualDir = path.basename(projectDir).toLowerCase();
+      const expectedDir = process.platform === 'win32'
+        ? normCwd.replace(/[:\\\/_ ]/g, '-').toLowerCase()
+        : ('-' + normCwd.replace(/^\//, '').replace(/[\/_ ]/g, '-')).toLowerCase();
+      if (actualDir === expectedDir) return true;
       return false; // dir name mismatch — session belongs to a different project
     } catch {
       return true; // conservative: infra failure ≠ invalid session

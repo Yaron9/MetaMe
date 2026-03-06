@@ -35,3 +35,4 @@ x.md
 eslint.config.js
 __pycache__/
 *.pyc
+AGENTS.md
