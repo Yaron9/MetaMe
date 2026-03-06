@@ -381,11 +381,11 @@ ${safeDelta}
         if (!p || !p.cwd) continue;
         const pCwd = normalizeCwd ? normalizeCwd(p.cwd) : p.cwd;
         const r1 = path.resolve(pCwd);
-                const r2 = path.resolve(cwd);
-                const isMatch = process.platform === 'win32'
-                  ? r1.toLowerCase() === r2.toLowerCase()
-                  : r1 === r2;
-                if (isMatch) {
+        const r2 = path.resolve(cwd);
+        const isMatch = process.platform === 'win32'
+          ? r1.toLowerCase() === r2.toLowerCase()
+          : r1 === r2;
+        if (isMatch) {
           projectKey = key;
           project = p;
           break;

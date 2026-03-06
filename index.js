@@ -139,14 +139,37 @@ try {
   }
 } catch { /* non-fatal */ }
 
-const scriptsUpdated = syncDirFiles(scriptsDir, METAME_DIR, { fileList: BUNDLED_SCRIPTS });
+// Pre-deploy syntax validation: check all .js files before syncing to ~/.metame/
+// Catches bad merges and careless agent edits BEFORE they can crash the daemon.
+const { execSync: _execSync } = require('child_process');
+const syntaxErrors = [];
+for (const f of BUNDLED_SCRIPTS) {
+  if (!f.endsWith('.js')) continue;
+  const fp = path.join(scriptsDir, f);
+  if (!fs.existsSync(fp)) continue;
+  try {
+    _execSync(`"${process.execPath}" -c "${fp}"`, { timeout: 5000, stdio: 'pipe', windowsHide: true });
+  } catch (e) {
+    const msg = (e.stderr ? e.stderr.toString().trim() : e.message).split('\n')[0];
+    syntaxErrors.push(`${f}: ${msg}`);
+  }
+}
 
-// Daemon restart on script update:
-// Don't kill daemon here — daemon's own file watcher detects ~/.metame/daemon.js changes
-// and has defer logic (waits for active Claude tasks to finish before restarting).
-// Killing here bypasses that and interrupts ongoing conversations.
-if (scriptsUpdated) {
-  console.log(`${icon("pkg")} Scripts synced to ~/.metame/ — daemon will auto-restart when idle.`);
+let scriptsUpdated = false;
+if (syntaxErrors.length > 0) {
+  console.error(`${icon("warn")} DEPLOY BLOCKED — syntax errors in ${syntaxErrors.length} file(s):`);
+  for (const err of syntaxErrors) console.error(`  ${err}`);
+  console.error('Fix the errors before deploying. Daemon continues running with old code.');
+} else {
+  scriptsUpdated = syncDirFiles(scriptsDir, METAME_DIR, { fileList: BUNDLED_SCRIPTS });
+
+  // Daemon restart on script update:
+  // Don't kill daemon here — daemon's own file watcher detects ~/.metame/daemon.js changes
+  // and has defer logic (waits for active Claude tasks to finish before restarting).
+  // Killing here bypasses that and interrupts ongoing conversations.
+  if (scriptsUpdated) {
+    console.log(`${icon("pkg")} Scripts synced to ~/.metame/ — daemon will auto-restart when idle.`);
+  }
 }
 
 // Docs: lazy-load references for CLAUDE.md pointer instructions

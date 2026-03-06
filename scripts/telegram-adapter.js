@@ -12,6 +12,8 @@ const path = require('path');
 
 const API_BASE = 'https://api.telegram.org';
 
+const { StringDecoder } = require('string_decoder');
+
 /**
  * Make an HTTPS request to Telegram Bot API
  */
@@ -34,8 +36,10 @@ function apiRequest(token, method, params = {}, timeout = 10000, signal = null) 
 
     const req = https.request(options, (res) => {
       let data = '';
-      res.on('data', (chunk) => { data += chunk; });
+      const decoder = new StringDecoder('utf8');
+      res.on('data', (chunk) => { data += decoder.write(chunk); });
       res.on('end', () => {
+        data += decoder.end();
         try {
           const parsed = JSON.parse(data);
           if (parsed.ok) {
@@ -252,7 +256,7 @@ function createBot(token) {
             resolve(destPath);
           });
           fileStream.on('error', (err) => {
-            fs.unlink(destPath, () => {});
+            fs.unlink(destPath, () => { });
             reject(err);
           });
         }).on('error', reject);
@@ -324,7 +328,7 @@ function createBot(token) {
       });
     },
 
-};
+  };
 }
 
 /**
@@ -369,11 +373,11 @@ function toTelegramMarkdownV2(md) {
   while ((m = pattern.exec(md)) !== null) {
     if (m.index > last) out += escapePlain(md.slice(last, m.index));
 
-    if      (m[1] !== undefined) out += '```' + m[1].replace(/[`\\]/g, '\\$&') + '```';
-    else if (m[2] !== undefined) out += '`'   + m[2].replace(/[`\\]/g, '\\$&') + '`';
-    else if (m[3] !== undefined) out += '*'   + toTelegramMarkdownV2(m[3]) + '*';
-    else if (m[4] !== undefined) out += '_'   + toTelegramMarkdownV2(m[4]) + '_';
-    else if (m[5] !== undefined) out += '_'   + toTelegramMarkdownV2(m[5]) + '_';
+    if (m[1] !== undefined) out += '```' + m[1].replace(/[`\\]/g, '\\$&') + '```';
+    else if (m[2] !== undefined) out += '`' + m[2].replace(/[`\\]/g, '\\$&') + '`';
+    else if (m[3] !== undefined) out += '*' + toTelegramMarkdownV2(m[3]) + '*';
+    else if (m[4] !== undefined) out += '_' + toTelegramMarkdownV2(m[4]) + '_';
+    else if (m[5] !== undefined) out += '_' + toTelegramMarkdownV2(m[5]) + '_';
     else if (m[6] !== undefined) out += '[' + toTelegramMarkdownV2(m[6]) + '](' + m[7].replace(/[()\\]/g, '\\$&') + ')';
     else if (m[9] !== undefined) out += '*' + escapePlain(m[9]) + '*';
     else if (m[10] !== undefined) {

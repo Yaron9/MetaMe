@@ -155,8 +155,8 @@ function createCommandRouter(deps) {
     const explicit = extractAgentName(input);
     if (explicit) return explicit;
     if (workspaceDir) {
-      const segs = workspaceDir.split('/').filter(Boolean);
-      if (segs.length > 0) return segs[segs.length - 1];
+      const basename = workspaceDir.split(/[/\\]/).filter(Boolean).pop();
+      if (basename) return basename;
     }
     return 'workspace-agent';
   }
@@ -422,6 +422,10 @@ function createCommandRouter(deps) {
         await bot.sendMessage(chatId, '❌ 当前群未绑定 Agent。先说“给这个群绑定一个 Agent，目录是 ~/xxx”。');
         return true;
       }
+      // Lazy migration: ensure soul layer exists for agents created before this feature
+      if (agentTools && typeof agentTools.repairAgentSoul === 'function') {
+        await agentTools.repairAgentSoul(bound.project.cwd).catch(() => {});
+      }
       const roleDelta = deriveRoleDelta(input);
       const res = await agentTools.editAgentRoleDefinition(bound.project.cwd, roleDelta);
       if (!res.ok) {
@@ -567,6 +571,7 @@ function createCommandRouter(deps) {
         '/agent edit — 编辑当前 Agent 角色',
         '/agent unbind — 解绑当前群',
         '/agent reset — 重置当前 Agent 角色',
+        '/agent soul [repair] — 查看/修复 Agent Soul 身份层',
         '',
         '📂 Session 管理:',
         '/new [path] [name] — 新建会话',

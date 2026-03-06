@@ -1,5 +1,6 @@
 'use strict';
 
+const { execSync } = require('child_process');
 const { sleepSync } = require('./platform');
 
 function createPidManager(deps) {
@@ -92,6 +93,127 @@ function setupRuntimeWatchers(deps) {
     }, 1000);
   });
 
+  // ── Pre-restart syntax validation ──────────────────────────────────────────
+  // Catches the most common class of hot-reload failures: syntax errors from
+  // bad merges or careless agent edits. Runs `node -c` on all .js files in
+  // METAME_DIR before allowing the daemon to exit for restart.
+  function validateScriptsSyntax() {
+    try {
+      const jsFiles = fs.readdirSync(METAME_DIR).filter(f => f.endsWith('.js'));
+      const errors = [];
+      for (const f of jsFiles) {
+        const fp = path.join(METAME_DIR, f);
+        try {
+          execSync(`"${process.execPath}" -c "${fp}"`, {
+            timeout: 5000,
+            stdio: 'pipe',
+            windowsHide: true,
+          });
+        } catch (e) {
+          const msg = (e.stderr ? e.stderr.toString().trim() : e.message).split('\n')[0];
+          errors.push(`${f}: ${msg}`);
+        }
+      }
+      if (errors.length > 0) {
+        return { ok: false, errors };
+      }
+      return { ok: true };
+    } catch (e) {
+      // If validation itself fails (e.g. can't read dir), allow restart
+      log('WARN', `Syntax validation skipped: ${e.message}`);
+      return { ok: true };
+    }
+  }
+
+  // ── Last-good backup ─────────────────────────────────────────────────────
+  const LAST_GOOD_DIR = path.join(METAME_DIR, '.last-good');
+
+  function backupLastGood() {
+    try {
+      if (!fs.existsSync(LAST_GOOD_DIR)) fs.mkdirSync(LAST_GOOD_DIR, { recursive: true });
+      const jsFiles = fs.readdirSync(METAME_DIR).filter(f => f.endsWith('.js'));
+      for (const f of jsFiles) {
+        fs.copyFileSync(path.join(METAME_DIR, f), path.join(LAST_GOOD_DIR, f));
+      }
+      log('INFO', `[BACKUP] Saved ${jsFiles.length} scripts to .last-good/`);
+    } catch (e) {
+      log('WARN', `[BACKUP] Failed: ${e.message}`);
+    }
+  }
+
+  function restoreFromLastGood() {
+    try {
+      if (!fs.existsSync(LAST_GOOD_DIR)) return false;
+      const files = fs.readdirSync(LAST_GOOD_DIR).filter(f => f.endsWith('.js'));
+      if (files.length === 0) return false;
+      for (const f of files) {
+        fs.copyFileSync(path.join(LAST_GOOD_DIR, f), path.join(METAME_DIR, f));
+      }
+      log('INFO', `[RESTORE] Restored ${files.length} scripts from .last-good/`);
+      return true;
+    } catch (e) {
+      log('ERROR', `[RESTORE] Failed: ${e.message}`);
+      return false;
+    }
+  }
+
+  // Delay initial backup: only backup after daemon has been running stably for 60s.
+  // This prevents backing up broken code that passed syntax check but fails at runtime.
+  const STABLE_BACKUP_DELAY_MS = 60 * 1000;
+  const stableBackupTimer = setTimeout(() => {
+    backupLastGood();
+  }, STABLE_BACKUP_DELAY_MS);
+
+  // ── Crash-loop detection ─────────────────────────────────────────────────
+  // Uses a consecutive crash counter (not just single boot timestamp) to avoid
+  // false positives from one-off crashes caused by user input rather than bad code.
+  const restartFromPid = process.env.METAME_RESTART_FROM_PID;
+  const bootFile = path.join(METAME_DIR, '.last-boot-ts');
+  const crashCountFile = path.join(METAME_DIR, '.crash-count');
+  if (restartFromPid) {
+    try {
+      if (fs.existsSync(bootFile)) {
+        const lastBoot = Number(fs.readFileSync(bootFile, 'utf8').trim());
+        const elapsed = Date.now() - lastBoot;
+        if (elapsed > 0 && elapsed < 30000) {
+          // Increment crash counter
+          let crashCount = 1;
+          try { crashCount = Number(fs.readFileSync(crashCountFile, 'utf8').trim()) + 1; } catch { /* first crash */ }
+          fs.writeFileSync(crashCountFile, String(crashCount), 'utf8');
+          log('FATAL', `[CRASH-LOOP] Previous daemon lived only ${Math.round(elapsed / 1000)}s (consecutive: ${crashCount})`);
+          if (crashCount >= 2) {
+            log('FATAL', `[CRASH-LOOP] ${crashCount} consecutive fast crashes — restoring from .last-good`);
+            const restored = restoreFromLastGood();
+            if (restored) {
+              adminNotifyFn('⚠️ 检测到 daemon 连续崩溃，已从上一个正常版本恢复。请检查最近的代码改动。').catch(() => {});
+              try { fs.writeFileSync(crashCountFile, '0', 'utf8'); } catch { /* non-fatal */ }
+            }
+          }
+        } else {
+          // Previous daemon ran long enough — reset crash counter
+          try { fs.writeFileSync(crashCountFile, '0', 'utf8'); } catch { /* non-fatal */ }
+        }
+      }
+    } catch { /* non-fatal */ }
+  }
+  // Record boot timestamp for next crash-loop check
+  try { fs.writeFileSync(bootFile, String(Date.now()), 'utf8'); } catch { /* non-fatal */ }
+
+  // ── Safe restart: validate then proceed ──────────────────────────────────
+  function safeRestart() {
+    const validation = validateScriptsSyntax();
+    if (!validation.ok) {
+      const errSummary = validation.errors.slice(0, 3).join('\n');
+      log('ERROR', `[RESTART BLOCKED] Syntax errors detected:\n${errSummary}`);
+      adminNotifyFn(`🚫 Daemon 热重载已阻止 — 新代码有语法错误:\n${errSummary}\n\n当前 daemon 继续运行。`).catch(() => {});
+      pendingRestart = false;
+      return;
+    }
+    // Backup current known-good set before restarting with new code
+    backupLastGood();
+    onRestartRequested();
+  }
+
   const daemonScript = path.join(METAME_DIR, 'daemon.js');
   const startTime = Date.now();
   let restartDebounce = null;
@@ -118,8 +240,8 @@ function setupRuntimeWatchers(deps) {
             pendingRestart = true;
             return;
           }
-          log('INFO', 'daemon.js changed on disk — exiting for restart...');
-          onRestartRequested();
+          log('INFO', 'daemon.js changed on disk — validating before restart...');
+          safeRestart();
         }, 5000);
       }
     }, 2000);
@@ -129,8 +251,8 @@ function setupRuntimeWatchers(deps) {
   activeProcesses.delete = function (key) {
     const result = origDelete(key);
     if (pendingRestart && activeProcesses.size === 0 && !deferredRestartTimer) {
-      log('INFO', 'All tasks completed — executing deferred restart in 8s...');
-      deferredRestartTimer = setTimeout(onRestartRequested, 8000); // 给 sendMessage/deleteMessage 等 cleanup 留出足够时间
+      log('INFO', 'All tasks completed — validating deferred restart in 8s...');
+      deferredRestartTimer = setTimeout(safeRestart, 8000); // 给 sendMessage/deleteMessage 等 cleanup 留出足够时间
     }
     return result;
   };
@@ -141,6 +263,7 @@ function setupRuntimeWatchers(deps) {
     if (reloadDebounce) clearTimeout(reloadDebounce);
     if (restartDebounce) clearTimeout(restartDebounce);
     if (deferredRestartTimer) clearTimeout(deferredRestartTimer);
+    if (stableBackupTimer) clearTimeout(stableBackupTimer);
     activeProcesses.delete = origDelete;
   }
 

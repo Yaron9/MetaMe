@@ -51,12 +51,11 @@ if (!Lark) {
 // Timeout wrapper: prevents SDK calls from hanging indefinitely when
 // Feishu's token refresh HTTP request has no response (e.g. network down)
 function withTimeout(promise, ms = 10000) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`Feishu API timeout after ${ms}ms`)), ms)
-    ),
-  ]);
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Feishu API timeout after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 // Max chars per lark_md element (Feishu limit ~4000)

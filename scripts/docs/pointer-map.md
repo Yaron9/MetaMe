@@ -15,6 +15,8 @@
 - 会话存储：`scripts/daemon-session-store.js`
 - 默认配置：`scripts/daemon-default.yaml`
 - Provider/蒸馏模型配置：`scripts/providers.js`（`/provider`、`/distill-model`）
+- 跨平台基础设施：`scripts/platform.js`（`killProcessTree`、`socketPath`、`sleepSync`、`icon`）
+- 热重载安全机制：`scripts/daemon-runtime-lifecycle.js`（语法预检、last-good 备份、crash-loop 自愈）
 - 维护手册：`scripts/docs/maintenance-manual.md`
 
 ## 多引擎（Claude/Codex）定位
@@ -28,10 +30,24 @@
   - 关键点：`askClaude()` 按 `project.engine`/session 选择 runtime；`patchSessionSerialized()` 串行回写 session
   - Codex 规则：`exec`/`resume`、10 分钟窗口内一次自动重试、`thread_id` 迁移回写
 
+- Agent Soul 身份层（新）：
+  - `scripts/agent-layer.js`
+  - 关键点：`ensureAgentLayer()` 创建 `~/.metame/agents/<id>/`（soul.md、memory-snapshot.md、agent.yaml）；
+    `createLinkOrMirror()` Windows 兼容（symlink → hardlink → copy 降级）；
+    `ensureClaudeMdSoulImport()` 在 CLAUDE.md 头部注入 `@SOUL.md`（Claude CLI 自动加载）；
+    Codex 引擎在每次新 session 时将 CLAUDE.md + SOUL.md 合并写入 AGENTS.md（见 daemon-claude-engine.js:957）；
+    `repairAgentLayer()` 懒迁移：老项目补建 soul 层，幂等安全
+
+- Agent 命令处理（新）：
+  - `scripts/daemon-agent-commands.js`
+  - 关键点：`createAgentCommandHandler()` 处理 `/agent`、`/activate`、`/resume`；
+    `/agent soul [repair|edit]`；`pendingActivations` 无 TTL（消费即删）；防止创建群自激活
+
 - 路由与 Agent 创建：
   - `scripts/daemon-command-router.js`
   - `scripts/daemon-agent-tools.js`
-  - 关键点：自然语言提取 `codex` 关键词；默认 `claude` 不写 `engine` 字段，仅 `codex` 持久化 `engine: codex`
+  - 关键点：自然语言提取 `codex` 关键词；默认 `claude` 不写 `engine` 字段，仅 `codex` 持久化 `engine: codex`；
+    `bindAgentToChat()` 自动调用 `ensureAgentMetadata()` 建立 soul 层
 
 - 会话命令与兼容边界：
   - `scripts/daemon-exec-commands.js`
@@ -74,6 +90,12 @@
 - 夜间反思文档：`~/.metame/memory/decisions/`、`~/.metame/memory/lessons/`
 - 知识胶囊：`~/.metame/memory/capsules/`
 - 复盘文档：`~/.metame/memory/postmortems/`
+- **Agent Soul 层**：`~/.metame/agents/<agent_id>/`
+  - `agent.yaml` — id / name / engine / aliases
+  - `soul.md` — 身份定义（主文件，项目目录的 SOUL.md 是其链接）
+  - `memory-snapshot.md` — 近期记忆快照（注入 session prompt）
+  - 项目视图：`<cwd>/SOUL.md`（symlink/hardlink/copy）、`<cwd>/MEMORY.md`（同）
+  - `<cwd>/AGENTS.md` — Codex 专用，每次新 session 由 daemon 合并 CLAUDE.md + SOUL.md 写入
 
 ## 诊断顺序（推荐）
 

@@ -79,6 +79,27 @@ function findProcessesByPattern(pattern) {
 }
 
 /**
+ * Kill a process and its entire child tree.
+ * POSIX: process.kill(-pid, signal) to kill process group.
+ * Windows: taskkill /PID /T /F (tree kill).
+ * Returns true if kill was attempted, false if process not found.
+ */
+function killProcessTree(pid, signal = 'SIGTERM') {
+  if (!pid || pid <= 0) return false;
+  try {
+    if (IS_WIN) {
+      execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore', windowsHide: true, timeout: 5000 });
+    } else {
+      // Try process group first, fallback to single process
+      try { process.kill(-pid, signal); } catch { process.kill(pid, signal); }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Whether the socket path needs fs.unlinkSync before server.listen().
  * Named Pipes on Windows are kernel-managed — no file to unlink.
  */
@@ -169,6 +190,7 @@ module.exports = {
   socketPath,
   sleepSync,
   findProcessesByPattern,
+  killProcessTree,
   needsSocketCleanup,
   icon,
 };

@@ -149,7 +149,11 @@ function parseClaudeStreamEvent(line) {
       }
     }
   }
+  if (raw.type === 'system' && raw.subtype === 'init' && raw.session_id) {
+    out.push({ type: 'session', sessionId: String(raw.session_id), raw });
+  }
   if (raw.type === 'result') {
+    if (raw.session_id) out.push({ type: 'session', sessionId: String(raw.session_id), raw });
     if (raw.result) out.push({ type: 'text', text: String(raw.result), raw });
     out.push({ type: 'done', usage: raw.usage || null, raw });
   }

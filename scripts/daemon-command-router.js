@@ -155,8 +155,8 @@ function createCommandRouter(deps) {
     const explicit = extractAgentName(input);
     if (explicit) return explicit;
     if (workspaceDir) {
-      const segs = workspaceDir.split('/').filter(Boolean);
-      if (segs.length > 0) return segs[segs.length - 1];
+      const basename = workspaceDir.split(/[/\\]/).filter(Boolean).pop();
+      if (basename) return basename;
     }
     return 'workspace-agent';
   }

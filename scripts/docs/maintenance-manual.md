@@ -72,13 +72,30 @@ feishu:
   - 仅在“当前默认引擎对应 CLI 不可用”时判为故障
   - 自定义 provider 下允许任意合法模型名（不再强制 sonnet/opus/haiku）
 
-## 5. 运行时文件与状态
+## 5. Agent Soul 身份层
+
+- 集中存储：`~/.metame/agents/<agent_id>/`（soul.md、memory-snapshot.md、agent.yaml）
+- 项目视图：`<cwd>/SOUL.md`、`<cwd>/MEMORY.md` 是指向集中存储的链接
+- Claude：`@SOUL.md` 写入 CLAUDE.md 头部，CLI 每次 session 自动加载（引用式，改源文件立即生效）
+- Codex：每次新 session 合并 CLAUDE.md + SOUL.md 写入 `<cwd>/AGENTS.md`（快照式，需新 session 生效）
+- 老项目迁移：`/agent soul repair` 幂等补建 soul 层
+- 注意：Windows 上 copy 模式的 SOUL.md 不会自动同步源文件变更，需 `/agent soul repair` 刷新
+
+## 6. 运行时文件与状态
 
 - 配置：`~/.metame/daemon.yaml`
 - daemon 状态：`~/.metame/daemon_state.json`
 - 活跃子进程：`~/.metame/active_agent_pids.json`
+- 热重载备份：`~/.metame/.last-good/`（daemon 稳定运行 60s 后自动备份）
+- 崩溃计数：`~/.metame/.crash-count`（连续 2 次快速崩溃触发自动恢复）
 
-## 6. 常见故障排查
+## 7. 热重载安全机制（三层防护）
+
+1. **部署前预检**（`index.js`）：`node -c` 语法检查所有 `.js`，不通过则拒绝部署到 `~/.metame/`
+2. **重启前预检**（`daemon-runtime-lifecycle.js`）：daemon.js 变更触发重启前再次语法校验，不通过则阻止重启并通知 admin
+3. **崩溃循环自愈**：连续 2 次在 30s 内崩溃 → 自动从 `.last-good/` 恢复 → 通知 admin
+
+## 8. 常见故障排查
 
 ### Codex 认证失败
 
@@ -109,7 +126,26 @@ feishu:
 2. 若仍失败，手动 `/new` 新开会话
 3. 检查 `~/.metame/active_agent_pids.json` 是否残留异常进程
 
-## 7. 变更后维护动作
+## 9. 双平台/双引擎维护矩阵
+
+### 统一维护（改一处即可）
+- agent-layer.js / daemon-agent-tools.js / daemon-agent-commands.js / daemon-user-acl.js
+- ENGINE_MODEL_CONFIG（daemon-engine-runtime.js 集中管理）
+- daemon-runtime-lifecycle.js 的语法检查和备份机制
+
+### 需分别维护（有平台/引擎特殊分支）
+
+| 模块 | 差异点 | 注意事项 |
+|------|--------|----------|
+| platform.js `killProcessTree` | POSIX: `kill(-pid)` / Windows: `taskkill /T /F` | 所有进程杀死调用点应统一使用此函数 |
+| daemon-engine-runtime.js `resolveBinary` | macOS: `which` + homebrew / Windows: `where` + `.cmd` | 新增引擎需两端测试 |
+| daemon-engine-runtime.js `buildArgs` | Claude: `--resume`/`--continue` / Codex: `exec resume`，Codex resume 不能传权限 flag | 改参数结构时两端验证 |
+| daemon-claude-engine.js Soul 注入 | Claude: `@SOUL.md` import（引用式）/ Codex: AGENTS.md 合并写入（快照式） | 改 soul 加载方式需两端测试 |
+| agent-layer.js `createLinkOrMirror` | macOS: symlink / Windows: hardlink → copy 降级 | copy 模式不会自动同步源文件变更 |
+| daemon.js `spawnReplacementDaemon` | POSIX: `detached: true` / Windows: `detached: false` | 改 spawn 参数时注意平台分支 |
+| NL Mac 控制（command-router） | macOS only，`process.platform === 'darwin'` 守卫 | Windows 天然跳过 |
+
+## 10. 变更后维护动作
 
 1. `npm test`
 2. `npm run sync:plugin`

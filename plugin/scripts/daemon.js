@@ -1958,13 +1958,14 @@ async function main() {
     try {
       const replacementScript = path.join(METAME_DIR, 'daemon.js');
       const bg = spawn(process.execPath, [replacementScript], {
-        detached: true,
+        detached: process.platform !== 'win32',
         stdio: 'ignore',
         windowsHide: true,
         cwd: METAME_DIR,
         env: {
           ...process.env,
           HOME,
+          USERPROFILE: HOME,
           METAME_ROOT: process.env.METAME_ROOT || path.dirname(__filename),
           METAME_RESTART_FROM_PID: String(process.pid),
         },
