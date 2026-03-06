@@ -29,8 +29,13 @@ function resolveBinary(engineName, deps = {}) {
   const key = engine === 'codex' ? 'codex' : 'claude';
   const cmd = process.platform === 'win32' ? `where ${key}` : `which ${key} 2>/dev/null`;
   try {
-    const resolved = execSyncFn(cmd, { encoding: 'utf8', timeout: 3000 }).trim().split('\n')[0];
-    if (resolved) return resolved;
+    const lines = execSyncFn(cmd, { encoding: 'utf8', timeout: 3000 })
+      .split('\n').map(l => l.trim()).filter(Boolean);
+    // On Windows prefer .cmd wrapper (reliably executable by spawn)
+    const preferred = process.platform === 'win32'
+      ? (lines.find(l => l.toLowerCase().endsWith(`${key}.cmd`)) || lines[0])
+      : lines[0];
+    if (preferred) return preferred;
   } catch { /* fallback */ }
 
   const candidates = engine === 'codex'
@@ -236,7 +241,7 @@ function createEngineRuntimeFactory(deps = {}) {
         buildEnv: ({ metameProject = '' } = {}) => {
           const env = { ...process.env, METAME_PROJECT: metameProject };
           // Unset CODEX_HOME if it points to a non-existent path (corrupted env var)
-          if (env.CODEX_HOME && !fsMod.existsSync(env.CODEX_HOME)) delete env.CODEX_HOME;
+          if (env.CODEX_HOME && !fs.existsSync(env.CODEX_HOME)) delete env.CODEX_HOME;
           return env;
         },
         parseStreamEvent: parseCodexStreamEvent,
