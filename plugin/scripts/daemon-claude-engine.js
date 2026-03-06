@@ -886,6 +886,20 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       cwd: session.cwd,
     });
 
+    // Auto-create AGENTS.md → CLAUDE.md symlink for Codex projects (one-time, idempotent).
+    // Codex auto-loads AGENTS.md from cwd and all parent dirs up to ~.
+    // ~/AGENTS.md → ~/.claude/CLAUDE.md covers global identity; this covers per-project role.
+    if (engineName === 'codex' && session.cwd && !session.started) {
+      try {
+        const agentsMd = path.join(session.cwd, 'AGENTS.md');
+        const claudeMd = path.join(session.cwd, 'CLAUDE.md');
+        if (!fs.existsSync(agentsMd) && fs.existsSync(claudeMd)) {
+          fs.symlinkSync('CLAUDE.md', agentsMd);
+          log('INFO', `Created AGENTS.md -> CLAUDE.md symlink in ${session.cwd}`);
+        }
+      } catch { /* non-critical */ }
+    }
+
     // Memory & Knowledge Injection (RAG)
     let memoryHint = '';
     // projectKey must be declared outside the try block so the daemonHint template below can reference it.
