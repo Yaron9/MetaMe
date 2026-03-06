@@ -9,28 +9,45 @@ const os = require('os');
 const { spawn, execSync } = require('child_process');
 const { sleepSync, findProcessesByPattern, icon } = require('./scripts/platform');
 
-// On Windows, .cmd files (like claude.cmd from npm global) need shell:true to spawn.
-// We use COMSPEC to avoid conda/PATH issues where cmd.exe can't be found.
+// On Windows, resolve .cmd wrapper → actual Node.js entry and spawn node directly.
+// Completely bypasses cmd.exe, eliminating terminal flash.
+function resolveNodeEntry(cmdPath) {
+  try {
+    const content = fs.readFileSync(cmdPath, 'utf8');
+    const m = content.match(/"([^"]+\.js)"\s*%\*\s*$/m);
+    if (m) {
+      const entry = m[1].replace(/%dp0%/gi, path.dirname(cmdPath) + path.sep);
+      if (fs.existsSync(entry)) return entry;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+function spawnViaNode(cmd, args, options) {
+  if (process.platform !== 'win32') return spawn(cmd, args, options);
+  try {
+    const { execSync: _es } = require('child_process');
+    const lines = _es(`where ${cmd}`, { encoding: 'utf8', timeout: 3000 })
+      .split('\n').map(l => l.trim()).filter(Boolean);
+    const cmdFile = lines.find(l => l.toLowerCase().endsWith(`${cmd}.cmd`)) || lines[0];
+    if (cmdFile) {
+      const entry = resolveNodeEntry(cmdFile);
+      if (entry) return spawn(process.execPath, [entry, ...args], { ...options, windowsHide: true });
+      return spawn(cmdFile, args, { ...options, shell: process.env.COMSPEC || true, windowsHide: true });
+    }
+  } catch { /* ignore */ }
+  return spawn(cmd, args, { ...options, shell: process.env.COMSPEC || true, windowsHide: true });
+}
+
 function spawnClaude(args, options) {
-  if (process.platform === 'win32') {
-    return spawn('claude', args, {
-      ...options,
-      shell: process.env.COMSPEC || true,
-      windowsHide: true,
-    });
-  }
-  return spawn('claude', args, options);
+  return spawnViaNode('claude', args, options);
 }
 
 function spawnCodex(args, options) {
   // Sanitize env: unset CODEX_HOME if it points to a non-existent path (corrupted registry value)
   const env = { ...(options && options.env ? options.env : process.env) };
   if (env.CODEX_HOME && !fs.existsSync(env.CODEX_HOME)) delete env.CODEX_HOME;
-  const opts = { ...options, env };
-  if (process.platform === 'win32') {
-    return spawn('codex', args, { ...opts, shell: process.env.COMSPEC || true, windowsHide: true });
-  }
-  return spawn('codex', args, opts);
+  return spawnViaNode('codex', args, { ...options, env });
 }
 
 // Quick flags (before heavy init)

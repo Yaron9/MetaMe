@@ -60,25 +60,60 @@ function createClaudeEngine(deps) {
     ? injectedGetEngineRuntime
     : createEngineRuntimeFactory({ fs, path, HOME, CLAUDE_BIN, getActiveProviderEnv });
 
-  // On Windows, .cmd/.bat files and bare npm commands need shell:true to spawn.
-  // Also covers the fallback case where resolveBinary returns the bare command name.
-  function spawn(cmd, args, options) {
+  // On Windows, spawning .cmd files via shell:true causes cmd.exe to flash briefly.
+  // Instead, read the .cmd wrapper, extract the real Node.js entry point, and spawn
+  // `node <entry.js> <args>` directly — completely bypasses cmd.exe, zero flash.
+  function resolveNodeEntry(cmdPath) {
+    try {
+      const content = fs.readFileSync(cmdPath, 'utf8');
+      // Match the quoted .js path just before %* at end of last exec line
+      const m = content.match(/"([^"]+\.js)"\s*%\*\s*$/m);
+      if (m) {
+        // Substitute %dp0% (batch var for the cmd file's own directory)
+        const entry = m[1].replace(/%dp0%/gi, path.dirname(cmdPath) + path.sep);
+        if (fs.existsSync(entry)) return entry;
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  // Cache resolved entries so we only read .cmd files once
+  const _nodeEntryCache = new Map();
+  function resolveNodeEntryForCmd(cmd) {
+    if (_nodeEntryCache.has(cmd)) return _nodeEntryCache.get(cmd);
+    let cmdPath = cmd;
     const lowerCmd = String(cmd || '').toLowerCase();
-    const needsShell = process.platform === 'win32' && (
-      cmd === CLAUDE_BIN ||
-      lowerCmd.endsWith('.cmd') ||
-      lowerCmd.endsWith('.bat') ||
-      lowerCmd === 'claude' ||
-      lowerCmd === 'codex'
-    );
-    if (needsShell) {
+    // If bare name (not a file path), find the .cmd via where
+    if (lowerCmd === 'claude' || lowerCmd === 'codex') {
+      try {
+        const { execSync: _es } = require('child_process');
+        const lines = _es(`where ${cmd}`, { encoding: 'utf8', timeout: 3000 })
+          .split('\n').map(l => l.trim()).filter(Boolean);
+        cmdPath = lines.find(l => l.toLowerCase().endsWith(`${lowerCmd}.cmd`)) || lines[0] || cmd;
+      } catch { /* ignore */ }
+    }
+    const entry = resolveNodeEntry(cmdPath);
+    _nodeEntryCache.set(cmd, entry);
+    return entry;
+  }
+
+  function spawn(cmd, args, options) {
+    if (process.platform !== 'win32') return _spawn(cmd, args, options);
+
+    const lowerCmd = String(cmd || '').toLowerCase();
+    const isCmdLike = lowerCmd.endsWith('.cmd') || lowerCmd.endsWith('.bat')
+      || cmd === CLAUDE_BIN || lowerCmd === 'claude' || lowerCmd === 'codex';
+
+    if (isCmdLike) {
+      const entry = resolveNodeEntryForCmd(cmd);
+      if (entry) {
+        // Run node directly — no cmd.exe, no flash
+        return _spawn(process.execPath, [entry, ...args], { ...options, windowsHide: true });
+      }
+      // Fallback: shell with windowsHide
       return _spawn(cmd, args, { ...options, shell: process.env.COMSPEC || true, windowsHide: true });
     }
-    // Always hide spawned windows on Windows (covers .exe and other non-shell binaries)
-    if (process.platform === 'win32') {
-      return _spawn(cmd, args, { ...options, windowsHide: true });
-    }
-    return _spawn(cmd, args, options);
+    return _spawn(cmd, args, { ...options, windowsHide: true });
   }
 
   // Per-chatId patch queues: Agent A's writes never block Agent B.
