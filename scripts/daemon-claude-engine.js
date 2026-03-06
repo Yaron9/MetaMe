@@ -780,15 +780,15 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         saveState(_st);
       }
     } catch { /* non-critical */ }
-    // Send a single status message, updated in-place, deleted on completion
+    // Send 🤔 ack and start typing — fire-and-forget so we don't block spawn on Telegram RTT.
+    // statusMsgId is resolved via a promise; it will be ready well before the first model output.
     let statusMsgId = null;
-    try {
-      const msg = await (bot.sendMarkdown ? bot.sendMarkdown(chatId, '🤔') : bot.sendMessage(chatId, '🤔'));
-      if (msg && msg.message_id) statusMsgId = msg.message_id;
-    } catch (e) {
-      log('ERROR', `Failed to send ack to ${chatId}: ${e.message}`);
-    }
-    await bot.sendTyping(chatId).catch(() => { });
+    // Fire-and-forget: don't await Telegram RTT before spawning the engine process.
+    // statusMsgId will be populated well before the first model output (~5s for codex).
+    (bot.sendMarkdown ? bot.sendMarkdown(chatId, '🤔') : bot.sendMessage(chatId, '🤔'))
+      .then(msg => { if (msg && msg.message_id) statusMsgId = msg.message_id; })
+      .catch(e => log('ERROR', `Failed to send ack to ${chatId}: ${e.message}`));
+    bot.sendTyping(chatId).catch(() => { });
     const typingTimer = setInterval(() => {
       bot.sendTyping(chatId).catch(() => { });
     }, 4000);
