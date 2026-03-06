@@ -647,7 +647,12 @@ let isKnownUser = false;
 try {
   if (fs.existsSync(BRAIN_FILE)) {
     const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
-    if (doc.identity && doc.identity.locale && doc.identity.locale !== 'null') {
+    const id = doc.identity || {};
+    // Known if locale is set, OR if any other identity field was filled in
+    // (covers cases where genesis ran but locale wasn't explicitly set)
+    const hasLocale = id.locale && id.locale !== 'null' && id.locale !== null;
+    const hasOtherFields = id.name || id.role || id.timezone || (doc.status && doc.status.focus && doc.status.focus !== 'Initializing');
+    if (hasLocale || hasOtherFields) {
       isKnownUser = true;
     }
   }
@@ -655,12 +660,19 @@ try {
   // Ignore error, treat as unknown
 }
 
+// Non-session commands (daemon ops, version, help) should not show genesis message
+const _arg2 = process.argv[2];
+const _isNonSessionCmd = ['daemon', 'start', 'stop', 'status', 'logs', 'codex',
+  'sync', 'continue', '-v', '--version', '-h', '--help', 'distill', 'evolve'].includes(_arg2);
+
 let finalProtocol;
 if (isKnownUser) {
   finalProtocol = PROTOCOL_NORMAL;
 } else {
   finalProtocol = PROTOCOL_ONBOARDING;
-  console.log(`${icon("new")} New user detected — entering Genesis interview mode...`);
+  if (!_isNonSessionCmd) {
+    console.log(`${icon("new")} New user detected — entering Genesis interview mode...`);
+  }
 }
 
 // ---------------------------------------------------------
