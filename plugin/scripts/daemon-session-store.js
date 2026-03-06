@@ -549,8 +549,7 @@ function createSessionStore(deps) {
   }
 
   // Claude backend: JSONL files under ~/.claude/projects/<hash>/
-  function _isClaudeSessionValid(sessionId, cwd) {
-    const normCwd = path.resolve(cwd);
+  function _isClaudeSessionValid(sessionId, normCwd) {
     try {
       const sessionFile = findSessionFile(sessionId);
       if (!sessionFile) return false;
@@ -567,7 +566,7 @@ function createSessionStore(deps) {
       // Weak fallback: Claude encodes cwd in dir name; only trust a positive match.
       const expectedDir = '-' + normCwd.replace(/^\//, '').replace(/[\/_ ]/g, '-');
       if (path.basename(projectDir) === expectedDir) return true;
-      return true; // cannot prove mismatch — keep session
+      return false; // dir name mismatch — session belongs to a different project
     } catch {
       return true; // conservative: infra failure ≠ invalid session
     }
@@ -575,26 +574,34 @@ function createSessionStore(deps) {
 
   // Codex backend: SQLite index at ~/.codex/state_5.sqlite
   const CODEX_DB = path.join(HOME, '.codex', 'state_5.sqlite');
-  function _isCodexSessionValid(sessionId, cwd) {
+  function _isCodexSessionValid(sessionId, normCwd) {
+    let db = null;
     try {
       const { DatabaseSync } = require('node:sqlite');
-      const db = new DatabaseSync(CODEX_DB, { readonly: true });
+      db = new DatabaseSync(CODEX_DB, { readonly: true });
       const row = db.prepare('SELECT cwd FROM threads WHERE id = ?').get(sessionId);
       db.close();
-      return !!row && path.resolve(row.cwd) === path.resolve(cwd);
-    } catch {
+      db = null;
+      return !!row && path.resolve(row.cwd) === normCwd;
+    } catch (e) {
+      if (db) { try { db.close(); } catch { /* ignore */ } }
+      // Transient errors (DB locked, busy) should not invalidate a live session.
+      // Only treat "session truly not found" as invalid; infra failures are conservative.
+      const msg = (e && e.message) || '';
+      if (msg.includes('SQLITE_BUSY') || msg.includes('SQLITE_LOCKED')) return true;
       return false;
     }
   }
 
   function isEngineSessionValid(engine, sessionId, cwd) {
     if (!sessionId || !cwd || sessionId === '__continue__') return true;
-    const key = `${engine}@@${sessionId}@@${path.resolve(cwd)}`;
+    const normCwd = path.resolve(cwd);
+    const key = `${engine}@@${sessionId}@@${normCwd}`;
     const cached = _validateCache.get(key);
     if (cached && Date.now() - cached.ts < SESSION_VALIDATE_TTL) return cached.valid;
     const valid = engine === 'codex'
-      ? _isCodexSessionValid(sessionId, cwd)
-      : _isClaudeSessionValid(sessionId, cwd);
+      ? _isCodexSessionValid(sessionId, normCwd)
+      : _isClaudeSessionValid(sessionId, normCwd);
     return _cacheValidation(key, valid);
   }
 

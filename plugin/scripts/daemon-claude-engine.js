@@ -840,7 +840,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
     // Pre-spawn session validation: unified for all engines.
     // Claude checks JSONL file existence; Codex checks SQLite. Same interface, different backend.
-    if (session && session.started && session.id && session.id !== '__continue__' && session.cwd && isEngineSessionValid) {
+    if (session && session.started && session.id && session.id !== '__continue__' && session.cwd) {
       const valid = isEngineSessionValid(engineName, session.id, session.cwd);
       if (!valid) {
         log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${chatId}; creating fresh session`);
