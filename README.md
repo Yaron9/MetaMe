@@ -24,18 +24,6 @@ No cloud. Your machine, your data.
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
 ```
 
-**Already have Node.js ≥ 22.5:**
-```bash
-npm install -g metame-cli
-metame
-```
-
-**Windows (PowerShell):**
-```powershell
-npm install -g metame-cli
-metame
-```
-
 ---
 
 > ### 🚀 v1.5.0 — Dynamic Engine Default + Distill Coupling
@@ -216,116 +204,74 @@ task outcome/failure → skill signal buffer
 
 ---
 
-## Quick Start
+## Install
+
+MetaMe is the orchestration layer. Claude Code and Codex are the engines. You install them together.
+
+### One-liner by user type
+
+| You use | Install command | First login |
+|---------|----------------|-------------|
+| **Claude Code** | `npm install -g @anthropic-ai/claude-code metame-cli` | `claude` |
+| **Codex** | `npm install -g @openai/codex metame-cli` | `codex login` |
+| **Both** | `npm install -g @anthropic-ai/claude-code @openai/codex metame-cli` | `claude` + `codex login` |
+| **Claude plugin** (no npm) | `claude plugin install github:Yaron9/MetaMe/plugin` | `claude` |
+
+> **No Node.js?** Run `curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash` — it installs Node + MetaMe for you.
+>
+> **Windows?** Use PowerShell/CMD natively. WSL has proxy and path issues.
+
+### Setup (3 minutes)
+
+| Step | What to do |
+|------|-----------|
+| 1. Launch | `metame` (Claude) or `metame codex` (Codex) |
+| 2. Genesis Interview | Just chat — MetaMe auto-starts a deep soul interview on first run → builds `~/.claude_profile.yaml` |
+| 3. Connect phone | Say "help me set up mobile access" → interactive Telegram/Feishu bot wizard |
+| 4. Start daemon | `metame start` → background daemon launches, bot goes online |
+| 5. Register with OS | macOS: `metame daemon install-launchd` · Windows: `metame daemon install-task-scheduler` |
+
+> **First time?** Just run `metame` and talk naturally. Everything is conversational.
+
+### Create your first Agent
+
+1. In any existing group, say: `Create an agent, directory ~/xxx, responsible for xxx`
+2. Bot replies: Agent created — **send `/activate` in your new group to bind it**
+3. Create a new group, add the bot, send `/activate` → binding complete
+
+> Want more Agents? Repeat the flow. Each group = independent AI workspace.
+
+### Update / Uninstall
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
-```
-
-**Already have Node.js ≥ 22.5:**
-```bash
+# Update
 npm install -g metame-cli
-metame
-```
 
-> **First run auto-provisioning:** MetaMe automatically deploys a default `CLAUDE.md`, documentation files, and the `dispatch_to` tool to `~/.metame/`. No manual setup needed.
+# Uninstall
+metame stop && npm uninstall -g metame-cli
 
-**Setup guide (3 minutes):**
-
-| Step | What to do | What happens |
-|------|-----------|-------------|
-| 1. Log in to your engine | Run `claude` (Claude user) or `codex login` (Codex user) | Your local CLI engine is ready |
-| 2. Launch MetaMe | Run `metame` (Claude) or `metame codex` (Codex) | Opens a MetaMe-initialized session |
-| 3. Genesis Interview | Just chat — MetaMe will automatically start a deep soul interview on first run | Builds `~/.claude_profile.yaml` (6-dimension cognitive profile) |
-| 4. Connect phone | Say "help me set up mobile access" or "connect my phone" | Interactive wizard for Telegram/Feishu bot setup → `~/.metame/daemon.yaml` |
-| 5. Start daemon | `metame start` | Background daemon launches, bot goes online |
-| 6. Register with system | macOS: `metame daemon install-launchd` · Windows: `metame daemon install-task-scheduler` · Linux: see below | Always-on, crash recovery |
-
-> **First time?** Just run `metame` and talk naturally. The interview and setup are conversational — no commands to memorize.
-
-**Update MetaMe:**
-```bash
-npm install -g metame-cli
-```
-
-### Install Path By User Type
-
-**Claude Code only (plugin path, one-liner):**
-```bash
-claude plugin install github:Yaron9/MetaMe/plugin
-```
-
-**Claude Code only (npm CLI path, one-liner):**
-```bash
-npm install -g @anthropic-ai/claude-code metame-cli && claude && metame
-```
-
-**Codex only (CLI path, one-liner):**
-```bash
-npm install -g @openai/codex metame-cli && codex login && metame codex
-```
-
-**Claude + Codex (one-liner):**
-```bash
-npm install -g @anthropic-ai/claude-code @openai/codex metame-cli
-```
-
-Then run `claude` once (Claude login), `codex login` once (Codex login), and use:
-- `metame` for Claude
-- `metame codex` for Codex
-
-> `metame-cli` is engine-agnostic. It does not bundle Claude or Codex.  
-> You install the engine(s) separately, and MetaMe routes/launches them.
-
-### Install FAQ
-
-- **Does Claude plugin mode support daemon + phone access?** Yes. Plugin mode can start the daemon (via `SessionStart` after `daemon.yaml` exists), and phone access works while the daemon is running.
-- **Does `npm install -g metame-cli` install Claude or Codex?** No. It only installs MetaMe. Install `@anthropic-ai/claude-code` and/or `@openai/codex` separately.
-- **If I only install one engine, does MetaMe still work?** Yes. MetaMe will run on the installed engine. `/doctor` marks the non-default missing engine as warning, not hard failure.
-
-### Uninstall (CLI Path)
-
-```bash
-metame stop
-npm uninstall -g metame-cli
-```
-
-Codex-only cleanup:
-```bash
-npm uninstall -g metame-cli @openai/codex
-```
-
-Claude-only cleanup:
-```bash
-npm uninstall -g metame-cli @anthropic-ai/claude-code
-```
-
-Optional data cleanup:
-```bash
+# Optional: remove data
 rm -rf ~/.metame ~/.claude_profile.yaml
 ```
 
 Optional service cleanup:
 - macOS: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.metame.daemon.plist && rm -f ~/Library/LaunchAgents/com.metame.daemon.plist`
 - Windows: `schtasks /delete /tn "MetaMe-Daemon" /f`
-- Linux/WSL(systemd): `systemctl --user disable --now metame && rm -f ~/.config/systemd/user/metame.service`
+- Linux/WSL: `systemctl --user disable --now metame && rm -f ~/.config/systemd/user/metame.service`
 
-> **What does system registration mean?**
-> Once registered, MetaMe runs in the background automatically — screen locked, lid closed, woken from sleep — as long as the machine is on. Scheduled tasks fire on time. No terminal window needed.
+### Platform notes
 
-**Windows — register with Task Scheduler:**
+<details>
+<summary>Windows</summary>
 
-```powershell
-metame daemon install-task-scheduler
-```
+- Emoji auto-degrades to ASCII (`[OK]`, `[FAIL]`) for GBK compatibility
+- IPC uses Named Pipes instead of Unix sockets
+- `/mac` commands are not available
+- **Install natively in PowerShell/CMD, not via WSL**
+</details>
 
-> The daemon auto-starts at login. Remove with: `schtasks /delete /tn "MetaMe-Daemon" /f`
-
-> **Windows notes:** Emoji display uses ASCII fallback (`[OK]`, `[FAIL]`) for GBK terminal compatibility. Named Pipes replace Unix sockets for IPC. `/mac` commands are not available.
-
-> **Windows users: install natively, not via WSL.** WSL often fails to inherit the host's network proxy (causing npm install and Claude API timeouts), has path mapping issues, and process management doesn't interoperate. `npm install -g metame-cli` directly in PowerShell/CMD is the most reliable approach.
-
-**WSL2 / Linux — register with systemd:**
+<details>
+<summary>WSL2 / Linux — systemd registration</summary>
 
 ```bash
 cat > ~/.config/systemd/user/metame.service << 'EOF'
@@ -346,17 +292,15 @@ systemctl --user enable metame
 systemctl --user start metame
 ```
 
-> WSL2 requires systemd enabled first: add `[boot]\nsystemd=true` to `/etc/wsl.conf`, then restart WSL.
+> Requires systemd enabled: add `[boot]\nsystemd=true` to `/etc/wsl.conf`, then restart WSL.
 
-> **WSL limitation:** `/mac` commands (macOS AppleScript/JXA automation) are not available.
+</details>
 
-**Create your first Agent:**
+### FAQ
 
-1. In any existing group, say: `Create an agent, directory ~/xxx, responsible for xxx`
-2. Bot replies: ✅ Agent created — **send `/activate` in your new group to bind it**
-3. Create a new group, add the bot, send `/activate` → binding complete
-
-> Want more Agents? Repeat: create in any group → new target group → `/activate`. Each group = independent AI workspace.
+- **Does plugin mode support daemon + phone?** Yes. Plugin auto-starts daemon when `daemon.yaml` exists.
+- **Does MetaMe bundle Claude or Codex?** No. `metame-cli` is engine-agnostic — you install engine(s) separately.
+- **One engine only?** Works fine. `/doctor` marks the missing engine as warning, not failure.
 
 ---
 
@@ -601,21 +545,9 @@ For day-2 operations and troubleshooting (engine routing, codex login/rate-limit
 
 ## Plugin
 
-Install directly into Claude Code without npm:
+Install directly into Claude Code without npm: `claude plugin install github:Yaron9/MetaMe/plugin`
 
-```bash
-claude plugin install github:Yaron9/MetaMe/plugin
-```
-
-Includes: cognitive profile injection, daemon (Telegram/Feishu), heartbeat tasks, layered memory, all mobile commands, slash commands (`/metame:evolve`, `/metame:daemon`, `/metame:refresh`, etc.).
-
-**Current behavior (code-aligned):**
-- Plugin auto-starts daemon on Claude `SessionStart` (if `~/.metame/daemon.yaml` exists).
-- Daemon runs detached; phone access works while daemon is running.
-- Plugin path does **not** auto-register OS service (launchd/task-scheduler/systemd). After reboot, open Claude once or run daemon start manually.
-
-Use the plugin if you want zero npm-global setup and Claude-integrated bootstrap.  
-Use npm CLI (`metame-cli`) if you want explicit system-service management and CLI-first operations.
+All features included. Plugin auto-starts daemon on `SessionStart` (if `daemon.yaml` exists). Does **not** auto-register OS service — after reboot, open Claude once or start daemon manually.
 
 ## Contributing
 
