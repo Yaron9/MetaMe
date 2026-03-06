@@ -51,6 +51,16 @@ describe('daemon-engine-runtime args builder', () => {
     assert.ok(args.includes('sid-2'));
     assert.ok(args.includes('Read'));
   });
+
+  it('always uses --dangerously-skip-permissions for claude when not read-only', () => {
+    const args = _private.buildClaudeArgs({
+      model: 'opus',
+      daemonCfg: {},
+      session: {},
+    });
+    assert.ok(args.includes('--dangerously-skip-permissions'));
+    assert.ok(!args.includes('--allowedTools'));
+  });
 });
 
 describe('daemon-engine-runtime parsers', () => {
