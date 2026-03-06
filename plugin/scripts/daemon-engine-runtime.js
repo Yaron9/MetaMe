@@ -62,16 +62,25 @@ const ENGINE_MODEL_CONFIG = Object.freeze({
   claude: {
     main:     'sonnet',                       // default session model
     distill:  'haiku',                        // background/cheap tasks
-    options:  ['opus', 'sonnet', 'haiku'],    // /model button list
+    options:  [                               // /model button list
+      { value: 'opus',   label: 'opus · 最强' },
+      { value: 'sonnet', label: 'sonnet · 均衡' },
+      { value: 'haiku',  label: 'haiku · 轻量' },
+    ],
     provider: 'anthropic',
     hint:     null,
   },
   codex: {
-    main:     'codex-1',                      // latest full model
-    distill:  'codex-mini-latest',            // mini for distill
-    options:  [],                             // free-form input only — models change fast
+    main:     'gpt-5.4',           // recommended for most tasks (official default)
+    distill:  'gpt-5.1-codex-mini', // cost-effective mini
+    options:  [                     // quick-pick buttons (official model names)
+      { value: 'gpt-5.4',            label: 'gpt-5.4 · 推荐' },
+      { value: 'gpt-5.3-codex',      label: 'gpt-5.3-codex · 最新 Codex 专用' },
+      { value: 'gpt-5.1-codex-max',  label: 'gpt-5.1-codex-max · 长任务' },
+      { value: 'gpt-5.1-codex-mini', label: 'gpt-5.1-codex-mini · 轻量' },
+    ],
     provider: 'openai',
-    hint:     '可输入任意 OpenAI 模型名',
+    hint:     '或直接发送任意 OpenAI 模型名切换',
   },
 });
 

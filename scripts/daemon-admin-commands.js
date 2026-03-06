@@ -993,39 +993,47 @@ function createAdminCommandHandler(deps) {
       const arg = text.slice(6).trim();
       const currentEngine = getDefaultEngine();
       const engineCfg = ENGINE_MODEL_CONFIG[currentEngine] || ENGINE_MODEL_CONFIG.claude;
-      const builtinModels = engineCfg.options;  // [] for codex (free-form), ['opus','sonnet','haiku'] for claude
+      // options is [{value, label}, ...] — normalize to a flat list for logic
+      const optionEntries = (engineCfg.options || []).map(o =>
+        typeof o === 'string' ? { value: o, label: o } : o
+      );
+      const optionValues = optionEntries.map(o => o.value);
       const daemonCfg = config.daemon || {};
       const currentModel = (daemonCfg.models && daemonCfg.models[currentEngine])
         || daemonCfg.model   // legacy fallback
         || engineCfg.main;
-      const activeProvider = providerMod ? providerMod.getActiveName() : engineCfg.provider;
+      // providerMod manages Claude providers only — for codex use engineCfg.provider
+      const activeProvider = (currentEngine === 'claude' && providerMod)
+        ? providerMod.getActiveName()
+        : engineCfg.provider;
       const isBuiltinProvider = activeProvider === engineCfg.provider;
       const distillModel = getDistillModel();
       const hintLine = engineCfg.hint ? `\n💡 ${engineCfg.hint}` : (!isBuiltinProvider ? `\n💡 ${activeProvider} 可输入任意模型名` : '');
 
       if (!arg) {
         const statusLine = `🤖 [${currentEngine}] 会话模型: ${currentModel}  Provider: ${activeProvider}\n🧪 后台轻量: ${distillModel}  (/distill-model 修改)${hintLine}`;
-        if (bot.sendButtons && builtinModels.length > 0) {
-          const buttons = builtinModels.map(m => [{
-            text: m === currentModel ? `${m} ✓` : m,
-            callback_data: `/model ${m}`,
+        if (bot.sendButtons && optionEntries.length > 0) {
+          const buttons = optionEntries.map(({ value, label }) => [{
+            text: value === currentModel ? `${label} ✓` : label,
+            callback_data: `/model ${value}`,
           }]);
           await bot.sendButtons(chatId, statusLine, buttons);
         } else {
-          const optionHint = builtinModels.length > 0 ? `\n\n可选: ${builtinModels.join(', ')}` : '';
+          const optionHint = optionValues.length > 0 ? `\n\n可选: ${optionValues.join(', ')}` : '';
           await bot.sendMessage(chatId, `${statusLine}${optionHint}`);
         }
         return { handled: true, config };
       }
 
       const normalizedArg = arg.toLowerCase();
-      // For claude with builtin provider, only accept known model names
-      if (builtinModels.length > 0 && isBuiltinProvider && !builtinModels.includes(normalizedArg)) {
-        await bot.sendMessage(chatId, `❌ 无效模型: ${arg}\n可选: ${builtinModels.join(', ')}\n💡 切换到自定义 provider 后可用任意模型名`);
+      // Only restrict model names for claude with anthropic provider (known fixed set)
+      // codex always allows free-form input (OpenAI models change frequently)
+      if (currentEngine === 'claude' && isBuiltinProvider && !optionValues.includes(normalizedArg)) {
+        await bot.sendMessage(chatId, `❌ 无效模型: ${arg}\n可选: ${optionValues.join(', ')}\n💡 切换到自定义 provider 后可用任意模型名`);
         return { handled: true, config };
       }
 
-      const modelName = builtinModels.includes(normalizedArg) ? normalizedArg : arg;
+      const modelName = optionValues.includes(normalizedArg) ? normalizedArg : arg;
       if (modelName === currentModel) {
         await bot.sendMessage(chatId, `🤖 已经是 ${modelName}（后台轻量模型: ${distillModel}）`);
         return { handled: true, config };
@@ -1076,7 +1084,9 @@ function createAdminCommandHandler(deps) {
       if (!arg) {
         const cur = getDefaultEngine();
         const curEngineCfg = ENGINE_MODEL_CONFIG[cur] || ENGINE_MODEL_CONFIG.claude;
-        const activeProvider = providerMod ? providerMod.getActiveName() : curEngineCfg.provider;
+        const activeProvider = (cur === 'claude' && providerMod)
+          ? providerMod.getActiveName()
+          : curEngineCfg.provider;
         const distill = getDistillModel();
         const daemonCfg = config.daemon || {};
         const currentModel = (daemonCfg.models && daemonCfg.models[cur])
