@@ -110,15 +110,50 @@ command -v node &>/dev/null || fail "Node.js installation failed. Install manual
 ok "Node.js $(node -v) ready"
 
 # -----------------------------------------------------------
-# 3. Install Claude Code
+# 3. Detect / install AI engine
 # -----------------------------------------------------------
-if command -v claude &>/dev/null; then
+has_claude=false
+has_codex=false
+command -v claude &>/dev/null && has_claude=true
+command -v codex  &>/dev/null && has_codex=true
+
+if $has_claude && $has_codex; then
+  ok "Claude Code $(claude -v 2>/dev/null || echo '') + Codex already installed"
+elif $has_claude; then
   ok "Claude Code already installed ($(claude -v 2>/dev/null || echo 'unknown version'))"
+elif $has_codex; then
+  ok "Codex already installed"
 else
-  info "Installing Claude Code..."
-  npm install -g @anthropic-ai/claude-code
-  command -v claude &>/dev/null || fail "Claude Code installation failed"
-  ok "Claude Code installed"
+  # Neither installed — ask once, default to Claude
+  echo ""
+  echo -e "  Which AI engine would you like to use?"
+  echo -e "  ${CYAN}1${RESET}) Claude Code  ${DIM}(recommended — by Anthropic)${RESET}"
+  echo -e "  ${CYAN}2${RESET}) Codex         ${DIM}(by OpenAI)${RESET}"
+  echo -e "  ${CYAN}3${RESET}) Both"
+  echo ""
+  read -r -p "  Choice [1]: " _engine_choice
+  _engine_choice="${_engine_choice:-1}"
+
+  install_claude() {
+    info "Installing Claude Code..."
+    npm install -g @anthropic-ai/claude-code
+    command -v claude &>/dev/null || fail "Claude Code installation failed"
+    ok "Claude Code installed"
+    has_claude=true
+  }
+  install_codex() {
+    info "Installing Codex..."
+    npm install -g @openai/codex
+    command -v codex &>/dev/null || fail "Codex installation failed"
+    ok "Codex installed"
+    has_codex=true
+  }
+
+  case "$_engine_choice" in
+    2) install_codex ;;
+    3) install_claude; install_codex ;;
+    *) install_claude ;;
+  esac
 fi
 
 # -----------------------------------------------------------
@@ -139,6 +174,12 @@ ok "MetaMe $(metame -v 2>/dev/null || echo '') installed"
 echo ""
 echo -e "${GREEN}${BOLD}  ✅ Installation complete!${RESET}"
 echo ""
-echo -e "  Run ${CYAN}metame${RESET} to start."
+if $has_codex && ! $has_claude; then
+  echo -e "  Run ${CYAN}codex login${RESET} to authenticate, then ${CYAN}metame codex${RESET} to start."
+elif $has_codex && $has_claude; then
+  echo -e "  Run ${CYAN}metame${RESET} (Claude) or ${CYAN}metame codex${RESET} (Codex) to start."
+else
+  echo -e "  Run ${CYAN}metame${RESET} to start."
+fi
 echo -e "  First launch will guide you through setup."
 echo ""
