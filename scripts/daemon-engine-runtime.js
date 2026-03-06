@@ -203,10 +203,10 @@ function buildCodexArgs(options = {}) {
 
   if (readOnly) {
     args.push('-s', 'read-only');
-  } else if (daemonCfg.dangerously_skip_permissions) {
-    args.push('--dangerously-bypass-approvals-and-sandbox');
   } else {
-    args.push('--full-auto');
+    // Mobile sessions: user cannot click permission dialogs.
+    // Security relies on allowed_chat_ids whitelist, not tool restrictions.
+    args.push('--dangerously-bypass-approvals-and-sandbox');
   }
 
   // "-" means prompt is read from stdin.
