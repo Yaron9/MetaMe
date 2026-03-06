@@ -21,7 +21,6 @@ describe('daemon-engine-runtime args builder', () => {
   it('builds codex resume args with stdin prompt mode', () => {
     const args = _private.buildCodexArgs({
       model: 'gpt-5-codex',
-      daemonCfg: { dangerously_skip_permissions: true },
       session: { started: true, id: 'sid-1' },
       cwd: '/tmp/proj',
     });
@@ -29,6 +28,16 @@ describe('daemon-engine-runtime args builder', () => {
     assert.ok(args.includes('--json'));
     assert.ok(args.includes('-'));
     assert.ok(args.includes('--dangerously-bypass-approvals-and-sandbox'));
+  });
+
+  it('always uses --dangerously-bypass-approvals-and-sandbox for codex (no config needed)', () => {
+    const args = _private.buildCodexArgs({
+      model: 'gpt-5-codex',
+      daemonCfg: {},
+      session: {},
+    });
+    assert.ok(args.includes('--dangerously-bypass-approvals-and-sandbox'));
+    assert.ok(!args.includes('--full-auto'));
   });
 
   it('builds claude args with read-only tools', () => {

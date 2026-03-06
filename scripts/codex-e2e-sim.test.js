@@ -100,7 +100,6 @@ describe('Codex E2E Simulation — Mobile User Flow', () => {
       },
       daemon: {
         model: 'o4-mini',
-        dangerously_skip_permissions: true,
         session_allowed_tools: [],
       },
     };
