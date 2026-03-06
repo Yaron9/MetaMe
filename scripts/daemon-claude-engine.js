@@ -64,7 +64,7 @@ function createClaudeEngine(deps) {
   function spawn(cmd, args, options) {
     const lowerCmd = String(cmd || '').toLowerCase();
     if (process.platform === 'win32' && (cmd === CLAUDE_BIN || lowerCmd.endsWith('\\claude.cmd') || lowerCmd.endsWith('\\codex.cmd'))) {
-      return _spawn(cmd, args, { ...options, shell: process.env.COMSPEC || true });
+      return _spawn(cmd, args, { ...options, shell: process.env.COMSPEC || true, windowsHide: true });
     }
     return _spawn(cmd, args, options);
   }

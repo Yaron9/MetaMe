@@ -203,13 +203,15 @@ function buildClaudeArgs(options = {}) {
 
 function buildCodexArgs(options = {}) {
   const { model = 'gpt-5-codex', readOnly = false, daemonCfg = {}, session = {}, cwd } = options;
-  const args = (session && session.started && session.id && session.id !== '__continue__')
+  const isResume = (session && session.started && session.id && session.id !== '__continue__');
+  const args = isResume
     ? ['exec', 'resume', session.id]
     : ['exec'];
 
   args.push('--json', '--skip-git-repo-check');
   if (model) args.push('-m', model);
-  if (cwd) args.push('-C', cwd);
+  // -C (cwd) is only supported on fresh exec, not resume
+  if (cwd && !isResume) args.push('-C', cwd);
 
   if (readOnly) {
     args.push('-s', 'read-only');

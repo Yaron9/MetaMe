@@ -29,8 +29,13 @@ function resolveBinary(engineName, deps = {}) {
   const key = engine === 'codex' ? 'codex' : 'claude';
   const cmd = process.platform === 'win32' ? `where ${key}` : `which ${key} 2>/dev/null`;
   try {
-    const resolved = execSyncFn(cmd, { encoding: 'utf8', timeout: 3000 }).trim().split('\n')[0];
-    if (resolved) return resolved;
+    const lines = execSyncFn(cmd, { encoding: 'utf8', timeout: 3000 })
+      .split('\n').map(l => l.trim()).filter(Boolean);
+    // On Windows prefer .cmd wrapper (reliably executable by spawn)
+    const preferred = process.platform === 'win32'
+      ? (lines.find(l => l.toLowerCase().endsWith(`${key}.cmd`)) || lines[0])
+      : lines[0];
+    if (preferred) return preferred;
   } catch { /* fallback */ }
 
   const candidates = engine === 'codex'
@@ -180,10 +185,10 @@ function buildClaudeArgs(options = {}) {
   if (readOnly) {
     const readOnlyTools = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Task'];
     for (const tool of readOnlyTools) args.push('--allowedTools', tool);
-  } else if (daemonCfg.dangerously_skip_permissions) {
-    args.push('--dangerously-skip-permissions');
   } else {
-    for (const tool of (daemonCfg.session_allowed_tools || [])) args.push('--allowedTools', tool);
+    // Always bypass permission prompts — desktop users run in trusted local context,
+    // mobile users cannot click dialogs. Security relies on allowed_chat_ids whitelist.
+    args.push('--dangerously-skip-permissions');
   }
 
   if (session.id === '__continue__') {
@@ -198,20 +203,22 @@ function buildClaudeArgs(options = {}) {
 
 function buildCodexArgs(options = {}) {
   const { model = 'gpt-5-codex', readOnly = false, daemonCfg = {}, session = {}, cwd } = options;
-  const args = (session && session.started && session.id && session.id !== '__continue__')
+  const isResume = (session && session.started && session.id && session.id !== '__continue__');
+  const args = isResume
     ? ['exec', 'resume', session.id]
     : ['exec'];
 
   args.push('--json', '--skip-git-repo-check');
   if (model) args.push('-m', model);
-  if (cwd) args.push('-C', cwd);
+  // -C (cwd) is only supported on fresh exec, not resume
+  if (cwd && !isResume) args.push('-C', cwd);
 
   if (readOnly) {
     args.push('-s', 'read-only');
-  } else if (daemonCfg.dangerously_skip_permissions) {
-    args.push('--dangerously-bypass-approvals-and-sandbox');
   } else {
-    args.push('--full-auto');
+    // Mobile sessions: user cannot click permission dialogs.
+    // Security relies on allowed_chat_ids whitelist, not tool restrictions.
+    args.push('--dangerously-bypass-approvals-and-sandbox');
   }
 
   // "-" means prompt is read from stdin.
@@ -241,7 +248,7 @@ function createEngineRuntimeFactory(deps = {}) {
         buildEnv: ({ metameProject = '' } = {}) => {
           const env = { ...process.env, METAME_PROJECT: metameProject };
           // Unset CODEX_HOME if it points to a non-existent path (corrupted env var)
-          if (env.CODEX_HOME && !fsMod.existsSync(env.CODEX_HOME)) delete env.CODEX_HOME;
+          if (env.CODEX_HOME && !fs.existsSync(env.CODEX_HOME)) delete env.CODEX_HOME;
           return env;
         },
         parseStreamEvent: parseCodexStreamEvent,
