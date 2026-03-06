@@ -10,15 +10,40 @@ const fs = require('fs');
 const path = require('path');
 
 let Lark;
-try {
-  Lark = require('@larksuiteoapi/node-sdk');
-} catch {
+function _tryRequireLark() {
+  // 1. local node_modules (dev environment)
+  try { return require('@larksuiteoapi/node-sdk'); } catch {}
+  // 2. METAME_ROOT/node_modules (packaged metame-cli)
   const metameRoot = process.env.METAME_ROOT;
   if (metameRoot) {
-    Lark = require(require('path').join(metameRoot, 'node_modules', '@larksuiteoapi/node-sdk'));
+    try { return require(path.join(metameRoot, 'node_modules', '@larksuiteoapi/node-sdk')); } catch {}
   }
-  if (!Lark) {
-    console.error('Cannot find @larksuiteoapi/node-sdk. Run: npm install @larksuiteoapi/node-sdk');
+  // 3. ~/.metame/node_modules (auto-installed for new users)
+  const home = process.env.HOME || process.env.USERPROFILE;
+  if (home) {
+    try { return require(path.join(home, '.metame', 'node_modules', '@larksuiteoapi', 'node-sdk')); } catch {}
+  }
+  return null;
+}
+Lark = _tryRequireLark();
+if (!Lark) {
+  // Auto-install into ~/.metame so new users never see this error
+  const home = process.env.HOME || process.env.USERPROFILE;
+  const prefix = home ? path.join(home, '.metame') : null;
+  if (prefix) {
+    console.log('[feishu] @larksuiteoapi/node-sdk not found, auto-installing into ~/.metame ...');
+    const { execSync } = require('child_process');
+    try {
+      execSync(`npm install @larksuiteoapi/node-sdk --prefix "${prefix}" --silent`, { stdio: 'inherit' });
+      Lark = require(path.join(prefix, 'node_modules', '@larksuiteoapi', 'node-sdk'));
+      console.log('[feishu] SDK installed successfully.');
+    } catch (e) {
+      console.error('[feishu] Auto-install failed:', e.message);
+      console.error('Manual fix: npm install @larksuiteoapi/node-sdk --prefix ~/.metame');
+      process.exit(1);
+    }
+  } else {
+    console.error('[feishu] Cannot find @larksuiteoapi/node-sdk and HOME is not set.');
     process.exit(1);
   }
 }
