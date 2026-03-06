@@ -890,8 +890,10 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       }
     }
 
-    // Build engine command
-    const model = (boundProject && boundProject.model) || daemonCfg.model || runtime.defaultModel;
+    // Build engine command — prefer per-engine model, fall back to legacy daemon.model
+    const engineModels = daemonCfg.models || {};
+    const engineModel = engineModels[runtime.name] || daemonCfg.model || runtime.defaultModel;
+    const model = (boundProject && boundProject.model) || engineModel;
     const args = runtime.buildArgs({
       model,
       readOnly,

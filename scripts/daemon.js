@@ -145,7 +145,7 @@ const { createFileBrowser } = require('./daemon-file-browser');
 const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lifecycle');
 const { createNotifier } = require('./daemon-notify');
 const { createClaudeEngine } = require('./daemon-claude-engine');
-const { createEngineRuntimeFactory, detectDefaultEngine, ENGINE_DISTILL_MAP, ENGINE_DEFAULT_MODEL } = require('./daemon-engine-runtime');
+const { createEngineRuntimeFactory, detectDefaultEngine, ENGINE_MODEL_CONFIG, ENGINE_DISTILL_MAP, ENGINE_DEFAULT_MODEL } = require('./daemon-engine-runtime');
 const { createCommandRouter } = require('./daemon-command-router');
 const { createTaskScheduler } = require('./daemon-task-scheduler');
 const { createAgentTools } = require('./daemon-agent-tools');
@@ -1396,6 +1396,16 @@ if (providerMod && typeof providerMod.setEngine === 'function') {
 }
 log('INFO', `Default engine: ${_defaultEngine} (detected: ${detectedEngine})`);
 
+// One-time migration: daemon.model (legacy) → daemon.models.<engine>
+try {
+  const _migCfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
+  if (_migCfg.daemon && _migCfg.daemon.model && !_migCfg.daemon.models) {
+    _migCfg.daemon.models = { [_defaultEngine]: _migCfg.daemon.model };
+    writeConfigSafe(_migCfg);
+    log('INFO', `Migrated daemon.model="${_migCfg.daemon.model}" → daemon.models.${_defaultEngine}`);
+  }
+} catch { /* ignore */ }
+
 function getDefaultEngine() {
   return _defaultEngine;
 }
@@ -1406,26 +1416,24 @@ function setDefaultEngine(engine) {
   st.default_engine = engine;
   saveState(st);
   if (providerMod) {
-    // Couple distill model
+    // Sync distill model to this engine's default
     if (typeof providerMod.setDistillModel === 'function') {
-      const paired = ENGINE_DISTILL_MAP[engine] || ENGINE_DISTILL_MAP.claude;
-      try { providerMod.setDistillModel(paired); } catch { /* ignore */ }
+      const distill = (ENGINE_MODEL_CONFIG[engine] || ENGINE_MODEL_CONFIG.claude).distill;
+      try { providerMod.setDistillModel(distill); } catch { /* ignore */ }
     }
-    // Couple distill binary
     if (typeof providerMod.setEngine === 'function') {
       try { providerMod.setEngine(engine); } catch { /* ignore */ }
     }
   }
-  // Sync daemon.model to the engine's default model
-  const defaultModel = ENGINE_DEFAULT_MODEL[engine];
-  if (defaultModel) {
-    try {
-      const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
-      if (!cfg.daemon) cfg.daemon = {};
-      cfg.daemon.model = defaultModel;
+  // Migrate old daemon.model → daemon.models[engine] on first switch
+  try {
+    const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
+    if (!cfg.daemon) cfg.daemon = {};
+    if (cfg.daemon.model && !cfg.daemon.models) {
+      cfg.daemon.models = { [engine]: cfg.daemon.model };
       writeConfigSafe(cfg);
-    } catch { /* ignore */ }
-  }
+    }
+  } catch { /* ignore */ }
 }
 
 const getEngineRuntime = createEngineRuntimeFactory({
@@ -1841,7 +1849,9 @@ async function main() {
   // Config validation: warn on unknown/suspect fields
   const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'heartbeat', 'budget', 'projects'];
   const KNOWN_DAEMON = [
-    'model',
+    'model',          // legacy (still valid as fallback)
+    'models',         // per-engine model map: { claude, codex }
+    'distill_models', // per-engine distill model map
     'log_max_size',
     'heartbeat_check_interval',
     'session_allowed_tools',
@@ -1853,7 +1863,8 @@ async function main() {
     'enable_nl_mac_control',
     'enable_nl_mac_fallback',
   ];
-  const VALID_MODELS = ['sonnet', 'opus', 'haiku'];
+  // All known models across all engines (for legacy daemon.model validation only)
+  const BUILTIN_CLAUDE_MODELS = ENGINE_MODEL_CONFIG.claude.options;
   for (const key of Object.keys(config)) {
     if (!KNOWN_SECTIONS.includes(key)) log('WARN', `Config: unknown section "${key}" (typo?)`);
   }
@@ -1861,13 +1872,13 @@ async function main() {
     for (const key of Object.keys(config.daemon)) {
       if (!KNOWN_DAEMON.includes(key)) log('WARN', `Config: unknown daemon.${key} (typo?)`);
     }
-    if (config.daemon.model && !VALID_MODELS.includes(config.daemon.model)) {
-      // Custom model names are valid when using non-anthropic providers
+    // Validate legacy daemon.model (only warn if anthropic provider + unknown Claude model)
+    if (config.daemon.model && !BUILTIN_CLAUDE_MODELS.includes(config.daemon.model)) {
       const activeProv = providerMod ? providerMod.getActiveName() : 'anthropic';
-      if (activeProv === 'anthropic') {
-        log('WARN', `Config: daemon.model="${config.daemon.model}" is not a known model`);
+      if (activeProv === 'anthropic' && _defaultEngine === 'claude') {
+        log('WARN', `Config: daemon.model="${config.daemon.model}" is not a known Claude model`);
       } else {
-        log('INFO', `Config: custom model "${config.daemon.model}" for provider "${activeProv}"`);
+        log('INFO', `Config: model "${config.daemon.model}" for engine "${_defaultEngine}" / provider "${activeProv}"`);
       }
     }
   }

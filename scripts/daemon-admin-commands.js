@@ -6,11 +6,9 @@ const {
   USAGE_CATEGORY_LABEL,
 } = require('./usage-classifier');
 const { IS_WIN } = require('./platform');
+const { ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
 let mentorEngine = null;
 try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
-
-// Maps engine name to its preferred provider key in providers.yaml
-const ENGINE_PREFERRED_PROVIDER = Object.freeze({ claude: 'anthropic', codex: 'openai' });
 
 function createAdminCommandHandler(deps) {
   const {
@@ -990,33 +988,39 @@ function createAdminCommandHandler(deps) {
       return { handled: true, config };
     }
 
-    // /model [name] — switch session model (interactive, accepts any name for custom providers)
+    // /model [name] — switch session model, engine-aware
     if (text === '/model' || text.startsWith('/model ')) {
       const arg = text.slice(6).trim();
-      const builtinModels = ['sonnet', 'opus', 'haiku'];
-      const currentModel = (config.daemon && config.daemon.model) || 'opus';
-      const activeProvider = providerMod ? providerMod.getActiveName() : 'anthropic';
-      const isCustomProvider = activeProvider !== 'anthropic';
+      const currentEngine = getDefaultEngine();
+      const engineCfg = ENGINE_MODEL_CONFIG[currentEngine] || ENGINE_MODEL_CONFIG.claude;
+      const builtinModels = engineCfg.options;  // [] for codex (free-form), ['opus','sonnet','haiku'] for claude
+      const daemonCfg = config.daemon || {};
+      const currentModel = (daemonCfg.models && daemonCfg.models[currentEngine])
+        || daemonCfg.model   // legacy fallback
+        || engineCfg.main;
+      const activeProvider = providerMod ? providerMod.getActiveName() : engineCfg.provider;
+      const isBuiltinProvider = activeProvider === engineCfg.provider;
       const distillModel = getDistillModel();
+      const hintLine = engineCfg.hint ? `\n💡 ${engineCfg.hint}` : (!isBuiltinProvider ? `\n💡 ${activeProvider} 可输入任意模型名` : '');
 
       if (!arg) {
-        const hint = isCustomProvider ? `\n💡 ${activeProvider} 可输入任意模型名` : '';
-        const statusLine = `🤖 会话模型: ${currentModel}  [Provider: ${activeProvider}]\n🧪 后台轻量: ${distillModel}  (/distill-model 修改)${hint}`;
-        if (bot.sendButtons) {
+        const statusLine = `🤖 [${currentEngine}] 会话模型: ${currentModel}  Provider: ${activeProvider}\n🧪 后台轻量: ${distillModel}  (/distill-model 修改)${hintLine}`;
+        if (bot.sendButtons && builtinModels.length > 0) {
           const buttons = builtinModels.map(m => [{
             text: m === currentModel ? `${m} ✓` : m,
             callback_data: `/model ${m}`,
           }]);
           await bot.sendButtons(chatId, statusLine, buttons);
         } else {
-          await bot.sendMessage(chatId, `${statusLine}\n\n可选: ${builtinModels.join(', ')}`);
+          const optionHint = builtinModels.length > 0 ? `\n\n可选: ${builtinModels.join(', ')}` : '';
+          await bot.sendMessage(chatId, `${statusLine}${optionHint}`);
         }
         return { handled: true, config };
       }
 
       const normalizedArg = arg.toLowerCase();
-      // Builtin providers only accept builtin model names
-      if (!isCustomProvider && !builtinModels.includes(normalizedArg)) {
+      // For claude with builtin provider, only accept known model names
+      if (builtinModels.length > 0 && isBuiltinProvider && !builtinModels.includes(normalizedArg)) {
         await bot.sendMessage(chatId, `❌ 无效模型: ${arg}\n可选: ${builtinModels.join(', ')}\n💡 切换到自定义 provider 后可用任意模型名`);
         return { handled: true, config };
       }
@@ -1031,10 +1035,11 @@ function createAdminCommandHandler(deps) {
         backupConfig();
         const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
         if (!cfg.daemon) cfg.daemon = {};
-        cfg.daemon.model = modelName;
+        if (!cfg.daemon.models) cfg.daemon.models = {};
+        cfg.daemon.models[currentEngine] = modelName;
         writeConfigSafe(cfg);
         config = loadConfig();
-        await bot.sendMessage(chatId, `✅ 会话模型: ${currentModel} → ${modelName}\n🧪 后台轻量模型: ${distillModel}（如需修改用 /distill-model）`);
+        await bot.sendMessage(chatId, `✅ [${currentEngine}] 会话模型: ${currentModel} → ${modelName}\n🧪 后台轻量模型: ${distillModel}（如需修改用 /distill-model）`);
       } catch (e) {
         await bot.sendMessage(chatId, `❌ 切换失败: ${e.message}`);
       }
@@ -1070,9 +1075,12 @@ function createAdminCommandHandler(deps) {
       const arg = text.slice('/engine'.length).trim().toLowerCase();
       if (!arg) {
         const cur = getDefaultEngine();
-        const activeProvider = providerMod ? providerMod.getActiveName() : 'anthropic';
+        const curEngineCfg = ENGINE_MODEL_CONFIG[cur] || ENGINE_MODEL_CONFIG.claude;
+        const activeProvider = providerMod ? providerMod.getActiveName() : curEngineCfg.provider;
         const distill = getDistillModel();
-        const currentModel = (config.daemon && config.daemon.model) || 'opus';
+        const daemonCfg = config.daemon || {};
+        const currentModel = (daemonCfg.models && daemonCfg.models[cur])
+          || daemonCfg.model || curEngineCfg.main;
         await bot.sendMessage(chatId, [
           `🔧 引擎: ${cur}  |  Provider: ${activeProvider}`,
           `🤖 会话模型: ${currentModel}  |  后台轻量: ${distill}`,
@@ -1087,12 +1095,15 @@ function createAdminCommandHandler(deps) {
         return { handled: true, config };
       }
 
-      const preferredProvider = ENGINE_PREFERRED_PROVIDER[arg];
+      const preferredProvider = (ENGINE_MODEL_CONFIG[arg] || {}).provider;
 
-      setDefaultEngine(arg); // also syncs distill model + daemon.model + providerMod.setEngine
+      setDefaultEngine(arg); // syncs distill model + providerMod.setEngine (no longer resets session model)
       const distill = getDistillModel();
       const freshCfg = loadConfig();
-      const syncedModel = (freshCfg.daemon && freshCfg.daemon.model) || arg;
+      const freshDaemon = freshCfg.daemon || {};
+      const targetEngineCfg = ENGINE_MODEL_CONFIG[arg] || ENGINE_MODEL_CONFIG.claude;
+      const syncedModel = (freshDaemon.models && freshDaemon.models[arg])
+        || freshDaemon.model || targetEngineCfg.main;
 
       // Auto-switch provider if the preferred one exists in providers.yaml
       let providerNote = '';

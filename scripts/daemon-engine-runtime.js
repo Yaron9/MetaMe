@@ -56,15 +56,32 @@ function resolveBinary(engineName, deps = {}) {
   return key;
 }
 
-const ENGINE_DISTILL_MAP = Object.freeze({
-  claude: 'haiku',
-  codex: 'gpt-5.1-codex-mini',
+// Single source of truth for all per-engine model config.
+// All other code should read from here — no scattered hardcodes.
+const ENGINE_MODEL_CONFIG = Object.freeze({
+  claude: {
+    main:     'sonnet',                       // default session model
+    distill:  'haiku',                        // background/cheap tasks
+    options:  ['opus', 'sonnet', 'haiku'],    // /model button list
+    provider: 'anthropic',
+    hint:     null,
+  },
+  codex: {
+    main:     'codex-1',                      // latest full model
+    distill:  'codex-mini-latest',            // mini for distill
+    options:  [],                             // free-form input only — models change fast
+    provider: 'openai',
+    hint:     '可输入任意 OpenAI 模型名',
+  },
 });
 
-const ENGINE_DEFAULT_MODEL = Object.freeze({
-  claude: 'sonnet',
-  codex: 'gpt-5.1-codex-mini',
-});
+// Backward-compat aliases (derived, do not edit directly)
+const ENGINE_DISTILL_MAP = Object.freeze(
+  Object.fromEntries(Object.entries(ENGINE_MODEL_CONFIG).map(([k, v]) => [k, v.distill]))
+);
+const ENGINE_DEFAULT_MODEL = Object.freeze(
+  Object.fromEntries(Object.entries(ENGINE_MODEL_CONFIG).map(([k, v]) => [k, v.main]))
+);
 
 function detectDefaultEngine(deps = {}) {
   for (const engine of ['claude', 'codex']) {
@@ -180,7 +197,7 @@ function parseCodexStreamEvent(line) {
 }
 
 function buildClaudeArgs(options = {}) {
-  const { model = 'opus', readOnly = false, daemonCfg = {}, session = {} } = options;
+  const { model = ENGINE_MODEL_CONFIG.claude.main, readOnly = false, daemonCfg = {}, session = {} } = options;
   const args = ['-p', '--model', model];
   if (readOnly) {
     const readOnlyTools = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Task'];
@@ -202,7 +219,7 @@ function buildClaudeArgs(options = {}) {
 }
 
 function buildCodexArgs(options = {}) {
-  const { model = 'gpt-5-codex', readOnly = false, daemonCfg = {}, session = {}, cwd } = options;
+  const { model = ENGINE_MODEL_CONFIG.codex.main, readOnly = false, daemonCfg = {}, session = {}, cwd } = options;
   const isResume = (session && session.started && session.id && session.id !== '__continue__');
   const args = isResume
     ? ['exec', 'resume', session.id]
@@ -240,7 +257,7 @@ function createEngineRuntimeFactory(deps = {}) {
       return {
         name: 'codex',
         binary: codexBin,
-        defaultModel: 'gpt-5-codex',
+        defaultModel: ENGINE_MODEL_CONFIG.codex.main,
         stdinBehavior: 'write-and-close',
         killSignal: 'SIGTERM',
         timeouts: { idleMs: 10 * 60 * 1000, toolMs: 25 * 60 * 1000, ceilingMs: 60 * 60 * 1000 },
@@ -258,7 +275,7 @@ function createEngineRuntimeFactory(deps = {}) {
     return {
       name: 'claude',
       binary: claudeBin,
-      defaultModel: 'opus',
+      defaultModel: ENGINE_MODEL_CONFIG.claude.main,
       stdinBehavior: 'write-and-close',
       killSignal: 'SIGTERM',
       timeouts: { idleMs: 5 * 60 * 1000, toolMs: 25 * 60 * 1000, ceilingMs: 60 * 60 * 1000 },
@@ -281,6 +298,7 @@ module.exports = {
   normalizeEngineName,
   resolveBinary,
   detectDefaultEngine,
+  ENGINE_MODEL_CONFIG,
   ENGINE_DISTILL_MAP,
   ENGINE_DEFAULT_MODEL,
   _private: {
