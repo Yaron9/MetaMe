@@ -182,7 +182,16 @@ const ADMIN_ONLY_ACTIONS = new Set(['system', 'agent', 'config', 'admin_acl']);
  */
 function resolveUserCtx(senderId, config) {
   const userData = loadUsers();
-  const hasConfiguredUsers = !!(userData && userData.users && Object.keys(userData.users).length > 0);
+  // Per-platform bootstrap: Feishu open_id starts with "ou_", Telegram IDs are numeric.
+  const allUsers = userData && userData.users ? userData.users : {};
+  const isFeishuId = senderId && senderId.startsWith('ou_');
+  const isTelegramId = senderId && /^\d+$/.test(senderId);
+  const hasPlatformAdmin = isFeishuId
+    ? Object.keys(allUsers).some(id => id.startsWith('ou_'))
+    : isTelegramId
+      ? Object.keys(allUsers).some(id => /^\d+$/.test(id))
+      : Object.keys(allUsers).length > 0;
+  const hasConfiguredUsers = hasPlatformAdmin;
 
   let role, name, allowedActions;
 
