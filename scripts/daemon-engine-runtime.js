@@ -233,7 +233,12 @@ function createEngineRuntimeFactory(deps = {}) {
         killSignal: 'SIGTERM',
         timeouts: { idleMs: 10 * 60 * 1000, toolMs: 25 * 60 * 1000, ceilingMs: 60 * 60 * 1000 },
         buildArgs: buildCodexArgs,
-        buildEnv: ({ metameProject = '' } = {}) => ({ ...process.env, METAME_PROJECT: metameProject }),
+        buildEnv: ({ metameProject = '' } = {}) => {
+          const env = { ...process.env, METAME_PROJECT: metameProject };
+          // Unset CODEX_HOME if it points to a non-existent path (corrupted env var)
+          if (env.CODEX_HOME && !fsMod.existsSync(env.CODEX_HOME)) delete env.CODEX_HOME;
+          return env;
+        },
         parseStreamEvent: parseCodexStreamEvent,
         classifyError: classifyEngineError,
       };
