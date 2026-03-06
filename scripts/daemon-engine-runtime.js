@@ -29,7 +29,7 @@ function resolveBinary(engineName, deps = {}) {
   const key = engine === 'codex' ? 'codex' : 'claude';
   const cmd = process.platform === 'win32' ? `where ${key}` : `which ${key} 2>/dev/null`;
   try {
-    const lines = execSyncFn(cmd, { encoding: 'utf8', timeout: 3000 })
+    const lines = execSyncFn(cmd, { encoding: 'utf8', timeout: 3000, ...(process.platform === 'win32' ? { windowsHide: true } : {}) })
       .split('\n').map(l => l.trim()).filter(Boolean);
     // On Windows prefer .cmd wrapper (reliably executable by spawn)
     const preferred = process.platform === 'win32'

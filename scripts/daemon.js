@@ -60,7 +60,7 @@ const CLAUDE_BIN = (() => {
   ];
   try {
     const cmd = process.platform === 'win32' ? 'where claude' : 'which claude 2>/dev/null';
-    return execSync(cmd, { encoding: 'utf8' }).trim().split('\n')[0];
+    return execSync(cmd, { encoding: 'utf8', ...(process.platform === 'win32' ? { windowsHide: true } : {}) }).trim().split('\n')[0];
   } catch {}
   for (const p of candidates) { if (fs.existsSync(p)) return p; }
   return 'claude'; // fallback: hope it's in PATH
@@ -943,6 +943,7 @@ function spawnSessionSummaries() {
     try {
       const child = spawn(process.execPath, [scriptPath, cid, sess.id], {
         detached: true, stdio: 'ignore',
+        ...(process.platform === 'win32' ? { windowsHide: true } : {}),
       });
       child.unref();
       spawned++;

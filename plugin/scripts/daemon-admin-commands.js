@@ -147,7 +147,7 @@ function createAdminCommandHandler(deps) {
   function hasCli(execSyncFn, bin) {
     try {
       const cmd = process.platform === 'win32' ? `where ${bin}` : `which ${bin}`;
-      execSyncFn(cmd, { encoding: 'utf8' });
+      execSyncFn(cmd, { encoding: 'utf8', ...(process.platform === 'win32' ? { windowsHide: true } : {}) });
       return true;
     } catch {
       return false;
