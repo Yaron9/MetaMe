@@ -1956,6 +1956,24 @@ if (isCodex) {
   const codexArgs = codexUserArgs.length === 0
     ? ['--full-auto']
     : ['exec', '--full-auto', ...codexUserArgs];
+
+  // Codex reads AGENTS.md (not CLAUDE.md); create symlink so genesis protocol is visible.
+  // Also ensure global ~/AGENTS.md → ~/.claude/CLAUDE.md for identity context.
+  try {
+    const agentsMd = path.join(process.cwd(), 'AGENTS.md');
+    const claudeMd = path.join(process.cwd(), 'CLAUDE.md');
+    if (!fs.existsSync(agentsMd) && fs.existsSync(claudeMd)) {
+      fs.symlinkSync('CLAUDE.md', agentsMd);
+    }
+  } catch { /* non-critical */ }
+  try {
+    const globalAgentsMd = path.join(HOME_DIR, 'AGENTS.md');
+    const globalClaudeMd = path.join(HOME_DIR, '.claude', 'CLAUDE.md');
+    if (!fs.existsSync(globalAgentsMd) && fs.existsSync(globalClaudeMd)) {
+      fs.symlinkSync(globalClaudeMd, globalAgentsMd);
+    }
+  } catch { /* non-critical */ }
+
   const child = spawnCodex(codexArgs, {
     stdio: 'inherit',
     cwd: process.cwd(),
