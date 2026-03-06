@@ -343,7 +343,7 @@ function callDistillModel(input, extraEnv, timeout, options = {}) {
     env,
     timeout,
     maxBuffer: 10 * 1024 * 1024,
-    ...(process.platform === 'win32' ? { shell: process.env.COMSPEC || true } : {}),
+    ...(process.platform === 'win32' ? { shell: process.env.COMSPEC || true, windowsHide: true } : {}),
   };
   return new Promise((resolve, reject) => {
     const proc = execFile(

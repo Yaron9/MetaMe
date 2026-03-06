@@ -406,6 +406,7 @@ function spawnDistillBackground() {
     detached: true,
     stdio: 'ignore',
     env: distillEnvClean,
+    windowsHide: true,
   });
   bg.unref();
 }
