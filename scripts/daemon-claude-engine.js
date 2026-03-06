@@ -60,10 +60,18 @@ function createClaudeEngine(deps) {
     ? injectedGetEngineRuntime
     : createEngineRuntimeFactory({ fs, path, HOME, CLAUDE_BIN, getActiveProviderEnv });
 
-  // On Windows, .cmd files need shell to spawn; use COMSPEC to avoid conda PATH issues
+  // On Windows, .cmd/.bat files and bare npm commands need shell:true to spawn.
+  // Also covers the fallback case where resolveBinary returns the bare command name.
   function spawn(cmd, args, options) {
     const lowerCmd = String(cmd || '').toLowerCase();
-    if (process.platform === 'win32' && (cmd === CLAUDE_BIN || lowerCmd.endsWith('\\claude.cmd') || lowerCmd.endsWith('\\codex.cmd'))) {
+    const needsShell = process.platform === 'win32' && (
+      cmd === CLAUDE_BIN ||
+      lowerCmd.endsWith('.cmd') ||
+      lowerCmd.endsWith('.bat') ||
+      lowerCmd === 'claude' ||
+      lowerCmd === 'codex'
+    );
+    if (needsShell) {
       return _spawn(cmd, args, { ...options, shell: process.env.COMSPEC || true, windowsHide: true });
     }
     return _spawn(cmd, args, options);
