@@ -74,6 +74,10 @@ function createClaudeEngine(deps) {
     if (needsShell) {
       return _spawn(cmd, args, { ...options, shell: process.env.COMSPEC || true, windowsHide: true });
     }
+    // Always hide spawned windows on Windows (covers .exe and other non-shell binaries)
+    if (process.platform === 'win32') {
+      return _spawn(cmd, args, { ...options, windowsHide: true });
+    }
     return _spawn(cmd, args, options);
   }
 

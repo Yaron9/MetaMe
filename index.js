@@ -16,6 +16,7 @@ function spawnClaude(args, options) {
     return spawn('claude', args, {
       ...options,
       shell: process.env.COMSPEC || true,
+      windowsHide: true,
     });
   }
   return spawn('claude', args, options);
@@ -27,7 +28,7 @@ function spawnCodex(args, options) {
   if (env.CODEX_HOME && !fs.existsSync(env.CODEX_HOME)) delete env.CODEX_HOME;
   const opts = { ...options, env };
   if (process.platform === 'win32') {
-    return spawn('codex', args, { ...opts, shell: process.env.COMSPEC || true });
+    return spawn('codex', args, { ...opts, shell: process.env.COMSPEC || true, windowsHide: true });
   }
   return spawn('codex', args, opts);
 }
