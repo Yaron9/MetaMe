@@ -441,18 +441,20 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const streamArgs = rt.name === 'claude'
         ? [...args, '--output-format', 'stream-json', '--verbose']
         : args;
+      const _spawnAt = Date.now();
       const child = spawn(rt.binary, streamArgs, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         env: rt.buildEnv({ metameProject }),
       });
+      log('INFO', `[TIMING:${chatId}] spawned ${rt.name} pid=${child.pid}`);
 
       if (chatId) {
         activeProcesses.set(chatId, {
           child,
           aborted: false,
-          startedAt: Date.now(),
+          startedAt: _spawnAt,
           engine: rt.name,
           killSignal: rt.killSignal || 'SIGTERM',
         });
@@ -466,6 +468,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       let finalResult = '';
       let finalUsage = null;
       let observedSessionId = '';
+      let _firstOutputLogged = false;
       let classifiedError = null;
       let lastStatusTime = 0;
       const STATUS_THROTTLE = statusThrottleMs;
@@ -537,6 +540,10 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
         for (const line of lines) {
           if (!line.trim()) continue;
+          if (!_firstOutputLogged) {
+            _firstOutputLogged = true;
+            log('INFO', `[TIMING:${chatId}] first-line +${Date.now() - _spawnAt}ms`);
+          }
           const events = parseEventsFromLine(line);
           for (const event of events) {
             if (!event || !event.type) continue;
@@ -652,6 +659,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       });
 
       child.on('close', (code) => {
+        log('INFO', `[TIMING:${chatId}] process-close code=${code} total=${Date.now() - _spawnAt}ms`);
         clearTimeout(idleTimer);
         clearTimeout(ceilingTimer);
         clearTimeout(sigkillTimer);
@@ -760,6 +768,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
   }
 
   async function askClaude(bot, chatId, prompt, config, readOnly = false) {
+    const _t0 = Date.now();
     log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
     // Track interaction time for idle/sleep detection
     if (touchInteraction) touchInteraction();
@@ -1110,6 +1119,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     // Run async (fire-and-forget) to avoid blocking Claude spawn by ~600ms.
     // Completes well before Claude's first file write (~2s after spawn).
     (gitCheckpointAsync || gitCheckpoint)(session.cwd, prompt).catch?.(() => {});
+    log('INFO', `[TIMING:${chatId}] pre-spawn +${Date.now() - _t0}ms (engine:${runtime.name} started:${session.started})`);
 
     // Use streaming mode to show progress
     // Telegram: edit status msg in-place; Feishu: edit or fallback to new messages
