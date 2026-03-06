@@ -1953,10 +1953,6 @@ if (isCodex) {
   // Genesis: new user + interactive mode — trigger profile interview within the same Codex session.
   // CLAUDE.md (already written to disk above) contains the full genesis protocol; Codex reads it.
   // We pass the trigger as the opening [PROMPT] argument so genesis flows into normal work seamlessly.
-  if (!isKnownUser && codexUserArgs.length === 0) {
-    console.log(`${icon("new")} New user detected — entering Genesis interview mode...`);
-  }
-
   const codexArgs = codexUserArgs.length === 0
     ? ['--full-auto']
     : ['exec', '--full-auto', ...codexUserArgs];
