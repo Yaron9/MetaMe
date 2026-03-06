@@ -407,6 +407,10 @@ function createAgentCommandHandler(deps) {
           return true;
         }
         const cwd = normalizeCwd(boundProj.cwd);
+        // Lazy migration: ensure soul layer exists for agents created before this feature
+        if (agentTools && typeof agentTools.repairAgentSoul === 'function') {
+          await agentTools.repairAgentSoul(cwd).catch(() => {});
+        }
         const inlineDelta = agentParts.slice(1).join(' ').trim();
         if (inlineDelta) {
           await bot.sendMessage(chatId, '⏳ 正在更新 CLAUDE.md...');
@@ -469,6 +473,83 @@ function createAgentCommandHandler(deps) {
         await bot.sendMessage(chatId, '✅ 已删除角色 section，请重新发送角色描述（/agent edit 或自然语言修改）');
         return true;
       }
+
+
+      // /agent soul [repair | edit <text>]
+      // Manage the agent's soul.md identity file.
+      // "repair"  → lazy-migration: create ~/.metame/agents/<id>/ and project symlinks.
+      // "edit"    → overwrite soul.md with provided text.
+      // (default) → display current SOUL.md content.
+      if (agentSub === 'soul') {
+        const soulAction = agentParts[1] || '';
+        const cfg = loadConfig();
+        const { boundProj } = getBoundProject(chatId, cfg);
+        if (!boundProj || !boundProj.cwd) {
+          await bot.sendMessage(chatId, '❌ 当前群未绑定 Agent，请先 /agent bind <名称> <目录>');
+          return true;
+        }
+        const cwd = normalizeCwd(boundProj.cwd);
+        const soulPath = path.join(cwd, 'SOUL.md');
+
+        if (soulAction === 'repair') {
+          if (agentTools && typeof agentTools.repairAgentSoul === 'function') {
+            const res = await agentTools.repairAgentSoul(cwd);
+            if (!res.ok) {
+              await bot.sendMessage(chatId, '❌ Soul 修复失败: ' + res.error);
+            } else {
+              const viewModes = res.data.views
+                ? Object.entries(res.data.views).map(([k, v]) => k + ':' + v).join(', ')
+                : '—';
+              await bot.sendMessage(chatId, [
+                '✅ Agent Soul 层已就绪',
+                'agent_id: ' + res.data.agentId,
+                '链接方式: ' + viewModes,
+                '',
+                '文件位置:',
+                '  SOUL.md   → ~/.metame/agents/' + res.data.agentId + '/soul.md',
+                '  MEMORY.md → ~/.metame/agents/' + res.data.agentId + '/memory-snapshot.md',
+              ].join('\n'));
+            }
+          } else {
+            await bot.sendMessage(chatId, '❌ agentTools 不可用');
+          }
+          return true;
+        }
+
+        if (soulAction === 'edit') {
+          const soulText = agentParts.slice(2).join(' ').trim();
+          if (!soulText) {
+            await bot.sendMessage(chatId, '用法: /agent soul edit <新内容>\n当前内容: /agent soul');
+            return true;
+          }
+          try {
+            fs.writeFileSync(soulPath, soulText, 'utf8');
+            await bot.sendMessage(chatId, '✅ SOUL.md 已更新');
+          } catch (e) {
+            await bot.sendMessage(chatId, '❌ 写入失败: ' + e.message);
+          }
+          return true;
+        }
+
+        // Default: show current SOUL.md content
+        if (!fs.existsSync(soulPath)) {
+          await bot.sendMessage(chatId, [
+            '⚠️ SOUL.md 不存在',
+            '',
+            '老项目或刚绑定的 Agent 可能尚未建立 Soul 层。',
+            '运行 /agent soul repair 自动生成。',
+          ].join('\n'));
+          return true;
+        }
+        try {
+          const soulContent = fs.readFileSync(soulPath, 'utf8').trim().slice(0, 2000);
+          await bot.sendMessage(chatId, '📋 当前 Soul:\n\n' + soulContent);
+        } catch (e) {
+          await bot.sendMessage(chatId, '❌ 读取 SOUL.md 失败: ' + e.message);
+        }
+        return true;
+      }
+
 
       // /agent (no sub command): show agent switch picker
       {

@@ -55,6 +55,9 @@ describe('daemon-agent-tools engine persistence', () => {
       assert.equal(res.ok, true);
       const cfg = h.getConfig();
       assert.equal(cfg.projects.codex_reviewer.engine, 'codex');
+      assert.equal(cfg.projects.codex_reviewer.agent_id, 'codex_reviewer');
+      assert.equal(fs.existsSync(path.join(workspace, 'SOUL.md')), true);
+      assert.equal(fs.existsSync(path.join(workspace, 'MEMORY.md')), true);
     } finally {
       h.cleanup();
     }
@@ -77,6 +80,7 @@ describe('daemon-agent-tools engine persistence', () => {
       assert.equal(res.ok, true);
       const cfg = h.getConfig();
       assert.equal(Object.prototype.hasOwnProperty.call(cfg.projects.default_reviewer, 'engine'), false);
+      assert.equal(cfg.projects.default_reviewer.agent_id, 'default_reviewer');
     } finally {
       h.cleanup();
     }
@@ -93,6 +97,7 @@ describe('daemon-agent-tools engine persistence', () => {
       assert.equal(res.ok, true);
       const cfg = h.getConfig();
       assert.equal(Object.prototype.hasOwnProperty.call(cfg.projects.bind_default, 'engine'), false);
+      assert.equal(cfg.projects.bind_default.agent_id, 'bind_default');
     } finally {
       h.cleanup();
     }
@@ -109,6 +114,7 @@ describe('daemon-agent-tools engine persistence', () => {
       assert.equal(res.ok, true);
       const cfg = h.getConfig();
       assert.equal(cfg.projects.bind_codex.engine, 'codex');
+      assert.equal(cfg.projects.bind_codex.agent_id, 'bind_codex');
     } finally {
       h.cleanup();
     }

@@ -3,6 +3,7 @@
 const { classifyChatUsage } = require('./usage-classifier');
 const { deriveProjectInfo } = require('./utils');
 const { createEngineRuntimeFactory, normalizeEngineName, ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
+const { buildAgentContextForEngine, buildMemorySnapshotContent, refreshMemorySnapshot } = require('./agent-layer');
 
 function createClaudeEngine(deps) {
   const {
@@ -949,18 +950,42 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       cwd: session.cwd,
     });
 
-    // Auto-create AGENTS.md → CLAUDE.md symlink for Codex projects (one-time, idempotent).
+    // Codex: write/refresh AGENTS.md = CLAUDE.md + SOUL.md on every new session.
+    // Written as a real file (not a symlink) for Windows compatibility.
+    // Refreshed each session so edits to CLAUDE.md or SOUL.md are always picked up.
     // Codex auto-loads AGENTS.md from cwd and all parent dirs up to ~.
-    // ~/AGENTS.md → ~/.claude/CLAUDE.md covers global identity; this covers per-project role.
     if (engineName === 'codex' && session.cwd && !session.started) {
       try {
-        const agentsMd = path.join(session.cwd, 'AGENTS.md');
+        const parts = [];
         const claudeMd = path.join(session.cwd, 'CLAUDE.md');
-        if (!fs.existsSync(agentsMd) && fs.existsSync(claudeMd)) {
-          fs.symlinkSync('CLAUDE.md', agentsMd);
-          log('INFO', `Created AGENTS.md -> CLAUDE.md symlink in ${session.cwd}`);
+        const soulMd = path.join(session.cwd, 'SOUL.md');
+        if (fs.existsSync(claudeMd)) parts.push(fs.readFileSync(claudeMd, 'utf8').trim());
+        if (fs.existsSync(soulMd)) {
+          const soulContent = fs.readFileSync(soulMd, 'utf8').trim();
+          if (soulContent) parts.push(soulContent);
         }
-      } catch { /* non-critical */ }
+        if (parts.length > 0) {
+          fs.writeFileSync(path.join(session.cwd, 'AGENTS.md'), parts.join('\n\n'), 'utf8');
+          log('INFO', `Refreshed AGENTS.md (${parts.length} section(s)) in ${session.cwd}`);
+        }
+      } catch (e) {
+        log('WARN', `AGENTS.md refresh failed: ${e.message}`);
+      }
+    }
+
+    let agentHint = '';
+    if (!session.started && (boundProject || (session && session.cwd))) {
+      try {
+        // Engine-aware: Codex gets memory only (soul is already in AGENTS.md);
+        // Claude gets soul + memory (SOUL.md is not auto-loaded by Claude).
+        agentHint = buildAgentContextForEngine(
+          boundProject || { cwd: session.cwd },
+          engineName,
+          HOME,
+        ).hint || '';
+      } catch (e) {
+        log('WARN', `Agent context injection failed: ${e.message}`);
+      }
     }
 
     // Memory & Knowledge Injection (RAG)
@@ -1162,7 +1187,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const langGuard = session.started
       ? ''
       : '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
-    const fullPrompt = routedPrompt + daemonHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
+    const fullPrompt = routedPrompt + daemonHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
 
     // Git checkpoint before Claude modifies files (for /undo).
     // Run async (fire-and-forget) to avoid blocking Claude spawn by ~600ms.
@@ -1433,6 +1458,25 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       // Auto-name: if this was the first message and session has no name, generate one
       if (runtime.name === 'claude' && wasNew && !getSessionName(session.id)) {
         autoNameSession(chatId, session.id, prompt, session.cwd).catch(() => { });
+      }
+
+      // Auto-refresh memory-snapshot.md for this agent on first session message (fire-and-forget)
+      if (wasNew && boundProject && boundProject.agent_id) {
+        setImmediate(async () => {
+          try {
+            const memory = require('./memory');
+            const pKey = boundProjectKey || '';
+            const sessions = memory.recentSessions({ limit: 5, project: pKey });
+            const factsRaw = memory.searchFacts('', { limit: 10, project: pKey });
+            const facts = Array.isArray(factsRaw) ? factsRaw : [];
+            memory.close();
+            const snapshotContent = buildMemorySnapshotContent(sessions, facts);
+            const agentId = boundProject.agent_id;
+            if (refreshMemorySnapshot(agentId, snapshotContent, HOME)) {
+              log('DEBUG', `[AGENT] Memory snapshot refreshed for ${agentId}`);
+            }
+          } catch { /* non-critical — memory module may not be available */ }
+        });
       }
       return { ok: !timedOut };
     } else {

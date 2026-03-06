@@ -1,5 +1,15 @@
 'use strict';
 
+const {
+  createAgentId,
+  ensureClaudeMdSoulImport,
+  ensureAgentLayer,
+  repairAgentLayer,
+  refreshMemorySnapshot,
+  buildMemorySnapshotContent,
+  normalizeEngine: normalizeLayerEngine,
+} = require('./agent-layer');
+
 function createAgentTools(deps) {
   const {
     fs,
@@ -31,8 +41,26 @@ function createAgentTools(deps) {
     return (String(agentName || '').replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() || String(chatId));
   }
 
-  function normalizeEngine(engine) {
-    return String(engine || '').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+  function ensureAgentMetadata({ cfg, projectKey, project, safeName, resolvedDir, engine }) {
+    const agentId = String(project && project.agent_id ? project.agent_id : createAgentId({
+      projectKey,
+      agentName: safeName,
+      cwd: resolvedDir,
+    }));
+    const ensured = ensureAgentLayer({
+      agentId,
+      projectKey,
+      agentName: safeName,
+      workspaceDir: resolvedDir,
+      engine: normalizeLayerEngine(engine || (project && project.engine)),
+      aliases: [safeName],
+      homeDir: HOME,
+    });
+    cfg.projects[projectKey] = {
+      ...cfg.projects[projectKey],
+      agent_id: ensured.agentId,
+    };
+    return ensured;
   }
 
   function ensureAdapterConfig(cfg, adapterKey) {
@@ -53,7 +81,7 @@ function createAgentTools(deps) {
 
       const projectKey = toProjectKey(safeName, chatId);
       let resolvedDir = resolveWorkspaceDir(workspaceDir);
-      const normalizedEngine = engine ? normalizeEngine(engine) : null;
+      const normalizedEngine = engine ? normalizeLayerEngine(engine) : null;
 
       if (!resolvedDir) {
         const existing = cfg.projects[projectKey];
@@ -89,6 +117,7 @@ function createAgentTools(deps) {
           name: safeName,
           cwd: resolvedDir,
           nicknames: [safeName],
+          agent_id: createAgentId({ projectKey, agentName: safeName, cwd: resolvedDir }),
           ...(normalizedEngine === 'codex' ? { engine: 'codex' } : {}),
         };
       } else {
@@ -101,9 +130,19 @@ function createAgentTools(deps) {
           name: safeName,
           cwd: resolvedDir,
           nicknames,
+          agent_id: cfg.projects[projectKey].agent_id || createAgentId({ projectKey, agentName: safeName, cwd: resolvedDir }),
           ...(normalizedEngine === 'codex' ? { engine: 'codex' } : {}),
         };
       }
+
+      const agentLayer = ensureAgentMetadata({
+        cfg,
+        projectKey,
+        project: cfg.projects[projectKey],
+        safeName,
+        resolvedDir,
+        engine: normalizedEngine,
+      });
 
       writeConfigSafe(cfg);
       backupConfig();
@@ -117,6 +156,7 @@ function createAgentTools(deps) {
           cwd: resolvedDir,
           isNewProject: !existed,
           project: cfg.projects[projectKey],
+          agent: agentLayer,
         },
       };
     } catch (e) {
@@ -138,6 +178,7 @@ function createAgentTools(deps) {
       const claudeMdPath = path.join(cwd, 'CLAUDE.md');
       if (!fs.existsSync(claudeMdPath)) {
         fs.writeFileSync(claudeMdPath, `## Agent 角色\n\n${safeDelta}\n`, 'utf8');
+        try { ensureClaudeMdSoulImport(cwd); } catch { /* non-critical */ }
         return { ok: true, data: { created: true, merged: false, path: claudeMdPath } };
       }
 
@@ -180,6 +221,7 @@ ${safeDelta}
         cleanOutput = cleanOutput.replace(/^```[a-zA-Z]*\n/, '').replace(/\n```$/, '');
       }
       fs.writeFileSync(claudeMdPath, cleanOutput, 'utf8');
+      try { ensureClaudeMdSoulImport(cwd); } catch { /* non-critical */ }
       return { ok: true, data: { created: false, merged: true, path: claudeMdPath } };
     } catch (e) {
       return { ok: false, error: e.message };
@@ -188,7 +230,7 @@ ${safeDelta}
 
   async function createNewWorkspaceAgent(agentName, workspaceDir, roleDescription, chatId, { skipChatBinding = false, engine = null } = {}) {
     let bindData;
-    const normalizedEngine = engine ? normalizeEngine(engine) : null;
+    const normalizedEngine = engine ? normalizeLayerEngine(engine) : null;
 
     if (skipChatBinding) {
       // Create the project entry without touching chat_agent_map
@@ -208,21 +250,33 @@ ${safeDelta}
           name: safeName,
           cwd: resolvedDir,
           nicknames: [safeName],
+          agent_id: createAgentId({ projectKey, agentName: safeName, cwd: resolvedDir }),
           ...(normalizedEngine === 'codex' ? { engine: 'codex' } : {}),
         };
-        writeConfigSafe(cfg);
-        backupConfig();
-      } else if (normalizedEngine === 'codex') {
-        cfg.projects[projectKey] = { ...cfg.projects[projectKey], engine: 'codex' };
-        writeConfigSafe(cfg);
-        backupConfig();
+      } else {
+        cfg.projects[projectKey] = {
+          ...cfg.projects[projectKey],
+          ...(normalizedEngine === 'codex' ? { engine: 'codex' } : {}),
+          agent_id: cfg.projects[projectKey].agent_id || createAgentId({ projectKey, agentName: safeName, cwd: resolvedDir }),
+        };
       }
+      const agentLayer = ensureAgentMetadata({
+        cfg,
+        projectKey,
+        project: cfg.projects[projectKey],
+        safeName,
+        resolvedDir,
+        engine: normalizedEngine,
+      });
+      writeConfigSafe(cfg);
+      backupConfig();
       bindData = {
         projectKey,
         cwd: resolvedDir,
         isNewProject: !existed,
         chatId: null,      // not bound to any chat
         project: cfg.projects[projectKey],
+        agent: agentLayer,
       };
     } else {
       const bindResult = await bindAgentToChat(chatId, agentName, workspaceDir, { engine: normalizedEngine });
@@ -243,6 +297,10 @@ ${safeDelta}
         data: { ...bindData, roleError: roleResult.error },
       };
     }
+
+    // editAgentRoleDefinition may have just created CLAUDE.md for the first time.
+    // Ensure @SOUL.md import is present so Claude auto-loads soul on every future session.
+    try { ensureClaudeMdSoulImport(bindData.cwd); } catch { /* non-critical */ }
 
     return {
       ok: true,
@@ -302,12 +360,89 @@ ${safeDelta}
     }
   }
 
+  /**
+   * Lazy-migration repair: given a workspace directory, ensure the agent soul layer
+   * (~/.metame/agents/<id>/, SOUL.md, MEMORY.md) exists and is wired up.
+   * Persists agent_id back to daemon.yaml if it was missing.
+   * Safe to call repeatedly — idempotent.
+   */
+  async function repairAgentSoul(workspaceDir) {
+    try {
+      const cwd = resolveWorkspaceDir(workspaceDir);
+      if (!cwd) return { ok: false, error: 'workspaceDir is required' };
+      if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
+        return { ok: false, error: `workspaceDir not found: ${cwd}` };
+      }
+
+      const cfg = loadConfig();
+      let projectKey = null;
+      let project = null;
+      for (const [key, p] of Object.entries(cfg.projects || {})) {
+        if (!p || !p.cwd) continue;
+        const pCwd = normalizeCwd ? normalizeCwd(p.cwd) : p.cwd;
+        const r1 = path.resolve(pCwd);
+                const r2 = path.resolve(cwd);
+                const isMatch = process.platform === 'win32'
+                  ? r1.toLowerCase() === r2.toLowerCase()
+                  : r1 === r2;
+                if (isMatch) {
+          projectKey = key;
+          project = p;
+          break;
+        }
+      }
+      if (!projectKey) {
+        return { ok: false, error: `No registered agent found for: ${cwd}. Run /agent bind first.` };
+      }
+
+      const ensured = repairAgentLayer(projectKey, project, HOME);
+      if (!ensured) return { ok: false, error: 'repairAgentLayer returned null' };
+
+      // Persist agent_id back to config if it was missing
+      if (!project.agent_id) {
+        cfg.projects[projectKey] = { ...cfg.projects[projectKey], agent_id: ensured.agentId };
+        writeConfigSafe(cfg);
+        backupConfig();
+      }
+
+      return {
+        ok: true,
+        data: {
+          projectKey,
+          agentId: ensured.agentId,
+          views: ensured.views
+            ? Object.fromEntries(Object.entries(ensured.views).map(([k, v]) => [k, v.mode]))
+            : null,
+        },
+      };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+
+  /**
+   * Refresh memory-snapshot.md from fresh session+fact data.
+   * Called by the engine after first-message of a session; also callable directly.
+   */
+  async function updateMemorySnapshot(agentId, sessions = [], facts = []) {
+    try {
+      if (!agentId) return { ok: false, error: 'agentId is required' };
+      const content = buildMemorySnapshotContent(sessions, facts);
+      const ok = refreshMemorySnapshot(agentId, content, HOME);
+      return { ok, error: ok ? null : 'agent directory not found or not yet created' };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+
   return {
     bindAgentToChat,
     createNewWorkspaceAgent,
     editAgentRoleDefinition,
     listAllAgents,
     unbindCurrentAgent,
+    repairAgentSoul,
+    updateMemorySnapshot,
   };
 }
 
