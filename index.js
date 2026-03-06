@@ -1810,11 +1810,10 @@ WantedBy=default.target
     }
     // Use caffeinate on macOS to prevent sleep while daemon is running
     const isMac = process.platform === 'darwin';
-    const isWin = process.platform === 'win32';
     const cmd = isMac ? 'caffeinate' : process.execPath;
     const args = isMac ? ['-i', process.execPath, DAEMON_SCRIPT] : [DAEMON_SCRIPT];
     const bg = spawn(cmd, args, {
-      detached: !isWin,
+      detached: true,
       stdio: 'ignore',
       windowsHide: true,
       env: { ...process.env, HOME: HOME_DIR, METAME_ROOT: __dirname },
@@ -1970,8 +1969,8 @@ if (isCodex) {
   // CLAUDE.md (already written to disk above) contains the full genesis protocol; Codex reads it.
   // We pass the trigger as the opening [PROMPT] argument so genesis flows into normal work seamlessly.
   const codexArgs = codexUserArgs.length === 0
-    ? ['--full-auto']
-    : ['exec', '--full-auto', ...codexUserArgs];
+    ? ['--dangerously-bypass-approvals-and-sandbox']
+    : ['exec', '--dangerously-bypass-approvals-and-sandbox', ...codexUserArgs];
 
   // Codex reads AGENTS.md (not CLAUDE.md); create symlink so genesis protocol is visible.
   // Also ensure global ~/AGENTS.md → ~/.claude/CLAUDE.md for identity context.
@@ -2137,11 +2136,10 @@ try {
     }
     if (!daemonRunning) {
       const _isMac = process.platform === 'darwin';
-      const _isWin = process.platform === 'win32';
       const dCmd = _isMac ? 'caffeinate' : process.execPath;
       const dArgs = _isMac ? ['-i', process.execPath, _daemonScript] : [_daemonScript];
       const bg = spawn(dCmd, dArgs, {
-        detached: !_isWin,
+        detached: true,
         stdio: 'ignore',
         windowsHide: true,
         env: { ...process.env, HOME: HOME_DIR, METAME_ROOT: __dirname },

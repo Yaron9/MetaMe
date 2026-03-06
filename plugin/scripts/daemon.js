@@ -1856,6 +1856,30 @@ async function main() {
   // Start heartbeat scheduler
   let heartbeatTimer = startHeartbeat(config, notifyFn, notifyPersonalFn);
 
+  let shuttingDown = false;
+  function spawnReplacementDaemon(reason) {
+    try {
+      const replacementScript = path.join(METAME_DIR, 'daemon.js');
+      const bg = spawn(process.execPath, [replacementScript], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        cwd: METAME_DIR,
+        env: {
+          ...process.env,
+          HOME,
+          METAME_ROOT: process.env.METAME_ROOT || path.dirname(__filename),
+        },
+      });
+      bg.unref();
+      log('INFO', `[RESTART] Spawned replacement daemon (PID: ${bg.pid}) reason=${reason}`);
+      return true;
+    } catch (e) {
+      log('ERROR', `[RESTART] Failed to spawn replacement daemon: ${e.message}`);
+      return false;
+    }
+  }
+
   const runtimeWatchers = setupRuntimeWatchers({
     fs,
     path,
@@ -1876,8 +1900,8 @@ async function main() {
     getHeartbeatTimer: () => heartbeatTimer,
     setHeartbeatTimer: (next) => { heartbeatTimer = next; },
     onRestartRequested: () => {
-      // Reuse full shutdown logic (kill child processes, clean PID, stop bridges)
-      shutdown().catch(() => process.exit(0));
+      // Reuse full shutdown logic, then self-spawn replacement.
+      shutdown({ restartReason: 'daemon-script-changed' }).catch(() => process.exit(1));
     },
   });
   // Expose reloadConfig to handleCommand via closure
@@ -1909,7 +1933,9 @@ async function main() {
   }
 
   // Graceful shutdown
-  const shutdown = async () => {
+  const shutdown = async (opts = {}) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     log('INFO', 'Daemon shutting down...');
     await notifyActiveUsers('关闭').catch(() => {});
     runtimeWatchers.stop();
@@ -1931,6 +1957,9 @@ async function main() {
     const s = loadState();
     s.pid = null;
     saveState(s);
+    if (opts.restartReason) {
+      spawnReplacementDaemon(opts.restartReason);
+    }
     process.exit(0);
   };
 
@@ -1951,7 +1980,7 @@ async function main() {
         st.watchdog_restart = new Date().toISOString();
         st.watchdog_stall_seconds = Math.round(elapsed / 1000);
         saveState(st);
-        process.exit(1); // caffeinate or launchd will restart us
+        shutdown({ restartReason: 'watchdog-stall' }).catch(() => process.exit(1));
       }
     } catch (e) {
       log('WARN', `[WATCHDOG] Check failed: ${e.message}`);

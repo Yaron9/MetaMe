@@ -24,23 +24,22 @@ if (!fs.existsSync(DAEMON_CONFIG)) {
   process.exit(0);
 }
 
-const { sleepSync } = require('./platform');
-
-// Kill any existing daemon (takeover strategy)
-function killExistingDaemon() {
-  if (!fs.existsSync(DAEMON_PID)) return;
+// Keep an existing healthy daemon; only clean stale pid files.
+function isDaemonRunning() {
+  if (!fs.existsSync(DAEMON_PID)) return false;
   try {
     const pid = parseInt(fs.readFileSync(DAEMON_PID, 'utf8').trim(), 10);
-    process.kill(pid, 'SIGTERM');
-    // Give it a moment to clean up
-    sleepSync(1000);
+    process.kill(pid, 0);
+    return true;
   } catch {
-    // Process doesn't exist or already dead
+    try { fs.unlinkSync(DAEMON_PID); } catch {}
+    return false;
   }
-  try { fs.unlinkSync(DAEMON_PID); } catch {}
 }
 
-killExistingDaemon();
+if (isDaemonRunning()) {
+  process.exit(0);
+}
 
 // Start daemon in background
 if (!fs.existsSync(DAEMON_SCRIPT)) {
@@ -48,9 +47,8 @@ if (!fs.existsSync(DAEMON_SCRIPT)) {
   process.exit(0);
 }
 
-const isWin = process.platform === 'win32';
 const bg = spawn(process.execPath, [DAEMON_SCRIPT], {
-  detached: !isWin,
+  detached: true,
   stdio: 'ignore',
   windowsHide: true,
   env: { ...process.env, HOME, METAME_ROOT: __dirname },
