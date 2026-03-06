@@ -365,14 +365,14 @@ function buildMentorPrompt(sessionState = {}, profile = {}, config = {}, nowMs =
   lines.push(`- mode=${mode}, zone=${zone}`);
 
   if (mode === 'gentle') {
-    lines.push('- Before solution, optionally ask one short guiding question.');
+    lines.push('- Give solution but include brief rationale so user can learn the "why".');
   } else if (mode === 'active') {
-    lines.push('- Ask user for their design idea first, then provide improvements.');
-    lines.push('- End with one-line "关键收获".');
+    lines.push('- Lead with the key concept/principle before the implementation.');
+    lines.push('- Add one-line "关键收获" at the end of your reply.');
   } else {
     lines.push('- Prefer scaffold/pseudocode first; avoid dumping full solution immediately.');
-    lines.push('- Use Socratic prompts to force active reasoning.');
     lines.push('- Apply knowledge firewall: do not fill user logic gaps with unstated assumptions.');
+    lines.push('- Guide via explanation structure, not by asking the user questions.');
   }
 
   if (zone === 'comfort') lines.push('- Increase challenge slightly (new method or stronger abstraction).');
