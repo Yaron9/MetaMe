@@ -35,6 +35,16 @@ function createSessionCommandHandler(deps) {
     return n === 'codex' ? 'codex' : getDefaultEngine();
   }
 
+  function getBoundCwd(chatId) {
+    try {
+      const cfg = loadConfig();
+      const chatAgentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
+      const mappedKey = chatAgentMap[String(chatId)];
+      const proj = mappedKey && cfg.projects ? cfg.projects[mappedKey] : null;
+      return (proj && proj.cwd) ? normalizeCwd(proj.cwd) : null;
+    } catch { return null; }
+  }
+
   // Write per-engine session slot, preserving cwd and other engine slots.
   function attachEngineSession(state, chatId, engine, sessionId, cwd) {
     const existing = state.sessions[chatId] || {};
@@ -254,7 +264,7 @@ function createSessionCommandHandler(deps) {
     if (text === '/sessions') {
       const currentEngine = getDefaultEngine();
       const codexLimitTip = '⚠️ 当前为 Codex 会话：`/sessions` 列表暂仅展示 Claude 本地会话，Codex 会话暂不可见。';
-      const allSessions = listRecentSessions(15);
+      const allSessions = listRecentSessions(15, getBoundCwd(chatId));
       if (allSessions.length === 0) {
         const base = 'No sessions found. Try /new first.';
         await bot.sendMessage(chatId, currentEngine === 'codex' ? `${base}\n\n${codexLimitTip}` : base);
@@ -365,14 +375,7 @@ function createSessionCommandHandler(deps) {
 
         // For bound chats, prefer sessions from the same project to avoid
         // the bound-chat guard (handleCommand) immediately overwriting with a new session.
-        let boundCwd = null;
-        try {
-          const cfg = loadConfig();
-          const chatAgentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
-          const mappedKey = chatAgentMap[String(chatId)];
-          const proj = mappedKey && cfg.projects ? cfg.projects[mappedKey] : null;
-          if (proj && proj.cwd) boundCwd = normalizeCwd(proj.cwd);
-        } catch { /* ignore */ }
+        const boundCwd = getBoundCwd(chatId);
 
         let candidates = filtered;
         if (boundCwd) {
