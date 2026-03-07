@@ -1370,12 +1370,84 @@ If no clear patterns found: respond with exactly NO_PATTERNS`;
   }
 }
 
+// ---------------------------------------------------------
+// SESSION REFLECTION — fill reflection word for sessions that lack one
+// ---------------------------------------------------------
+
+/**
+ * For each session in session_log.yaml that has no `reflection` field,
+ * call Haiku once (batch) to generate a 1-4 char Chinese word capturing the feel.
+ * Runs after every distill — no-op if all sessions already have reflection.
+ */
+async function fillSessionReflections() {
+  const yaml = require('js-yaml');
+  if (!fs.existsSync(SESSION_LOG_FILE)) return;
+
+  let log;
+  try {
+    log = yaml.load(fs.readFileSync(SESSION_LOG_FILE, 'utf8')) || { sessions: [] };
+  } catch { return; }
+  if (!Array.isArray(log.sessions)) return;
+
+  const pending = log.sessions.filter(s => !s.reflection);
+  if (pending.length === 0) return;
+
+  const sessionLines = pending.map((s, i) => {
+    const parts = [];
+    if (s.topics && s.topics.length) parts.push(`topics: ${s.topics.join(', ')}`);
+    if (s.zone) parts.push(`zone: ${s.zone}`);
+    if (s.cognitive_load) parts.push(`load: ${s.cognitive_load}`);
+    if (s.goal_alignment) parts.push(`goal: ${s.goal_alignment}`);
+    if (s.friction && s.friction.length) parts.push(`friction: ${s.friction.join(', ')}`);
+    if (s.session_outcome) parts.push(`outcome: ${s.session_outcome}`);
+    return `${i + 1}. [${s.ts || '?'}] ${parts.join(' | ')}`;
+  }).join('\n');
+
+  const prompt = `You are a session reflection assistant. For each session below, generate ONE Chinese word (1-4 characters) that honestly captures the overall feel or experience of that session.
+
+SESSIONS:
+${sessionLines}
+
+OUTPUT FORMAT — respond with ONLY a YAML code block:
+\`\`\`yaml
+reflections:
+  - "专注"
+  - "艰难"
+\`\`\`
+
+One word per session, in order. Chinese only. Be honest and precise.`;
+
+  try {
+    const result = await callHaiku(prompt, distillEnv, 20000);
+    if (!result) return;
+
+    const yamlMatch = result.match(/```yaml\n([\s\S]*?)```/) || result.match(/```\n([\s\S]*?)```/);
+    if (!yamlMatch) return;
+
+    const parsed = yaml.load(yamlMatch[1].trim());
+    if (!parsed || !Array.isArray(parsed.reflections)) return;
+
+    let written = 0;
+    for (let i = 0; i < pending.length && i < parsed.reflections.length; i++) {
+      const word = String(parsed.reflections[i] || '').trim().slice(0, 8);
+      if (word) { pending[i].reflection = word; written++; }
+    }
+
+    if (written > 0) {
+      fs.writeFileSync(SESSION_LOG_FILE, yaml.dump(log, { lineWidth: -1 }), 'utf8');
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
 // Export for use in index.js
 module.exports = {
   distill,
   writeSessionLog,
   bootstrapSessionLog,
   detectPatterns,
+  fillSessionReflections,
   _private: {
     mergeCompetenceMap,
     normalizeCompetenceLevel,
@@ -1400,6 +1472,9 @@ if (require.main === module) {
     if (result.behavior) {
       writeSessionLog(result.behavior, result.signalCount || 0, result.skeleton || null, result.sessionSummary || null);
     }
+
+    // Fill reflection words for sessions that don't have one yet
+    await fillSessionReflections();
 
     // Run pattern detection (only triggers every 5th distill)
     if (!bootstrapped) await detectPatterns();

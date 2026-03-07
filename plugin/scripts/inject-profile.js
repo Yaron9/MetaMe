@@ -220,43 +220,8 @@ function inject() {
     // Non-fatal
   }
 
-  // ---------------------------------------------------------
-  // REFLECTION PROMPT (conditional)
-  // ---------------------------------------------------------
-  let reflectionLine = '';
-  try {
-    const yaml = require('js-yaml');
-    if (isKnownUser && fs.existsSync(BRAIN_FILE)) {
-      const refDoc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
-
-      const quietUntil = refDoc.growth && refDoc.growth.quiet_until;
-      const isQuietForRef = quietUntil && new Date(quietUntil).getTime() > Date.now();
-
-      if (!isQuietForRef) {
-        const distillCount = (refDoc.evolution && refDoc.evolution.distill_count) || 0;
-        const zoneHistory = (refDoc.growth && refDoc.growth.zone_history) || [];
-
-        const trigger7th = distillCount > 0 && distillCount % 7 === 0;
-        const lastThree = zoneHistory.slice(-3);
-        const triggerComfort = lastThree.length === 3 && lastThree.every(z => z === 'C');
-
-        if (trigger7th || triggerComfort) {
-          let hint = '';
-          if (triggerComfort) {
-            hint = 'Several consecutive sessions in comfort zone. If the user naturally pauses at session end, gently ask: Ready to explore the stretch zone?';
-          } else {
-            hint = 'This is session #' + distillCount + '. If the session ends naturally, append: One word to describe how this session felt?';
-          }
-          reflectionLine = `\n[MetaMe reflection: ${hint} Only say this once at session end. If the user doesn't respond, don't push.]\n`;
-        }
-      }
-    }
-  } catch {
-    // Non-fatal
-  }
-
   // Write the final CLAUDE.md
-  const newContent = finalProtocol + mirrorLine + reflectionLine + '\n' + fileContent;
+  const newContent = finalProtocol + mirrorLine + '\n' + fileContent;
   fs.writeFileSync(PROJECT_FILE, newContent, 'utf8');
 }
 

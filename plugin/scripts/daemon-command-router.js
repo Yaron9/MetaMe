@@ -678,6 +678,7 @@ function createCommandRouter(deps) {
       const followUp = await askClaude(bot, chatId, combined, config, readOnly);
       if (followUp && followUp.error === 'Stopped by user') break;
     }
+
   }
 
   return { handleCommand };

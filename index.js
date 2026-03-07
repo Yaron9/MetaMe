@@ -806,73 +806,10 @@ try {
   // Non-fatal
 }
 
-// ---------------------------------------------------------
-// 4.6 REFLECTION PROMPT (Phase C — conditional, NOT static)
-// ---------------------------------------------------------
-// Only inject when trigger conditions are met at startup.
-// This ensures reflections don't fire every session.
-let reflectionLine = '';
-try {
-  if (isKnownUser && _brainDoc) {
-    const refDoc = _brainDoc;
-
-    // Check quiet mode
-    const quietUntil = refDoc.growth && refDoc.growth.quiet_until;
-    const isQuietForRef = quietUntil && new Date(quietUntil).getTime() > Date.now();
-
-    if (!isQuietForRef) {
-      const distillCount = (refDoc.evolution && refDoc.evolution.distill_count) || 0;
-      const zoneHistory = (refDoc.growth && refDoc.growth.zone_history) || [];
-
-      // Trigger 1: Every 7th session
-      const trigger7th = distillCount > 0 && distillCount % 7 === 0;
-
-      // Trigger 2: Three consecutive comfort-zone sessions
-      const lastThree = zoneHistory.slice(-3);
-      const triggerComfort = lastThree.length === 3 && lastThree.every(z => z === 'C');
-
-      // Trigger 3: Persistent goal drift (2+ drifted in last 3 sessions)
-      let triggerDrift = false;
-      let driftDeclaredFocus = null;
-      try {
-        const sessionLogFile = path.join(METAME_DIR, 'session_log.yaml');
-        if (fs.existsSync(sessionLogFile)) {
-          const driftLog = yaml.load(fs.readFileSync(sessionLogFile, 'utf8'));
-          if (driftLog && Array.isArray(driftLog.sessions)) {
-            const recentSessions = driftLog.sessions.slice(-3);
-            const driftCount = recentSessions.filter(s =>
-              s.goal_alignment === 'drifted' || s.goal_alignment === 'partial'
-            ).length;
-            if (driftCount >= 2 && recentSessions.length >= 2) {
-              driftDeclaredFocus = refDoc.status?.focus || refDoc.context?.focus;
-              if (driftDeclaredFocus) triggerDrift = true;
-            }
-          }
-        }
-      } catch { /* non-fatal */ }
-
-      if (triggerDrift || triggerComfort || trigger7th) {
-        let hint = '';
-        if (triggerDrift) {
-          hint = `最近几个session的方向和"${driftDeclaredFocus}"有偏差。请在对话开始时温和地问：${icon("mirror")} 是方向有意调整了，还是不小心偏了？`;
-        } else if (triggerComfort) {
-          hint = `连续几次都在熟悉领域。如果用户在session结束时自然停顿，可以温和地问：${icon("mirror")} 准备好探索拉伸区了吗？`;
-        } else {
-          hint = '这是第' + distillCount + `次session。如果session自然结束，可以附加一句：${icon("mirror")} 一个词形容这次session的感受？`;
-        }
-        const timing = triggerDrift ? '在对话开始时就问一次' : '只在session即将结束时说一次';
-        reflectionLine = `\n[MetaMe reflection: ${hint} ${timing}。如果用户没回应就不要追问。]\n`;
-      }
-    }
-  }
-} catch {
-  // Non-fatal
-}
-
 // Project-level CLAUDE.md: KERNEL has moved to global ~/.claude/CLAUDE.md.
-// Only inject dynamic per-session observations (mirror / reflection).
+// Only inject dynamic per-session observations (mirror).
 // If nothing dynamic, write the cleaned file with no METAME block at all.
-const dynamicContent = mirrorLine + reflectionLine;
+const dynamicContent = mirrorLine;
 const newContent = dynamicContent.trim()
   ? METAME_START + '\n' + dynamicContent + METAME_END + '\n' + fileContent
   : fileContent;
