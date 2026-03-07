@@ -1,0 +1,1 @@
+../../.metame/agents/metame/soul.md
