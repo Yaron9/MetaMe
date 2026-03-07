@@ -1,0 +1,25 @@
+# Private modules - these files are stripped from the public release
+# One pattern per line (glob syntax, relative to repo root)
+
+# Memory system
+scripts/memory.js
+scripts/memory-extract.js
+scripts/memory-gc.js
+scripts/memory-index.js
+scripts/memory-nightly-reflect.js
+scripts/memory-search.js
+scripts/memory-write.js
+scripts/distill.js
+
+# Skill evolution
+scripts/skill-evolution.js
+
+# Mobile bridge (Feishu + Telegram)
+scripts/daemon-bridges.js
+scripts/feishu-adapter.js
+scripts/telegram-adapter.js
+
+# Self-reflection / cognition
+scripts/self-reflect.js
+scripts/signal-capture.js
+scripts/session-summarize.js
