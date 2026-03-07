@@ -1808,6 +1808,16 @@ function acquireDaemonLock() {
               if (attempt < maxAttempts - 1) continue;
               return false;
             }
+            // Parent is dead — re-read lock before deleting: another daemon (e.g. LaunchAgent-
+            // spawned) may have acquired it in the window between parent exit and us waking up.
+            try {
+              const reread = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8') || '{}');
+              const newOwner = parseInt(reread.pid, 10);
+              if (newOwner && newOwner !== ownerPid && isPidAlive(newOwner)) {
+                log('WARN', `Lock acquired by PID ${newOwner} during handoff — yielding`);
+                return false;
+              }
+            } catch { /* lock already gone — proceed to create */ }
             try { fs.unlinkSync(LOCK_FILE); } catch { /* ignore */ }
             continue;
           }
@@ -1828,7 +1838,13 @@ function releaseDaemonLock() {
     if (daemonLockFd !== null) fs.closeSync(daemonLockFd);
   } catch { /* ignore */ }
   daemonLockFd = null;
-  try { if (fs.existsSync(LOCK_FILE)) fs.unlinkSync(LOCK_FILE); } catch { /* ignore */ }
+  // Only delete the lock file if we still own it — avoids wiping a successor daemon's lock.
+  try {
+    if (fs.existsSync(LOCK_FILE)) {
+      const meta = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8') || '{}');
+      if (parseInt(meta.pid, 10) === process.pid) fs.unlinkSync(LOCK_FILE);
+    }
+  } catch { /* ignore */ }
 }
 
 // ---------------------------------------------------------
