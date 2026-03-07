@@ -137,12 +137,13 @@ async function run() {
       fs.unlinkSync(LOCK_FILE);
       try {
         lockFd = fs.openSync(LOCK_FILE, 'wx');
+        fs.writeSync(lockFd, process.pid.toString());
+        fs.closeSync(lockFd);
       } catch {
-        // Another process acquired the lock
+        // Another process acquired the lock, or write failed — ensure fd is closed
+        try { if (lockFd !== undefined) fs.closeSync(lockFd); } catch { /* ignore */ }
         return;
       }
-      fs.writeSync(lockFd, process.pid.toString());
-      fs.closeSync(lockFd);
     } else throw e;
   }
 

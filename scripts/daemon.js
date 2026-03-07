@@ -1832,7 +1832,7 @@ function acquireDaemonLock() {
             try {
               const reread = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8') || '{}');
               const newOwner = parseInt(reread.pid, 10);
-              if (newOwner && newOwner !== ownerPid && isPidAlive(newOwner)) {
+              if (newOwner && newOwner !== ownerPid && newOwner !== process.pid && isPidAlive(newOwner)) {
                 log('WARN', `Lock acquired by PID ${newOwner} during handoff — yielding`);
                 return false;
               }
