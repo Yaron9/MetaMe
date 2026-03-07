@@ -338,7 +338,7 @@ function createTaskScheduler(deps) {
 
     if (!checkBudget(config, state)) {
       log('WARN', `Budget exceeded, skipping task: ${task.name}`);
-      return { success: false, error: 'budget_exceeded', output: '' };
+      return { success: false, error: 'budget_exceeded', output: '', skipped: true };
     }
 
     // Precondition gate: run a cheap shell check before burning tokens
@@ -583,7 +583,7 @@ function createTaskScheduler(deps) {
     const state = loadState();
     if (!checkBudget(config, state)) {
       log('WARN', `Budget exceeded, skipping workflow: ${task.name}`);
-      return { success: false, error: 'budget_exceeded', output: '' };
+      return { success: false, error: 'budget_exceeded', output: '', skipped: true };
     }
     // precheck.pass is guaranteed true here — executeTask() already returns early when false
     const steps = task.steps || [];
@@ -793,6 +793,14 @@ function createTaskScheduler(deps) {
           Promise.resolve(executeTask(task, config))
             .then((result) => {
               runningTasks.delete(task.name);
+              // Budget exceeded: back off until next day instead of retrying every interval
+              if (result.error === 'budget_exceeded') {
+                const tomorrow = new Date();
+                tomorrow.setDate(tomorrow.getDate() + 1);
+                tomorrow.setHours(0, 5, 0, 0); // 00:05 next day
+                nextRun[task.name] = tomorrow.getTime();
+                return;
+              }
               if (task.notify && notifyFn && !result.skipped) {
                 const proj = task._project || null;
                 if (result.success) {

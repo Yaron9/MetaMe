@@ -1434,7 +1434,9 @@ One word per session, in order. Chinese only. Be honest and precise.`;
     }
 
     if (written > 0) {
-      fs.writeFileSync(SESSION_LOG_FILE, yaml.dump(log, { lineWidth: -1 }), 'utf8');
+      const tmp = SESSION_LOG_FILE + '.tmp';
+      fs.writeFileSync(tmp, yaml.dump(log, { lineWidth: -1 }), 'utf8');
+      fs.renameSync(tmp, SESSION_LOG_FILE);
     }
   } catch {
     // Non-fatal
