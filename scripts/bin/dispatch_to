@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * dispatch_to [--new] <project_key> "<prompt>"
+ * dispatch_to [--new] [--from <project_key>] <project_key> "<prompt>"
  * Tries Unix socket / Named Pipe first (low-latency), falls back to pending.jsonl.
  */
 'use strict';
@@ -13,10 +13,18 @@ const { socketPath } = require('../platform');
 
 const args = process.argv.slice(2);
 const newSession = args[0] === '--new' ? (args.shift(), true) : false;
+
+// --from <project_key>: identifies the calling agent for callback routing
+let fromKey = '_claude_session';
+const fromIdx = args.indexOf('--from');
+if (fromIdx !== -1 && args[fromIdx + 1]) {
+  fromKey = args.splice(fromIdx, 2)[1];
+}
+
 const [target, ...rest] = args;
 const prompt = rest.join(' ').replace(/^["']|["']$/g, '');
 if (!target || !prompt) {
-  console.error('Usage: dispatch_to [--new] <project_key> "<prompt>"');
+  console.error('Usage: dispatch_to [--new] [--from <project_key>] <project_key> "<prompt>"');
   process.exit(1);
 }
 
@@ -41,10 +49,43 @@ function getDispatchSecret() {
 
 const ts = new Date().toISOString();
 const secret = getDispatchSecret();
-const sigPayload = JSON.stringify({ target, prompt, ts });
+
+// Auto-inject shared context: now/shared.md + target's _latest.md
+function buildEnrichedPrompt(rawPrompt) {
+  const nowFile = path.join(METAME_DIR, 'memory', 'now', 'shared.md');
+  const agentFile = path.join(METAME_DIR, 'memory', 'agents', `${target}_latest.md`);
+  let ctx = '';
+  try { if (fs.existsSync(nowFile)) ctx += `[共享进度 now.md]\n${fs.readFileSync(nowFile, 'utf8').trim()}\n\n`; } catch {}
+  try { if (fs.existsSync(agentFile)) ctx += `[${target} 上次产出]\n${fs.readFileSync(agentFile, 'utf8').trim()}\n\n`; } catch {}
+  // Push model: inject unread inbox messages and immediately archive them
+  try {
+    const inboxDir = path.join(METAME_DIR, 'memory', 'inbox', target);
+    const readDir = path.join(inboxDir, 'read');
+    const files = fs.readdirSync(inboxDir).filter(f => f.endsWith('.md')).sort();
+    if (files.length > 0) {
+      ctx += `[📬 Agent Inbox — ${files.length} 条未读消息]\n`;
+      fs.mkdirSync(readDir, { recursive: true });
+      for (const f of files) {
+        const filePath = path.join(inboxDir, f);
+        ctx += fs.readFileSync(filePath, 'utf8').trim() + '\n---\n';
+        fs.renameSync(filePath, path.join(readDir, f));
+      }
+      ctx += '\n';
+    }
+  } catch {}
+  return ctx ? `${ctx}---\n${rawPrompt}` : rawPrompt;
+}
+
+const enrichedPrompt = buildEnrichedPrompt(prompt);
+const sigPayload = JSON.stringify({ target, prompt: enrichedPrompt, ts });
 const sig = crypto.createHmac('sha256', secret).update(sigPayload).digest('hex');
 
-const msg = { target, prompt, from: '_claude_session', new_session: newSession, created_at: ts, ts, sig };
+// Set callback: true when dispatched by another agent (not a user session)
+const callback = fromKey !== '_claude_session';
+const msg = { target, prompt: enrichedPrompt, from: fromKey, new_session: newSession, created_at: ts, ts, sig, ...(callback && { callback: true }) };
+
+// Ensure target's inbox exists — lazy init, safe for new users and new agents
+fs.mkdirSync(path.join(METAME_DIR, 'memory', 'inbox', target, 'read'), { recursive: true });
 
 function fallbackToFile() {
   fs.mkdirSync(DISPATCH_DIR, { recursive: true });

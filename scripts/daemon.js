@@ -847,6 +847,25 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
     if (replyFn && outStr.trim().length > 2) {
       replyFn(outStr);
     } else if (!replyFn && fullMsg.callback && fullMsg.from && config) {
+      // Write result to sender's inbox before dispatching callback
+      try {
+        const inboxDir = path.join(os.homedir(), '.metame', 'memory', 'inbox', fullMsg.from);
+        fs.mkdirSync(inboxDir, { recursive: true });
+        const tsStr = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+        const subject = `callback_${(fullMsg.payload.title || fullMsg.id || 'task').replace(/\s+/g, '_').slice(0, 30)}`;
+        const inboxFile = path.join(inboxDir, `${tsStr}_${targetProject}_${subject}.md`);
+        const body = [
+          `FROM: ${targetProject}`,
+          `TO: ${fullMsg.from}`,
+          `TS: ${new Date().toISOString()}`,
+          `SUBJECT: ${subject}`,
+          '',
+          outStr.trim().slice(0, 2000),
+        ].join('\n');
+        fs.writeFileSync(inboxFile, body, 'utf8');
+      } catch (e) {
+        log('WARN', `callback inbox write failed: ${e.message}`);
+      }
       dispatchTask(fullMsg.from, {
         from: targetProject,
         type: 'callback',
