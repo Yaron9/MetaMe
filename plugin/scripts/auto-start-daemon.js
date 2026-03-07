@@ -48,7 +48,7 @@ if (!fs.existsSync(DAEMON_SCRIPT)) {
 }
 
 const bg = spawn(process.execPath, [DAEMON_SCRIPT], {
-  detached: true,
+  detached: process.platform !== 'win32',
   stdio: 'ignore',
   windowsHide: true,
   env: { ...process.env, HOME, METAME_ROOT: __dirname },
