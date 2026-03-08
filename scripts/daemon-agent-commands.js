@@ -247,9 +247,14 @@ function createAgentCommandHandler(deps) {
     if (text === '/resume' || text.startsWith('/resume ')) {
       const arg = text.slice(7).trim();
 
-      // Get current workdir to scope session list
+      // Get current workdir to scope session list — prefer bound project cwd over session cwd
+      const cfgForResume = loadConfig();
+      const chatAgentMapForResume = { ...(cfgForResume.telegram ? cfgForResume.telegram.chat_agent_map : {}), ...(cfgForResume.feishu ? cfgForResume.feishu.chat_agent_map : {}) };
+      const boundKeyForResume = chatAgentMapForResume[String(chatId)];
+      const boundProjForResume = boundKeyForResume && cfgForResume.projects ? cfgForResume.projects[boundKeyForResume] : null;
+      const boundCwdForResume = (boundProjForResume && boundProjForResume.cwd) ? normalizeCwd(boundProjForResume.cwd) : null;
       const curSession = getSession(chatId);
-      const curCwd = curSession ? curSession.cwd : null;
+      const curCwd = boundCwdForResume || (curSession ? curSession.cwd : null);
       const recentSessions = listRecentSessions(5, curCwd);
 
       if (!arg) {

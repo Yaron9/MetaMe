@@ -182,6 +182,11 @@ function createSessionStore(deps) {
               }
             }
           }
+          // Fallback: decode projectPath from directory name (e.g. -Users-yaron-AGI-AChat → /Users/yaron/AGI/AChat)
+          if (!projPathCache.has(proj) && proj.startsWith('-')) {
+            const decoded = proj.replace(/-/g, '/');
+            if (fs.existsSync(decoded)) projPathCache.set(proj, decoded);
+          }
         } catch { /* skip */ }
 
         try {
@@ -283,8 +288,7 @@ function createSessionStore(deps) {
   function listRecentSessions(limit, cwd) {
     let all = scanAllSessions();
     if (cwd) {
-      const matched = all.filter(s => s.projectPath === cwd);
-      if (matched.length > 0) all = matched;
+      all = all.filter(s => s.projectPath === cwd);
     }
     return all.slice(0, limit || 10);
   }

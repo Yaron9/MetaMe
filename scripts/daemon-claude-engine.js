@@ -457,6 +457,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     WebFetch: '🌐',
     WebSearch: '🔍',
     Task: '🤖',
+    Agent: '🤖',
     Skill: '🔧',
     TodoWrite: '📋',
     NotebookEdit: '📓',
@@ -659,8 +660,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
             if (toolName === 'Skill' && toolInput.skill) {
               context = toolInput.skill;
-            } else if (toolName === 'Task' && toolInput.description) {
-              context = String(toolInput.description).slice(0, 30);
+            } else if ((toolName === 'Task' || toolName === 'Agent') && toolInput.description) {
+              const agentType = toolInput.subagent_type ? `[${toolInput.subagent_type}] ` : '';
+              context = (agentType + String(toolInput.description)).slice(0, 40);
             } else if (toolName.startsWith('mcp__')) {
               const parts = toolName.split('__');
               const server = parts[1] || 'unknown';
@@ -869,10 +871,14 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     // Skill routing: detect skill first, then decide session
     // BUT: skip skill routing if agent addressed by nickname OR chat already has an active session
     // (active conversation should never be hijacked by keyword-based skill matching)
-    const sessionRaw = getSession(chatId);
     const chatIdStr = String(chatId);
     const chatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
     const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
+    // If this chat is bound to an agent, route session lookups to the agent's virtual chatId.
+    // This ensures user replies in a bound group resume the agent's current session (including dispatch tasks),
+    // rather than forking a separate chat session.
+    const sessionChatId = boundProjectKey ? `_agent_${boundProjectKey}` : chatId;
+    const sessionRaw = getSession(sessionChatId);
     const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
     const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
     const boundEngineName = (boundProject && boundProject.engine) ? normalizeEngineName(boundProject.engine) : getDefaultEngine();
@@ -893,11 +899,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       // No saved state for this chatId: start a fresh session.
       // Note: daemon_state.json persists across restarts, so this only happens on truly first use
       // or after an explicit /new command.
-      createSession(chatId, boundCwd || undefined, boundProject && boundProject.name ? boundProject.name : '', boundEngineName);
+      createSession(sessionChatId, boundCwd || undefined, boundProject && boundProject.name ? boundProject.name : '', boundEngineName);
     }
 
     // Resolve flat view for current engine (id + started are engine-specific; cwd is shared)
-    let session = getSessionForEngine(chatId, engineName) || { cwd: boundCwd || HOME, engine: engineName, id: null, started: false };
+    let session = getSessionForEngine(sessionChatId, engineName) || { cwd: boundCwd || HOME, engine: engineName, id: null, started: false };
     session.engine = engineName; // keep local copy for Codex resume detection below
 
     // Pre-spawn session validation: unified for all engines.
@@ -905,9 +911,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     if (session.started && session.id && session.id !== '__continue__' && session.cwd) {
       const valid = isEngineSessionValid(engineName, session.id, session.cwd);
       if (!valid) {
-        log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${chatId}; starting fresh ${engineName} session`);
+        log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${sessionChatId}; starting fresh ${engineName} session`);
         await bot.sendMessage(chatId, '⚠️ 上次 session 已失效，已自动开启新 session。').catch(() => {});
-        session = createSession(chatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', engineName);
+        session = createSession(sessionChatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', engineName);
       }
     }
 
@@ -1276,7 +1282,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         // Notify user explicitly — silent context loss is worse than a visible warning.
         await bot.sendMessage(chatId, '⚠️ Codex session 已过期，上下文丢失。正在以全新 session 重试，请在回复后补充必要背景。').catch(() => {});
         session = createSession(
-          chatId,
+          sessionChatId,
           session.cwd,
           boundProject && boundProject.name ? boundProject.name : '',
           'codex'
@@ -1489,7 +1495,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       // If session not found (expired/deleted), create new and retry once (Claude path)
       if (runtime.name === 'claude' && (errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use'))) {
         log('WARN', `Session ${session.id} unusable (${errMsg.includes('already in use') ? 'locked' : 'not found'}), creating new`);
-        session = createSession(chatId, session.cwd, '', runtime.name);
+        session = createSession(sessionChatId, session.cwd, '', runtime.name);
 
         const retryArgs = runtime.buildArgs({
           model,
