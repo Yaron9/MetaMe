@@ -56,10 +56,27 @@ memory-write.js — 主动写入事实到 memory.db
 // ── Project inference ─────────────────────────────────────────────────────────
 function inferProject(cwd) {
   if (!cwd) return '*';
-  const known = { 'MetaMe': 'metame', 'metame-desktop': 'desktop' };
-  for (const [dir, key] of Object.entries(known)) {
-    if (cwd.includes(dir)) return key;
-  }
+  // Try to match cwd against daemon.yaml projects
+  try {
+    const fs = require('fs');
+    const yaml = require('./resolve-yaml');
+    const HOME = require('os').homedir();
+    const cfgPath = `${HOME}/.metame/daemon.yaml`;
+    if (fs.existsSync(cfgPath)) {
+      const cfg = yaml.load(fs.readFileSync(cfgPath, 'utf8'));
+      const projects = cfg && cfg.projects;
+      if (projects) {
+        // Sort by expanded cwd length descending so most specific path wins
+        const entries = Object.entries(projects)
+          .filter(([, p]) => p && p.cwd)
+          .map(([key, proj]) => [key, proj.cwd.replace(/^~/, HOME)])
+          .sort((a, b) => b[1].length - a[1].length);
+        for (const [key, projCwd] of entries) {
+          if (cwd === projCwd || cwd.startsWith(projCwd + '/')) return key;
+        }
+      }
+    }
+  } catch { /* fallthrough */ }
   return '*';
 }
 
