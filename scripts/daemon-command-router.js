@@ -597,49 +597,28 @@ function createCommandRouter(deps) {
     }
 
     // --- Natural language → Claude Code session ---
-    // Helper: check if any task is active for this chat (including team member virtual chatIds)
-    function _hasActiveTask(cid) {
-      if (activeProcesses.has(cid)) return true;
-      const cfg = loadConfig();
-      const am = { ...(cfg.telegram ? cfg.telegram.chat_agent_map || {} : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map || {} : {}) };
-      const bk = am[String(cid)];
-      const bp = bk && cfg.projects ? cfg.projects[bk] : null;
-      if (bp && Array.isArray(bp.team)) {
-        for (const m of bp.team) {
-          if (activeProcesses.has(`_agent_${m.key}`)) return true;
-        }
-      }
-      return false;
-    }
-    function _killAllForChat(cid) {
-      const _clearQ = (id) => {
-        if (messageQueue.has(id)) { const q = messageQueue.get(id); if (q.timer) clearTimeout(q.timer); messageQueue.delete(id); }
-      };
-      const _killProc = (id) => {
-        const p = activeProcesses.get(id);
-        if (p && p.child) { p.aborted = true; const sig = p.killSignal || 'SIGTERM'; try { process.kill(-p.child.pid, sig); } catch { try { p.child.kill(sig); } catch { /* */ } } }
-      };
-      _clearQ(cid); _killProc(cid);
-      const cfg = loadConfig();
-      const am = { ...(cfg.telegram ? cfg.telegram.chat_agent_map || {} : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map || {} : {}) };
-      const bk = am[String(cid)];
-      const bp = bk && cfg.projects ? cfg.projects[bk] : null;
-      if (bp && Array.isArray(bp.team)) {
-        for (const m of bp.team) { const vid = `_agent_${m.key}`; _clearQ(vid); _killProc(vid); }
-      }
-    }
-
     // Interrupt detection: "等一下/停/hold on" while task is running → stop task, keep session for resume
     const INTERRUPT_RE = /^(等一下|等等|等下|停一下|停下|停|先停|hold\s*on|wait|暂停)$/i;
-    if (_hasActiveTask(chatId) && INTERRUPT_RE.test(text.trim())) {
-      _killAllForChat(chatId);
+    if (activeProcesses.has(chatId) && INTERRUPT_RE.test(text.trim())) {
+      // Kill current process but preserve session for resume
+      if (messageQueue.has(chatId)) {
+        const q = messageQueue.get(chatId);
+        if (q.timer) clearTimeout(q.timer);
+        messageQueue.delete(chatId);
+      }
+      const proc = activeProcesses.get(chatId);
+      if (proc && proc.child) {
+        proc.aborted = true;
+        const signal = proc.killSignal || 'SIGTERM';
+        try { process.kill(-proc.child.pid, signal); } catch { proc.child.kill(signal); }
+      }
       await bot.sendMessage(chatId, '⏸ 好的，听你说');
       return;
     }
 
     // "继续" when no task running → resume most recent session via /last, then send prompt
     const CONTINUE_RE = /^(继续|接着|go\s*on|continue)$/i;
-    if (!_hasActiveTask(chatId) && CONTINUE_RE.test(text.trim())) {
+    if (!activeProcesses.has(chatId) && CONTINUE_RE.test(text.trim())) {
       // Delegate to /last which attaches the most recent session
       const handled = await handleSessionCommand({ bot, chatId, text: '/last' });
       if (handled) {
@@ -652,7 +631,7 @@ function createCommandRouter(deps) {
     }
 
     // If a task is running: queue message, DON'T kill — will be sent as follow-up after completion
-    if (_hasActiveTask(chatId)) {
+    if (activeProcesses.has(chatId)) {
       const isFirst = !messageQueue.has(chatId);
       if (isFirst) {
         messageQueue.set(chatId, { messages: [] });
