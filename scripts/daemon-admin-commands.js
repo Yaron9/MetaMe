@@ -6,7 +6,7 @@ const {
   USAGE_CATEGORY_LABEL,
 } = require('./usage-classifier');
 const { IS_WIN } = require('./platform');
-const { ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
+const { ENGINE_MODEL_CONFIG, resolveEngineModel } = require('./daemon-engine-runtime');
 let mentorEngine = null;
 try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
 
@@ -1095,9 +1095,7 @@ function createAdminCommandHandler(deps) {
       );
       const optionValues = optionEntries.map(o => o.value);
       const daemonCfg = config.daemon || {};
-      const currentModel = (daemonCfg.models && daemonCfg.models[currentEngine])
-        || daemonCfg.model   // legacy fallback
-        || engineCfg.main;
+      const currentModel = resolveEngineModel(currentEngine, daemonCfg);
       // providerMod manages Claude providers only — for codex use engineCfg.provider
       const activeProvider = (currentEngine === 'claude' && providerMod)
         ? providerMod.getActiveName()
@@ -1185,8 +1183,7 @@ function createAdminCommandHandler(deps) {
           : curEngineCfg.provider;
         const distill = getDistillModel();
         const daemonCfg = config.daemon || {};
-        const currentModel = (daemonCfg.models && daemonCfg.models[cur])
-          || daemonCfg.model || curEngineCfg.main;
+        const currentModel = resolveEngineModel(cur, daemonCfg);
         await bot.sendMessage(chatId, [
           `🔧 引擎: ${cur}  |  Provider: ${activeProvider}`,
           `🤖 会话模型: ${currentModel}  |  后台轻量: ${distill}`,
@@ -1207,9 +1204,7 @@ function createAdminCommandHandler(deps) {
       const distill = getDistillModel();
       const freshCfg = loadConfig();
       const freshDaemon = freshCfg.daemon || {};
-      const targetEngineCfg = ENGINE_MODEL_CONFIG[arg] || ENGINE_MODEL_CONFIG.claude;
-      const syncedModel = (freshDaemon.models && freshDaemon.models[arg])
-        || freshDaemon.model || targetEngineCfg.main;
+      const syncedModel = resolveEngineModel(arg, freshDaemon);
 
       // Auto-switch provider if the preferred one exists in providers.yaml
       let providerNote = '';
