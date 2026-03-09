@@ -126,7 +126,7 @@ function createBot(config) {
       try {
         // Feishu patch API only works on card (interactive) messages
         // Update card content with markdown element
-        const card = { schema: '2.0', body: { elements: [{ tag: 'markdown', content: text }] } };
+        const card = { schema: '2.0', body: { elements: [{ tag: 'markdown', content: text, text_size: 'x-large' }] } };
         await withTimeout(client.im.message.patch({
           path: { message_id: messageId },
           data: { content: JSON.stringify(card) },
