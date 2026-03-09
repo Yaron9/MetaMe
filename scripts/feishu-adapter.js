@@ -97,7 +97,7 @@ function createBot(config) {
     const res = await withTimeout(client.im.message.create({
       params: { receive_id_type: 'chat_id' },
       data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
-    }));
+    }), 30000); // 30s: large card content can be slow; timeout must not fire after delivery
     const msgId = res?.data?.message_id;
     return msgId ? { message_id: msgId } : null;
   }
@@ -130,7 +130,7 @@ function createBot(config) {
         await withTimeout(client.im.message.patch({
           path: { message_id: messageId },
           data: { content: JSON.stringify(card) },
-        }));
+        }), 30000); // 30s: must not timeout after Feishu has applied the patch
         return true;
       } catch (e) {
         const code = e?.code || e?.response?.data?.code;
