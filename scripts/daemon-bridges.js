@@ -411,7 +411,7 @@ function createBridgeStarter(deps) {
                 return;
               }
             }
-            // 1. Explicit nickname → route to that member
+            // 1. Explicit nickname → route + set sticky
             const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
             if (teamMatch) {
               const { member, rest } = teamMatch;
@@ -420,11 +420,29 @@ function createBridgeStarter(deps) {
                 bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`).catch(() => {});
                 return;
               }
+              // Set sticky so subsequent messages go to this member by default
+              const _stSticky = loadState();
+              if (!_stSticky.team_sticky) _stSticky.team_sticky = {};
+              _stSticky.team_sticky[String(chatId)] = member.key;
+              saveState(_stSticky);
+              log('INFO', `Sticky set: ${String(chatId).slice(-8)} → ${member.key}`);
               _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, chatId, executeTaskByName, acl);
               return;
             }
 
-            // 2. Auto-dispatch: main busy → find first free auto_dispatch clone
+            // 2. Sticky: no nickname given → route to last explicitly named member
+            const _stRead = loadState();
+            const _stickyKey = (_stRead.team_sticky || {})[String(chatId)] || null;
+            if (_stickyKey) {
+              const member = _boundProj.team.find(m => m.key === _stickyKey);
+              if (member) {
+                log('INFO', `Sticky route: → ${_stickyKey}`);
+                _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+                return;
+              }
+            }
+
+            // 3. Auto-dispatch: main busy → find first free auto_dispatch clone
             if (activeProcesses) {
               const clones = _boundProj.team.filter(m => m.auto_dispatch);
               const mainBusy = activeProcesses.has(chatId);
