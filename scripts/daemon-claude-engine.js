@@ -1236,15 +1236,16 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         // __STREAM_TEXT__: streamed model text — edit card and track for final dedup
         if (status.startsWith('__STREAM_TEXT__')) {
           const content = status.slice('__STREAM_TEXT__'.length);
+          // Set synchronously BEFORE await — this is the critical race fix.
+          // flushStream(true) is called from the 'done' event (before process close),
+          // so by setting here synchronously, _lastStatusCardContent is guaranteed to be
+          // set before the child 'close' event fires and finalize() resolves.
+          _lastStatusCardContent = content;
           if (statusMsgId && bot.editMessage && !editFailed) {
             const ok = await bot.editMessage(chatId, statusMsgId, content);
-            if (ok !== false) {
-              _lastStatusCardContent = content; // track for final-reply dedup
-              return;
-            }
-            editFailed = true;
+            if (ok === false) editFailed = true;
           }
-          return; // skip fallback — stream text is transient; final reply will send full content
+          return; // skip fallback — final reply logic will use existing card
         }
 
         // __TOOL_OVERLAY__: text + tool status line — edit card but don't update _lastStatusCardContent
