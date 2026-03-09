@@ -840,6 +840,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     // statusMsgId is resolved via a promise; it will be ready well before the first model output.
     let statusMsgId = null;
     let _earlyTextShown = false;
+    let _lastStatusCardContent = null; // track last content written to status card
     // Fire-and-forget: don't await Telegram RTT before spawning the engine process.
     // statusMsgId will be populated well before the first model output (~5s for codex).
     (bot.sendMarkdown ? bot.sendMarkdown(chatId, '🤔') : bot.sendMessage(chatId, '🤔'))
@@ -1228,6 +1229,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             // If edit fails and we fall back to sendMessage, _earlyTextShown stays false
             // so the final reply won't try to edit the status card, preventing duplicates.
             if (isEarlyText) _earlyTextShown = true;
+            _lastStatusCardContent = actualStatus; // track what's currently on the card
             return; // edit succeeded (true or undefined for Telegram)
           }
           editFailed = true; // edit failed, switch to fallback permanently
@@ -1464,16 +1466,23 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         // If edit fails: try to delete the status card (awaited, not fire-and-forget).
         // If delete also fails: edit-with-content as last resort before sending a new card.
         if (_statusMsgIdForReply && bot.editMessage) {
-          const editOk = await bot.editMessage(chatId, _statusMsgIdForReply, cleanOutput);
-          log('DEBUG', `[REPLY:${chatId}] editMessage result=${editOk}`);
-          if (editOk !== false) {
+          // Skip redundant edit: if card already shows the final content (e.g. early text = final output),
+          // avoid a visible second "update" that the user would perceive as a duplicate reply.
+          if (_lastStatusCardContent !== null && _lastStatusCardContent === cleanOutput) {
+            log('DEBUG', `[REPLY:${chatId}] skipping editMessage — content unchanged (early text === final output)`);
             replyMsg = { message_id: _statusMsgIdForReply };
-          } else if (bot.deleteMessage) {
-            const deleted = await bot.deleteMessage(chatId, _statusMsgIdForReply).then(() => true).catch(() => false);
-            log('DEBUG', `[REPLY:${chatId}] deleteMessage result=${deleted}`);
-            if (!deleted) {
-              // Both edit and delete failed — try one more edit attempt to avoid leaving 🤔
-              log('WARN', `[REPLY:${chatId}] deleteMessage failed — status card may linger alongside new reply`);
+          } else {
+            const editOk = await bot.editMessage(chatId, _statusMsgIdForReply, cleanOutput);
+            log('DEBUG', `[REPLY:${chatId}] editMessage result=${editOk}`);
+            if (editOk !== false) {
+              replyMsg = { message_id: _statusMsgIdForReply };
+            } else if (bot.deleteMessage) {
+              const deleted = await bot.deleteMessage(chatId, _statusMsgIdForReply).then(() => true).catch(() => false);
+              log('DEBUG', `[REPLY:${chatId}] deleteMessage result=${deleted}`);
+              if (!deleted) {
+                // Both edit and delete failed — try one more edit attempt to avoid leaving 🤔
+                log('WARN', `[REPLY:${chatId}] deleteMessage failed — status card may linger alongside new reply`);
+              }
             }
           }
         } else if (_statusMsgIdForReply && bot.deleteMessage) {
