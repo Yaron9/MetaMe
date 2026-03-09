@@ -173,6 +173,32 @@ projects:
       - Jarvis
       - jarvis
     heartbeat_tasks: null
+    broadcast: true
+    team:
+      - key: jia
+        name: 甲
+        icon: 甲
+        color: green
+        cwd: ~/AGI/MetaMe
+        nicknames:
+          - 甲
+        auto_dispatch: true
+      - key: yi
+        name: 乙
+        icon: 乙
+        color: yellow
+        cwd: ~/AGI/MetaMe
+        nicknames:
+          - 乙
+        auto_dispatch: true
+      - key: bing
+        name: 丙
+        icon: 丙
+        color: red
+        cwd: ~/AGI/MetaMe
+        nicknames:
+          - 丙
+        auto_dispatch: true
   desktop:
     name: Desktop PM
     icon: 🚀
