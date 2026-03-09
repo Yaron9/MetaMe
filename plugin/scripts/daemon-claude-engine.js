@@ -1235,8 +1235,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const fullPrompt = routedPrompt + daemonHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
 
     // Git checkpoint before Claude modifies files (for /undo).
-    // Skip for virtual agents (team clones like _agent_yi) — they share the same cwd
-    // as the parent project, so `git add -A` would stage other agents' in-progress work.
+    // Skip for virtual agents (team clones like _agent_yi) — each has its own worktree,
+    // but checkpoint uses `git add -A` which could interfere with parallel work.
     const _isVirtualAgent = String(chatId).startsWith('_agent_') || String(chatId).startsWith('_scope_');
     if (!_isVirtualAgent) {
       (gitCheckpointAsync || gitCheckpoint)(session.cwd, prompt).catch?.(() => {});

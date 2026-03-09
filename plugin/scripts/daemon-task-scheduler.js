@@ -741,12 +741,12 @@ function createTaskScheduler(deps) {
       lastTickTime = tickNow;
 
       if (tickElapsed > WAKE_THRESHOLD) {
-        log('FATAL', `[WAKE-DETECT] System resumed after ${Math.round(tickElapsed / 1000)}s sleep — restarting daemon to rebuild connections`);
+        log('WARN', `[WAKE-DETECT] System resumed after ${Math.round(tickElapsed / 1000)}s sleep — letting connections auto-reconnect`);
         const st = loadState();
         st.wake_restart = new Date().toISOString();
         st.wake_sleep_seconds = Math.round(tickElapsed / 1000);
         saveState(st);
-        process.exit(1); // caffeinate will restart us with fresh connections
+        // Don't exit — Feishu and Telegram have built-in auto-reconnect
       }
 
       // ① Physiological heartbeat (zero token, pure awareness)

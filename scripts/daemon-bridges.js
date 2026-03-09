@@ -135,6 +135,22 @@ function createBridgeStarter(deps) {
   function _getMemberCwd(parentCwd, key) {
     const { existsSync, mkdirSync } = require('fs');
     const { execFileSync } = require('child_process');
+    const WIN_HIDE = process.platform === 'win32' ? { windowsHide: true } : {};
+
+    // Ensure git repository exists in directory (for checkpoint support)
+    function _ensureGitInitialized(dir) {
+      const gitDir = path.join(dir, '.git');
+      if (existsSync(gitDir)) return true;
+      try {
+        execFileSync('git', ['init'], { cwd: dir, stdio: 'ignore', ...WIN_HIDE });
+        log('INFO', `Git repo initialized: ${dir}`);
+        return true;
+      } catch (e) {
+        log('WARN', `Failed to init git for ${dir}: ${e.message}`);
+        return false;
+      }
+    }
+
     const memberDir = path.join(parentCwd, 'team', key);
     // Check if parent is a git repo
     let isGitRepo = false;
@@ -147,15 +163,7 @@ function createBridgeStarter(deps) {
       if (!existsSync(memberDir)) {
         mkdirSync(memberDir, { recursive: true });
       }
-      // Initialize git repo if not exists (for checkpoint support)
-      if (!existsSync(path.join(memberDir, '.git'))) {
-        try {
-          execFileSync('git', ['init'], { cwd: memberDir, stdio: 'ignore' });
-          log('INFO', `Git repo initialized for team member: ${memberDir}`);
-        } catch (e) {
-          log('WARN', `Failed to init git for ${memberDir}: ${e.message}`);
-        }
-      }
+      _ensureGitInitialized(memberDir);
       return memberDir;
     }
     // Git repo: use worktree
@@ -175,10 +183,7 @@ function createBridgeStarter(deps) {
       if (existsSync(path.join(wtDir, '.git'))) return wtDir;
       log('ERROR', `Worktree creation failed for ${key}: ${e.message} — falling back to regular dir`);
       if (!existsSync(memberDir)) mkdirSync(memberDir, { recursive: true });
-      // Initialize git for checkpoint support
-      if (!existsSync(path.join(memberDir, '.git'))) {
-        try { execFileSync('git', ['init'], { cwd: memberDir, stdio: 'ignore' }); } catch {}
-      }
+      _ensureGitInitialized(memberDir);
       return memberDir;
     }
     return wtDir;

@@ -129,24 +129,62 @@ function createBridgeStarter(deps) {
       },
     });
   }
-  // Ensure a git worktree exists for a team member. Returns the worktree path.
-  // Worktree is created at {parentCwd}/.worktree/{key}/ on a branch named team/{key}.
-  function _ensureWorktree(parentCwd, key) {
-    const fs = require('fs');
-    const { execSync: _exec } = require('child_process');
+  // Get team member's working directory. Prefers git worktree if parent is a git repo.
+  // Falls back to regular directory if parent is not a git repo.
+  const _worktreeLocks = new Map(); // per-key lock to prevent TOCTOU races
+  function _getMemberCwd(parentCwd, key) {
+    const { existsSync, mkdirSync } = require('fs');
+    const { execFileSync } = require('child_process');
+    const WIN_HIDE = process.platform === 'win32' ? { windowsHide: true } : {};
+
+    // Ensure git repository exists in directory (for checkpoint support)
+    function _ensureGitInitialized(dir) {
+      const gitDir = path.join(dir, '.git');
+      if (existsSync(gitDir)) return true;
+      try {
+        execFileSync('git', ['init'], { cwd: dir, stdio: 'ignore', ...WIN_HIDE });
+        log('INFO', `Git repo initialized: ${dir}`);
+        return true;
+      } catch (e) {
+        log('WARN', `Failed to init git for ${dir}: ${e.message}`);
+        return false;
+      }
+    }
+
+    const memberDir = path.join(parentCwd, 'team', key);
+    // Check if parent is a git repo
+    let isGitRepo = false;
+    try {
+      execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: parentCwd, stdio: 'ignore' });
+      isGitRepo = true;
+    } catch { isGitRepo = false; }
+    // If not a git repo, use regular directory but initialize git for checkpoint
+    if (!isGitRepo) {
+      if (!existsSync(memberDir)) {
+        mkdirSync(memberDir, { recursive: true });
+      }
+      _ensureGitInitialized(memberDir);
+      return memberDir;
+    }
+    // Git repo: use worktree
     const wtDir = path.join(parentCwd, '.worktree', key);
-    if (fs.existsSync(path.join(wtDir, '.git'))) return wtDir;
-    // Create directory and worktree
-    fs.mkdirSync(path.join(parentCwd, '.worktree'), { recursive: true });
+    if (existsSync(path.join(wtDir, '.git'))) return wtDir;
+    // Concurrency guard
+    if (_worktreeLocks.has(key)) return _worktreeLocks.get(key);
+    _worktreeLocks.set(key, wtDir);
+    mkdirSync(path.join(parentCwd, '.worktree'), { recursive: true });
     const branch = `team/${key}`;
     try {
-      // Create branch from current HEAD if it doesn't exist
-      _exec(`git branch ${branch} HEAD 2>/dev/null || true`, { cwd: parentCwd, stdio: 'ignore' });
-      _exec(`git worktree add "${wtDir}" ${branch}`, { cwd: parentCwd, stdio: 'ignore', timeout: 10000 });
+      try { execFileSync('git', ['branch', branch, 'HEAD'], { cwd: parentCwd, stdio: 'ignore' }); } catch { /* branch exists */ }
+      execFileSync('git', ['worktree', 'add', wtDir, branch], { cwd: parentCwd, stdio: 'ignore', timeout: 10000 });
       log('INFO', `Worktree created: ${wtDir} (branch: ${branch})`);
     } catch (e) {
-      log('ERROR', `Worktree creation failed for ${key}: ${e.message}`);
-      return parentCwd; // fallback to shared cwd
+      _worktreeLocks.delete(key);
+      if (existsSync(path.join(wtDir, '.git'))) return wtDir;
+      log('ERROR', `Worktree creation failed for ${key}: ${e.message} — falling back to regular dir`);
+      if (!existsSync(memberDir)) mkdirSync(memberDir, { recursive: true });
+      _ensureGitInitialized(memberDir);
+      return memberDir;
     }
     return wtDir;
   }
@@ -155,7 +193,12 @@ function createBridgeStarter(deps) {
     const virtualChatId = `_agent_${member.key}`;
     const parentCwd = member.cwd || boundProj.cwd;
     const resolvedParentCwd = parentCwd.replace(/^~/, require('os').homedir());
-    const memberCwd = _ensureWorktree(resolvedParentCwd, member.key);
+    const memberCwd = _getMemberCwd(resolvedParentCwd, member.key);
+    if (!memberCwd) {
+      log('ERROR', `Team [${member.key}] cannot start: worktree unavailable`);
+      bot.sendMessage(realChatId, `❌ ${member.icon || '🤖'} ${member.name} 启动失败：工作目录创建失败`).catch(() => {});
+      return;
+    }
     const teamCfg = {
       ...cfg,
       projects: {
