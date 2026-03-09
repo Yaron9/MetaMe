@@ -26,6 +26,7 @@ feishu:
     - oc_bd0b81e62ff3576dc9b4c6670bb788d2
     - oc_e33569664c1c1224d44a864a4fb40dd2
   chat_agent_map:
+    oc_84be4bf1a1dabc6c1f0c22d0b6feaf8d: metame
     oc_2693fc5ca63064f144eca78264bcea48: personal
     oc_280f2c243f348d8f688580f882996bcd: metame
     oc_942de23c38ff876f73f163052fbdb68f: digital_me
