@@ -148,6 +148,43 @@ function createExecCommandHandler(deps) {
     ].join('\n');
   }
 
+  // Kill all active processes for a chat, including team member virtual chatIds
+  function _killAllForChat(chatId) {
+    // Direct chatId
+    if (messageQueue.has(chatId)) {
+      const q = messageQueue.get(chatId);
+      if (q.timer) clearTimeout(q.timer);
+      messageQueue.delete(chatId);
+    }
+    const proc = activeProcesses.get(chatId);
+    if (proc && proc.child) {
+      proc.aborted = true;
+      const signal = proc.killSignal || 'SIGTERM';
+      try { process.kill(-proc.child.pid, signal); } catch { try { proc.child.kill(signal); } catch { /* */ } }
+    }
+    // Team member virtual chatIds
+    const cfg = loadConfig();
+    const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map || {} : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map || {} : {}) };
+    const boundKey = agentMap[String(chatId)];
+    const boundProj = boundKey && cfg.projects ? cfg.projects[boundKey] : null;
+    if (boundProj && Array.isArray(boundProj.team)) {
+      for (const member of boundProj.team) {
+        const vid = `_agent_${member.key}`;
+        if (messageQueue.has(vid)) {
+          const vq = messageQueue.get(vid);
+          if (vq.timer) clearTimeout(vq.timer);
+          messageQueue.delete(vid);
+        }
+        const vproc = activeProcesses.get(vid);
+        if (vproc && vproc.child) {
+          vproc.aborted = true;
+          const signal = vproc.killSignal || 'SIGTERM';
+          try { process.kill(-vproc.child.pid, signal); } catch { try { vproc.child.kill(signal); } catch { /* */ } }
+        }
+      }
+    }
+  }
+
   async function handleExecCommand(ctx) {
     const { bot, chatId, text, config, executeTaskByName, nlIntentText } = ctx;
 
@@ -208,12 +245,35 @@ function createExecCommandHandler(deps) {
         if (q.timer) clearTimeout(q.timer);
         messageQueue.delete(chatId);
       }
+      // Collect processes to kill: direct chatId + team member virtual chatIds
+      const procsToKill = [];
       const proc = activeProcesses.get(chatId);
-      if (proc && proc.child) {
-        proc.aborted = true;
-        const signal = proc.killSignal || 'SIGTERM';
-        try { process.kill(-proc.child.pid, signal); } catch { proc.child.kill(signal); }
-        await bot.sendMessage(chatId, '⏹ Stopping current engine task...');
+      if (proc && proc.child) procsToKill.push({ id: chatId, proc });
+      // For team groups: find all _agent_* virtual processes belonging to this chat's bound project
+      const cfg = loadConfig();
+      const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map || {} : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map || {} : {}) };
+      const boundKey = agentMap[String(chatId)];
+      const boundProj = boundKey && cfg.projects ? cfg.projects[boundKey] : null;
+      if (boundProj && Array.isArray(boundProj.team)) {
+        for (const member of boundProj.team) {
+          const vid = `_agent_${member.key}`;
+          const vproc = activeProcesses.get(vid);
+          if (vproc && vproc.child) procsToKill.push({ id: vid, proc: vproc });
+          // Also clear virtual chatId message queues
+          if (messageQueue.has(vid)) {
+            const vq = messageQueue.get(vid);
+            if (vq.timer) clearTimeout(vq.timer);
+            messageQueue.delete(vid);
+          }
+        }
+      }
+      if (procsToKill.length > 0) {
+        for (const { proc: p } of procsToKill) {
+          p.aborted = true;
+          const signal = p.killSignal || 'SIGTERM';
+          try { process.kill(-p.child.pid, signal); } catch { try { p.child.kill(signal); } catch { /* */ } }
+        }
+        await bot.sendMessage(chatId, `⏹ Stopping ${procsToKill.length} task(s)...`);
       } else {
         await bot.sendMessage(chatId, 'No active task to stop.');
       }
@@ -222,18 +282,8 @@ function createExecCommandHandler(deps) {
 
     // /quit — restart session process (reloads MCP/config, keeps same session)
     if (text === '/quit') {
-      // Stop running task if any
-      if (messageQueue.has(chatId)) {
-        const q = messageQueue.get(chatId);
-        if (q.timer) clearTimeout(q.timer);
-        messageQueue.delete(chatId);
-      }
-      const proc = activeProcesses.get(chatId);
-      if (proc && proc.child) {
-        proc.aborted = true;
-        const signal = proc.killSignal || 'SIGTERM';
-        try { process.kill(-proc.child.pid, signal); } catch { proc.child.kill(signal); }
-      }
+      // Stop running task if any (including team member virtual processes)
+      _killAllForChat(chatId);
       const session = getSession(chatId);
       const name = session ? getSessionName(session.id) : null;
       const label = name || (session ? session.id.slice(0, 8) : 'none');
