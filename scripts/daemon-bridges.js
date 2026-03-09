@@ -131,22 +131,33 @@ function createBridgeStarter(deps) {
   }
   // Ensure a git worktree exists for a team member. Returns the worktree path.
   // Worktree is created at {parentCwd}/.worktree/{key}/ on a branch named team/{key}.
+  const _worktreeLocks = new Map(); // per-key lock to prevent TOCTOU races
   function _ensureWorktree(parentCwd, key) {
-    const fs = require('fs');
-    const { execSync: _exec } = require('child_process');
+    // Validate key to prevent shell injection
+    if (!/^[a-zA-Z0-9_-]+$/.test(key)) {
+      log('ERROR', `Invalid worktree key (must be alphanumeric): ${key}`);
+      return null;
+    }
+    const { existsSync, mkdirSync } = require('fs');
+    const { execFileSync } = require('child_process');
     const wtDir = path.join(parentCwd, '.worktree', key);
-    if (fs.existsSync(path.join(wtDir, '.git'))) return wtDir;
-    // Create directory and worktree
-    fs.mkdirSync(path.join(parentCwd, '.worktree'), { recursive: true });
+    if (existsSync(path.join(wtDir, '.git'))) return wtDir;
+    // Concurrency guard: if another call is already creating this worktree, wait
+    if (_worktreeLocks.has(key)) return _worktreeLocks.get(key);
+    _worktreeLocks.set(key, wtDir);
+    mkdirSync(path.join(parentCwd, '.worktree'), { recursive: true });
     const branch = `team/${key}`;
     try {
-      // Create branch from current HEAD if it doesn't exist
-      _exec(`git branch ${branch} HEAD 2>/dev/null || true`, { cwd: parentCwd, stdio: 'ignore' });
-      _exec(`git worktree add "${wtDir}" ${branch}`, { cwd: parentCwd, stdio: 'ignore', timeout: 10000 });
+      // Create branch from current HEAD if it doesn't exist (execFileSync = no shell injection)
+      try { execFileSync('git', ['branch', branch, 'HEAD'], { cwd: parentCwd, stdio: 'ignore' }); } catch { /* branch exists */ }
+      execFileSync('git', ['worktree', 'add', wtDir, branch], { cwd: parentCwd, stdio: 'ignore', timeout: 10000 });
       log('INFO', `Worktree created: ${wtDir} (branch: ${branch})`);
     } catch (e) {
-      log('ERROR', `Worktree creation failed for ${key}: ${e.message}`);
-      return parentCwd; // fallback to shared cwd
+      _worktreeLocks.delete(key);
+      // Re-check: another process may have created it while we waited
+      if (existsSync(path.join(wtDir, '.git'))) return wtDir;
+      log('ERROR', `Worktree creation failed for ${key}: ${e.message} — team member will not start`);
+      return null;
     }
     return wtDir;
   }
@@ -156,6 +167,11 @@ function createBridgeStarter(deps) {
     const parentCwd = member.cwd || boundProj.cwd;
     const resolvedParentCwd = parentCwd.replace(/^~/, require('os').homedir());
     const memberCwd = _ensureWorktree(resolvedParentCwd, member.key);
+    if (!memberCwd) {
+      log('ERROR', `Team [${member.key}] cannot start: worktree unavailable`);
+      bot.sendMessage(realChatId, `❌ ${member.icon || '🤖'} ${member.name} 启动失败：工作目录创建失败`).catch(() => {});
+      return;
+    }
     const teamCfg = {
       ...cfg,
       projects: {
