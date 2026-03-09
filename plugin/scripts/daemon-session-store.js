@@ -599,10 +599,11 @@ function createSessionStore(deps) {
       // Weak fallback: Claude encodes cwd in dir name; only trust a positive match.
       // Unix: /home/user/project → -home-user-project
       // Windows: D:\MetaMe → D--MetaMe (replaces : and \ with -)
+      // Note: also replace '.' (for .worktree paths)
       const actualDir = path.basename(projectDir).toLowerCase();
       const expectedDir = process.platform === 'win32'
         ? normCwd.replace(/[:\\\/_ ]/g, '-').toLowerCase()
-        : ('-' + normCwd.replace(/^\//, '').replace(/[\/_ ]/g, '-')).toLowerCase();
+        : ('-' + normCwd.replace(/^\//, '').replace(/[\/_. ]/g, '-')).toLowerCase();
       if (actualDir === expectedDir) return true;
       return false; // dir name mismatch — session belongs to a different project
     } catch {
