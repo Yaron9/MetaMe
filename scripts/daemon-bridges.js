@@ -406,13 +406,19 @@ function createBridgeStarter(deps) {
               return;
             }
 
-            // 2. Auto-dispatch: main is busy → find first free auto_dispatch clone
-            if (activeProcesses && activeProcesses.has(chatId)) {
-              const clone = _boundProj.team.find(m => m.auto_dispatch && !activeProcesses.has(`_agent_${m.key}`));
-              if (clone) {
-                log('INFO', `Auto-dispatch: main busy → ${clone.key} (${clone.name})`);
-                _dispatchToTeamMember(clone, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
-                return;
+            // 2. Auto-dispatch: any instance (main or clone) is busy → find first free auto_dispatch clone
+            // Check main (real chatId) AND all clones (_agent_xxx) for busyness
+            if (activeProcesses) {
+              const clones = _boundProj.team.filter(m => m.auto_dispatch);
+              const mainBusy = activeProcesses.has(chatId);
+              const allBusy = mainBusy && clones.every(m => activeProcesses.has(`_agent_${m.key}`));
+              if (mainBusy && !allBusy) {
+                const clone = clones.find(m => !activeProcesses.has(`_agent_${m.key}`));
+                if (clone) {
+                  log('INFO', `Auto-dispatch: main busy → ${clone.key} (${clone.name})`);
+                  _dispatchToTeamMember(clone, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+                  return;
+                }
               }
             }
           }
