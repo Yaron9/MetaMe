@@ -154,8 +154,10 @@ function parseClaudeStreamEvent(line) {
   }
   if (raw.type === 'result') {
     if (raw.session_id) out.push({ type: 'session', sessionId: String(raw.session_id), raw });
-    if (raw.result) out.push({ type: 'text', text: String(raw.result), raw });
-    out.push({ type: 'done', usage: raw.usage || null, raw });
+    // Pass raw.result as fallback on done event — NOT as a text event.
+    // The assistant streaming events already delivered this text; emitting it again as text
+    // would cause finalResult to accumulate the same content twice → duplicate on card.
+    out.push({ type: 'done', usage: raw.usage || null, result: raw.result || null, raw });
   }
   if (raw.type === 'content_block_start' || raw.type === 'content_block_delta') {
     out.push({ type: 'tool_result', raw });

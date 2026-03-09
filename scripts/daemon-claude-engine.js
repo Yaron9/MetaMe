@@ -638,6 +638,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
                 waitingForTool = false;
                 resetIdleTimer();
               }
+              // Fallback: if no text streamed yet (tool-only response), use result text from done.
+              // Do NOT use when finalResult already has content — result duplicates streamed text.
+              if (!finalResult && event.result) {
+                finalResult = String(event.result);
+                _streamText = finalResult;
+              }
               flushStream(true); // force final text flush before process ends
               continue;
             }
