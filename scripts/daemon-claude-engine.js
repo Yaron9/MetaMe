@@ -2,7 +2,7 @@
 
 const { classifyChatUsage } = require('./usage-classifier');
 const { deriveProjectInfo } = require('./utils');
-const { createEngineRuntimeFactory, normalizeEngineName, ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
+const { createEngineRuntimeFactory, normalizeEngineName, resolveEngineModel, ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
 const { buildAgentContextForEngine, buildMemorySnapshotContent, refreshMemorySnapshot } = require('./agent-layer');
 
 function createClaudeEngine(deps) {
@@ -986,9 +986,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     }
 
     // Build engine command — prefer per-engine model, fall back to legacy daemon.model
-    const engineModels = daemonCfg.models || {};
-    const engineModel = engineModels[runtime.name] || daemonCfg.model || runtime.defaultModel;
-    const model = (boundProject && boundProject.model) || engineModel;
+    const model = resolveEngineModel(runtime.name, daemonCfg, boundProject && boundProject.model);
     const args = runtime.buildArgs({
       model,
       readOnly,

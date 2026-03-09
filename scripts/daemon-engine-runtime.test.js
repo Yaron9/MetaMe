@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
   createEngineRuntimeFactory,
   normalizeEngineName,
+  resolveEngineModel,
   _private,
 } = require('./daemon-engine-runtime');
 
@@ -27,7 +28,7 @@ describe('daemon-engine-runtime args builder', () => {
     assert.deepEqual(args.slice(0, 3), ['exec', 'resume', 'sid-1']);
     assert.ok(args.includes('--json'));
     assert.ok(args.includes('-'));
-    assert.ok(args.includes('--dangerously-bypass-approvals-and-sandbox'));
+    assert.ok(!args.includes('--dangerously-bypass-approvals-and-sandbox'));
   });
 
   it('always uses --dangerously-bypass-approvals-and-sandbox for codex (no config needed)', () => {
@@ -60,6 +61,26 @@ describe('daemon-engine-runtime args builder', () => {
     });
     assert.ok(args.includes('--dangerously-skip-permissions'));
     assert.ok(!args.includes('--allowedTools'));
+  });
+});
+
+describe('daemon-engine-runtime model resolution', () => {
+  it('uses per-engine models before legacy daemon.model', () => {
+    const model = resolveEngineModel('codex', {
+      model: 'opus',
+      models: { codex: 'gpt-5.4' },
+    });
+    assert.equal(model, 'gpt-5.4');
+  });
+
+  it('does not leak legacy claude aliases into codex', () => {
+    const model = resolveEngineModel('codex', { model: 'opus' });
+    assert.equal(model, 'gpt-5.4');
+  });
+
+  it('preserves legacy custom model ids for codex', () => {
+    const model = resolveEngineModel('codex', { model: 'gpt-5-mini' });
+    assert.equal(model, 'gpt-5-mini');
   });
 });
 
@@ -131,6 +152,6 @@ describe('daemon-engine-runtime factory', () => {
     assert.equal(codex.name, 'codex');
     assert.equal(codex.binary, 'codex');
     assert.equal(codex.stdinBehavior, 'write-and-close');
-    assert.equal(codex.defaultModel, 'gpt-5-codex');
+    assert.equal(codex.defaultModel, 'gpt-5.4');
   });
 });
