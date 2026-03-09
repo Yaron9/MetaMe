@@ -102,7 +102,8 @@ function createBot(config) {
     return msgId ? { message_id: msgId } : null;
   }
 
-  let _editBroken = false; // closure var — safe against destructured calls
+  let _editBroken = false;      // closure var — safe against destructured calls
+  let _editBrokenAt = 0;        // timestamp when broken; auto-resets after 10min
 
   return {
     /**
@@ -123,7 +124,8 @@ function createBot(config) {
     },
 
     async editMessage(chatId, messageId, text, header = null) {
-      if (_editBroken) return false;
+      if (_editBroken && Date.now() - _editBrokenAt < 10 * 60 * 1000) return false;
+      if (_editBroken) _editBroken = false; // auto-reset after 10min
       try {
         // Feishu patch API only works on card (interactive) messages
         // Update card content with markdown element; preserve header if provided
@@ -140,6 +142,7 @@ function createBot(config) {
         const code = e?.code || e?.response?.data?.code;
         if (code === 230001 || code === 230002 || /permission|forbidden/i.test(String(e))) {
           _editBroken = true;
+          _editBrokenAt = Date.now();
         }
         return false;
       }
