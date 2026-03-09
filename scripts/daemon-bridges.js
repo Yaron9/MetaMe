@@ -3,9 +3,6 @@
 let userAcl = null;
 try { userAcl = require('./daemon-user-acl'); } catch { /* optional */ }
 
-let _createReflectionManager = null;
-try { _createReflectionManager = require('./daemon-reflection').createReflectionManager; } catch { /* optional */ }
-
 function createBridgeStarter(deps) {
   const {
     fs,
@@ -20,7 +17,6 @@ function createBridgeStarter(deps) {
     handleCommand,
     pendingActivations,  // optional — used to show smart activation hint
     activeProcesses,     // optional — used for auto-dispatch to clones
-    yaml,                // optional — needed for reflection manager
   } = deps;
 
   async function sendAclReply(bot, chatId, text) {
@@ -326,13 +322,6 @@ function createBridgeStarter(deps) {
     const { createBot } = require('./feishu-adapter.js');
     const bot = createBot(config.feishu);
 
-    const reflection = (_createReflectionManager && yaml) ? _createReflectionManager({
-      fs, path, yaml, log,
-      METAME_DIR: path.join(HOME, '.metame'),
-      BRAIN_FILE: path.join(HOME, '.claude_profile.yaml'),
-      sendToChat: (chatId, text) => bot.sendMessage(chatId, text),
-    }) : null;
-
     try {
       const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo, senderId) => {
         const liveCfg = loadConfig();
@@ -397,7 +386,6 @@ function createBridgeStarter(deps) {
           });
           if (acl.blocked) return;
           log('INFO', `Feishu message from ${chatId}: ${text.slice(0, 50)}`);
-          if (reflection && reflection.tryCapture(chatId, text)) return;
           const parentId = event?.message?.parent_id;
           let _replyAgentKey = null;
           if (parentId) {
@@ -452,7 +440,6 @@ function createBridgeStarter(deps) {
           }
 
           await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
-          if (reflection) reflection.onSessionEnd(chatId);
         }
       }, { log: (lvl, msg) => log(lvl, msg) });
 
