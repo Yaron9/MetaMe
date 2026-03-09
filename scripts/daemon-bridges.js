@@ -388,11 +388,11 @@ function createBridgeStarter(deps) {
                 projects: {
                   ...(liveCfg.projects || {}),
                   [member.key]: {
-                    cwd: _boundProj.cwd,
+                    cwd: member.cwd || _boundProj.cwd,  // per-member cwd if specified
                     name: member.name,
                     icon: member.icon || '🤖',
                     color: member.color || 'blue',
-                    engine: _boundProj.engine,
+                    engine: member.engine || _boundProj.engine,
                   },
                 },
               };
