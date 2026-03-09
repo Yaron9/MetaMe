@@ -17,6 +17,7 @@ function createBridgeStarter(deps) {
     handleCommand,
     pendingActivations,  // optional — used to show smart activation hint
     activeProcesses,     // optional — used for auto-dispatch to clones
+    messageQueue,        // optional — used for /stop to clear queued messages
   } = deps;
 
   async function sendAclReply(bot, chatId, text) {
@@ -321,6 +322,7 @@ function createBridgeStarter(deps) {
 
     const { createBot } = require('./feishu-adapter.js');
     const bot = createBot(config.feishu);
+
     try {
       const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo, senderId) => {
         const liveCfg = loadConfig();
@@ -386,6 +388,7 @@ function createBridgeStarter(deps) {
           if (acl.blocked) return;
           log('INFO', `Feishu message from ${chatId}: ${text.slice(0, 50)}`);
           const parentId = event?.message?.parent_id;
+          let _replyAgentKey = null;
           if (parentId) {
             const st = loadState();
             const mapped = st.msg_sessions && st.msg_sessions[parentId];
@@ -393,38 +396,133 @@ function createBridgeStarter(deps) {
               st.sessions[chatId] = { id: mapped.id, cwd: mapped.cwd, started: true };
               saveState(st);
               log('INFO', `Session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
+              _replyAgentKey = mapped.agentKey || null;
             }
           }
 
           // Team group routing: if bound project has a team array, check message for member nickname
+          // Slash commands always bypass team routing → handled by main project
           const { key: _boundKey, project: _boundProj } = _getBoundProject(chatId, liveCfg);
-          if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0) {
-            // 1. Explicit nickname → route to that member
+          if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0 && !trimmedText.startsWith('/')) {
+            // ── /stop precise routing for team groups ──
+            const _stopMatch = trimmedText && trimmedText.match(/^\/stop(?:\s+(.+))?$/i);
+            if (_stopMatch) {
+              const _stopArg = (_stopMatch[1] || '').trim();
+              let _targetKey = null;
+              // Priority 1: quoted reply → stop that agent
+              if (_replyAgentKey) {
+                const m = _boundProj.team.find(t => t.key === _replyAgentKey);
+                if (m) _targetKey = m.key;
+              }
+              // Priority 2: /stop <nickname> → match team member (case-insensitive)
+              if (!_targetKey && _stopArg) {
+                const _sa = _stopArg.toLowerCase();
+                const m = _boundProj.team.find(t =>
+                  (t.nicknames || []).some(n => n.toLowerCase() === _sa) || (t.name && t.name.toLowerCase() === _sa) || t.key === _sa
+                );
+                if (m) _targetKey = m.key;
+              }
+              // Priority 3: bare /stop → sticky
+              if (!_targetKey && !_stopArg) {
+                const _stR = loadState();
+                _targetKey = (_stR.team_sticky || {})[String(chatId)] || null;
+              }
+              if (_targetKey) {
+                const vid = `_agent_${_targetKey}`;
+                const member = _boundProj.team.find(t => t.key === _targetKey);
+                const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
+                // Clear message queue for this virtual agent
+                if (messageQueue.has(vid)) {
+                  const vq = messageQueue.get(vid);
+                  if (vq && vq.timer) clearTimeout(vq.timer);
+                  messageQueue.delete(vid);
+                }
+                const vproc = activeProcesses && activeProcesses.get(vid);
+                if (vproc && vproc.child) {
+                  vproc.aborted = true;
+                  const sig = vproc.killSignal || 'SIGTERM';
+                  try { process.kill(-vproc.child.pid, sig); } catch { try { vproc.child.kill(sig); } catch { /* */ } }
+                  await bot.sendMessage(chatId, `⏹ Stopping ${label}...`);
+                } else {
+                  await bot.sendMessage(chatId, `${label} 当前没有活跃任务`);
+                }
+                return;
+              }
+              // /stop <bad-nickname> → no match, report error instead of falling through
+              if (_stopArg) {
+                await bot.sendMessage(chatId, `❌ 未找到团队成员: ${_stopArg}`);
+                return;
+              }
+              // Bare /stop, no sticky set → fall through to handleCommand
+            }
+
+            // 0. Quoted reply → force route + set sticky
+            if (_replyAgentKey) {
+              const member = _boundProj.team.find(m => m.key === _replyAgentKey);
+              if (member) {
+                const _stQ = loadState();
+                if (!_stQ.team_sticky) _stQ.team_sticky = {};
+                _stQ.team_sticky[String(chatId)] = member.key;
+                saveState(_stQ);
+                log('INFO', `Quoted reply → force route to ${_replyAgentKey} (sticky set)`);
+                _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+                return;
+              }
+            }
+            // 1. Explicit nickname → route + set sticky
             const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
             if (teamMatch) {
               const { member, rest } = teamMatch;
               if (!rest) {
-                // Pure nickname, no task — just confirm member is online
+                // Pure nickname, no task — set sticky + confirm member is online
+                const _stPure = loadState();
+                if (!_stPure.team_sticky) _stPure.team_sticky = {};
+                _stPure.team_sticky[String(chatId)] = member.key;
+                saveState(_stPure);
+                log('INFO', `Sticky set (pure nickname): ${String(chatId).slice(-8)} → ${member.key}`);
                 bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`).catch(() => {});
                 return;
               }
+              // Set sticky so subsequent messages go to this member by default
+              const _stSticky = loadState();
+              if (!_stSticky.team_sticky) _stSticky.team_sticky = {};
+              _stSticky.team_sticky[String(chatId)] = member.key;
+              saveState(_stSticky);
+              log('INFO', `Sticky set: ${String(chatId).slice(-8)} → ${member.key}`);
               _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, chatId, executeTaskByName, acl);
               return;
             }
 
-            // 2. Auto-dispatch: main busy → find first free auto_dispatch clone
-            if (activeProcesses) {
-              const clones = _boundProj.team.filter(m => m.auto_dispatch);
-              const mainBusy = activeProcesses.has(chatId);
-              if (mainBusy) {
-                const clone = clones.find(m => !activeProcesses.has(`_agent_${m.key}`));
-                if (clone) {
-                  log('INFO', `Auto-dispatch: main busy → ${clone.key} (${clone.name})`);
-                  _dispatchToTeamMember(clone, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
-                  return;
-                }
+            // 1.5. Main project nickname → clear sticky, route to main
+            const _mainNicks = Array.isArray(_boundProj.nicknames) ? _boundProj.nicknames : [];
+            const _trimLower = trimmedText.toLowerCase();
+            const _mainMatch = _mainNicks.find(n => _trimLower === n.toLowerCase() || _trimLower.startsWith(n.toLowerCase() + ' ') || _trimLower.startsWith(n.toLowerCase() + '，') || _trimLower.startsWith(n.toLowerCase() + ','));
+            if (_mainMatch) {
+              const _stMain = loadState();
+              if (_stMain.team_sticky) delete _stMain.team_sticky[String(chatId)];
+              saveState(_stMain);
+              const rest = trimmedText.slice(_mainMatch.length).replace(/^[\s,，:：]+/, '');
+              log('INFO', `Main nickname → cleared sticky, routing to main${rest ? ` (task: ${rest.slice(0, 30)})` : ''}`);
+              if (!rest) {
+                bot.sendMarkdown(chatId, `${_boundProj.icon || '🤖'} **${_boundProj.name}** 在线`).catch(() => {});
+                return;
+              }
+              await handleCommand(bot, chatId, rest, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
+              return;
+            }
+
+            // 2. Sticky: no nickname given → route to last explicitly named member
+            const _stRead = loadState();
+            const _stickyKey = (_stRead.team_sticky || {})[String(chatId)] || null;
+            if (_stickyKey) {
+              const member = _boundProj.team.find(m => m.key === _stickyKey);
+              if (member) {
+                log('INFO', `Sticky route: → ${_stickyKey}`);
+                _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+                return;
               }
             }
+
           }
 
           await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
