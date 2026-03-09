@@ -401,9 +401,10 @@ function createBridgeStarter(deps) {
           }
 
           // Team group routing: if bound project has a team array, check message for member nickname
-          // Slash commands always bypass team routing → handled by main project
+          // Non-/stop slash commands bypass team routing → handled by main project
           const { key: _boundKey, project: _boundProj } = _getBoundProject(chatId, liveCfg);
-          if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0 && !trimmedText.startsWith('/')) {
+          const _isTeamSlashCmd = trimmedText.startsWith('/') && !/^\/stop(\s|$)/i.test(trimmedText);
+          if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0 && !_isTeamSlashCmd) {
             // ── /stop precise routing for team groups ──
             const _stopMatch = trimmedText && trimmedText.match(/^\/stop(?:\s+(.+))?$/i);
             if (_stopMatch) {
