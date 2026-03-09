@@ -949,11 +949,15 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
     // Pre-spawn session validation: unified for all engines.
     // Claude checks JSONL file existence; Codex checks SQLite. Same interface, different backend.
+    // Skip warning for virtual agents (team members) - they may use worktrees with fresh sessions
+    const isVirtualAgent = String(sessionChatId).startsWith('_agent_');
     if (session.started && session.id && session.id !== '__continue__' && session.cwd) {
       const valid = isEngineSessionValid(engineName, session.id, session.cwd);
       if (!valid) {
         log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${sessionChatId}; starting fresh ${engineName} session`);
-        await bot.sendMessage(chatId, '⚠️ 上次 session 已失效，已自动开启新 session。').catch(() => {});
+        if (!isVirtualAgent) {
+          await bot.sendMessage(chatId, '⚠️ 上次 session 已失效，已自动开启新 session。').catch(() => {});
+        }
         session = createSession(sessionChatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', engineName);
       }
     }
