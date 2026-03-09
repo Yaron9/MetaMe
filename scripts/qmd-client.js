@@ -152,7 +152,7 @@ async function searchViaHttp(query, limit) {
   try {
     const res = await fetch(`${QMD_URL}/mcp`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream' },
       body: JSON.stringify({
         jsonrpc: '2.0',
         id: 1,
