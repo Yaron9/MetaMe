@@ -520,8 +520,18 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       let _firstOutputLogged = false;
       let classifiedError = null;
       let lastStatusTime = 0;
-      let _earlyTextSent = false;
       const STATUS_THROTTLE = statusThrottleMs;
+      // Streaming card: accumulate text and push to card in real-time (throttled)
+      let _streamText = '';
+      let _lastStreamFlush = 0;
+      const STREAM_THROTTLE = 1500; // ms between card edits (safe within Feishu 5 req/s limit)
+      function flushStream(force) {
+        if (!onStatus || !_streamText.trim()) return;
+        const now = Date.now();
+        if (!force && now - _lastStreamFlush < STREAM_THROTTLE) return;
+        _lastStreamFlush = now;
+        onStatus('__STREAM_TEXT__' + _streamText).catch(() => {});
+      }
       const writtenFiles = [];
       const toolUsageLog = [];
 
@@ -570,7 +580,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             const ctx = recentTool.context || recentTool.skill || '';
             parts.push(`最近: ${recentTool.tool}${ctx ? ' ' + ctx : ''}`);
           }
-          if (onStatus) onStatus(parts.join(' | ')).catch(() => { });
+          if (onStatus) {
+            const milestoneMsg = parts.join(' | ');
+            const msg = _streamText ? `__TOOL_OVERLAY__${_streamText}\n\n> ${milestoneMsg}` : milestoneMsg;
+            onStatus(msg).catch(() => {});
+          }
         }
       }, 30000);
 
@@ -610,15 +624,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             }
             if (event.type === 'text' && event.text) {
               finalResult += (finalResult ? '\n\n' : '') + String(event.text);
+              _streamText = finalResult;
               if (waitingForTool) {
                 waitingForTool = false;
                 resetIdleTimer();
               }
-              // Show first text chunk immediately so user sees "计划：xxx" before tool work begins
-              if (onStatus && finalResult.trim() && !_earlyTextSent) {
-                _earlyTextSent = true;
-                onStatus('__EARLY_TEXT__' + finalResult).catch(() => {});
-              }
+              flushStream(); // throttled stream to card
               continue;
             }
             if (event.type === 'done') {
@@ -627,6 +638,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
                 waitingForTool = false;
                 resetIdleTimer();
               }
+              flushStream(true); // force final text flush before process ends
               continue;
             }
             if (event.type === 'tool_result') {
@@ -700,7 +712,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             const status = context
               ? `${displayEmoji} ${displayName}: 「${context}」`
               : `${displayEmoji} ${displayName}...`;
-            if (onStatus) onStatus(status).catch(() => { });
+            if (onStatus) {
+              // Overlay tool status on top of streamed text (if any); else show plain status
+              const msg = _streamText ? `__TOOL_OVERLAY__${_streamText}\n\n> ${status}` : status;
+              onStatus(msg).catch(() => {});
+            }
           }
         }
       });
@@ -839,9 +855,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     // Send 🤔 ack and start typing — fire-and-forget so we don't block spawn on Telegram RTT.
     // statusMsgId is resolved via a promise; it will be ready well before the first model output.
     let statusMsgId = null;
-    let _earlyTextShown = false;
-    let _lastStatusCardContent = null; // track last content written to status card
-    let _earlyTextContent = null; // track early text content synchronously (avoids race with async edit)
+    let _lastStatusCardContent = null; // tracks last clean text written to card (for final-reply dedup)
     // Fire-and-forget: don't await Telegram RTT before spawning the engine process.
     // statusMsgId will be populated well before the first model output (~5s for codex).
     (bot.sendMarkdown ? bot.sendMarkdown(chatId, '🤔') : bot.sendMessage(chatId, '🤔'))
@@ -1217,33 +1231,46 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const FALLBACK_THROTTLE = fallbackThrottleMs;
     const onStatus = async (status) => {
       try {
-        // Detect early model text (tagged by spawnClaudeStreaming with __EARLY_TEXT__ prefix)
-        let actualStatus = status;
-        const isEarlyText = typeof status === 'string' && status.startsWith('__EARLY_TEXT__');
-        if (isEarlyText) {
-          actualStatus = status.slice('__EARLY_TEXT__'.length);
-          _earlyTextContent = actualStatus; // sync track before async edit
-        }
-        if (statusMsgId && bot.editMessage && !editFailed) {
-          const ok = await bot.editMessage(chatId, statusMsgId, actualStatus);
-          if (ok !== false) {
-            // Only mark early text as shown when the edit actually succeeded.
-            // If edit fails and we fall back to sendMessage, _earlyTextShown stays false
-            // so the final reply won't try to edit the status card, preventing duplicates.
-            if (isEarlyText) _earlyTextShown = true;
-            _lastStatusCardContent = actualStatus; // track what's currently on the card
-            return; // edit succeeded (true or undefined for Telegram)
+        if (typeof status !== 'string') return;
+
+        // __STREAM_TEXT__: streamed model text — edit card and track for final dedup
+        if (status.startsWith('__STREAM_TEXT__')) {
+          const content = status.slice('__STREAM_TEXT__'.length);
+          if (statusMsgId && bot.editMessage && !editFailed) {
+            const ok = await bot.editMessage(chatId, statusMsgId, content);
+            if (ok !== false) {
+              _lastStatusCardContent = content; // track for final-reply dedup
+              return;
+            }
+            editFailed = true;
           }
-          editFailed = true; // edit failed, switch to fallback permanently
+          return; // skip fallback — stream text is transient; final reply will send full content
         }
-        // Early text: skip fallback entirely — avoids a duplicate when the final reply
-        // also sends a new message (since _earlyTextShown=false → status card is deleted).
-        if (isEarlyText) return;
-        // Normal status updates: send as new message with extra throttle to avoid spam
+
+        // __TOOL_OVERLAY__: text + tool status line — edit card but don't update _lastStatusCardContent
+        if (status.startsWith('__TOOL_OVERLAY__')) {
+          const content = status.slice('__TOOL_OVERLAY__'.length);
+          if (statusMsgId && bot.editMessage && !editFailed) {
+            await bot.editMessage(chatId, statusMsgId, content);
+            // intentionally NOT updating _lastStatusCardContent — overlay is transient
+          }
+          return;
+        }
+
+        // Plain status (tool names before any text, milestone timers, etc.)
+        if (statusMsgId && bot.editMessage && !editFailed) {
+          const ok = await bot.editMessage(chatId, statusMsgId, status);
+          if (ok !== false) {
+            _lastStatusCardContent = status;
+            return;
+          }
+          editFailed = true;
+        }
+        // Fallback: send as new message with throttle to avoid spam
         const now = Date.now();
         if (now - lastFallbackStatus < FALLBACK_THROTTLE) return;
         lastFallbackStatus = now;
-        await bot.sendMessage(chatId, actualStatus);
+        await bot.sendMessage(chatId, status);
       } catch { /* ignore status update failures */ }
     };
 
@@ -1461,21 +1488,18 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       let replyMsg;
       try {
-        log('DEBUG', `[REPLY:${chatId}] statusMsgId=${statusMsgId} _earlyTextShown=${_earlyTextShown} editFailed=${editFailed} activeProject=${activeProject && activeProject.name}`);
+        log('DEBUG', `[REPLY:${chatId}] statusMsgId=${statusMsgId} editFailed=${editFailed} activeProject=${activeProject && activeProject.name} lastCard=${_lastStatusCardContent ? _lastStatusCardContent.slice(0,40) : 'null'}`);
 
         // Strategy: always try to update the status card first (avoids sending a new card
         // while the old 🤔 card lingers, which would produce two messages).
         // If edit fails: try to delete the status card (awaited, not fire-and-forget).
-        // If delete also fails: edit-with-content as last resort before sending a new card.
+        // If delete also fails: fall through to sending a new card.
         if (_statusMsgIdForReply && bot.editMessage) {
-          // Skip redundant edit: if card already shows the final content (e.g. early text = final output),
-          // avoid a visible second "update" that the user would perceive as a duplicate reply.
-          // Check both _lastStatusCardContent (set by async callback) and _earlyTextContent (set synchronously)
-          // to handle the race where the async edit hasn't completed yet but content is identical.
-          const contentAlreadyShown = (_lastStatusCardContent !== null && _lastStatusCardContent === cleanOutput)
-            || (_earlyTextContent !== null && _earlyTextContent === cleanOutput);
-          if (contentAlreadyShown) {
-            log('DEBUG', `[REPLY:${chatId}] skipping editMessage — content unchanged (early text === final output, sync=${_earlyTextContent !== null}, async=${_lastStatusCardContent !== null})`);
+          // Skip redundant edit: streaming already wrote the final content to the card.
+          // _lastStatusCardContent tracks the last __STREAM_TEXT__ write, so if it matches
+          // cleanOutput the card is already showing the right content — no update needed.
+          if (_lastStatusCardContent !== null && _lastStatusCardContent === cleanOutput) {
+            log('DEBUG', `[REPLY:${chatId}] skipping editMessage — card already shows final content`);
             replyMsg = { message_id: _statusMsgIdForReply };
           } else {
             const editOk = await bot.editMessage(chatId, _statusMsgIdForReply, cleanOutput);
