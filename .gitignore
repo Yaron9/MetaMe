@@ -7,7 +7,15 @@ CLAUDE.md
 ROADMAP_PHASE_B.md
 METAME_MAINTENANCE.md
 package-lock.json
+# User private config — only daemon-default.yaml (template) is tracked
+scripts/daemon.yaml
 feishu-login-qr.png
+
+# Personal/private files — never upload
+MEMORY.md
+SOUL.md
+.env*
+*.log
 
 # Playwright browser profile (runtime data, never commit)
 ~/.metame/browser-profile/

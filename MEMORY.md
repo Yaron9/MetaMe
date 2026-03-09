@@ -1,1 +1,0 @@
-../../.metame/agents/metame/memory-snapshot.md
