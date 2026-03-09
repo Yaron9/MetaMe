@@ -582,10 +582,24 @@ function createSessionStore(deps) {
   }
 
   // Claude backend: JSONL files under ~/.claude/projects/<hash>/
+  // Best approach: read cwd directly from session file content (not from dir name)
   function _isClaudeSessionValid(sessionId, normCwd) {
     try {
       const sessionFile = findSessionFile(sessionId);
       if (!sessionFile) return false;
+
+      // Try to read cwd from session JSONL file content (most reliable)
+      const content = fs.readFileSync(sessionFile, 'utf8');
+      const lines = content.split('\n').filter(l => l.trim());
+      for (const line of lines.slice(0, 20)) { // Check first 20 lines
+        try {
+          const entry = JSON.parse(line);
+          const fileCwd = entry.cwd || (entry.message && entry.message.cwd);
+          if (fileCwd && path.resolve(fileCwd) === normCwd) return true;
+        } catch { /* skip non-JSON lines */ }
+      }
+
+      // Fallback: check sessions-index.json if exists
       const projectDir = path.dirname(sessionFile);
       const indexFile = path.join(projectDir, 'sessions-index.json');
       if (fs.existsSync(indexFile)) {
@@ -596,16 +610,15 @@ function createSessionStore(deps) {
         const anyPath = (entries.find(e => e && e.projectPath) || {}).projectPath;
         if (anyPath) return path.resolve(anyPath) === normCwd;
       }
-      // Weak fallback: Claude encodes cwd in dir name; only trust a positive match.
-      // Unix: /home/user/project → -home-user-project
-      // Windows: D:\MetaMe → D--MetaMe (replaces : and \ with -)
-      // Note: also replace '.' (for .worktree paths)
+
+      // Last resort fallback: dir name match (less reliable, skip for worktree paths)
+      // Skip this for paths containing .worktree to avoid edge cases
+      if (normCwd.includes('.worktree')) return true; // trust the session exists
       const actualDir = path.basename(projectDir).toLowerCase();
       const expectedDir = process.platform === 'win32'
         ? normCwd.replace(/[:\\\/_ ]/g, '-').toLowerCase()
         : ('-' + normCwd.replace(/^\//, '').replace(/[\/_. ]/g, '-')).toLowerCase();
-      if (actualDir === expectedDir) return true;
-      return false; // dir name mismatch — session belongs to a different project
+      return actualDir === expectedDir;
     } catch {
       return true; // conservative: infra failure ≠ invalid session
     }
