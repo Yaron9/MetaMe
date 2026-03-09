@@ -2,7 +2,7 @@
 
 const { classifyChatUsage } = require('./usage-classifier');
 const { deriveProjectInfo } = require('./utils');
-const { createEngineRuntimeFactory, normalizeEngineName, resolveEngineModel, ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
+const { createEngineRuntimeFactory, normalizeEngineName, ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
 const { buildAgentContextForEngine, buildMemorySnapshotContent, refreshMemorySnapshot } = require('./agent-layer');
 
 function createClaudeEngine(deps) {
@@ -812,11 +812,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
   // Track outbound message_id → session for reply-based session restoration.
   // Keeps last 200 entries to avoid unbounded growth.
-  function trackMsgSession(messageId, session, agentKey) {
+  function trackMsgSession(messageId, session) {
     if (!messageId || !session || !session.id) return;
     const st = loadState();
     if (!st.msg_sessions) st.msg_sessions = {};
-    st.msg_sessions[messageId] = { id: session.id, cwd: session.cwd, engine: session.engine || getDefaultEngine(), agentKey: agentKey || null };
+    st.msg_sessions[messageId] = { id: session.id, cwd: session.cwd, engine: session.engine || getDefaultEngine() };
     const keys = Object.keys(st.msg_sessions);
     if (keys.length > 200) {
       for (const k of keys.slice(0, keys.length - 200)) delete st.msg_sessions[k];
@@ -986,7 +986,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     }
 
     // Build engine command — prefer per-engine model, fall back to legacy daemon.model
-    const model = resolveEngineModel(runtime.name, daemonCfg, boundProject && boundProject.model);
+    const engineModels = daemonCfg.models || {};
+    const engineModel = engineModels[runtime.name] || daemonCfg.model || runtime.defaultModel;
+    const model = (boundProject && boundProject.model) || engineModel;
     const args = runtime.buildArgs({
       model,
       readOnly,
@@ -1440,14 +1442,14 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         const allProjects = (config && config.projects) || {};
         const names = dispatchedTargets.map(k => (allProjects[k] && allProjects[k].name) || k).join('、');
         const doneMsg = await bot.sendMessage(chatId, `✉️ 已转达给 ${names}，处理中…`);
-        if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session, String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null);
+        if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session);
         const wasNew = !session.started;
         if (wasNew) markSessionStarted(sessionChatId, engineName);
         return { ok: true };
       }
       const filesDesc = files && files.length > 0 ? `\n修改了 ${files.length} 个文件` : '';
       const doneMsg = await bot.sendMessage(chatId, `✅ 完成${filesDesc}`);
-      if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session, String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null);
+      if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session);
       const wasNew = !session.started;
       if (wasNew) markSessionStarted(sessionChatId, engineName);
       return { ok: true };
@@ -1560,7 +1562,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           log('ERROR', `sendMessage fallback also failed: ${e2.message}`);
         }
       }
-      if (replyMsg && replyMsg.message_id && session) trackMsgSession(replyMsg.message_id, session, String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null);
+      if (replyMsg && replyMsg.message_id && session) trackMsgSession(replyMsg.message_id, session);
 
       await sendFileButtons(bot, chatId, mergeFileCollections(markedFiles, files));
 

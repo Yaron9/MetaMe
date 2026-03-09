@@ -97,13 +97,10 @@ function createBot(config) {
     const res = await withTimeout(client.im.message.create({
       params: { receive_id_type: 'chat_id' },
       data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
-    }), 30000); // 30s: large card content can be slow; timeout must not fire after delivery
+    }));
     const msgId = res?.data?.message_id;
     return msgId ? { message_id: msgId } : null;
   }
-
-  let _editBroken = false;      // closure var — safe against destructured calls
-  let _editBrokenAt = 0;        // timestamp when broken; auto-resets after 10min
 
   return {
     /**
@@ -123,26 +120,22 @@ function createBot(config) {
       return msgId ? { message_id: msgId } : null;
     },
 
-    async editMessage(chatId, messageId, text, header = null) {
-      if (_editBroken && Date.now() - _editBrokenAt < 10 * 60 * 1000) return false;
-      if (_editBroken) _editBroken = false; // auto-reset after 10min
+    _editBroken: false, // Set to true if patch API consistently fails
+    async editMessage(chatId, messageId, text) {
+      if (this._editBroken) return false;
       try {
         // Feishu patch API only works on card (interactive) messages
-        // Update card content with markdown element; preserve header if provided
-        const card = { schema: '2.0', body: { elements: [{ tag: 'markdown', content: text, text_size: 'x-large' }] } };
-        if (header && header.title) {
-          card.header = { title: { tag: 'plain_text', content: header.title }, template: header.color || 'blue' };
-        }
+        // Update card content with markdown element
+        const card = { schema: '2.0', body: { elements: [{ tag: 'markdown', content: text }] } };
         await withTimeout(client.im.message.patch({
           path: { message_id: messageId },
           data: { content: JSON.stringify(card) },
-        }), 30000); // 30s: must not timeout after Feishu has applied the patch
+        }));
         return true;
       } catch (e) {
         const code = e?.code || e?.response?.data?.code;
         if (code === 230001 || code === 230002 || /permission|forbidden/i.test(String(e))) {
-          _editBroken = true;
-          _editBrokenAt = Date.now();
+          this._editBroken = true;
         }
         return false;
       }
@@ -323,7 +316,7 @@ function createBot(config) {
           },
         });
 
-        // Upload response logged at debug level if needed
+        console.log('[Feishu] Upload response:', JSON.stringify(uploadRes));
 
         // Response is { code, msg, data: { file_key } }
         const fileKey = uploadRes?.data?.file_key || uploadRes?.file_key;
@@ -364,50 +357,42 @@ function createBot(config) {
     },
 
     /**
-     * Start WebSocket long connection to receive messages (with auto-reconnect)
+     * Start WebSocket long connection to receive messages
      * @param {function} onMessage - callback(chatId, text, event)
-     * @param {object} [opts]
-     * @param {function} [opts.log] - logger function(level, msg)
-     * @returns {Promise<{stop: function, reconnect: function, isAlive: function}>}
+     * @returns {Promise<{stop: function}>}
      */
-    startReceiving(onMessage, opts = {}) {
-      const _log = opts.log || ((lvl, msg) => console.log(`[feishu] [${lvl}] ${msg}`));
-      let stopped = false;
-      let currentWs = null;
-      let healthTimer = null;
-      let reconnectTimer = null;
-      let reconnectDelay = 5000; // start 5s, doubles up to 60s
-      const MAX_RECONNECT_DELAY = 60000;
-      const HEALTH_CHECK_INTERVAL = 90000; // check every 90s
-      const SILENT_THRESHOLD = 300000; // 5 min no SDK activity → suspect dead
+    startReceiving(onMessage) {
+      return new Promise((resolve, reject) => {
+        const wsClient = new Lark.WSClient({
+          appId: app_id,
+          appSecret: app_secret,
+          loggerLevel: Lark.LoggerLevel.info,
+        });
 
-      // Track last SDK activity (any event received = alive)
-      let _lastActivityAt = Date.now();
-      function touchActivity() { _lastActivityAt = Date.now(); }
-
-      // Dedup: track recent message_ids (Feishu may redeliver on slow ack)
-      const _seenMsgIds = new Map(); // message_id → timestamp
-      const DEDUP_TTL = 60000; // 60s window
-      function isDuplicate(msgId) {
-        if (!msgId) return false;
-        const now = Date.now();
-        if (_seenMsgIds.size > 200) {
-          for (const [k, t] of _seenMsgIds) {
-            if (now - t > DEDUP_TTL) _seenMsgIds.delete(k);
+        // Dedup: track recent message_ids (Feishu may redeliver on slow ack)
+        const _seenMsgIds = new Map(); // message_id → timestamp
+        const DEDUP_TTL = 60000; // 60s window
+        function isDuplicate(msgId) {
+          if (!msgId) return false;
+          const now = Date.now();
+          // Cleanup old entries
+          if (_seenMsgIds.size > 200) {
+            for (const [k, t] of _seenMsgIds) {
+              if (now - t > DEDUP_TTL) _seenMsgIds.delete(k);
+            }
           }
+          if (_seenMsgIds.has(msgId)) return true;
+          _seenMsgIds.set(msgId, now);
+          return false;
         }
-        if (_seenMsgIds.has(msgId)) return true;
-        _seenMsgIds.set(msgId, now);
-        return false;
-      }
 
-      function buildDispatcher() {
-        return new Lark.EventDispatcher({}).register({
+        const eventDispatcher = new Lark.EventDispatcher({}).register({
           'im.message.receive_v1': async (data) => {
-            touchActivity();
             try {
               const msg = data.message;
               if (!msg) return;
+
+              // Dedup by message_id
               if (isDuplicate(msg.message_id)) return;
 
               const chatId = msg.chat_id;
@@ -423,30 +408,35 @@ function createBot(config) {
                   text = msg.content || '';
                 }
               } else if (msg.message_type === 'file' || msg.message_type === 'image' || msg.message_type === 'media') {
+                // File, image or media (video) message
                 try {
                   const content = JSON.parse(msg.content);
                   fileInfo = {
                     messageId: msg.message_id,
                     fileKey: content.file_key || content.image_key,
                     fileName: content.file_name || (content.image_key ? `image_${Date.now()}.png` : `file_${Date.now()}`),
-                    msgType: msg.message_type,
+                    msgType: msg.message_type, // 'file', 'image', or 'media'
                   };
                 } catch {}
               }
 
+              // Strip @mention prefix if present
               text = text.replace(/@_user_\d+\s*/g, '').trim();
 
               if (text || fileInfo) {
+                // Fire-and-forget: don't block the event loop (SDK needs fast ack)
                 Promise.resolve().then(() => onMessage(chatId, text, data, fileInfo, senderId)).catch((err) => {
                   try { console.error(`[feishu-adapter] onMessage error: ${err && err.message || err}`); } catch { }
                 });
               }
-            } catch (e) { /* Non-fatal */ }
+            } catch (e) {
+              // Non-fatal
+            }
           },
           'card.action.trigger': async (data) => {
-            touchActivity();
             try {
               const action = data.action;
+              // Try multiple possible chatId fields
               const chatId = data.open_chat_id || data.chat_id
                 || (data.context && data.context.open_chat_id)
                 || (data.event && data.event.open_chat_id);
@@ -459,86 +449,27 @@ function createBot(config) {
                 const cmd = action.value && action.value.cmd;
                 if (cmd) {
                   Promise.resolve().then(() => onMessage(chatId, cmd, data, null, senderId)).catch((err) => {
-                    try { console.error(`[feishu-adapter] card action error: ${err && err.message || err}`); } catch { }
-                  });
+                  try { console.error(`[feishu-adapter] card action error: ${err && err.message || err}`); } catch { }
+                });
                 }
               }
-            } catch (e) { /* Non-fatal */ }
+            } catch (e) {
+              // Non-fatal
+            }
             return {};
           },
         });
-      }
 
-      function connect() {
-        if (stopped) return;
-        try {
-          currentWs = new Lark.WSClient({
-            appId: app_id,
-            appSecret: app_secret,
-            loggerLevel: Lark.LoggerLevel.info,
-          });
-          const eventDispatcher = buildDispatcher();
-          currentWs.start({ eventDispatcher });
-          touchActivity();
-          reconnectDelay = 5000; // reset backoff on successful start
-          _log('INFO', 'Feishu WebSocket connecting...');
-        } catch (err) {
-          _log('ERROR', `Feishu WSClient.start failed: ${err.message}`);
-          scheduleReconnect();
-        }
-      }
+        wsClient.start({ eventDispatcher });
 
-      function scheduleReconnect() {
-        if (stopped) return;
-        clearTimeout(reconnectTimer);
-        _log('INFO', `Feishu reconnecting in ${reconnectDelay / 1000}s...`);
-        reconnectTimer = setTimeout(() => {
-          _log('INFO', 'Feishu reconnecting now...');
-          connect();
-        }, reconnectDelay);
-        reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
-      }
-
-      // Health check: detect silent WebSocket death via API probe
-      function startHealthCheck() {
-        clearInterval(healthTimer);
-        healthTimer = setInterval(async () => {
-          if (stopped) return;
-          const silentMs = Date.now() - _lastActivityAt;
-          if (silentMs < SILENT_THRESHOLD) return; // recently active, skip
-          // Probe: try a lightweight API call to verify token + connectivity
-          try {
-            await withTimeout(client.im.chat.list({ params: { page_size: 1 } }), 10000);
-            // API works — connection might still be alive, just quiet. Reset activity.
-            touchActivity();
-          } catch (err) {
-            _log('WARN', `Feishu health check failed after ${Math.round(silentMs / 1000)}s silence: ${err.message} — reconnecting`);
-            try { currentWs?.stop?.(); } catch { /* ignore */ }
-            currentWs = null;
-            connect();
-          }
-        }, HEALTH_CHECK_INTERVAL);
-      }
-
-      // Initial connect
-      connect();
-      startHealthCheck();
-
-      return Promise.resolve({
-        stop() {
-          stopped = true;
-          clearTimeout(reconnectTimer);
-          clearInterval(healthTimer);
-          currentWs = null;
-        },
-        reconnect() {
-          _log('INFO', 'Feishu manual reconnect triggered');
-          reconnectDelay = 5000;
-          connect();
-        },
-        isAlive() {
-          return !stopped && (Date.now() - _lastActivityAt) < SILENT_THRESHOLD;
-        },
+        // SDK doesn't provide a clean "connected" callback,
+        // resolve immediately — errors will show in logs
+        resolve({
+          stop() {
+            // SDK doesn't expose a clean shutdown method
+            // Process exit will clean up
+          },
+        });
       });
     },
 

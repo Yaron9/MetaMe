@@ -15,8 +15,7 @@ const args = process.argv.slice(2);
 const newSession = args[0] === '--new' ? (args.shift(), true) : false;
 
 // --from <project_key>: identifies the calling agent for callback routing
-// Auto-detect from METAME_PROJECT env var (set by daemon when spawning agent sessions)
-let fromKey = process.env.METAME_PROJECT || '_claude_session';
+let fromKey = '_claude_session';
 const fromIdx = args.indexOf('--from');
 if (fromIdx !== -1 && args[fromIdx + 1]) {
   fromKey = args.splice(fromIdx, 2)[1];
