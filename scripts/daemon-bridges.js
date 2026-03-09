@@ -3,6 +3,9 @@
 let userAcl = null;
 try { userAcl = require('./daemon-user-acl'); } catch { /* optional */ }
 
+let _createReflectionManager = null;
+try { _createReflectionManager = require('./daemon-reflection').createReflectionManager; } catch { /* optional */ }
+
 function createBridgeStarter(deps) {
   const {
     fs,
@@ -17,6 +20,7 @@ function createBridgeStarter(deps) {
     handleCommand,
     pendingActivations,  // optional — used to show smart activation hint
     activeProcesses,     // optional — used for auto-dispatch to clones
+    yaml,                // optional — needed for reflection manager
   } = deps;
 
   async function sendAclReply(bot, chatId, text) {
@@ -321,6 +325,14 @@ function createBridgeStarter(deps) {
 
     const { createBot } = require('./feishu-adapter.js');
     const bot = createBot(config.feishu);
+
+    const reflection = (_createReflectionManager && yaml) ? _createReflectionManager({
+      fs, path, yaml, log,
+      METAME_DIR: path.join(HOME, '.metame'),
+      BRAIN_FILE: path.join(HOME, '.claude_profile.yaml'),
+      sendToChat: (chatId, text) => bot.sendMessage(chatId, text),
+    }) : null;
+
     try {
       const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo, senderId) => {
         const liveCfg = loadConfig();
@@ -385,7 +397,9 @@ function createBridgeStarter(deps) {
           });
           if (acl.blocked) return;
           log('INFO', `Feishu message from ${chatId}: ${text.slice(0, 50)}`);
+          if (reflection && reflection.tryCapture(chatId, text)) return;
           const parentId = event?.message?.parent_id;
+          let _replyAgentKey = null;
           if (parentId) {
             const st = loadState();
             const mapped = st.msg_sessions && st.msg_sessions[parentId];
@@ -393,12 +407,22 @@ function createBridgeStarter(deps) {
               st.sessions[chatId] = { id: mapped.id, cwd: mapped.cwd, started: true };
               saveState(st);
               log('INFO', `Session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
+              _replyAgentKey = mapped.agentKey || null;
             }
           }
 
           // Team group routing: if bound project has a team array, check message for member nickname
           const { key: _boundKey, project: _boundProj } = _getBoundProject(chatId, liveCfg);
           if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0) {
+            // 0. Quoted reply → force route to the agent who sent that message
+            if (_replyAgentKey) {
+              const member = _boundProj.team.find(m => m.key === _replyAgentKey);
+              if (member) {
+                log('INFO', `Quoted reply → force route to ${_replyAgentKey}`);
+                _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+                return;
+              }
+            }
             // 1. Explicit nickname → route to that member
             const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
             if (teamMatch) {
@@ -428,6 +452,7 @@ function createBridgeStarter(deps) {
           }
 
           await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
+          if (reflection) reflection.onSessionEnd(chatId);
         }
       }, { log: (lvl, msg) => log(lvl, msg) });
 
