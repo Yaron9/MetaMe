@@ -1076,7 +1076,21 @@ function handleDispatchItem(item, config) {
       const _userSources = new Set(['unknown', 'claude_session', '_claude_session', 'user']);
       let senderChatId = null;
       if (!_userSources.has(item.from)) {
+        // Direct match: sender is a bound agent
         senderChatId = Object.entries(feishuMap).find(([, v]) => v === item.from)?.[0] || null;
+        // Team member fallback: if sender is a team member (e.g., jarvis_c), find parent project's chatId
+        if (!senderChatId) {
+          const projects = config.projects || {};
+          for (const [projKey, proj] of Object.entries(projects)) {
+            if (proj.team && Array.isArray(proj.team)) {
+              const member = proj.team.find(m => m.key === item.from);
+              if (member && feishuMap[projKey]) {
+                senderChatId = feishuMap[projKey];
+                break;
+              }
+            }
+          }
+        }
       }
       if (!senderChatId) {
         senderChatId = allowedFeishuIds.map(String).find(id => !agentChatIds.has(id)) || null;
@@ -1098,6 +1112,8 @@ function handleDispatchItem(item, config) {
             );
           });
         };
+        // Also set streamOptions so target agent's streaming replies go to the sender's group
+        streamOptions = { bot: liveBot, chatId: senderChatId };
       }
     }
   }
