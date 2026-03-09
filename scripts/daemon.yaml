@@ -173,6 +173,7 @@ projects:
       - Jarvis
       - jarvis
     heartbeat_tasks: null
+    broadcast: true
   desktop:
     name: Desktop PM
     icon: 🚀
