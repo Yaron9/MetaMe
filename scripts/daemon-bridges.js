@@ -402,11 +402,57 @@ function createBridgeStarter(deps) {
           // Team group routing: if bound project has a team array, check message for member nickname
           const { key: _boundKey, project: _boundProj } = _getBoundProject(chatId, liveCfg);
           if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0) {
-            // 0. Quoted reply → force route to the agent who sent that message
+            // ── /stop precise routing for team groups ──
+            const _stopMatch = trimmedText && trimmedText.match(/^\/stop(?:\s+(.+))?$/i);
+            if (_stopMatch) {
+              const _stopArg = (_stopMatch[1] || '').trim();
+              let _targetKey = null;
+              // Priority 1: quoted reply → stop that agent
+              if (_replyAgentKey) {
+                const m = _boundProj.team.find(t => t.key === _replyAgentKey);
+                if (m) _targetKey = m.key;
+              }
+              // Priority 2: /stop <nickname> → match team member
+              if (!_targetKey && _stopArg) {
+                const m = _boundProj.team.find(t =>
+                  (t.nicknames || []).some(n => n === _stopArg) || t.name === _stopArg || t.key === _stopArg
+                );
+                if (m) _targetKey = m.key;
+              }
+              // Priority 3: bare /stop → sticky
+              if (!_targetKey && !_stopArg) {
+                const _stR = loadState();
+                _targetKey = (_stR.team_sticky || {})[String(chatId)] || null;
+              }
+              if (_targetKey) {
+                const vid = `_agent_${_targetKey}`;
+                const vproc = activeProcesses && activeProcesses.get(vid);
+                if (vproc && vproc.child) {
+                  vproc.aborted = true;
+                  const sig = vproc.killSignal || 'SIGTERM';
+                  try { process.kill(-vproc.child.pid, sig); } catch { try { vproc.child.kill(sig); } catch { /* */ } }
+                  const member = _boundProj.team.find(t => t.key === _targetKey);
+                  const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
+                  await bot.sendMessage(chatId, `⏹ Stopping ${label}...`);
+                } else {
+                  const member = _boundProj.team.find(t => t.key === _targetKey);
+                  const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
+                  await bot.sendMessage(chatId, `${label} 当前没有活跃任务`);
+                }
+                return;
+              }
+              // No target resolved — fall through to handleCommand
+            }
+
+            // 0. Quoted reply → force route + set sticky
             if (_replyAgentKey) {
               const member = _boundProj.team.find(m => m.key === _replyAgentKey);
               if (member) {
-                log('INFO', `Quoted reply → force route to ${_replyAgentKey}`);
+                const _stQ = loadState();
+                if (!_stQ.team_sticky) _stQ.team_sticky = {};
+                _stQ.team_sticky[String(chatId)] = member.key;
+                saveState(_stQ);
+                log('INFO', `Quoted reply → force route to ${_replyAgentKey} (sticky set)`);
                 _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
                 return;
               }

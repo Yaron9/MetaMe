@@ -148,43 +148,6 @@ function createExecCommandHandler(deps) {
     ].join('\n');
   }
 
-  // Kill all active processes for a chat, including team member virtual chatIds
-  function _killAllForChat(chatId) {
-    // Direct chatId
-    if (messageQueue.has(chatId)) {
-      const q = messageQueue.get(chatId);
-      if (q.timer) clearTimeout(q.timer);
-      messageQueue.delete(chatId);
-    }
-    const proc = activeProcesses.get(chatId);
-    if (proc && proc.child) {
-      proc.aborted = true;
-      const signal = proc.killSignal || 'SIGTERM';
-      try { process.kill(-proc.child.pid, signal); } catch { try { proc.child.kill(signal); } catch { /* */ } }
-    }
-    // Team member virtual chatIds
-    const cfg = loadConfig();
-    const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map || {} : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map || {} : {}) };
-    const boundKey = agentMap[String(chatId)];
-    const boundProj = boundKey && cfg.projects ? cfg.projects[boundKey] : null;
-    if (boundProj && Array.isArray(boundProj.team)) {
-      for (const member of boundProj.team) {
-        const vid = `_agent_${member.key}`;
-        if (messageQueue.has(vid)) {
-          const vq = messageQueue.get(vid);
-          if (vq.timer) clearTimeout(vq.timer);
-          messageQueue.delete(vid);
-        }
-        const vproc = activeProcesses.get(vid);
-        if (vproc && vproc.child) {
-          vproc.aborted = true;
-          const signal = vproc.killSignal || 'SIGTERM';
-          try { process.kill(-vproc.child.pid, signal); } catch { try { vproc.child.kill(signal); } catch { /* */ } }
-        }
-      }
-    }
-  }
-
   async function handleExecCommand(ctx) {
     const { bot, chatId, text, config, executeTaskByName, nlIntentText } = ctx;
 
