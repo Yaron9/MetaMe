@@ -84,6 +84,51 @@ function createBridgeStarter(deps) {
     return '⚠️ 此群未授权\n\n如已创建 Agent，发送 `/activate` 完成绑定。\n否则请先在主群创建 Agent。';
   }
 
+  // ── Team group helpers ──────────────────────────────────────────────────
+  function _getBoundProject(chatId, cfg) {
+    const map = {
+      ...(cfg.telegram ? cfg.telegram.chat_agent_map || {} : {}),
+      ...(cfg.feishu ? cfg.feishu.chat_agent_map || {} : {}),
+    };
+    const key = map[String(chatId)];
+    const proj = key && cfg.projects ? cfg.projects[key] : null;
+    return { key: key || null, project: proj || null };
+  }
+
+  function _escapeRe(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function _findTeamMember(text, team) {
+    const t = String(text || '').trim();
+    for (const member of team) {
+      const nicks = Array.isArray(member.nicknames) ? member.nicknames : [];
+      for (const nick of nicks) {
+        const n = String(nick || '').trim();
+        if (!n) continue;
+        if (t.toLowerCase() === n.toLowerCase()) return { member, rest: '' };
+        const re = new RegExp(`^${_escapeRe(n)}[\\s,，、:：]+`, 'i');
+        const m = t.match(re);
+        if (m) return { member, rest: t.slice(m[0].length).trim() };
+      }
+    }
+    return null;
+  }
+
+  // Creates a bot proxy that redirects all send methods to replyChatId
+  function _createTeamProxyBot(bot, replyChatId) {
+    const SEND = new Set(['sendMessage', 'sendMarkdown', 'sendCard', 'editMessage', 'deleteMessage', 'sendTyping', 'sendFile', 'sendButtonCard']);
+    return new Proxy(bot, {
+      get(target, prop) {
+        const orig = target[prop];
+        if (typeof orig !== 'function') return orig;
+        if (!SEND.has(prop)) return orig.bind(target);
+        return function(_chatId, ...args) { return orig.call(target, replyChatId, ...args); };
+      },
+    });
+  }
+  // ────────────────────────────────────────────────────────────────────────
+
   async function startTelegramBridge(config, executeTaskByName) {
     if (!config.telegram || !config.telegram.enabled) return null;
     if (!config.telegram.bot_token) {
@@ -329,6 +374,36 @@ function createBridgeStarter(deps) {
               log('INFO', `Session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
             }
           }
+
+          // Team group routing: if bound project has a team array, check message for member nickname
+          const { project: _boundProj } = _getBoundProject(chatId, liveCfg);
+          if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0) {
+            const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
+            if (teamMatch) {
+              const { member, rest } = teamMatch;
+              const virtualChatId = `_agent_${member.key}`;
+              // Inject team member as top-level project so routing/card logic finds it
+              const teamCfg = {
+                ...liveCfg,
+                projects: {
+                  ...(liveCfg.projects || {}),
+                  [member.key]: {
+                    cwd: _boundProj.cwd,
+                    name: member.name,
+                    icon: member.icon || '🤖',
+                    color: member.color || 'blue',
+                    engine: _boundProj.engine,
+                  },
+                },
+              };
+              const proxyBot = _createTeamProxyBot(bot, chatId);
+              log('INFO', `Team dispatch: ${member.key} (${member.name}) in ${chatId}`);
+              handleCommand(proxyBot, virtualChatId, rest || trimmedText, teamCfg, executeTaskByName, acl.senderId, acl.readOnly)
+                .catch(e => log('ERROR', `Team [${member.key}] handler error: ${e.message}`));
+              return;
+            }
+          }
+
           await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
         }
       }, { log: (lvl, msg) => log(lvl, msg) });

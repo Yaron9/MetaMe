@@ -121,12 +121,15 @@ function createBot(config) {
     },
 
     _editBroken: false, // Set to true if patch API consistently fails
-    async editMessage(chatId, messageId, text) {
+    async editMessage(chatId, messageId, text, header = null) {
       if (this._editBroken) return false;
       try {
         // Feishu patch API only works on card (interactive) messages
-        // Update card content with markdown element
+        // Update card content with markdown element; preserve header if provided
         const card = { schema: '2.0', body: { elements: [{ tag: 'markdown', content: text, text_size: 'x-large' }] } };
+        if (header && header.title) {
+          card.header = { title: { tag: 'plain_text', content: header.title }, template: header.color || 'blue' };
+        }
         await withTimeout(client.im.message.patch({
           path: { message_id: messageId },
           data: { content: JSON.stringify(card) },

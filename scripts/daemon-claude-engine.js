@@ -862,9 +862,22 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     // statusMsgId is resolved via a promise; it will be ready well before the first model output.
     let statusMsgId = null;
     let _lastStatusCardContent = null; // tracks last clean text written to card (for final-reply dedup)
+    // Early detect bound project for branded ack card (team members / dispatch agents)
+    const _ackChatIdStr = String(chatId);
+    const _ackAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map || {} : {}), ...(config.feishu ? config.feishu.chat_agent_map || {} : {}) };
+    const _ackBoundKey = _ackAgentMap[_ackChatIdStr] || projectKeyFromVirtualChatId(_ackChatIdStr);
+    const _ackBoundProj = _ackBoundKey && config.projects ? config.projects[_ackBoundKey] : null;
+    // _ackCardHeader: non-null for agents with icon/name (team members, dispatch); passed to editMessage to preserve header on streaming edits
+    const _ackCardHeader = (_ackBoundProj && _ackBoundProj.icon && _ackBoundProj.name)
+      ? { title: `${_ackBoundProj.icon} ${_ackBoundProj.name}`, color: _ackBoundProj.color || 'blue' }
+      : null;
     // Fire-and-forget: don't await Telegram RTT before spawning the engine process.
     // statusMsgId will be populated well before the first model output (~5s for codex).
-    (bot.sendMarkdown ? bot.sendMarkdown(chatId, '🤔') : bot.sendMessage(chatId, '🤔'))
+    // For branded agents: send a card with header so streaming edits preserve the agent identity.
+    const _ackFn = (_ackCardHeader && bot.sendCard)
+      ? () => bot.sendCard(chatId, { title: _ackCardHeader.title, body: '🤔', color: _ackCardHeader.color })
+      : () => (bot.sendMarkdown ? bot.sendMarkdown(chatId, '🤔') : bot.sendMessage(chatId, '🤔'));
+    _ackFn()
       .then(msg => { if (msg && msg.message_id) statusMsgId = msg.message_id; })
       .catch(e => log('ERROR', `Failed to send ack to ${chatId}: ${e.message}`));
     bot.sendTyping(chatId).catch(() => { });
@@ -1248,7 +1261,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           // set before the child 'close' event fires and finalize() resolves.
           _lastStatusCardContent = content;
           if (statusMsgId && bot.editMessage && !editFailed) {
-            const ok = await bot.editMessage(chatId, statusMsgId, content);
+            const ok = await bot.editMessage(chatId, statusMsgId, content, _ackCardHeader);
             if (ok === false) editFailed = true;
           }
           return; // skip fallback — final reply logic will use existing card
@@ -1258,7 +1271,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         if (status.startsWith('__TOOL_OVERLAY__')) {
           const content = status.slice('__TOOL_OVERLAY__'.length);
           if (statusMsgId && bot.editMessage && !editFailed) {
-            await bot.editMessage(chatId, statusMsgId, content);
+            await bot.editMessage(chatId, statusMsgId, content, _ackCardHeader);
             // intentionally NOT updating _lastStatusCardContent — overlay is transient
           }
           return;
@@ -1266,7 +1279,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
         // Plain status (tool names before any text, milestone timers, etc.)
         if (statusMsgId && bot.editMessage && !editFailed) {
-          const ok = await bot.editMessage(chatId, statusMsgId, status);
+          const ok = await bot.editMessage(chatId, statusMsgId, status, _ackCardHeader);
           if (ok !== false) {
             _lastStatusCardContent = status;
             return;
@@ -1482,9 +1495,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         cleanOutput = `⚠️ **任务超时，以下是已完成的部分结果：**\n\n${cleanOutput}`;
       }
 
-      // Match current session to a project for colored card display
-      let activeProject = null;
-      if (session && session.cwd && config && config.projects) {
+      // Match current session to a project for colored card display.
+      // Prefer the bound project (known by virtual chatId or chat_agent_map) — avoids ambiguity
+      // when multiple projects share the same cwd (e.g. team members with parent project cwd).
+      let activeProject = boundProject || null;
+      if (!activeProject && session && session.cwd && config && config.projects) {
         const sessionCwd = path.resolve(normalizeCwd(session.cwd));
         for (const [, proj] of Object.entries(config.projects)) {
           if (!proj.cwd) continue;
@@ -1509,7 +1524,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             log('DEBUG', `[REPLY:${chatId}] skipping editMessage — card already shows final content`);
             replyMsg = { message_id: _statusMsgIdForReply };
           } else {
-            const editOk = await bot.editMessage(chatId, _statusMsgIdForReply, cleanOutput);
+            const editOk = await bot.editMessage(chatId, _statusMsgIdForReply, cleanOutput, _ackCardHeader);
             log('DEBUG', `[REPLY:${chatId}] editMessage result=${editOk}`);
             if (editOk !== false) {
               replyMsg = { message_id: _statusMsgIdForReply };
