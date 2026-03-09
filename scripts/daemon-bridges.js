@@ -142,10 +142,19 @@ function createBridgeStarter(deps) {
       execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: parentCwd, stdio: 'ignore' });
       isGitRepo = true;
     } catch { isGitRepo = false; }
-    // If not a git repo, use regular directory
+    // If not a git repo, use regular directory but initialize git for checkpoint
     if (!isGitRepo) {
       if (!existsSync(memberDir)) {
         mkdirSync(memberDir, { recursive: true });
+      }
+      // Initialize git repo if not exists (for checkpoint support)
+      if (!existsSync(path.join(memberDir, '.git'))) {
+        try {
+          execFileSync('git', ['init'], { cwd: memberDir, stdio: 'ignore' });
+          log('INFO', `Git repo initialized for team member: ${memberDir}`);
+        } catch (e) {
+          log('WARN', `Failed to init git for ${memberDir}: ${e.message}`);
+        }
       }
       return memberDir;
     }
@@ -166,6 +175,10 @@ function createBridgeStarter(deps) {
       if (existsSync(path.join(wtDir, '.git'))) return wtDir;
       log('ERROR', `Worktree creation failed for ${key}: ${e.message} — falling back to regular dir`);
       if (!existsSync(memberDir)) mkdirSync(memberDir, { recursive: true });
+      // Initialize git for checkpoint support
+      if (!existsSync(path.join(memberDir, '.git'))) {
+        try { execFileSync('git', ['init'], { cwd: memberDir, stdio: 'ignore' }); } catch {}
+      }
       return memberDir;
     }
     return wtDir;
