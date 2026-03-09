@@ -1719,6 +1719,7 @@ const { handleAdminCommand } = createAdminCommandHandler({
   skillEvolution,
   taskBoard,
   taskEnvelope,
+  sendRemoteDispatch,
   getActiveProcesses: () => activeProcesses,
   getMessageQueue: () => messageQueue,
   loadState,
