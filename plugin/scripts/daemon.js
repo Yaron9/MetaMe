@@ -145,7 +145,7 @@ const { createFileBrowser } = require('./daemon-file-browser');
 const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lifecycle');
 const { createNotifier } = require('./daemon-notify');
 const { createClaudeEngine } = require('./daemon-claude-engine');
-const { createEngineRuntimeFactory, detectDefaultEngine, ENGINE_MODEL_CONFIG, ENGINE_DISTILL_MAP, ENGINE_DEFAULT_MODEL } = require('./daemon-engine-runtime');
+const { createEngineRuntimeFactory, detectDefaultEngine, resolveEngineModel, ENGINE_MODEL_CONFIG, ENGINE_DISTILL_MAP, ENGINE_DEFAULT_MODEL } = require('./daemon-engine-runtime');
 const { createCommandRouter } = require('./daemon-command-router');
 const { createTaskScheduler } = require('./daemon-task-scheduler');
 const { createAgentTools } = require('./daemon-agent-tools');
@@ -980,6 +980,36 @@ function spawnSessionSummaries() {
 /**
  * Handle a single dispatch message (from socket or pending.jsonl fallback).
  */
+/**
+ * Find if both sender and target belong to the same team group.
+ * Returns { parentKey, parentProject, senderMember, targetMember, groupChatId } or null.
+ */
+function _findTeamBroadcastContext(fromKey, targetKey, config) {
+  if (!config || !config.projects) return null;
+  const feishuMap = (config.feishu && config.feishu.chat_agent_map) || {};
+  for (const [projKey, proj] of Object.entries(config.projects)) {
+    if (!proj || !Array.isArray(proj.team) || proj.team.length === 0) continue;
+    if (!proj.broadcast) continue; // broadcast switch must be on
+    const senderMember = proj.team.find(m => m.key === fromKey);
+    const targetMember = proj.team.find(m => m.key === targetKey);
+    // Also check if sender/target is the parent project itself
+    const senderIsParent = fromKey === projKey;
+    const targetIsParent = targetKey === projKey;
+    if ((senderMember || senderIsParent) && (targetMember || targetIsParent)) {
+      // Find group chatId for this project
+      const groupChatId = Object.entries(feishuMap).find(([, v]) => v === projKey)?.[0] || null;
+      return {
+        parentKey: projKey,
+        parentProject: proj,
+        senderMember: senderMember || { key: projKey, name: proj.name, icon: proj.icon || '🤖' },
+        targetMember: targetMember || { key: projKey, name: proj.name, icon: proj.icon || '🤖' },
+        groupChatId,
+      };
+    }
+  }
+  return null;
+}
+
 function handleDispatchItem(item, config) {
   if (!item.target || !item.prompt) return;
   if (!(config && config.projects && config.projects[item.target])) {
@@ -996,9 +1026,39 @@ function handleDispatchItem(item, config) {
     return;
   }
   log('INFO', `Dispatch: ${item.from || '?'} → ${item.target}: ${item.prompt.slice(0, 60)}`);
+
+  // ── Team broadcast: intra-team dispatch → show in group chat ──
+  const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
+  const teamCtx = liveBot ? _findTeamBroadcastContext(item.from, item.target, config) : null;
+  if (teamCtx && teamCtx.groupChatId) {
+    const { senderMember, targetMember, groupChatId, parentProject } = teamCtx;
+    const sIcon = senderMember.icon || '🤖';
+    const sName = senderMember.name || senderMember.key;
+    const tIcon = targetMember.icon || '🤖';
+    const tName = targetMember.name || targetMember.key;
+    // Broadcast the handoff message to group as a card
+    const cardTitle = `${sIcon} ${sName} → ${tIcon} ${tName}`;
+    const cardBody = item.prompt.slice(0, 300) + (item.prompt.length > 300 ? '…' : '');
+    const cardColor = senderMember.color || 'blue';
+    const sendFn = liveBot.sendCard
+      ? () => liveBot.sendCard(groupChatId, { title: cardTitle, body: cardBody, color: cardColor })
+      : () => liveBot.sendMarkdown(groupChatId, `**${cardTitle}**\n\n> ${cardBody}`);
+    sendFn().catch(e => log('WARN', `Team broadcast failed: ${e.message}`));
+    // Use streamForwardBot so target's reply also shows in group
+    const streamOptions = { bot: liveBot, chatId: groupChatId };
+    dispatchTask(item.target, {
+      from: item.from || 'claude_session',
+      type: 'task', priority: 'normal',
+      payload: { title: item.prompt.slice(0, 60), prompt: item.prompt },
+      callback: false,
+      new_session: !!item.new_session,
+    }, config, null, streamOptions);
+    return;
+  }
+
+  // ── Normal dispatch (non-team or broadcast off) ──
   let pendingReplyFn = null;
   let streamOptions = null;
-  const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
   if (liveBot) {
     const feishuMap = (config.feishu && config.feishu.chat_agent_map) || {};
     const allowedFeishuIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
@@ -1765,6 +1825,8 @@ const { startTelegramBridge, startFeishuBridge } = createBridgeStarter({
   getSession,
   handleCommand,
   pendingActivations,
+  activeProcesses,
+  messageQueue,
 });
 
 const { killExistingDaemon, writePid, cleanPid } = createPidManager({
@@ -1900,7 +1962,9 @@ async function main() {
     'enable_nl_mac_fallback',
   ];
   // All known models across all engines (for legacy daemon.model validation only)
-  const BUILTIN_CLAUDE_MODELS = ENGINE_MODEL_CONFIG.claude.options;
+  const BUILTIN_CLAUDE_MODELS = (ENGINE_MODEL_CONFIG.claude.options || []).map(option =>
+    typeof option === 'string' ? option : option.value
+  ).filter(Boolean);
   for (const key of Object.keys(config)) {
     if (!KNOWN_SECTIONS.includes(key)) log('WARN', `Config: unknown section "${key}" (typo?)`);
   }
@@ -1914,7 +1978,7 @@ async function main() {
       if (activeProv === 'anthropic' && _defaultEngine === 'claude') {
         log('WARN', `Config: daemon.model="${config.daemon.model}" is not a known Claude model`);
       } else {
-        log('INFO', `Config: model "${config.daemon.model}" for engine "${_defaultEngine}" / provider "${activeProv}"`);
+        log('INFO', `Config: legacy daemon.model="${config.daemon.model}" retained; active ${_defaultEngine} model resolves to "${resolveEngineModel(_defaultEngine, config.daemon)}" (${activeProv})`);
       }
     }
   }

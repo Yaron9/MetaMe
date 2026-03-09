@@ -91,6 +91,33 @@ const ENGINE_DISTILL_MAP = Object.freeze(
 const ENGINE_DEFAULT_MODEL = Object.freeze(
   Object.fromEntries(Object.entries(ENGINE_MODEL_CONFIG).map(([k, v]) => [k, v.main]))
 );
+const BUILTIN_CLAUDE_MODEL_VALUES = Object.freeze(
+  (ENGINE_MODEL_CONFIG.claude.options || []).map(option =>
+    typeof option === 'string' ? option : option.value
+  ).filter(Boolean)
+);
+
+function resolveEngineModel(engineName, daemonCfg = {}, overrideModel = '') {
+  const engine = normalizeEngineName(engineName);
+  const engineCfg = ENGINE_MODEL_CONFIG[engine] || ENGINE_MODEL_CONFIG.claude;
+  const engineModels = (daemonCfg && daemonCfg.models) || {};
+  const explicitModel = String(overrideModel || '').trim();
+  if (explicitModel) return explicitModel;
+
+  const perEngineModel = String(engineModels[engine] || '').trim();
+  if (perEngineModel) return perEngineModel;
+
+  const legacyModel = String((daemonCfg && daemonCfg.model) || '').trim();
+  if (!legacyModel) return engineCfg.main;
+
+  // Legacy daemon.model historically meant a Claude model.
+  // Preserve backward compatibility for non-Claude custom model IDs,
+  // but do not leak Claude aliases like "opus" into Codex sessions.
+  if (engine === 'codex' && BUILTIN_CLAUDE_MODEL_VALUES.includes(legacyModel)) {
+    return engineCfg.main;
+  }
+  return legacyModel;
+}
 
 function detectDefaultEngine(deps = {}) {
   for (const engine of ['claude', 'codex']) {
@@ -154,8 +181,10 @@ function parseClaudeStreamEvent(line) {
   }
   if (raw.type === 'result') {
     if (raw.session_id) out.push({ type: 'session', sessionId: String(raw.session_id), raw });
-    if (raw.result) out.push({ type: 'text', text: String(raw.result), raw });
-    out.push({ type: 'done', usage: raw.usage || null, raw });
+    // Pass raw.result as fallback on done event — NOT as a text event.
+    // The assistant streaming events already delivered this text; emitting it again as text
+    // would cause finalResult to accumulate the same content twice → duplicate on card.
+    out.push({ type: 'done', usage: raw.usage || null, result: raw.result || null, raw });
   }
   if (raw.type === 'content_block_start' || raw.type === 'content_block_delta') {
     out.push({ type: 'tool_result', raw });
@@ -315,6 +344,7 @@ module.exports = {
   normalizeEngineName,
   resolveBinary,
   detectDefaultEngine,
+  resolveEngineModel,
   ENGINE_MODEL_CONFIG,
   ENGINE_DISTILL_MAP,
   ENGINE_DEFAULT_MODEL,
@@ -324,5 +354,6 @@ module.exports = {
     parseCodexStreamEvent,
     buildClaudeArgs,
     buildCodexArgs,
+    BUILTIN_CLAUDE_MODEL_VALUES,
   },
 };

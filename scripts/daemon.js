@@ -145,7 +145,7 @@ const { createFileBrowser } = require('./daemon-file-browser');
 const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lifecycle');
 const { createNotifier } = require('./daemon-notify');
 const { createClaudeEngine } = require('./daemon-claude-engine');
-const { createEngineRuntimeFactory, detectDefaultEngine, ENGINE_MODEL_CONFIG, ENGINE_DISTILL_MAP, ENGINE_DEFAULT_MODEL } = require('./daemon-engine-runtime');
+const { createEngineRuntimeFactory, detectDefaultEngine, resolveEngineModel, ENGINE_MODEL_CONFIG, ENGINE_DISTILL_MAP, ENGINE_DEFAULT_MODEL } = require('./daemon-engine-runtime');
 const { createCommandRouter } = require('./daemon-command-router');
 const { createTaskScheduler } = require('./daemon-task-scheduler');
 const { createAgentTools } = require('./daemon-agent-tools');
@@ -1962,7 +1962,9 @@ async function main() {
     'enable_nl_mac_fallback',
   ];
   // All known models across all engines (for legacy daemon.model validation only)
-  const BUILTIN_CLAUDE_MODELS = ENGINE_MODEL_CONFIG.claude.options;
+  const BUILTIN_CLAUDE_MODELS = (ENGINE_MODEL_CONFIG.claude.options || []).map(option =>
+    typeof option === 'string' ? option : option.value
+  ).filter(Boolean);
   for (const key of Object.keys(config)) {
     if (!KNOWN_SECTIONS.includes(key)) log('WARN', `Config: unknown section "${key}" (typo?)`);
   }
@@ -1976,7 +1978,7 @@ async function main() {
       if (activeProv === 'anthropic' && _defaultEngine === 'claude') {
         log('WARN', `Config: daemon.model="${config.daemon.model}" is not a known Claude model`);
       } else {
-        log('INFO', `Config: model "${config.daemon.model}" for engine "${_defaultEngine}" / provider "${activeProv}"`);
+        log('INFO', `Config: legacy daemon.model="${config.daemon.model}" retained; active ${_defaultEngine} model resolves to "${resolveEngineModel(_defaultEngine, config.daemon)}" (${activeProv})`);
       }
     }
   }
