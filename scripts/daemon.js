@@ -1036,11 +1036,14 @@ function handleDispatchItem(item, config) {
     const sName = senderMember.name || senderMember.key;
     const tIcon = targetMember.icon || '🤖';
     const tName = targetMember.name || targetMember.key;
-    // Broadcast the handoff message to group
-    const broadcastText = `${sIcon} **${sName}** → ${tIcon} **${tName}**\n\n> ${item.prompt.slice(0, 200)}${item.prompt.length > 200 ? '...' : ''}`;
-    liveBot.sendMarkdown(groupChatId, broadcastText).catch(e =>
-      log('WARN', `Team broadcast failed: ${e.message}`)
-    );
+    // Broadcast the handoff message to group as a card
+    const cardTitle = `${sIcon} ${sName} → ${tIcon} ${tName}`;
+    const cardBody = item.prompt.slice(0, 300) + (item.prompt.length > 300 ? '…' : '');
+    const cardColor = senderMember.color || 'blue';
+    const sendFn = liveBot.sendCard
+      ? () => liveBot.sendCard(groupChatId, { title: cardTitle, body: cardBody, color: cardColor })
+      : () => liveBot.sendMarkdown(groupChatId, `**${cardTitle}**\n\n> ${cardBody}`);
+    sendFn().catch(e => log('WARN', `Team broadcast failed: ${e.message}`));
     // Use streamForwardBot so target's reply also shows in group
     const streamOptions = { bot: liveBot, chatId: groupChatId };
     dispatchTask(item.target, {
