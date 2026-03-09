@@ -128,7 +128,7 @@ function createBridgeStarter(deps) {
       },
     });
   }
-  function _dispatchToTeamMember(member, boundProj, text, cfg, bot, realChatId, executeTaskByName, acl, parentKey) {
+  function _dispatchToTeamMember(member, boundProj, text, cfg, bot, realChatId, executeTaskByName, acl) {
     const virtualChatId = `_agent_${member.key}`;
     const teamCfg = {
       ...cfg,
@@ -140,8 +140,7 @@ function createBridgeStarter(deps) {
           icon: member.icon || '🤖',
           color: member.color || 'blue',
           engine: member.engine || boundProj.engine,
-          // Clones share parent session: same conversation history, different process slot
-          parent_key: member.auto_dispatch ? (parentKey || null) : null,
+          // Each clone keeps its own session — parallel work must not share JSONL files
         },
       },
     };
@@ -409,7 +408,7 @@ function createBridgeStarter(deps) {
                 bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`).catch(() => {});
                 return;
               }
-              _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, chatId, executeTaskByName, acl, _boundKey);
+              _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, chatId, executeTaskByName, acl);
               return;
             }
 
@@ -421,7 +420,7 @@ function createBridgeStarter(deps) {
                 const clone = clones.find(m => !activeProcesses.has(`_agent_${m.key}`));
                 if (clone) {
                   log('INFO', `Auto-dispatch: main busy → ${clone.key} (${clone.name})`);
-                  _dispatchToTeamMember(clone, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl, _boundKey);
+                  _dispatchToTeamMember(clone, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
                   return;
                 }
               }

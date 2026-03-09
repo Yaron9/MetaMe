@@ -917,11 +917,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const chatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
     const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
     const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
-    // If this chat is bound to an agent, route session lookups to the agent's virtual chatId.
-    // For clones (auto_dispatch members with parent_key), share the parent's session so they
-    // can resume each other's conversations — they're the same agent, just different process slots.
-    const _sessionKey = (boundProject && boundProject.parent_key) || boundProjectKey;
-    const sessionChatId = _sessionKey ? `_agent_${_sessionKey}` : chatId;
+    // Each virtual chatId (including clones) keeps its own isolated session.
+    // Parallel tasks must not share JSONL files — concurrent writes cause corruption.
+    const sessionChatId = boundProjectKey ? `_agent_${boundProjectKey}` : chatId;
     const sessionRaw = getSession(sessionChatId);
     const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
     const boundEngineName = (boundProject && boundProject.engine) ? normalizeEngineName(boundProject.engine) : getDefaultEngine();
