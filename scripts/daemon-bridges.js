@@ -492,6 +492,24 @@ function createBridgeStarter(deps) {
               return;
             }
 
+            // 1.5. Main project nickname → clear sticky, route to main
+            const _mainNicks = Array.isArray(_boundProj.nicknames) ? _boundProj.nicknames : [];
+            const _trimLower = trimmedText.toLowerCase();
+            const _mainMatch = _mainNicks.find(n => _trimLower === n.toLowerCase() || _trimLower.startsWith(n.toLowerCase() + ' ') || _trimLower.startsWith(n.toLowerCase() + '，') || _trimLower.startsWith(n.toLowerCase() + ','));
+            if (_mainMatch) {
+              const _stMain = loadState();
+              if (_stMain.team_sticky) delete _stMain.team_sticky[String(chatId)];
+              saveState(_stMain);
+              const rest = trimmedText.slice(_mainMatch.length).replace(/^[\s,，:：]+/, '');
+              log('INFO', `Main nickname → cleared sticky, routing to main${rest ? ` (task: ${rest.slice(0, 30)})` : ''}`);
+              if (!rest) {
+                bot.sendMarkdown(chatId, `${_boundProj.icon || '🤖'} **${_boundProj.name}** 在线`).catch(() => {});
+                return;
+              }
+              await handleCommand(bot, chatId, rest, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
+              return;
+            }
+
             // 2. Sticky: no nickname given → route to last explicitly named member
             const _stRead = loadState();
             const _stickyKey = (_stRead.team_sticky || {})[String(chatId)] || null;
