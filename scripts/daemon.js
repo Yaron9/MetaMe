@@ -1816,6 +1816,7 @@ const { startTelegramBridge, startFeishuBridge } = createBridgeStarter({
   HOME,
   log,
   sleep,
+  yaml,
   loadConfig,
   loadState,
   saveState,
