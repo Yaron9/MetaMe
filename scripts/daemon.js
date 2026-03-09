@@ -521,6 +521,31 @@ let _handleCommand = null;
 let _dispatchBridgeRef = null; // Store bridge (not bot) so .bot is always the live object after reconnects
 function setDispatchHandler(fn) { _handleCommand = fn; }
 
+function getRemoteDispatchConfig(config) {
+  return normalizeRemoteDispatchConfig(config || {});
+}
+
+async function sendRemoteDispatch(packet, config) {
+  const rd = getRemoteDispatchConfig(config);
+  const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
+  if (!rd) return { success: false, error: 'feishu.remote_dispatch not configured' };
+  if (!liveBot || typeof liveBot.sendMessage !== 'function') return { success: false, error: 'feishu bot not connected' };
+  const ts = new Date().toISOString();
+  const id = `${rd.selfPeer}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    const body = encodeRemoteDispatchPacket({
+      v: 1,
+      id,
+      ts,
+      ...packet,
+    }, rd.secret);
+    await liveBot.sendMessage(rd.chatId, body);
+    return { success: true, id };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
 /**
  * Create a null bot that captures Claude's output without sending to Feishu/Telegram.
  */
@@ -1130,6 +1155,90 @@ function handleDispatchItem(item, config) {
     callback: false,
     new_session: !!item.new_session,
   }, config, pendingReplyFn, streamOptions);
+}
+
+async function handleRemoteDispatchMessage({ chatId, text, config }) {
+  const rd = getRemoteDispatchConfig(config);
+  if (!rd || String(chatId) !== rd.chatId) return false;
+
+  const packet = decodeRemoteDispatchPacket(text);
+  if (!packet) return true;
+  if (!verifyRemoteDispatchPacket(packet, rd.secret)) {
+    log('WARN', 'Remote dispatch ignored: invalid signature');
+    return true;
+  }
+  if (packet.from_peer === rd.selfPeer) return true;
+  if (packet.to_peer !== rd.selfPeer) return true;
+
+  if (packet.type === 'task') {
+    const replyFn = async (output) => {
+      const res = await sendRemoteDispatch({
+        type: 'result',
+        from_peer: rd.selfPeer,
+        to_peer: packet.from_peer,
+        target_project: packet.target_project,
+        source_chat_id: packet.source_chat_id,
+        source_sender_key: packet.source_sender_key || 'user',
+        request_id: packet.id,
+        result: String(output || '').slice(0, 4000),
+      }, config);
+      if (!res.success) log('WARN', `Remote dispatch result send failed: ${res.error}`);
+    };
+
+    handleDispatchItem({
+      target: packet.target_project,
+      prompt: packet.prompt,
+      from: packet.source_sender_key || `${packet.from_peer}:remote`,
+      new_session: !!packet.new_session,
+      _replyFn: replyFn,
+      _suppressDefaultReplyRouting: true,
+    }, config);
+    return true;
+  }
+
+  if (packet.type === 'result') {
+    const targetChatId = String(packet.source_chat_id || '').trim();
+    if (!targetChatId) {
+      const inboxTarget = String(packet.source_sender_key || '').trim();
+      if (!inboxTarget || inboxTarget === 'user' || inboxTarget === '_claude_session') {
+        log('WARN', 'Remote dispatch result dropped: no source_chat_id/source_sender_key');
+        return true;
+      }
+      try {
+        const inboxDir = path.join(os.homedir(), '.metame', 'memory', 'inbox', inboxTarget);
+        fs.mkdirSync(inboxDir, { recursive: true });
+        const tsStr = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+        const inboxFile = path.join(inboxDir, `${tsStr}_${packet.from_peer}_${packet.target_project || 'remote'}_result.md`);
+        const body = [
+          `FROM: ${packet.from_peer}:${packet.target_project || 'unknown'}`,
+          `TO: ${inboxTarget}`,
+          `TS: ${new Date().toISOString()}`,
+          '',
+          String(packet.result || '').trim() || '(empty result)',
+        ].join('\n');
+        fs.writeFileSync(inboxFile, body, 'utf8');
+      } catch (e) {
+        log('WARN', `Remote dispatch inbox write failed: ${e.message}`);
+      }
+      return true;
+    }
+    const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
+    if (!liveBot) {
+      log('WARN', 'Remote dispatch result dropped: no live bot');
+      return true;
+    }
+    const header = `${packet.from_peer}:${packet.target_project || 'unknown'}`;
+    const body = `${header}\n\n${String(packet.result || '').trim() || '(empty result)'}`;
+    try {
+      if (liveBot.sendMarkdown) await liveBot.sendMarkdown(targetChatId, body);
+      else await liveBot.sendMessage(targetChatId, body);
+    } catch (e) {
+      log('WARN', `Remote dispatch result delivery failed: ${e.message}`);
+    }
+    return true;
+  }
+
+  return true;
 }
 
 /**
@@ -2248,5 +2357,5 @@ if (process.argv.includes('--run')) {
   });
 }
 
-// Export for testing
-module.exports = { executeTask, loadConfig, loadState, buildProfilePreamble, parseInterval };
+// Export for testing & cross-bot dispatch
+module.exports = { executeTask, loadConfig, loadState, buildProfilePreamble, parseInterval, handleRemoteDispatchMessage, sendRemoteDispatch };
