@@ -239,41 +239,21 @@ function createExecCommandHandler(deps) {
     }
 
     if (text === '/stop') {
-      // Clear message queue (don't process queued messages after stop)
-      if (messageQueue.has(chatId)) {
-        const q = messageQueue.get(chatId);
-        if (q.timer) clearTimeout(q.timer);
-        messageQueue.delete(chatId);
-      }
-      // Collect processes to kill: direct chatId + team member virtual chatIds
-      const procsToKill = [];
-      const proc = activeProcesses.get(chatId);
-      if (proc && proc.child) procsToKill.push({ id: chatId, proc });
-      // For team groups: find all _agent_* virtual processes belonging to this chat's bound project
+      // Count active processes before killing (direct + team virtual)
+      let count = 0;
+      if (activeProcesses.has(chatId)) count++;
       const cfg = loadConfig();
-      const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map || {} : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map || {} : {}) };
-      const boundKey = agentMap[String(chatId)];
-      const boundProj = boundKey && cfg.projects ? cfg.projects[boundKey] : null;
-      if (boundProj && Array.isArray(boundProj.team)) {
-        for (const member of boundProj.team) {
-          const vid = `_agent_${member.key}`;
-          const vproc = activeProcesses.get(vid);
-          if (vproc && vproc.child) procsToKill.push({ id: vid, proc: vproc });
-          // Also clear virtual chatId message queues
-          if (messageQueue.has(vid)) {
-            const vq = messageQueue.get(vid);
-            if (vq.timer) clearTimeout(vq.timer);
-            messageQueue.delete(vid);
-          }
+      const _agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map || {} : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map || {} : {}) };
+      const _bKey = _agentMap[String(chatId)];
+      const _bProj = _bKey && cfg.projects ? cfg.projects[_bKey] : null;
+      if (_bProj && Array.isArray(_bProj.team)) {
+        for (const m of _bProj.team) {
+          if (activeProcesses.has(`_agent_${m.key}`)) count++;
         }
       }
-      if (procsToKill.length > 0) {
-        for (const { proc: p } of procsToKill) {
-          p.aborted = true;
-          const signal = p.killSignal || 'SIGTERM';
-          try { process.kill(-p.child.pid, signal); } catch { try { p.child.kill(signal); } catch { /* */ } }
-        }
-        await bot.sendMessage(chatId, `⏹ Stopping ${procsToKill.length} task(s)...`);
+      _killAllForChat(chatId);
+      if (count > 0) {
+        await bot.sendMessage(chatId, `⏹ Stopping ${count} task(s)...`);
       } else {
         await bot.sendMessage(chatId, 'No active task to stop.');
       }
