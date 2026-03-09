@@ -1,0 +1,60 @@
+'use strict';
+
+const crypto = require('crypto');
+
+const REMOTE_DISPATCH_PREFIX = '[METAME_REMOTE_DISPATCH]';
+
+function normalizeRemoteDispatchConfig(config) {
+  const rd = config && config.feishu && config.feishu.remote_dispatch;
+  if (!rd || typeof rd !== 'object') return null;
+  if (!rd.enabled) return null;
+  const selfPeer = String(rd.self || '').trim();
+  const chatId = String(rd.chat_id || '').trim();
+  const secret = String(rd.secret || '').trim();
+  if (!selfPeer || !chatId || !secret) return null;
+  return { selfPeer, chatId, secret };
+}
+
+function parseRemoteTargetRef(input) {
+  const text = String(input || '').trim();
+  const m = text.match(/^([a-zA-Z0-9_-]+):([a-zA-Z0-9_-]+)$/);
+  if (!m) return null;
+  return { peer: m[1], project: m[2] };
+}
+
+function signPacket(packet, secret) {
+  const body = { ...packet };
+  delete body.sig;
+  return crypto.createHmac('sha256', secret).update(JSON.stringify(body)).digest('hex');
+}
+
+function encodePacket(packet, secret) {
+  const signed = { ...packet, sig: signPacket(packet, secret) };
+  return `${REMOTE_DISPATCH_PREFIX} ${Buffer.from(JSON.stringify(signed), 'utf8').toString('base64')}`;
+}
+
+function decodePacket(text) {
+  const src = String(text || '').trim();
+  if (!src.startsWith(REMOTE_DISPATCH_PREFIX)) return null;
+  const encoded = src.slice(REMOTE_DISPATCH_PREFIX.length).trim();
+  if (!encoded) return null;
+  try {
+    return JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function verifyPacket(packet, secret) {
+  if (!packet || typeof packet !== 'object' || !packet.sig) return false;
+  return signPacket(packet, secret) === packet.sig;
+}
+
+module.exports = {
+  REMOTE_DISPATCH_PREFIX,
+  normalizeRemoteDispatchConfig,
+  parseRemoteTargetRef,
+  encodePacket,
+  decodePacket,
+  verifyPacket,
+};

@@ -69,6 +69,12 @@ const CLAUDE_BIN = (() => {
 // Skill evolution module (hot path + cold path)
 let skillEvolution = null;
 try { skillEvolution = require('./skill-evolution'); } catch { /* graceful fallback */ }
+const {
+  normalizeRemoteDispatchConfig,
+  encodePacket: encodeRemoteDispatchPacket,
+  decodePacket: decodeRemoteDispatchPacket,
+  verifyPacket: verifyRemoteDispatchPacket,
+} = require('./daemon-remote-dispatch');
 
 // ---------------------------------------------------------
 // SKILL ROUTING (keyword → /skillname prefix, like metame-desktop)
