@@ -473,7 +473,12 @@ function createBridgeStarter(deps) {
             if (teamMatch) {
               const { member, rest } = teamMatch;
               if (!rest) {
-                // Pure nickname, no task — just confirm member is online
+                // Pure nickname, no task — set sticky + confirm member is online
+                const _stPure = loadState();
+                if (!_stPure.team_sticky) _stPure.team_sticky = {};
+                _stPure.team_sticky[String(chatId)] = member.key;
+                saveState(_stPure);
+                log('INFO', `Sticky set (pure nickname): ${String(chatId).slice(-8)} → ${member.key}`);
                 bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`).catch(() => {});
                 return;
               }
