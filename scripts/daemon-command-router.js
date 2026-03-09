@@ -610,7 +610,7 @@ function createCommandRouter(deps) {
       if (proc && proc.child) {
         proc.aborted = true;
         const signal = proc.killSignal || 'SIGTERM';
-        try { process.kill(-proc.child.pid, signal); } catch { proc.child.kill(signal); }
+        try { process.kill(-proc.child.pid, signal); } catch { try { proc.child.kill(signal); } catch { /* */ } }
       }
       await bot.sendMessage(chatId, '⏸ 好的，听你说');
       return;

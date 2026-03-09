@@ -389,21 +389,37 @@ function createBridgeStarter(deps) {
           log('INFO', `Feishu message from ${chatId}: ${text.slice(0, 50)}`);
           const parentId = event?.message?.parent_id;
           let _replyAgentKey = null;
+          // Load state once for the entire routing block
+          const _st = loadState();
           if (parentId) {
-            const st = loadState();
-            const mapped = st.msg_sessions && st.msg_sessions[parentId];
+            const mapped = _st.msg_sessions && _st.msg_sessions[parentId];
             if (mapped) {
-              st.sessions[chatId] = { id: mapped.id, cwd: mapped.cwd, started: true };
-              saveState(st);
+              if (!_st.sessions) _st.sessions = {};
+              _st.sessions[chatId] = { id: mapped.id, cwd: mapped.cwd, started: true };
+              saveState(_st);
               log('INFO', `Session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
               _replyAgentKey = mapped.agentKey || null;
             }
           }
 
+          // Helper: set/clear sticky on shared state object and persist
+          const _chatKey = String(chatId);
+          const _setSticky = (key) => {
+            if (!_st.team_sticky) _st.team_sticky = {};
+            _st.team_sticky[_chatKey] = key;
+            saveState(_st);
+          };
+          const _clearSticky = () => {
+            if (_st.team_sticky) delete _st.team_sticky[_chatKey];
+            saveState(_st);
+          };
+          const _stickyKey = (_st.team_sticky || {})[_chatKey] || null;
+
           // Team group routing: if bound project has a team array, check message for member nickname
-          // Slash commands always bypass team routing → handled by main project
+          // Non-/stop slash commands bypass team routing → handled by main project
           const { key: _boundKey, project: _boundProj } = _getBoundProject(chatId, liveCfg);
-          if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0 && !trimmedText.startsWith('/')) {
+          const _isTeamSlashCmd = trimmedText.startsWith('/') && !/^\/stop(\s|$)/i.test(trimmedText);
+          if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0 && !_isTeamSlashCmd) {
             // ── /stop precise routing for team groups ──
             const _stopMatch = trimmedText && trimmedText.match(/^\/stop(?:\s+(.+))?$/i);
             if (_stopMatch) {
@@ -423,10 +439,7 @@ function createBridgeStarter(deps) {
                 if (m) _targetKey = m.key;
               }
               // Priority 3: bare /stop → sticky
-              if (!_targetKey && !_stopArg) {
-                const _stR = loadState();
-                _targetKey = (_stR.team_sticky || {})[String(chatId)] || null;
-              }
+              if (!_targetKey && !_stopArg) _targetKey = _stickyKey;
               if (_targetKey) {
                 const vid = `_agent_${_targetKey}`;
                 const member = _boundProj.team.find(t => t.key === _targetKey);
@@ -460,35 +473,25 @@ function createBridgeStarter(deps) {
             if (_replyAgentKey) {
               const member = _boundProj.team.find(m => m.key === _replyAgentKey);
               if (member) {
-                const _stQ = loadState();
-                if (!_stQ.team_sticky) _stQ.team_sticky = {};
-                _stQ.team_sticky[String(chatId)] = member.key;
-                saveState(_stQ);
+                _setSticky(member.key);
                 log('INFO', `Quoted reply → force route to ${_replyAgentKey} (sticky set)`);
                 _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
                 return;
               }
+              log('INFO', `Quoted reply agentKey=${_replyAgentKey} not in team, falling through`);
             }
             // 1. Explicit nickname → route + set sticky
             const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
             if (teamMatch) {
               const { member, rest } = teamMatch;
+              _setSticky(member.key);
               if (!rest) {
-                // Pure nickname, no task — set sticky + confirm member is online
-                const _stPure = loadState();
-                if (!_stPure.team_sticky) _stPure.team_sticky = {};
-                _stPure.team_sticky[String(chatId)] = member.key;
-                saveState(_stPure);
-                log('INFO', `Sticky set (pure nickname): ${String(chatId).slice(-8)} → ${member.key}`);
+                // Pure nickname, no task — confirm member is online
+                log('INFO', `Sticky set (pure nickname): ${_chatKey.slice(-8)} → ${member.key}`);
                 bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`).catch(() => {});
                 return;
               }
-              // Set sticky so subsequent messages go to this member by default
-              const _stSticky = loadState();
-              if (!_stSticky.team_sticky) _stSticky.team_sticky = {};
-              _stSticky.team_sticky[String(chatId)] = member.key;
-              saveState(_stSticky);
-              log('INFO', `Sticky set: ${String(chatId).slice(-8)} → ${member.key}`);
+              log('INFO', `Sticky set: ${_chatKey.slice(-8)} → ${member.key}`);
               _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, chatId, executeTaskByName, acl);
               return;
             }
@@ -498,22 +501,23 @@ function createBridgeStarter(deps) {
             const _trimLower = trimmedText.toLowerCase();
             const _mainMatch = _mainNicks.find(n => _trimLower === n.toLowerCase() || _trimLower.startsWith(n.toLowerCase() + ' ') || _trimLower.startsWith(n.toLowerCase() + '，') || _trimLower.startsWith(n.toLowerCase() + ','));
             if (_mainMatch) {
-              const _stMain = loadState();
-              if (_stMain.team_sticky) delete _stMain.team_sticky[String(chatId)];
-              saveState(_stMain);
+              _clearSticky();
               const rest = trimmedText.slice(_mainMatch.length).replace(/^[\s,，:：]+/, '');
               log('INFO', `Main nickname → cleared sticky, routing to main${rest ? ` (task: ${rest.slice(0, 30)})` : ''}`);
               if (!rest) {
                 bot.sendMarkdown(chatId, `${_boundProj.icon || '🤖'} **${_boundProj.name}** 在线`).catch(() => {});
                 return;
               }
-              await handleCommand(bot, chatId, rest, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
+              try {
+                await handleCommand(bot, chatId, rest, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
+              } catch (e) {
+                log('ERROR', `Team main-route handleCommand failed: ${e.message}`);
+                bot.sendMessage(chatId, `❌ 执行失败: ${e.message}`).catch(() => {});
+              }
               return;
             }
 
             // 2. Sticky: no nickname given → route to last explicitly named member
-            const _stRead = loadState();
-            const _stickyKey = (_stRead.team_sticky || {})[String(chatId)] || null;
             if (_stickyKey) {
               const member = _boundProj.team.find(m => m.key === _stickyKey);
               if (member) {
