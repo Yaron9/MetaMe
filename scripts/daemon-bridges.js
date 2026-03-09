@@ -404,7 +404,12 @@ function createBridgeStarter(deps) {
             const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
             if (teamMatch) {
               const { member, rest } = teamMatch;
-              _dispatchToTeamMember(member, _boundProj, rest || trimmedText, liveCfg, bot, chatId, executeTaskByName, acl, _boundKey);
+              if (!rest) {
+                // Pure nickname, no task — just confirm member is online
+                bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`).catch(() => {});
+                return;
+              }
+              _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, chatId, executeTaskByName, acl, _boundKey);
               return;
             }
 

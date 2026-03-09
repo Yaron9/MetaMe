@@ -102,6 +102,8 @@ function createBot(config) {
     return msgId ? { message_id: msgId } : null;
   }
 
+  let _editBroken = false; // closure var — safe against destructured calls
+
   return {
     /**
      * Send a plain text message
@@ -120,9 +122,8 @@ function createBot(config) {
       return msgId ? { message_id: msgId } : null;
     },
 
-    _editBroken: false, // Set to true if patch API consistently fails
     async editMessage(chatId, messageId, text, header = null) {
-      if (this._editBroken) return false;
+      if (_editBroken) return false;
       try {
         // Feishu patch API only works on card (interactive) messages
         // Update card content with markdown element; preserve header if provided
@@ -138,7 +139,7 @@ function createBot(config) {
       } catch (e) {
         const code = e?.code || e?.response?.data?.code;
         if (code === 230001 || code === 230002 || /permission|forbidden/i.test(String(e))) {
-          this._editBroken = true;
+          _editBroken = true;
         }
         return false;
       }
@@ -319,7 +320,7 @@ function createBot(config) {
           },
         });
 
-        console.log('[Feishu] Upload response:', JSON.stringify(uploadRes));
+        // Upload response logged at debug level if needed
 
         // Response is { code, msg, data: { file_key } }
         const fileKey = uploadRes?.data?.file_key || uploadRes?.file_key;
@@ -509,7 +510,9 @@ function createBot(config) {
             touchActivity();
           } catch (err) {
             _log('WARN', `Feishu health check failed after ${Math.round(silentMs / 1000)}s silence: ${err.message} — reconnecting`);
-            connect(); // tear down implicitly (old WSClient gets GC'd) and create new
+            try { currentWs?.stop?.(); } catch { /* ignore */ }
+            currentWs = null;
+            connect();
           }
         }, HEALTH_CHECK_INTERVAL);
       }
