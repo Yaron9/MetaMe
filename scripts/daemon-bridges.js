@@ -258,6 +258,7 @@ function createBridgeStarter(deps) {
     try {
       const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo, senderId) => {
         const liveCfg = loadConfig();
+
         const allowedIds = (liveCfg.feishu && liveCfg.feishu.allowed_chat_ids) || [];
         const trimmedText = text && text.trim();
         const isBindCmd = trimmedText && (
@@ -330,10 +331,10 @@ function createBridgeStarter(deps) {
           }
           await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
         }
-      });
+      }, { log: (lvl, msg) => log(lvl, msg) });
 
       log('INFO', 'Feishu bot connected (WebSocket long connection)');
-      return { stop: () => receiver.stop(), bot };
+      return { stop: () => receiver.stop(), bot, reconnect: () => receiver.reconnect(), isAlive: () => receiver.isAlive() };
     } catch (e) {
       log('ERROR', `Feishu bridge failed: ${e.message}`);
       return null;
