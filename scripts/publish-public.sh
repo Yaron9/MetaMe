@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# Sync sanitized code from private repo to the public MetaMe repo.
+# Sync code from private repo to the public MetaMe repo.
 #
 # Usage:
-#   ./scripts/publish-public.sh              # generate to ../MetaMe-public
+#   ./scripts/publish-public.sh              # dry-run: generate to ../MetaMe-public
 #   ./scripts/publish-public.sh --push       # generate + push to public repo
 #
-# Workflow:
-#   - You develop in MetaMe-private (this repo), push to origin as usual
-#   - Run this script when you want to update the public mirror
-#   - Private modules (listed in .private-modules) get replaced with stubs
+# Files listed in .private-modules are excluded entirely (secrets, tokens, etc).
+# Everything else is published as-is (full open source).
 
 set -euo pipefail
 
@@ -24,51 +22,42 @@ for arg in "$@"; do
   esac
 done
 
-if [ ! -f "$PRIVATE_LIST" ]; then
-  echo "Error: .private-modules not found"
-  exit 1
+# Read exclusion list
+EXCLUDE_FILES=()
+if [ -f "$PRIVATE_LIST" ]; then
+  while IFS= read -r line; do
+    line="${line%%#*}"
+    line="${line// /}"
+    [ -z "$line" ] && continue
+    EXCLUDE_FILES+=("$line")
+  done < "$PRIVATE_LIST"
 fi
 
-PRIVATE_FILES=()
-while IFS= read -r line; do
-  line="${line%%#*}"
-  line="${line// /}"
-  [ -z "$line" ] && continue
-  PRIVATE_FILES+=("$line")
-done < "$PRIVATE_LIST"
-
 echo "==> Generating public release to: $OUT_DIR"
-echo "    Stripping ${#PRIVATE_FILES[@]} private modules"
+echo "    Excluding ${#EXCLUDE_FILES[@]} private files"
 
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 
+# Export all tracked files
 git -C "$REPO_ROOT" archive HEAD | tar -x -C "$OUT_DIR"
 
-# Strip .private-modules itself from public release
+# Remove .private-modules list itself
 rm -f "$OUT_DIR/.private-modules"
 
-for pattern in "${PRIVATE_FILES[@]}"; do
+# Remove excluded files (secrets, tokens, config with credentials)
+REMOVED=0
+for pattern in "${EXCLUDE_FILES[@]}"; do
   for file in $OUT_DIR/$pattern; do
     [ -f "$file" ] || continue
     rel="${file#$OUT_DIR/}"
-    basename=$(basename "$file" .js)
-    cat > "$file" << STUB
-// This module is part of MetaMe's proprietary core.
-// See https://github.com/Yaron9/MetaMe for the open-source components.
-//
-// Module: ${basename}
-// License: Business Source License (BSL 1.1)
-//
-// For licensing inquiries: github.com/Yaron9/MetaMe/issues
-
-module.exports = {};
-STUB
-    echo "    [stub] $rel"
+    rm -f "$file"
+    echo "    [excluded] $rel"
+    REMOVED=$((REMOVED + 1))
   done
 done
 
-echo "==> Done. ${#PRIVATE_FILES[@]} modules stubbed."
+echo "==> Done. ${REMOVED} private files excluded."
 
 if [ "$DO_PUSH" = true ]; then
   cd "$OUT_DIR"
@@ -77,7 +66,7 @@ if [ "$DO_PUSH" = true ]; then
     git remote add origin "$PUBLIC_REMOTE"
   fi
   git add -A
-  COMMIT_MSG="sync: $(git -C "$REPO_ROOT" log -1 --format='%h %s')"
+  COMMIT_MSG="sync: $(git -C "$REPO_ROOT" log -1 --format='%h') $(date -u +%Y-%m-%d)"
   git commit -m "$COMMIT_MSG" --allow-empty
   echo "==> Pushing to public repo..."
   git push -u origin main --force
