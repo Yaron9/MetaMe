@@ -145,7 +145,68 @@ feishu:
 | daemon.js `spawnReplacementDaemon` | POSIX: `detached: true` / Windows: `detached: false` | 改 spawn 参数时注意平台分支 |
 | NL Mac 控制（command-router） | macOS only，`process.platform === 'darwin'` 守卫 | Windows 天然跳过 |
 
-## 10. 变更后维护动作
+## 10. 团队路由（Team Routing）
+
+### 概念
+
+一个项目可以有多个 team 成员（数字分身），共享同一个 `cwd`，通过虚拟 chatId 并行工作。
+
+### 配置
+
+在 `~/.metame/daemon.yaml` 的项目下添加 `team` 数组和 `broadcast: true`：
+
+```yaml
+  metame:
+    name: 超级总管 Jarvis
+    icon: 🤖
+    broadcast: true
+    team:
+      - key: jia
+        name: Jarvis · 甲
+        icon: 🤖
+        color: green
+        cwd: ~/AGI/MetaMe
+        nicknames:
+          - 甲
+        auto_dispatch: true
+```
+
+### 路由规则（按优先级）
+
+1. **引用回复** → 路由到原 agent + 设置 sticky
+2. **显式昵称**（如"乙 帮我查下"）→ 路由到对应成员 + 设置 sticky
+3. **主项目昵称**（如"贾维斯"）→ 清除 sticky，路由到主项目
+4. **Sticky**：无昵称时 → 路由到上次显式指定的成员
+5. **Auto-dispatch**：主忙时自动分配给空闲的 `auto_dispatch` 成员
+
+### /stop 精准路由
+
+- `/stop 乙`：停止指定成员
+- `/stop`：停止 sticky 成员
+- 引用回复 `/stop`：停止对应成员
+
+### Team Broadcast
+
+`broadcast: true` 时，team 成员之间通过 `dispatch_to` 互发消息会在群里用卡片广播。
+
+### 虚拟 chatId
+
+team 成员使用 `_agent_{key}` 格式的虚拟 chatId，与物理群 chatId 隔离。
+
+### 卡片标题
+
+由 `icon + name` 拼成，如 `🤖 Jarvis · 乙`。
+
+## 11. 私人配置保护
+
+- `daemon.yaml` 是用户私人配置，包含 API keys、chat IDs、个人项目配置
+- **绝不上传**到代码仓库，已加入 `.gitignore`
+- 仓库只追踪 `scripts/daemon-default.yaml`（模板文件）
+- 部署流程（`node index.js`）不会覆盖用户的 `~/.metame/daemon.yaml`
+- 同样不应上传的文件：`MEMORY.md`、`SOUL.md`、`.env*`
+- Agent 在执行任务时，**绝不能** `cp scripts/daemon.yaml ~/.metame/daemon.yaml`，这会覆盖用户私人配置
+
+## 12. 变更后维护动作
 
 1. `npm test`
 2. `npm run sync:plugin`

@@ -316,6 +316,7 @@ systemctl --user start metame
 | **Auto-Provisioning** | First run deploys default CLAUDE.md, documentation, and `dispatch_to` to `~/.metame/`. Subsequent runs sync scripts without overwriting user config. |
 | **Heartbeat System** | Three-layer programmable nervous system. Layer 0 kernel always-on (zero config). Layer 1 system evolution built-in (5 tasks: distill + memory + skills + nightly reflection + memory index). Layer 2 your custom scheduled tasks with `require_idle`, `precondition`, `notify`, workflows. |
 | **Multi-Agent** | Multiple projects with dedicated chat groups. `/agent bind` for one-tap setup. True parallel execution. |
+| **Team Routing** | Project-level team clones: multiple AI agents work in parallel within a single chat group. Nickname routing, sticky follow, `/stop` per member, broadcast visibility. |
 | **Browser Automation** | Built-in Playwright MCP. Browser control out of the box for every user. |
 | **Cross-Platform** | Native support for macOS and Windows. Platform abstraction layer handles spawn, IPC, process management, and terminal encoding automatically. |
 | **Provider Relay** | Route through any Anthropic-compatible API. Use GPT-4, DeepSeek, Gemini — zero config file mutation. |
@@ -415,6 +416,41 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 ~/.metame/bin/dispatch_to assistant "Schedule tomorrow's standup"
 ~/.metame/bin/dispatch_to coder "Run the test suite and report results"
 ```
+
+## Team Routing
+
+MetaMe supports project-level team clones — multiple AI agents (digital twins) sharing the same workspace, working in parallel within a single Feishu group.
+
+### Configuration
+
+Add a `team` array and `broadcast: true` under any project in `daemon.yaml`:
+
+```yaml
+projects:
+  metame:
+    name: 超级总管 Jarvis
+    icon: 🤖
+    broadcast: true
+    team:
+      - key: jia
+        name: Jarvis · 甲
+        icon: 🤖
+        color: green
+        cwd: ~/AGI/MetaMe
+        nicknames:
+          - 甲
+        auto_dispatch: true
+```
+
+### Key Features
+
+- **Nickname routing**: mention a member by nickname (e.g. "乙 check this") to route directly to them
+- **Sticky follow**: once you address a member, subsequent messages without a nickname continue going to the same member
+- **`/stop` precision**: `/stop 乙` stops a specific member; `/stop` stops the sticky member; reply-quote `/stop` stops the quoted member
+- **Auto-dispatch**: when the main agent is busy, messages are automatically routed to idle `auto_dispatch` members
+- **Broadcast**: with `broadcast: true`, inter-member `dispatch_to` messages are shown as cards in the group chat
+
+Each team member runs on a virtual chatId (`_agent_{key}`) and appears with its own card title (e.g. `🤖 Jarvis · 乙`).
 
 ## Mobile Commands
 
