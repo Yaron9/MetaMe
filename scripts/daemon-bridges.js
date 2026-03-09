@@ -128,7 +128,7 @@ function createBridgeStarter(deps) {
       },
     });
   }
-  function _dispatchToTeamMember(member, boundProj, text, cfg, bot, realChatId, executeTaskByName, acl) {
+  function _dispatchToTeamMember(member, boundProj, text, cfg, bot, realChatId, executeTaskByName, acl, parentKey) {
     const virtualChatId = `_agent_${member.key}`;
     const teamCfg = {
       ...cfg,
@@ -140,6 +140,8 @@ function createBridgeStarter(deps) {
           icon: member.icon || '🤖',
           color: member.color || 'blue',
           engine: member.engine || boundProj.engine,
+          // Clones share parent session: same conversation history, different process slot
+          parent_key: member.auto_dispatch ? (parentKey || null) : null,
         },
       },
     };
@@ -396,27 +398,25 @@ function createBridgeStarter(deps) {
           }
 
           // Team group routing: if bound project has a team array, check message for member nickname
-          const { project: _boundProj } = _getBoundProject(chatId, liveCfg);
+          const { key: _boundKey, project: _boundProj } = _getBoundProject(chatId, liveCfg);
           if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0) {
             // 1. Explicit nickname → route to that member
             const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
             if (teamMatch) {
               const { member, rest } = teamMatch;
-              _dispatchToTeamMember(member, _boundProj, rest || trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+              _dispatchToTeamMember(member, _boundProj, rest || trimmedText, liveCfg, bot, chatId, executeTaskByName, acl, _boundKey);
               return;
             }
 
-            // 2. Auto-dispatch: any instance (main or clone) is busy → find first free auto_dispatch clone
-            // Check main (real chatId) AND all clones (_agent_xxx) for busyness
+            // 2. Auto-dispatch: main busy → find first free auto_dispatch clone
             if (activeProcesses) {
               const clones = _boundProj.team.filter(m => m.auto_dispatch);
               const mainBusy = activeProcesses.has(chatId);
-              const allBusy = mainBusy && clones.every(m => activeProcesses.has(`_agent_${m.key}`));
-              if (mainBusy && !allBusy) {
+              if (mainBusy) {
                 const clone = clones.find(m => !activeProcesses.has(`_agent_${m.key}`));
                 if (clone) {
                   log('INFO', `Auto-dispatch: main busy → ${clone.key} (${clone.name})`);
-                  _dispatchToTeamMember(clone, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+                  _dispatchToTeamMember(clone, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl, _boundKey);
                   return;
                 }
               }
