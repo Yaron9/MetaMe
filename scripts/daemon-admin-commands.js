@@ -46,6 +46,17 @@ function createAdminCommandHandler(deps) {
         ? proj.nicknames
         : (proj.nicknames ? [proj.nicknames] : []);
       if (key === targetName || nicknames.some(n => n === targetName)) return key;
+
+      // Also search team members (nested projects)
+      if (Array.isArray(proj.team)) {
+        for (const member of proj.team) {
+          const memberNicks = Array.isArray(member.nicknames) ? member.nicknames : [];
+          if (member.key === targetName || memberNicks.some(n => n === targetName)) {
+            // Return full path: parentKey/teamMemberKey
+            return `${key}/${member.key}`;
+          }
+        }
+      }
     }
     return null;
   }

@@ -69,6 +69,12 @@ const CLAUDE_BIN = (() => {
 // Skill evolution module (hot path + cold path)
 let skillEvolution = null;
 try { skillEvolution = require('./skill-evolution'); } catch { /* graceful fallback */ }
+const {
+  normalizeRemoteDispatchConfig,
+  encodePacket: encodeRemoteDispatchPacket,
+  decodePacket: decodeRemoteDispatchPacket,
+  verifyPacket: verifyRemoteDispatchPacket,
+} = require('./daemon-remote-dispatch');
 
 // ---------------------------------------------------------
 // SKILL ROUTING (keyword → /skillname prefix, like metame-desktop)
@@ -145,7 +151,7 @@ const { createFileBrowser } = require('./daemon-file-browser');
 const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lifecycle');
 const { createNotifier } = require('./daemon-notify');
 const { createClaudeEngine } = require('./daemon-claude-engine');
-const { createEngineRuntimeFactory, detectDefaultEngine, ENGINE_MODEL_CONFIG, ENGINE_DISTILL_MAP, ENGINE_DEFAULT_MODEL } = require('./daemon-engine-runtime');
+const { createEngineRuntimeFactory, detectDefaultEngine, resolveEngineModel, ENGINE_MODEL_CONFIG, ENGINE_DISTILL_MAP, ENGINE_DEFAULT_MODEL } = require('./daemon-engine-runtime');
 const { createCommandRouter } = require('./daemon-command-router');
 const { createTaskScheduler } = require('./daemon-task-scheduler');
 const { createAgentTools } = require('./daemon-agent-tools');
@@ -514,6 +520,31 @@ const taskBoard = createTaskBoard({
 let _handleCommand = null;
 let _dispatchBridgeRef = null; // Store bridge (not bot) so .bot is always the live object after reconnects
 function setDispatchHandler(fn) { _handleCommand = fn; }
+
+function getRemoteDispatchConfig(config) {
+  return normalizeRemoteDispatchConfig(config || {});
+}
+
+async function sendRemoteDispatch(packet, config) {
+  const rd = getRemoteDispatchConfig(config);
+  const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
+  if (!rd) return { success: false, error: 'feishu.remote_dispatch not configured' };
+  if (!liveBot || typeof liveBot.sendMessage !== 'function') return { success: false, error: 'feishu bot not connected' };
+  const ts = new Date().toISOString();
+  const id = `${rd.selfPeer}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    const body = encodeRemoteDispatchPacket({
+      v: 1,
+      id,
+      ts,
+      ...packet,
+    }, rd.secret);
+    await liveBot.sendMessage(rd.chatId, body);
+    return { success: true, id };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
 
 /**
  * Create a null bot that captures Claude's output without sending to Feishu/Telegram.
@@ -980,6 +1011,36 @@ function spawnSessionSummaries() {
 /**
  * Handle a single dispatch message (from socket or pending.jsonl fallback).
  */
+/**
+ * Find if both sender and target belong to the same team group.
+ * Returns { parentKey, parentProject, senderMember, targetMember, groupChatId } or null.
+ */
+function _findTeamBroadcastContext(fromKey, targetKey, config) {
+  if (!config || !config.projects) return null;
+  const feishuMap = (config.feishu && config.feishu.chat_agent_map) || {};
+  for (const [projKey, proj] of Object.entries(config.projects)) {
+    if (!proj || !Array.isArray(proj.team) || proj.team.length === 0) continue;
+    if (!proj.broadcast) continue; // broadcast switch must be on
+    const senderMember = proj.team.find(m => m.key === fromKey);
+    const targetMember = proj.team.find(m => m.key === targetKey);
+    // Also check if sender/target is the parent project itself
+    const senderIsParent = fromKey === projKey;
+    const targetIsParent = targetKey === projKey;
+    if ((senderMember || senderIsParent) && (targetMember || targetIsParent)) {
+      // Find group chatId for this project
+      const groupChatId = Object.entries(feishuMap).find(([, v]) => v === projKey)?.[0] || null;
+      return {
+        parentKey: projKey,
+        parentProject: proj,
+        senderMember: senderMember || { key: projKey, name: proj.name, icon: proj.icon || '🤖' },
+        targetMember: targetMember || { key: projKey, name: proj.name, icon: proj.icon || '🤖' },
+        groupChatId,
+      };
+    }
+  }
+  return null;
+}
+
 function handleDispatchItem(item, config) {
   if (!item.target || !item.prompt) return;
   if (!(config && config.projects && config.projects[item.target])) {
@@ -996,9 +1057,39 @@ function handleDispatchItem(item, config) {
     return;
   }
   log('INFO', `Dispatch: ${item.from || '?'} → ${item.target}: ${item.prompt.slice(0, 60)}`);
+
+  // ── Team broadcast: intra-team dispatch → show in group chat ──
+  const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
+  const teamCtx = liveBot ? _findTeamBroadcastContext(item.from, item.target, config) : null;
+  if (teamCtx && teamCtx.groupChatId) {
+    const { senderMember, targetMember, groupChatId, parentProject } = teamCtx;
+    const sIcon = senderMember.icon || '🤖';
+    const sName = senderMember.name || senderMember.key;
+    const tIcon = targetMember.icon || '🤖';
+    const tName = targetMember.name || targetMember.key;
+    // Broadcast the handoff message to group as a card
+    const cardTitle = `${sIcon} ${sName} → ${tIcon} ${tName}`;
+    const cardBody = item.prompt.slice(0, 300) + (item.prompt.length > 300 ? '…' : '');
+    const cardColor = senderMember.color || 'blue';
+    const sendFn = liveBot.sendCard
+      ? () => liveBot.sendCard(groupChatId, { title: cardTitle, body: cardBody, color: cardColor })
+      : () => liveBot.sendMarkdown(groupChatId, `**${cardTitle}**\n\n> ${cardBody}`);
+    sendFn().catch(e => log('WARN', `Team broadcast failed: ${e.message}`));
+    // Use streamForwardBot so target's reply also shows in group
+    const streamOptions = { bot: liveBot, chatId: groupChatId };
+    dispatchTask(item.target, {
+      from: item.from || 'claude_session',
+      type: 'task', priority: 'normal',
+      payload: { title: item.prompt.slice(0, 60), prompt: item.prompt },
+      callback: false,
+      new_session: !!item.new_session,
+    }, config, null, streamOptions);
+    return;
+  }
+
+  // ── Normal dispatch (non-team or broadcast off) ──
   let pendingReplyFn = null;
   let streamOptions = null;
-  const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
   if (liveBot) {
     const feishuMap = (config.feishu && config.feishu.chat_agent_map) || {};
     const allowedFeishuIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
@@ -1016,7 +1107,21 @@ function handleDispatchItem(item, config) {
       const _userSources = new Set(['unknown', 'claude_session', '_claude_session', 'user']);
       let senderChatId = null;
       if (!_userSources.has(item.from)) {
+        // Direct match: sender is a bound agent
         senderChatId = Object.entries(feishuMap).find(([, v]) => v === item.from)?.[0] || null;
+        // Team member fallback: if sender is a team member (e.g., jarvis_c), find parent project's chatId
+        if (!senderChatId) {
+          const projects = config.projects || {};
+          for (const [projKey, proj] of Object.entries(projects)) {
+            if (proj.team && Array.isArray(proj.team)) {
+              const member = proj.team.find(m => m.key === item.from);
+              if (member && feishuMap[projKey]) {
+                senderChatId = feishuMap[projKey];
+                break;
+              }
+            }
+          }
+        }
       }
       if (!senderChatId) {
         senderChatId = allowedFeishuIds.map(String).find(id => !agentChatIds.has(id)) || null;
@@ -1038,6 +1143,8 @@ function handleDispatchItem(item, config) {
             );
           });
         };
+        // Also set streamOptions so target agent's streaming replies go to the sender's group
+        streamOptions = { bot: liveBot, chatId: senderChatId };
       }
     }
   }
@@ -1048,6 +1155,90 @@ function handleDispatchItem(item, config) {
     callback: false,
     new_session: !!item.new_session,
   }, config, pendingReplyFn, streamOptions);
+}
+
+async function handleRemoteDispatchMessage({ chatId, text, config }) {
+  const rd = getRemoteDispatchConfig(config);
+  if (!rd || String(chatId) !== rd.chatId) return false;
+
+  const packet = decodeRemoteDispatchPacket(text);
+  if (!packet) return true;
+  if (!verifyRemoteDispatchPacket(packet, rd.secret)) {
+    log('WARN', 'Remote dispatch ignored: invalid signature');
+    return true;
+  }
+  if (packet.from_peer === rd.selfPeer) return true;
+  if (packet.to_peer !== rd.selfPeer) return true;
+
+  if (packet.type === 'task') {
+    const replyFn = async (output) => {
+      const res = await sendRemoteDispatch({
+        type: 'result',
+        from_peer: rd.selfPeer,
+        to_peer: packet.from_peer,
+        target_project: packet.target_project,
+        source_chat_id: packet.source_chat_id,
+        source_sender_key: packet.source_sender_key || 'user',
+        request_id: packet.id,
+        result: String(output || '').slice(0, 4000),
+      }, config);
+      if (!res.success) log('WARN', `Remote dispatch result send failed: ${res.error}`);
+    };
+
+    handleDispatchItem({
+      target: packet.target_project,
+      prompt: packet.prompt,
+      from: packet.source_sender_key || `${packet.from_peer}:remote`,
+      new_session: !!packet.new_session,
+      _replyFn: replyFn,
+      _suppressDefaultReplyRouting: true,
+    }, config);
+    return true;
+  }
+
+  if (packet.type === 'result') {
+    const targetChatId = String(packet.source_chat_id || '').trim();
+    if (!targetChatId) {
+      const inboxTarget = String(packet.source_sender_key || '').trim();
+      if (!inboxTarget || inboxTarget === 'user' || inboxTarget === '_claude_session') {
+        log('WARN', 'Remote dispatch result dropped: no source_chat_id/source_sender_key');
+        return true;
+      }
+      try {
+        const inboxDir = path.join(os.homedir(), '.metame', 'memory', 'inbox', inboxTarget);
+        fs.mkdirSync(inboxDir, { recursive: true });
+        const tsStr = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+        const inboxFile = path.join(inboxDir, `${tsStr}_${packet.from_peer}_${packet.target_project || 'remote'}_result.md`);
+        const body = [
+          `FROM: ${packet.from_peer}:${packet.target_project || 'unknown'}`,
+          `TO: ${inboxTarget}`,
+          `TS: ${new Date().toISOString()}`,
+          '',
+          String(packet.result || '').trim() || '(empty result)',
+        ].join('\n');
+        fs.writeFileSync(inboxFile, body, 'utf8');
+      } catch (e) {
+        log('WARN', `Remote dispatch inbox write failed: ${e.message}`);
+      }
+      return true;
+    }
+    const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
+    if (!liveBot) {
+      log('WARN', 'Remote dispatch result dropped: no live bot');
+      return true;
+    }
+    const header = `${packet.from_peer}:${packet.target_project || 'unknown'}`;
+    const body = `${header}\n\n${String(packet.result || '').trim() || '(empty result)'}`;
+    try {
+      if (liveBot.sendMarkdown) await liveBot.sendMarkdown(targetChatId, body);
+      else await liveBot.sendMessage(targetChatId, body);
+    } catch (e) {
+      log('WARN', `Remote dispatch result delivery failed: ${e.message}`);
+    }
+    return true;
+  }
+
+  return true;
 }
 
 /**
@@ -1528,6 +1719,7 @@ const { handleAdminCommand } = createAdminCommandHandler({
   skillEvolution,
   taskBoard,
   taskEnvelope,
+  sendRemoteDispatch,
   getActiveProcesses: () => activeProcesses,
   getMessageQueue: () => messageQueue,
   loadState,
@@ -1765,6 +1957,8 @@ const { startTelegramBridge, startFeishuBridge } = createBridgeStarter({
   getSession,
   handleCommand,
   pendingActivations,
+  activeProcesses,
+  messageQueue,
 });
 
 const { killExistingDaemon, writePid, cleanPid } = createPidManager({
@@ -1900,7 +2094,9 @@ async function main() {
     'enable_nl_mac_fallback',
   ];
   // All known models across all engines (for legacy daemon.model validation only)
-  const BUILTIN_CLAUDE_MODELS = ENGINE_MODEL_CONFIG.claude.options;
+  const BUILTIN_CLAUDE_MODELS = (ENGINE_MODEL_CONFIG.claude.options || []).map(option =>
+    typeof option === 'string' ? option : option.value
+  ).filter(Boolean);
   for (const key of Object.keys(config)) {
     if (!KNOWN_SECTIONS.includes(key)) log('WARN', `Config: unknown section "${key}" (typo?)`);
   }
@@ -1914,7 +2110,7 @@ async function main() {
       if (activeProv === 'anthropic' && _defaultEngine === 'claude') {
         log('WARN', `Config: daemon.model="${config.daemon.model}" is not a known Claude model`);
       } else {
-        log('INFO', `Config: model "${config.daemon.model}" for engine "${_defaultEngine}" / provider "${activeProv}"`);
+        log('INFO', `Config: legacy daemon.model="${config.daemon.model}" retained; active ${_defaultEngine} model resolves to "${resolveEngineModel(_defaultEngine, config.daemon)}" (${activeProv})`);
       }
     }
   }
@@ -2162,5 +2358,5 @@ if (process.argv.includes('--run')) {
   });
 }
 
-// Export for testing
-module.exports = { executeTask, loadConfig, loadState, buildProfilePreamble, parseInterval };
+// Export for testing & cross-bot dispatch
+module.exports = { executeTask, loadConfig, loadState, buildProfilePreamble, parseInterval, handleRemoteDispatchMessage, sendRemoteDispatch };

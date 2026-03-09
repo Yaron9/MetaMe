@@ -129,19 +129,43 @@ function createBridgeStarter(deps) {
       },
     });
   }
+  // Ensure a git worktree exists for a team member. Returns the worktree path.
+  // Worktree is created at {parentCwd}/.worktree/{key}/ on a branch named team/{key}.
+  function _ensureWorktree(parentCwd, key) {
+    const fs = require('fs');
+    const { execSync: _exec } = require('child_process');
+    const wtDir = path.join(parentCwd, '.worktree', key);
+    if (fs.existsSync(path.join(wtDir, '.git'))) return wtDir;
+    // Create directory and worktree
+    fs.mkdirSync(path.join(parentCwd, '.worktree'), { recursive: true });
+    const branch = `team/${key}`;
+    try {
+      // Create branch from current HEAD if it doesn't exist
+      _exec(`git branch ${branch} HEAD 2>/dev/null || true`, { cwd: parentCwd, stdio: 'ignore' });
+      _exec(`git worktree add "${wtDir}" ${branch}`, { cwd: parentCwd, stdio: 'ignore', timeout: 10000 });
+      log('INFO', `Worktree created: ${wtDir} (branch: ${branch})`);
+    } catch (e) {
+      log('ERROR', `Worktree creation failed for ${key}: ${e.message}`);
+      return parentCwd; // fallback to shared cwd
+    }
+    return wtDir;
+  }
+
   function _dispatchToTeamMember(member, boundProj, text, cfg, bot, realChatId, executeTaskByName, acl) {
     const virtualChatId = `_agent_${member.key}`;
+    const parentCwd = member.cwd || boundProj.cwd;
+    const resolvedParentCwd = parentCwd.replace(/^~/, require('os').homedir());
+    const memberCwd = _ensureWorktree(resolvedParentCwd, member.key);
     const teamCfg = {
       ...cfg,
       projects: {
         ...(cfg.projects || {}),
         [member.key]: {
-          cwd: member.cwd || boundProj.cwd,
+          cwd: memberCwd,
           name: member.name,
           icon: member.icon || '🤖',
           color: member.color || 'blue',
           engine: member.engine || boundProj.engine,
-          // Each clone keeps its own session — parallel work must not share JSONL files
         },
       },
     };
@@ -285,6 +309,99 @@ function createBridgeStarter(deps) {
                 bypassAcl: !isAllowedChat && !!isBindCmd,
               });
               if (acl.blocked) continue;
+
+              // Team group routing for Telegram (same logic as Feishu)
+              const trimmedText = text.trim();
+              const { key: _boundKey, project: _boundProj } = _getBoundProject(chatId, liveCfg);
+              const _isTeamSlashCmd = trimmedText.startsWith('/') && !/^\/stop(\s|$)/i.test(trimmedText);
+
+              // Load sticky state
+              const _st = loadState();
+              const _chatKey = String(chatId);
+              const _setSticky = (key) => {
+                if (!_st.team_sticky) _st.team_sticky = {};
+                _st.team_sticky[_chatKey] = key;
+                saveState(_st);
+              };
+              const _clearSticky = () => {
+                if (_st.team_sticky) delete _st.team_sticky[_chatKey];
+                saveState(_st);
+              };
+              const _stickyKey = (_st.team_sticky || {})[_chatKey] || null;
+
+              if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0 && !_isTeamSlashCmd) {
+                // Team dispatch logic (same as Feishu)
+                const _stopMatch = trimmedText && trimmedText.match(/^\/stop(?:\s+(.+))?$/i);
+                if (_stopMatch) {
+                  const _stopArg = (_stopMatch[1] || '').trim();
+                  if (_stopArg) {
+                    const _sa = _stopArg.toLowerCase();
+                    const m = _boundProj.team.find(t =>
+                      (t.nicknames || []).some(n => n.toLowerCase() === _sa) || (t.name && t.name.toLowerCase() === _sa) || t.key === _sa
+                    );
+                    if (m) {
+                      _clearSticky();
+                      log('INFO', `Team /stop: ${_chatKey.slice(-8)} → cleared sticky`);
+                      await bot.sendMessage(chatId, `⏹ 已切换回主 Agent`).catch(() => {});
+                    } else {
+                      await bot.sendMessage(chatId, `❌ 未找到团队成员: ${_stopArg}`).catch(() => {});
+                    }
+                    continue;
+                  }
+                  // Bare /stop, clear sticky
+                  _clearSticky();
+                  await bot.sendMessage(chatId, `⏹ 已切换回主 Agent`).catch(() => {});
+                  continue;
+                }
+
+                // 1. Explicit nickname → route + set sticky
+                const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
+                if (teamMatch) {
+                  const { member, rest } = teamMatch;
+                  _setSticky(member.key);
+                  if (!rest) {
+                    log('INFO', `Sticky set (pure nickname): ${_chatKey.slice(-8)} → ${member.key}`);
+                    bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`).catch(() => {});
+                    continue;
+                  }
+                  log('INFO', `Sticky set: ${_chatKey.slice(-8)} → ${member.key}`);
+                  _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, chatId, executeTaskByName, acl);
+                  continue;
+                }
+
+                // 1.5. Main project nickname → clear sticky, route to main
+                const _mainNicks = Array.isArray(_boundProj.nicknames) ? _boundProj.nicknames : [];
+                const _trimLower = trimmedText.toLowerCase();
+                const _mainMatch = _mainNicks.find(n => _trimLower === n.toLowerCase() || _trimLower.startsWith(n.toLowerCase() + ' ') || _trimLower.startsWith(n.toLowerCase() + '，') || _trimLower.startsWith(n.toLowerCase() + ','));
+                if (_mainMatch) {
+                  _clearSticky();
+                  const rest = trimmedText.slice(_mainMatch.length).replace(/^[\s,，:：]+/, '');
+                  log('INFO', `Main nickname → cleared sticky, routing to main${rest ? ` (task: ${rest.slice(0, 30)})` : ''}`);
+                  if (!rest) {
+                    bot.sendMarkdown(chatId, `${_boundProj.icon || '🤖'} **${_boundProj.name}** 在线`).catch(() => {});
+                    continue;
+                  }
+                  try {
+                    await handleCommand(bot, chatId, rest, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
+                  } catch (e) {
+                    log('ERROR', `Team main-route handleCommand failed: ${e.message}`);
+                    bot.sendMessage(chatId, `❌ 执行失败: ${e.message}`).catch(() => {});
+                  }
+                  continue;
+                }
+
+                // 2. Sticky: no nickname given → route to last explicitly named member
+                if (_stickyKey) {
+                  const member = _boundProj.team.find(m => m.key === _stickyKey);
+                  if (member) {
+                    log('INFO', `Sticky route: → ${_stickyKey}`);
+                    _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+                    continue;
+                  }
+                }
+              }
+
+              // Default: route to main project
               handleCommand(bot, chatId, text, liveCfg, executeTaskByName, acl.senderId, acl.readOnly).catch(e => {
                 log('ERROR', `Telegram handler error: ${e.message}`);
               });

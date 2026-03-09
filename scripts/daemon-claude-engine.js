@@ -1235,9 +1235,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const fullPrompt = routedPrompt + daemonHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
 
     // Git checkpoint before Claude modifies files (for /undo).
-    // Run async (fire-and-forget) to avoid blocking Claude spawn by ~600ms.
-    // Completes well before Claude's first file write (~2s after spawn).
-    (gitCheckpointAsync || gitCheckpoint)(session.cwd, prompt).catch?.(() => {});
+    // Skip for virtual agents (team clones like _agent_yi) — they share the same cwd
+    // as the parent project, so `git add -A` would stage other agents' in-progress work.
+    const _isVirtualAgent = String(chatId).startsWith('_agent_') || String(chatId).startsWith('_scope_');
+    if (!_isVirtualAgent) {
+      (gitCheckpointAsync || gitCheckpoint)(session.cwd, prompt).catch?.(() => {});
+    }
     log('INFO', `[TIMING:${chatId}] pre-spawn +${Date.now() - _t0}ms (engine:${runtime.name} started:${session.started})`);
 
     // Use streaming mode to show progress

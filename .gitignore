@@ -23,6 +23,9 @@ SOUL.md
 # Playwright MCP console logs
 .playwright-mcp/
 
+# Team worktrees (auto-created per agent)
+.worktree/
+
 # Local working dirs (never push)
 docs/
 !scripts/docs/

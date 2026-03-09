@@ -2,7 +2,7 @@
 
 const { classifyChatUsage } = require('./usage-classifier');
 const { deriveProjectInfo } = require('./utils');
-const { createEngineRuntimeFactory, normalizeEngineName, ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
+const { createEngineRuntimeFactory, normalizeEngineName, resolveEngineModel, ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
 const { buildAgentContextForEngine, buildMemorySnapshotContent, refreshMemorySnapshot } = require('./agent-layer');
 
 function createClaudeEngine(deps) {
@@ -520,8 +520,18 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       let _firstOutputLogged = false;
       let classifiedError = null;
       let lastStatusTime = 0;
-      let _earlyTextSent = false;
       const STATUS_THROTTLE = statusThrottleMs;
+      // Streaming card: accumulate text and push to card in real-time (throttled)
+      let _streamText = '';
+      let _lastStreamFlush = 0;
+      const STREAM_THROTTLE = 1500; // ms between card edits (safe within Feishu 5 req/s limit)
+      function flushStream(force) {
+        if (!onStatus || !_streamText.trim()) return;
+        const now = Date.now();
+        if (!force && now - _lastStreamFlush < STREAM_THROTTLE) return;
+        _lastStreamFlush = now;
+        onStatus('__STREAM_TEXT__' + _streamText).catch(() => {});
+      }
       const writtenFiles = [];
       const toolUsageLog = [];
 
@@ -570,7 +580,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             const ctx = recentTool.context || recentTool.skill || '';
             parts.push(`最近: ${recentTool.tool}${ctx ? ' ' + ctx : ''}`);
           }
-          if (onStatus) onStatus(parts.join(' | ')).catch(() => { });
+          if (onStatus) {
+            const milestoneMsg = parts.join(' | ');
+            const msg = _streamText ? `__TOOL_OVERLAY__${_streamText}\n\n> ${milestoneMsg}` : milestoneMsg;
+            onStatus(msg).catch(() => {});
+          }
         }
       }, 30000);
 
@@ -610,15 +624,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             }
             if (event.type === 'text' && event.text) {
               finalResult += (finalResult ? '\n\n' : '') + String(event.text);
+              _streamText = finalResult;
               if (waitingForTool) {
                 waitingForTool = false;
                 resetIdleTimer();
               }
-              // Show first text chunk immediately so user sees "计划：xxx" before tool work begins
-              if (onStatus && finalResult.trim() && !_earlyTextSent) {
-                _earlyTextSent = true;
-                onStatus('__EARLY_TEXT__' + finalResult).catch(() => {});
-              }
+              flushStream(); // throttled stream to card
               continue;
             }
             if (event.type === 'done') {
@@ -627,6 +638,13 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
                 waitingForTool = false;
                 resetIdleTimer();
               }
+              // Fallback: if no text streamed yet (tool-only response), use result text from done.
+              // Do NOT use when finalResult already has content — result duplicates streamed text.
+              if (!finalResult && event.result) {
+                finalResult = String(event.result);
+                _streamText = finalResult;
+              }
+              flushStream(true); // force final text flush before process ends
               continue;
             }
             if (event.type === 'tool_result') {
@@ -700,7 +718,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             const status = context
               ? `${displayEmoji} ${displayName}: 「${context}」`
               : `${displayEmoji} ${displayName}...`;
-            if (onStatus) onStatus(status).catch(() => { });
+            if (onStatus) {
+              // Overlay tool status on top of streamed text (if any); else show plain status
+              const msg = _streamText ? `__TOOL_OVERLAY__${_streamText}\n\n> ${status}` : status;
+              onStatus(msg).catch(() => {});
+            }
           }
         }
       });
@@ -790,11 +812,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
   // Track outbound message_id → session for reply-based session restoration.
   // Keeps last 200 entries to avoid unbounded growth.
-  function trackMsgSession(messageId, session) {
+  function trackMsgSession(messageId, session, agentKey) {
     if (!messageId || !session || !session.id) return;
     const st = loadState();
     if (!st.msg_sessions) st.msg_sessions = {};
-    st.msg_sessions[messageId] = { id: session.id, cwd: session.cwd, engine: session.engine || getDefaultEngine() };
+    st.msg_sessions[messageId] = { id: session.id, cwd: session.cwd, engine: session.engine || getDefaultEngine(), agentKey: agentKey || null };
     const keys = Object.keys(st.msg_sessions);
     if (keys.length > 200) {
       for (const k of keys.slice(0, keys.length - 200)) delete st.msg_sessions[k];
@@ -839,10 +861,23 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     // Send 🤔 ack and start typing — fire-and-forget so we don't block spawn on Telegram RTT.
     // statusMsgId is resolved via a promise; it will be ready well before the first model output.
     let statusMsgId = null;
-    let _earlyTextShown = false;
+    let _lastStatusCardContent = null; // tracks last clean text written to card (for final-reply dedup)
+    // Early detect bound project for branded ack card (team members / dispatch agents)
+    const _ackChatIdStr = String(chatId);
+    const _ackAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map || {} : {}), ...(config.feishu ? config.feishu.chat_agent_map || {} : {}) };
+    const _ackBoundKey = _ackAgentMap[_ackChatIdStr] || projectKeyFromVirtualChatId(_ackChatIdStr);
+    const _ackBoundProj = _ackBoundKey && config.projects ? config.projects[_ackBoundKey] : null;
+    // _ackCardHeader: non-null for agents with icon/name (team members, dispatch); passed to editMessage to preserve header on streaming edits
+    const _ackCardHeader = (_ackBoundProj && _ackBoundProj.icon && _ackBoundProj.name)
+      ? { title: `${_ackBoundProj.icon} ${_ackBoundProj.name}`, color: _ackBoundProj.color || 'blue' }
+      : null;
     // Fire-and-forget: don't await Telegram RTT before spawning the engine process.
     // statusMsgId will be populated well before the first model output (~5s for codex).
-    (bot.sendMarkdown ? bot.sendMarkdown(chatId, '🤔') : bot.sendMessage(chatId, '🤔'))
+    // For branded agents: send a card with header so streaming edits preserve the agent identity.
+    const _ackFn = (_ackCardHeader && bot.sendCard)
+      ? () => bot.sendCard(chatId, { title: _ackCardHeader.title, body: '🤔', color: _ackCardHeader.color })
+      : () => (bot.sendMarkdown ? bot.sendMarkdown(chatId, '🤔') : bot.sendMessage(chatId, '🤔'));
+    _ackFn()
       .then(msg => { if (msg && msg.message_id) statusMsgId = msg.message_id; })
       .catch(e => log('ERROR', `Failed to send ack to ${chatId}: ${e.message}`));
     bot.sendTyping(chatId).catch(() => { });
@@ -881,12 +916,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const chatIdStr = String(chatId);
     const chatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
     const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
-    // If this chat is bound to an agent, route session lookups to the agent's virtual chatId.
-    // This ensures user replies in a bound group resume the agent's current session (including dispatch tasks),
-    // rather than forking a separate chat session.
+    const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
+    // Each virtual chatId (including clones) keeps its own isolated session.
+    // Parallel tasks must not share JSONL files — concurrent writes cause corruption.
     const sessionChatId = boundProjectKey ? `_agent_${boundProjectKey}` : chatId;
     const sessionRaw = getSession(sessionChatId);
-    const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
     const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
     const boundEngineName = (boundProject && boundProject.engine) ? normalizeEngineName(boundProject.engine) : getDefaultEngine();
 
@@ -952,9 +986,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     }
 
     // Build engine command — prefer per-engine model, fall back to legacy daemon.model
-    const engineModels = daemonCfg.models || {};
-    const engineModel = engineModels[runtime.name] || daemonCfg.model || runtime.defaultModel;
-    const model = (boundProject && boundProject.model) || engineModel;
+    const model = resolveEngineModel(runtime.name, daemonCfg, boundProject && boundProject.model);
     const args = runtime.buildArgs({
       model,
       readOnly,
@@ -1203,9 +1235,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const fullPrompt = routedPrompt + daemonHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
 
     // Git checkpoint before Claude modifies files (for /undo).
-    // Run async (fire-and-forget) to avoid blocking Claude spawn by ~600ms.
-    // Completes well before Claude's first file write (~2s after spawn).
-    (gitCheckpointAsync || gitCheckpoint)(session.cwd, prompt).catch?.(() => {});
+    // Skip for virtual agents (team clones like _agent_yi) — they share the same cwd
+    // as the parent project, so `git add -A` would stage other agents' in-progress work.
+    const _isVirtualAgent = String(chatId).startsWith('_agent_') || String(chatId).startsWith('_scope_');
+    if (!_isVirtualAgent) {
+      (gitCheckpointAsync || gitCheckpoint)(session.cwd, prompt).catch?.(() => {});
+    }
     log('INFO', `[TIMING:${chatId}] pre-spawn +${Date.now() - _t0}ms (engine:${runtime.name} started:${session.started})`);
 
     // Use streaming mode to show progress
@@ -1215,31 +1250,47 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const FALLBACK_THROTTLE = fallbackThrottleMs;
     const onStatus = async (status) => {
       try {
-        // Detect early model text (tagged by spawnClaudeStreaming with __EARLY_TEXT__ prefix)
-        let actualStatus = status;
-        const isEarlyText = typeof status === 'string' && status.startsWith('__EARLY_TEXT__');
-        if (isEarlyText) {
-          actualStatus = status.slice('__EARLY_TEXT__'.length);
-        }
-        if (statusMsgId && bot.editMessage && !editFailed) {
-          const ok = await bot.editMessage(chatId, statusMsgId, actualStatus);
-          if (ok !== false) {
-            // Only mark early text as shown when the edit actually succeeded.
-            // If edit fails and we fall back to sendMessage, _earlyTextShown stays false
-            // so the final reply won't try to edit the status card, preventing duplicates.
-            if (isEarlyText) _earlyTextShown = true;
-            return; // edit succeeded (true or undefined for Telegram)
+        if (typeof status !== 'string') return;
+
+        // __STREAM_TEXT__: streamed model text — edit card and track for final dedup
+        if (status.startsWith('__STREAM_TEXT__')) {
+          const content = status.slice('__STREAM_TEXT__'.length);
+          // Set synchronously BEFORE await — this is the critical race fix.
+          // flushStream(true) is called from the 'done' event (before process close),
+          // so by setting here synchronously, _lastStatusCardContent is guaranteed to be
+          // set before the child 'close' event fires and finalize() resolves.
+          _lastStatusCardContent = content;
+          if (statusMsgId && bot.editMessage && !editFailed) {
+            const ok = await bot.editMessage(chatId, statusMsgId, content, _ackCardHeader);
+            if (ok === false) editFailed = true;
           }
-          editFailed = true; // edit failed, switch to fallback permanently
+          return; // skip fallback — final reply logic will use existing card
         }
-        // Early text: skip fallback entirely — avoids a duplicate when the final reply
-        // also sends a new message (since _earlyTextShown=false → status card is deleted).
-        if (isEarlyText) return;
-        // Normal status updates: send as new message with extra throttle to avoid spam
+
+        // __TOOL_OVERLAY__: text + tool status line — edit card but don't update _lastStatusCardContent
+        if (status.startsWith('__TOOL_OVERLAY__')) {
+          const content = status.slice('__TOOL_OVERLAY__'.length);
+          if (statusMsgId && bot.editMessage && !editFailed) {
+            await bot.editMessage(chatId, statusMsgId, content, _ackCardHeader);
+            // intentionally NOT updating _lastStatusCardContent — overlay is transient
+          }
+          return;
+        }
+
+        // Plain status (tool names before any text, milestone timers, etc.)
+        if (statusMsgId && bot.editMessage && !editFailed) {
+          const ok = await bot.editMessage(chatId, statusMsgId, status, _ackCardHeader);
+          if (ok !== false) {
+            _lastStatusCardContent = status;
+            return;
+          }
+          editFailed = true;
+        }
+        // Fallback: send as new message with throttle to avoid spam
         const now = Date.now();
         if (now - lastFallbackStatus < FALLBACK_THROTTLE) return;
         lastFallbackStatus = now;
-        await bot.sendMessage(chatId, actualStatus);
+        await bot.sendMessage(chatId, status);
       } catch { /* ignore status update failures */ }
     };
 
@@ -1360,12 +1411,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       } catch (e) { log('WARN', `Skill evolution signal capture failed: ${e.message}`); }
     }
 
-    // Clean up status message — but if we already showed early text via onStatus, keep the message
-    // and let it be overwritten by the final reply via editMessage below.
-    const _statusMsgIdForReply = _earlyTextShown ? statusMsgId : null;
-    if (statusMsgId && !_earlyTextShown && bot.deleteMessage) {
-      bot.deleteMessage(chatId, statusMsgId).catch(() => { });
-    }
+    // statusMsgId is always available for final reply handling (edit or delete).
+    const _statusMsgIdForReply = statusMsgId || null;
 
     // Mentor post-flight debt registration (intense mode only).
     if (mentorEnabled && !mentorExcluded && !mentorSuppressed && mentorEngine && typeof mentorEngine.registerDebt === 'function' && output) {
@@ -1396,14 +1443,14 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         const allProjects = (config && config.projects) || {};
         const names = dispatchedTargets.map(k => (allProjects[k] && allProjects[k].name) || k).join('、');
         const doneMsg = await bot.sendMessage(chatId, `✉️ 已转达给 ${names}，处理中…`);
-        if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session);
+        if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session, String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null);
         const wasNew = !session.started;
         if (wasNew) markSessionStarted(sessionChatId, engineName);
         return { ok: true };
       }
       const filesDesc = files && files.length > 0 ? `\n修改了 ${files.length} 个文件` : '';
       const doneMsg = await bot.sendMessage(chatId, `✅ 完成${filesDesc}`);
-      if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session);
+      if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session, String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null);
       const wasNew = !session.started;
       if (wasNew) markSessionStarted(sessionChatId, engineName);
       return { ok: true };
@@ -1448,9 +1495,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         cleanOutput = `⚠️ **任务超时，以下是已完成的部分结果：**\n\n${cleanOutput}`;
       }
 
-      // Match current session to a project for colored card display
-      let activeProject = null;
-      if (session && session.cwd && config && config.projects) {
+      // Match current session to a project for colored card display.
+      // Prefer the bound project (known by virtual chatId or chat_agent_map) — avoids ambiguity
+      // when multiple projects share the same cwd (e.g. team members with parent project cwd).
+      let activeProject = boundProject || null;
+      if (!activeProject && session && session.cwd && config && config.projects) {
         const sessionCwd = path.resolve(normalizeCwd(session.cwd));
         for (const [, proj] of Object.entries(config.projects)) {
           if (!proj.cwd) continue;
@@ -1461,18 +1510,38 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       let replyMsg;
       try {
-        // If early text was shown via status message, try to edit it with final reply first
-        log('DEBUG', `[REPLY:${chatId}] statusMsgId=${statusMsgId} _earlyTextShown=${_earlyTextShown} _statusMsgIdForReply=${_statusMsgIdForReply} editFailed=${editFailed} activeProject=${activeProject && activeProject.name}`);
+        log('DEBUG', `[REPLY:${chatId}] statusMsgId=${statusMsgId} editFailed=${editFailed} activeProject=${activeProject && activeProject.name} lastCard=${_lastStatusCardContent ? _lastStatusCardContent.slice(0,40) : 'null'}`);
+
+        // Strategy: always try to update the status card first (avoids sending a new card
+        // while the old 🤔 card lingers, which would produce two messages).
+        // If edit fails: try to delete the status card (awaited, not fire-and-forget).
+        // If delete also fails: fall through to sending a new card.
         if (_statusMsgIdForReply && bot.editMessage) {
-          const editOk = await bot.editMessage(chatId, _statusMsgIdForReply, cleanOutput);
-          log('DEBUG', `[REPLY:${chatId}] editMessage result=${editOk}`);
-          if (editOk !== false) {
+          // Skip redundant edit: streaming already wrote the final content to the card.
+          // _lastStatusCardContent tracks the last __STREAM_TEXT__ write, so if it matches
+          // cleanOutput the card is already showing the right content — no update needed.
+          if (_lastStatusCardContent !== null && _lastStatusCardContent === cleanOutput) {
+            log('DEBUG', `[REPLY:${chatId}] skipping editMessage — card already shows final content`);
             replyMsg = { message_id: _statusMsgIdForReply };
-          } else if (bot.deleteMessage) {
-            // Edit failed — delete the status msg so it doesn't linger alongside the new reply
-            bot.deleteMessage(chatId, _statusMsgIdForReply).catch(() => { });
+          } else {
+            const editOk = await bot.editMessage(chatId, _statusMsgIdForReply, cleanOutput, _ackCardHeader);
+            log('DEBUG', `[REPLY:${chatId}] editMessage result=${editOk}`);
+            if (editOk !== false) {
+              replyMsg = { message_id: _statusMsgIdForReply };
+            } else if (bot.deleteMessage) {
+              const deleted = await bot.deleteMessage(chatId, _statusMsgIdForReply).then(() => true).catch(() => false);
+              log('DEBUG', `[REPLY:${chatId}] deleteMessage result=${deleted}`);
+              if (!deleted) {
+                // Both edit and delete failed — try one more edit attempt to avoid leaving 🤔
+                log('WARN', `[REPLY:${chatId}] deleteMessage failed — status card may linger alongside new reply`);
+              }
+            }
           }
+        } else if (_statusMsgIdForReply && bot.deleteMessage) {
+          // No editMessage — delete the status card
+          await bot.deleteMessage(chatId, _statusMsgIdForReply).catch(() => { });
         }
+
         if (!replyMsg) {
           if (activeProject && bot.sendCard) {
             log('DEBUG', `[REPLY:${chatId}] sending sendCard`);
@@ -1494,7 +1563,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           log('ERROR', `sendMessage fallback also failed: ${e2.message}`);
         }
       }
-      if (replyMsg && replyMsg.message_id && session) trackMsgSession(replyMsg.message_id, session);
+      if (replyMsg && replyMsg.message_id && session) trackMsgSession(replyMsg.message_id, session, String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null);
 
       await sendFileButtons(bot, chatId, mergeFileCollections(markedFiles, files));
 
