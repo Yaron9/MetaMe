@@ -1823,6 +1823,7 @@ const { startTelegramBridge, startFeishuBridge } = createBridgeStarter({
   handleCommand,
   pendingActivations,
   activeProcesses,
+  messageQueue,
 });
 
 const { killExistingDaemon, writePid, cleanPid } = createPidManager({

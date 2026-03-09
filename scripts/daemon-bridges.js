@@ -17,6 +17,7 @@ function createBridgeStarter(deps) {
     handleCommand,
     pendingActivations,  // optional — used to show smart activation hint
     activeProcesses,     // optional — used for auto-dispatch to clones
+    messageQueue,        // optional — used for /stop to clear queued messages
   } = deps;
 
   async function sendAclReply(bot, chatId, text) {
@@ -412,10 +413,11 @@ function createBridgeStarter(deps) {
                 const m = _boundProj.team.find(t => t.key === _replyAgentKey);
                 if (m) _targetKey = m.key;
               }
-              // Priority 2: /stop <nickname> → match team member
+              // Priority 2: /stop <nickname> → match team member (case-insensitive)
               if (!_targetKey && _stopArg) {
+                const _sa = _stopArg.toLowerCase();
                 const m = _boundProj.team.find(t =>
-                  (t.nicknames || []).some(n => n === _stopArg) || t.name === _stopArg || t.key === _stopArg
+                  (t.nicknames || []).some(n => n.toLowerCase() === _sa) || (t.name && t.name.toLowerCase() === _sa) || t.key === _sa
                 );
                 if (m) _targetKey = m.key;
               }
@@ -426,22 +428,31 @@ function createBridgeStarter(deps) {
               }
               if (_targetKey) {
                 const vid = `_agent_${_targetKey}`;
+                const member = _boundProj.team.find(t => t.key === _targetKey);
+                const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
+                // Clear message queue for this virtual agent
+                if (messageQueue.has(vid)) {
+                  const vq = messageQueue.get(vid);
+                  if (vq && vq.timer) clearTimeout(vq.timer);
+                  messageQueue.delete(vid);
+                }
                 const vproc = activeProcesses && activeProcesses.get(vid);
                 if (vproc && vproc.child) {
                   vproc.aborted = true;
                   const sig = vproc.killSignal || 'SIGTERM';
                   try { process.kill(-vproc.child.pid, sig); } catch { try { vproc.child.kill(sig); } catch { /* */ } }
-                  const member = _boundProj.team.find(t => t.key === _targetKey);
-                  const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
                   await bot.sendMessage(chatId, `⏹ Stopping ${label}...`);
                 } else {
-                  const member = _boundProj.team.find(t => t.key === _targetKey);
-                  const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
                   await bot.sendMessage(chatId, `${label} 当前没有活跃任务`);
                 }
                 return;
               }
-              // No target resolved — fall through to handleCommand
+              // /stop <bad-nickname> → no match, report error instead of falling through
+              if (_stopArg) {
+                await bot.sendMessage(chatId, `❌ 未找到团队成员: ${_stopArg}`);
+                return;
+              }
+              // Bare /stop, no sticky set → fall through to handleCommand
             }
 
             // 0. Quoted reply → force route + set sticky
@@ -488,19 +499,6 @@ function createBridgeStarter(deps) {
               }
             }
 
-            // 3. Auto-dispatch: main busy → find first free auto_dispatch clone
-            if (activeProcesses) {
-              const clones = _boundProj.team.filter(m => m.auto_dispatch);
-              const mainBusy = activeProcesses.has(chatId);
-              if (mainBusy) {
-                const clone = clones.find(m => !activeProcesses.has(`_agent_${m.key}`));
-                if (clone) {
-                  log('INFO', `Auto-dispatch: main busy → ${clone.key} (${clone.name})`);
-                  _dispatchToTeamMember(clone, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
-                  return;
-                }
-              }
-            }
           }
 
           await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
