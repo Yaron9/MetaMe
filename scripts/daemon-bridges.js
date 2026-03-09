@@ -16,6 +16,7 @@ function createBridgeStarter(deps) {
     getSession,
     handleCommand,
     pendingActivations,  // optional — used to show smart activation hint
+    activeProcesses,     // optional — used for auto-dispatch to clones
   } = deps;
 
   async function sendAclReply(bot, chatId, text) {
@@ -84,7 +85,7 @@ function createBridgeStarter(deps) {
     return '⚠️ 此群未授权\n\n如已创建 Agent，发送 `/activate` 完成绑定。\n否则请先在主群创建 Agent。';
   }
 
-  // ── Team group helpers ──────────────────────────────────────────────────
+  // ── Team group helpers ─────────────────────────────────────────────────
   function _getBoundProject(chatId, cfg) {
     const map = {
       ...(cfg.telegram ? cfg.telegram.chat_agent_map || {} : {}),
@@ -126,6 +127,25 @@ function createBridgeStarter(deps) {
         return function(_chatId, ...args) { return orig.call(target, replyChatId, ...args); };
       },
     });
+  }
+  function _dispatchToTeamMember(member, boundProj, text, cfg, bot, realChatId, executeTaskByName, acl) {
+    const virtualChatId = `_agent_${member.key}`;
+    const teamCfg = {
+      ...cfg,
+      projects: {
+        ...(cfg.projects || {}),
+        [member.key]: {
+          cwd: member.cwd || boundProj.cwd,
+          name: member.name,
+          icon: member.icon || '🤖',
+          color: member.color || 'blue',
+          engine: member.engine || boundProj.engine,
+        },
+      },
+    };
+    const proxyBot = _createTeamProxyBot(bot, realChatId);
+    handleCommand(proxyBot, virtualChatId, text, teamCfg, executeTaskByName, acl.senderId, acl.readOnly)
+      .catch(e => log('ERROR', `Team [${member.key}] error: ${e.message}`));
   }
   // ────────────────────────────────────────────────────────────────────────
 
@@ -378,29 +398,22 @@ function createBridgeStarter(deps) {
           // Team group routing: if bound project has a team array, check message for member nickname
           const { project: _boundProj } = _getBoundProject(chatId, liveCfg);
           if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0) {
+            // 1. Explicit nickname → route to that member
             const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
             if (teamMatch) {
               const { member, rest } = teamMatch;
-              const virtualChatId = `_agent_${member.key}`;
-              // Inject team member as top-level project so routing/card logic finds it
-              const teamCfg = {
-                ...liveCfg,
-                projects: {
-                  ...(liveCfg.projects || {}),
-                  [member.key]: {
-                    cwd: member.cwd || _boundProj.cwd,  // per-member cwd if specified
-                    name: member.name,
-                    icon: member.icon || '🤖',
-                    color: member.color || 'blue',
-                    engine: member.engine || _boundProj.engine,
-                  },
-                },
-              };
-              const proxyBot = _createTeamProxyBot(bot, chatId);
-              log('INFO', `Team dispatch: ${member.key} (${member.name}) in ${chatId}`);
-              handleCommand(proxyBot, virtualChatId, rest || trimmedText, teamCfg, executeTaskByName, acl.senderId, acl.readOnly)
-                .catch(e => log('ERROR', `Team [${member.key}] handler error: ${e.message}`));
+              _dispatchToTeamMember(member, _boundProj, rest || trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
               return;
+            }
+
+            // 2. Auto-dispatch: main is busy → find first free auto_dispatch clone
+            if (activeProcesses && activeProcesses.has(chatId)) {
+              const clone = _boundProj.team.find(m => m.auto_dispatch && !activeProcesses.has(`_agent_${m.key}`));
+              if (clone) {
+                log('INFO', `Auto-dispatch: main busy → ${clone.key} (${clone.name})`);
+                _dispatchToTeamMember(clone, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+                return;
+              }
             }
           }
 

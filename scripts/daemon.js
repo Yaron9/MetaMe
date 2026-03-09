@@ -1765,6 +1765,7 @@ const { startTelegramBridge, startFeishuBridge } = createBridgeStarter({
   getSession,
   handleCommand,
   pendingActivations,
+  activeProcesses,
 });
 
 const { killExistingDaemon, writePid, cleanPid } = createPidManager({
