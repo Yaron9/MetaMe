@@ -19,6 +19,9 @@ scripts/daemon-bridges.js
 scripts/feishu-adapter.js
 scripts/telegram-adapter.js
 
+# User config (contains real tokens/secrets — never publish)
+scripts/daemon.yaml
+
 # Self-reflection / cognition
 scripts/self-reflect.js
 scripts/signal-capture.js
