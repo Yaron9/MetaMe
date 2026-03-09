@@ -597,6 +597,39 @@ function createCommandRouter(deps) {
     }
 
     // --- Natural language → Claude Code session ---
+    // Interrupt detection: "等一下/停/hold on" while task is running → stop task, keep session for resume
+    const INTERRUPT_RE = /^(等一下|等等|等下|停一下|停下|停|先停|hold\s*on|wait|暂停)$/i;
+    if (activeProcesses.has(chatId) && INTERRUPT_RE.test(text.trim())) {
+      // Kill current process but preserve session for resume
+      if (messageQueue.has(chatId)) {
+        const q = messageQueue.get(chatId);
+        if (q.timer) clearTimeout(q.timer);
+        messageQueue.delete(chatId);
+      }
+      const proc = activeProcesses.get(chatId);
+      if (proc && proc.child) {
+        proc.aborted = true;
+        const signal = proc.killSignal || 'SIGTERM';
+        try { process.kill(-proc.child.pid, signal); } catch { proc.child.kill(signal); }
+      }
+      await bot.sendMessage(chatId, '⏸ 好的，听你说');
+      return;
+    }
+
+    // "继续" when no task running → resume most recent session via /last, then send prompt
+    const CONTINUE_RE = /^(继续|接着|go\s*on|continue)$/i;
+    if (!activeProcesses.has(chatId) && CONTINUE_RE.test(text.trim())) {
+      // Delegate to /last which attaches the most recent session
+      const handled = await handleSessionCommand({ bot, chatId, text: '/last' });
+      if (handled) {
+        // /last attached the session — now send "继续" to actually resume the conversation
+        resetCooldown(chatId);
+        await askClaude(bot, chatId, '继续上面的工作', config, readOnly);
+        return;
+      }
+      // No session found — fall through to normal askClaude
+    }
+
     // If a task is running: queue message, DON'T kill — will be sent as follow-up after completion
     if (activeProcesses.has(chatId)) {
       const isFirst = !messageQueue.has(chatId);

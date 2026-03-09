@@ -216,6 +216,20 @@ process.stdin.on('end', () => {
     // === LAYER 2: Confidence tagging ===
     const isStrong = STRONG_SIGNAL_ZH.test(prompt) || STRONG_SIGNAL_EN.test(prompt);
     const isCorrection = CORRECTION_ZH.test(prompt) || CORRECTION_EN.test(prompt);
+
+    // === LAYER 2.5: Implicit signal whitelist ===
+    // If not meta/correction/directive, require at least one preference keyword.
+    // This flips from blacklist ("exclude known noise") to whitelist ("require signal").
+    if (!isMeta && !isStrong && !isCorrection) {
+      const hasPreferenceSignal =
+        IMPLICIT_ZH.test(prompt) || IMPLICIT_EN.test(prompt) ||
+        /风格|方式|原则|策略|思路|态度|价值观|审美|品味/.test(prompt) ||
+        /style|approach|principle|strategy|mindset|philosophy/i.test(prompt);
+      if (!hasPreferenceSignal) {
+        process.exit(0);
+      }
+    }
+
     const confidence = (isStrong || isCorrection) ? 'high' : 'normal';
     const signalType = isMeta ? 'metacognitive' : isCorrection ? 'correction' : isStrong ? 'directive' : 'implicit';
 

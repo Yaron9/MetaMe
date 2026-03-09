@@ -33,11 +33,11 @@ projects:
 
 heartbeat:
   tasks:
-    # 认知蒸馏：有偏好信号才触发，2小时冷却，仅在用户闲置时执行
+    # 认知蒸馏：有偏好信号才触发，4小时冷却，一次处理所有 batch
     - name: cognitive-distill
       type: script
       command: node ~/.metame/distill.js
-      interval: 2h
+      interval: 4h
       precondition: "test -s ~/.metame/raw_signals.jsonl"
       require_idle: true
       notify: false
@@ -62,11 +62,11 @@ heartbeat:
       notify: false
       enabled: true
 
-    # 技能演化：有技能信号才触发，6小时冷却，仅在用户闲置时执行
+    # 技能演化：有技能信号才触发，12小时冷却，仅在用户闲置时执行
     - name: skill-evolve
       type: script
       command: node ~/.metame/skill-evolution.js
-      interval: 6h
+      interval: 12h
       precondition: "test -s ~/.metame/skill_signals.jsonl"
       require_idle: true
       notify: false

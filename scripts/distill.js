@@ -1469,26 +1469,45 @@ if (require.main === module) {
       await detectPatterns(true);
     }
 
-    const result = await distill();
-    // Write session log if behavior was detected
-    if (result.behavior) {
-      writeSessionLog(result.behavior, result.signalCount || 0, result.skeleton || null, result.sessionSummary || null);
+    // Process ALL pending batches in one run (not just one session group).
+    // Cap at 5 iterations to bound total token spend per invocation.
+    const MAX_BATCH_ROUNDS = 5;
+    let totalTokens = 0;
+    let roundsRun = 0;
+
+    for (let round = 0; round < MAX_BATCH_ROUNDS; round++) {
+      // Check if buffer still has signals
+      try {
+        const buf = fs.readFileSync(BUFFER_FILE, 'utf8').trim();
+        if (!buf) break;
+      } catch { break; }
+
+      const result = await distill();
+      roundsRun++;
+
+      // Write session log if behavior was detected
+      if (result.behavior) {
+        writeSessionLog(result.behavior, result.signalCount || 0, result.skeleton || null, result.sessionSummary || null);
+      }
+
+      const estTokens = Math.ceil(((result.signalCount || 1) * 500) + ((result.summary || '').length / 4));
+      totalTokens += estTokens;
+
+      if (result.updated) {
+        console.log(`🧠 [${round + 1}] ${result.summary}`);
+      } else {
+        console.log(`💤 [${round + 1}] ${result.summary}`);
+      }
+
+      // Stop if: no signals, nothing processed, or signals not consumed (avoid retry loop)
+      if (!result.signalCount || !result.updated || result.summary.includes('No signals')) break;
     }
 
-    // Fill reflection words for sessions that don't have one yet
+    // Post-distill tasks: run once after all batches
     await fillSessionReflections();
-
-    // Run pattern detection (only triggers every 5th distill)
     if (!bootstrapped) await detectPatterns();
 
-    if (result.updated) {
-      console.log(`🧠 ${result.summary}`);
-    } else {
-      console.log(`💤 ${result.summary}`);
-    }
-    // Report estimated token usage for daemon budget tracking
-    // Each callHaiku invocation ~2k-5k tokens; estimate from signal count + result size
-    const estTokens = Math.ceil(((result.signalCount || 1) * 500) + ((result.summary || '').length / 4));
-    console.log(`__TOKENS__:${estTokens}`);
+    console.log(`__TOKENS__:${totalTokens}`);
+    if (roundsRun > 1) console.log(`[distill] processed ${roundsRun} batches in one run`);
   })();
 }

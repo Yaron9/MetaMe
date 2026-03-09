@@ -676,6 +676,75 @@ function createAdminCommandHandler(deps) {
       return { handled: true, config };
     }
 
+    if (text === '/reset-budget') {
+      if (!state.budget) state.budget = {};
+      state.budget.tokens_used = 0;
+      state.budget.date = new Date().toISOString().slice(0, 10);
+      await bot.sendMessage(chatId, `✅ Budget 已重置 (${state.budget.date})`);
+      return { handled: true, config };
+    }
+
+    if (text === '/toggle' || text.startsWith('/toggle ')) {
+      const arg = text.slice('/toggle'.length).trim();
+      const cfg = config;
+      const tasks = (cfg.heartbeat && cfg.heartbeat.tasks) || [];
+
+      // Group mapping: friendly name → task names
+      const groups = {
+        cognition: ['cognitive-distill', 'self-reflect'],
+        memory: ['memory-extract', 'nightly-reflect', 'memory-gc', 'memory-index'],
+        skill: ['skill-evolve'],
+      };
+
+      if (!arg) {
+        // Show status
+        const lines = ['⚙️ 后台任务开关:'];
+        for (const [group, names] of Object.entries(groups)) {
+          const statuses = names.map(n => {
+            const t = tasks.find(t2 => t2.name === n);
+            return t ? (t.enabled !== false ? '✅' : '❌') : '⚠️';
+          });
+          const allOn = statuses.every(s => s === '✅');
+          const allOff = statuses.every(s => s === '❌');
+          lines.push(`  ${allOn ? '✅' : allOff ? '❌' : '⚠️'} ${group}`);
+        }
+        lines.push('', '用法: /toggle <cognition|memory|skill> <on|off>');
+        await bot.sendMessage(chatId, lines.join('\n'));
+        return { handled: true, config };
+      }
+
+      const parts = arg.split(/\s+/);
+      const groupName = parts[0];
+      const action = parts[1];
+
+      if (!groups[groupName]) {
+        await bot.sendMessage(chatId, `未知分组: ${groupName}\n可选: cognition, memory, skill`);
+        return { handled: true, config };
+      }
+      if (action !== 'on' && action !== 'off') {
+        await bot.sendMessage(chatId, `用法: /toggle ${groupName} <on|off>`);
+        return { handled: true, config };
+      }
+
+      const enabled = action === 'on';
+      const affected = [];
+      for (const name of groups[groupName]) {
+        const t = tasks.find(t2 => t2.name === name);
+        if (t) {
+          t.enabled = enabled;
+          affected.push(name);
+        }
+      }
+      if (affected.length === 0) {
+        await bot.sendMessage(chatId, `⚠️ 未找到 ${groupName} 相关任务，请检查 heartbeat 配置`);
+        return { handled: true, config };
+      }
+      writeConfigSafe(cfg);
+      config = loadConfig();
+      await bot.sendMessage(chatId, `${enabled ? '✅' : '❌'} ${groupName} ${enabled ? 'ON' : 'OFF'} (${affected.join(', ')})`);
+      return { handled: true, config };
+    }
+
     if (text === '/usage' || text.startsWith('/usage ')) {
       const arg = text.slice('/usage'.length).trim() || 'today';
       const usage = state.usage || {};

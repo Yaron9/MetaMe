@@ -47,9 +47,14 @@ function createSessionCommandHandler(deps) {
 
   // Write per-engine session slot, preserving cwd and other engine slots.
   function attachEngineSession(state, chatId, engine, sessionId, cwd) {
-    const existing = state.sessions[chatId] || {};
+    // For bound chats, resolve to virtual chatId so askClaude picks up the session
+    const cfg = loadConfig();
+    const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
+    const boundKey = agentMap[String(chatId)];
+    const effectiveId = boundKey ? `_agent_${boundKey}` : String(chatId);
+    const existing = state.sessions[effectiveId] || {};
     const existingEngines = existing.engines || {};
-    state.sessions[chatId] = {
+    state.sessions[effectiveId] = {
       ...existing,
       cwd: cwd || existing.cwd || HOME,
       engines: { ...existingEngines, [engine]: { id: sessionId, started: true } },

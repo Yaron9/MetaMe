@@ -276,7 +276,7 @@ async function run() {
     let distillEnv = {};
     try { distillEnv = buildDistillEnv(); } catch { }
 
-    const sessions = sessionAnalytics.findAllUnextractedSessions(8);
+    const sessions = sessionAnalytics.findAllUnextractedSessions(3);
     if (sessions.length === 0) {
       console.log('[memory-extract] No unanalyzed sessions found.');
       memory.close();

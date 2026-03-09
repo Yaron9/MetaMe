@@ -520,6 +520,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       let _firstOutputLogged = false;
       let classifiedError = null;
       let lastStatusTime = 0;
+      let _earlyTextSent = false;
       const STATUS_THROTTLE = statusThrottleMs;
       const writtenFiles = [];
       const toolUsageLog = [];
@@ -608,10 +609,15 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
               continue;
             }
             if (event.type === 'text' && event.text) {
-              finalResult = String(event.text);
+              finalResult += (finalResult ? '\n\n' : '') + String(event.text);
               if (waitingForTool) {
                 waitingForTool = false;
                 resetIdleTimer();
+              }
+              // Show first text chunk immediately so user sees "计划：xxx" before tool work begins
+              if (onStatus && finalResult.trim() && !_earlyTextSent) {
+                _earlyTextSent = true;
+                onStatus('__EARLY_TEXT__' + finalResult).catch(() => {});
               }
               continue;
             }
@@ -833,6 +839,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     // Send 🤔 ack and start typing — fire-and-forget so we don't block spawn on Telegram RTT.
     // statusMsgId is resolved via a promise; it will be ready well before the first model output.
     let statusMsgId = null;
+    let _earlyTextShown = false;
     // Fire-and-forget: don't await Telegram RTT before spawning the engine process.
     // statusMsgId will be populated well before the first model output (~5s for codex).
     (bot.sendMarkdown ? bot.sendMarkdown(chatId, '🤔') : bot.sendMessage(chatId, '🤔'))
@@ -1208,16 +1215,31 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const FALLBACK_THROTTLE = fallbackThrottleMs;
     const onStatus = async (status) => {
       try {
+        // Detect early model text (tagged by spawnClaudeStreaming with __EARLY_TEXT__ prefix)
+        let actualStatus = status;
+        const isEarlyText = typeof status === 'string' && status.startsWith('__EARLY_TEXT__');
+        if (isEarlyText) {
+          actualStatus = status.slice('__EARLY_TEXT__'.length);
+        }
         if (statusMsgId && bot.editMessage && !editFailed) {
-          const ok = await bot.editMessage(chatId, statusMsgId, status);
-          if (ok !== false) return; // edit succeeded (true or undefined for Telegram)
+          const ok = await bot.editMessage(chatId, statusMsgId, actualStatus);
+          if (ok !== false) {
+            // Only mark early text as shown when the edit actually succeeded.
+            // If edit fails and we fall back to sendMessage, _earlyTextShown stays false
+            // so the final reply won't try to edit the status card, preventing duplicates.
+            if (isEarlyText) _earlyTextShown = true;
+            return; // edit succeeded (true or undefined for Telegram)
+          }
           editFailed = true; // edit failed, switch to fallback permanently
         }
-        // Fallback: send as new message with extra throttle to avoid spam
+        // Early text: skip fallback entirely — avoids a duplicate when the final reply
+        // also sends a new message (since _earlyTextShown=false → status card is deleted).
+        if (isEarlyText) return;
+        // Normal status updates: send as new message with extra throttle to avoid spam
         const now = Date.now();
         if (now - lastFallbackStatus < FALLBACK_THROTTLE) return;
         lastFallbackStatus = now;
-        await bot.sendMessage(chatId, status);
+        await bot.sendMessage(chatId, actualStatus);
       } catch { /* ignore status update failures */ }
     };
 
@@ -1234,7 +1256,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         engine: runtime.name,
         started: true,
       };
-      await patchSessionSerialized(chatId, (cur) => {
+      await patchSessionSerialized(sessionChatId, (cur) => {
         const engines = { ...(cur.engines || {}) };
         engines[runtime.name] = { ...(engines[runtime.name] || {}), id: safeNextId, started: true };
         return { ...cur, cwd: session.cwd || cur.cwd || HOME, engines };
@@ -1338,8 +1360,10 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       } catch (e) { log('WARN', `Skill evolution signal capture failed: ${e.message}`); }
     }
 
-    // Clean up status message
-    if (statusMsgId && bot.deleteMessage) {
+    // Clean up status message — but if we already showed early text via onStatus, keep the message
+    // and let it be overwritten by the final reply via editMessage below.
+    const _statusMsgIdForReply = _earlyTextShown ? statusMsgId : null;
+    if (statusMsgId && !_earlyTextShown && bot.deleteMessage) {
       bot.deleteMessage(chatId, statusMsgId).catch(() => { });
     }
 
@@ -1374,14 +1398,14 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         const doneMsg = await bot.sendMessage(chatId, `✉️ 已转达给 ${names}，处理中…`);
         if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session);
         const wasNew = !session.started;
-        if (wasNew) markSessionStarted(chatId, engineName);
+        if (wasNew) markSessionStarted(sessionChatId, engineName);
         return { ok: true };
       }
       const filesDesc = files && files.length > 0 ? `\n修改了 ${files.length} 个文件` : '';
       const doneMsg = await bot.sendMessage(chatId, `✅ 完成${filesDesc}`);
       if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session);
       const wasNew = !session.started;
-      if (wasNew) markSessionStarted(chatId, engineName);
+      if (wasNew) markSessionStarted(sessionChatId, engineName);
       return { ok: true };
     }
 
@@ -1406,7 +1430,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       // Mark session as started after first successful call
       const wasNew = !session.started;
-      if (wasNew) markSessionStarted(chatId, engineName);
+      if (wasNew) markSessionStarted(sessionChatId, engineName);
 
       const estimated = Math.ceil((prompt.length + output.length) / 4);
       const chatCategory = classifyChatUsage(chatId, {
@@ -1437,14 +1461,32 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       let replyMsg;
       try {
-        if (activeProject && bot.sendCard) {
-          replyMsg = await bot.sendCard(chatId, {
-            title: `${activeProject.icon || '🤖'} ${activeProject.name || ''}`,
-            body: cleanOutput,
-            color: activeProject.color || 'blue',
-          });
-        } else {
-          replyMsg = await bot.sendMarkdown(chatId, cleanOutput);
+        // If early text was shown via status message, try to edit it with final reply first
+        log('DEBUG', `[REPLY:${chatId}] statusMsgId=${statusMsgId} _earlyTextShown=${_earlyTextShown} _statusMsgIdForReply=${_statusMsgIdForReply} editFailed=${editFailed} activeProject=${activeProject && activeProject.name}`);
+        if (_statusMsgIdForReply && bot.editMessage) {
+          const editOk = await bot.editMessage(chatId, _statusMsgIdForReply, cleanOutput);
+          log('DEBUG', `[REPLY:${chatId}] editMessage result=${editOk}`);
+          if (editOk !== false) {
+            replyMsg = { message_id: _statusMsgIdForReply };
+          } else if (bot.deleteMessage) {
+            // Edit failed — delete the status msg so it doesn't linger alongside the new reply
+            bot.deleteMessage(chatId, _statusMsgIdForReply).catch(() => { });
+          }
+        }
+        if (!replyMsg) {
+          if (activeProject && bot.sendCard) {
+            log('DEBUG', `[REPLY:${chatId}] sending sendCard`);
+            replyMsg = await bot.sendCard(chatId, {
+              title: `${activeProject.icon || '🤖'} ${activeProject.name || ''}`,
+              body: cleanOutput,
+              color: activeProject.color || 'blue',
+            });
+            log('DEBUG', `[REPLY:${chatId}] sendCard done msgId=${replyMsg && replyMsg.message_id}`);
+          } else {
+            log('DEBUG', `[REPLY:${chatId}] sending sendMarkdown`);
+            replyMsg = await bot.sendMarkdown(chatId, cleanOutput);
+            log('DEBUG', `[REPLY:${chatId}] sendMarkdown done msgId=${replyMsg && replyMsg.message_id}`);
+          }
         }
       } catch (sendErr) {
         log('WARN', `sendCard/sendMarkdown failed (${sendErr.message}), falling back to sendMessage`);
@@ -1518,7 +1560,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         );
         if (retry.sessionId) await onSession(retry.sessionId);
         if (retry.output) {
-          markSessionStarted(chatId, runtime.name);
+          markSessionStarted(sessionChatId, runtime.name);
           const { markedFiles: retryMarked, cleanOutput: retryClean } = parseFileMarkers(retry.output);
           await bot.sendMarkdown(chatId, retryClean);
           await sendFileButtons(bot, chatId, mergeFileCollections(retryMarked, retry.files));
