@@ -841,6 +841,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     let statusMsgId = null;
     let _earlyTextShown = false;
     let _lastStatusCardContent = null; // track last content written to status card
+    let _earlyTextContent = null; // track early text content synchronously (avoids race with async edit)
     // Fire-and-forget: don't await Telegram RTT before spawning the engine process.
     // statusMsgId will be populated well before the first model output (~5s for codex).
     (bot.sendMarkdown ? bot.sendMarkdown(chatId, '🤔') : bot.sendMessage(chatId, '🤔'))
@@ -1221,6 +1222,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         const isEarlyText = typeof status === 'string' && status.startsWith('__EARLY_TEXT__');
         if (isEarlyText) {
           actualStatus = status.slice('__EARLY_TEXT__'.length);
+          _earlyTextContent = actualStatus; // sync track before async edit
         }
         if (statusMsgId && bot.editMessage && !editFailed) {
           const ok = await bot.editMessage(chatId, statusMsgId, actualStatus);
@@ -1468,8 +1470,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         if (_statusMsgIdForReply && bot.editMessage) {
           // Skip redundant edit: if card already shows the final content (e.g. early text = final output),
           // avoid a visible second "update" that the user would perceive as a duplicate reply.
-          if (_lastStatusCardContent !== null && _lastStatusCardContent === cleanOutput) {
-            log('DEBUG', `[REPLY:${chatId}] skipping editMessage — content unchanged (early text === final output)`);
+          // Check both _lastStatusCardContent (set by async callback) and _earlyTextContent (set synchronously)
+          // to handle the race where the async edit hasn't completed yet but content is identical.
+          const contentAlreadyShown = (_lastStatusCardContent !== null && _lastStatusCardContent === cleanOutput)
+            || (_earlyTextContent !== null && _earlyTextContent === cleanOutput);
+          if (contentAlreadyShown) {
+            log('DEBUG', `[REPLY:${chatId}] skipping editMessage — content unchanged (early text === final output, sync=${_earlyTextContent !== null}, async=${_lastStatusCardContent !== null})`);
             replyMsg = { message_id: _statusMsgIdForReply };
           } else {
             const editOk = await bot.editMessage(chatId, _statusMsgIdForReply, cleanOutput);
