@@ -26,8 +26,11 @@ curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bas
 
 ---
 
-> ### 🚀 v1.5.0 — Dynamic Engine Default + Distill Coupling
+> ### 🚀 v1.5.3 — Unified Intent Engine & Team Broadcast
 >
+> - **Unified intent engine**: Config-driven intent dispatcher replacing standalone hooks for team communication, ops assist, and task creation.
+> - **Team broadcast**: Real-time cross-agent visibility in shared group chats with nickname routing and sticky follow.
+> - **Modular agent wizards**: New streamlined CLI flows for creating teams and cloning agents.
 > - **Dynamic default engine**: auto-detects installed CLI (claude/codex) at startup; pure-codex users work out of the box with zero config.
 > - **`/engine` command**: switch global default engine from mobile (`/engine codex`), with three-layer priority: `project.engine > /engine setting > auto-detect`.
 > - **Engine–distill coupling**: switching engine auto-pairs the distill model (claude→haiku, codex→gpt-5.1-codex-mini) and distill binary.
@@ -513,8 +516,9 @@ Level mapping:
 
 ## Hook Optimizations (Default On)
 
-MetaMe installs and maintains two core Claude hooks automatically on launch:
+MetaMe installs and maintains core Claude hooks automatically on launch:
 
+- `UserPromptSubmit` hook (`scripts/hooks/intent-engine.js`): Unified intent engine for team dispatch, ops assist, and task creation hints.
 - `UserPromptSubmit` hook (`scripts/signal-capture.js`): captures high-signal preference/task traces with layered filtering.
 - `Stop` hook (`scripts/hooks/stop-session-capture.js`): records session-end/tool-failure signals with watermark protection.
 

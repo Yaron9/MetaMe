@@ -378,25 +378,39 @@ function ensureHookInstalled() {
       console.log(`${icon("hook")} MetaMe: Stop session capture hook installed.`);
     }
 
-    // Ensure team-context hook (team roster injection for team member sessions)
-    const teamCtxScript = path.join(METAME_DIR, 'hooks', 'team-context.js').replace(/\\/g, '/');
-    const teamCtxCommand = `node "${teamCtxScript}"`;
-    const teamCtxInstalled = (settings.hooks?.UserPromptSubmit || []).some(entry =>
-      entry.hooks?.some(h => h.command && h.command.includes('team-context.js'))
+    // Migrate: remove standalone team-context.js hook (superseded by intent-engine)
+    if (settings.hooks?.UserPromptSubmit) {
+      const before = settings.hooks.UserPromptSubmit.length;
+      for (const entry of settings.hooks.UserPromptSubmit) {
+        if (entry.hooks) {
+          entry.hooks = entry.hooks.filter(h => !(h.command && h.command.includes('team-context.js')));
+        }
+      }
+      settings.hooks.UserPromptSubmit = settings.hooks.UserPromptSubmit.filter(
+        entry => entry.hooks && entry.hooks.length > 0
+      );
+      if (settings.hooks.UserPromptSubmit.length !== before) modified = true;
+    }
+
+    // Ensure intent-engine hook (unified intent detection + hint injection)
+    const intentEngineScript = path.join(METAME_DIR, 'hooks', 'intent-engine.js').replace(/\\/g, '/');
+    const intentEngineCommand = `node "${intentEngineScript}"`;
+    const intentEngineInstalled = (settings.hooks?.UserPromptSubmit || []).some(entry =>
+      entry.hooks?.some(h => h.command && h.command.includes('intent-engine.js'))
     );
 
-    if (!teamCtxInstalled) {
+    if (!intentEngineInstalled) {
       if (!settings.hooks) settings.hooks = {};
       if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
 
       settings.hooks.UserPromptSubmit.push({
         hooks: [{
           type: 'command',
-          command: teamCtxCommand,
+          command: intentEngineCommand,
         }]
       });
       modified = true;
-      console.log(`${icon("hook")} MetaMe: Team context hook installed.`);
+      console.log(`${icon("hook")} MetaMe: Intent engine hook installed.`);
     }
 
     if (modified) {
@@ -939,6 +953,14 @@ const CAPABILITY_SECTIONS = [
   '## 跨会话记忆',
   '用户提"上次/之前"时搜索：`node ~/.metame/memory-search.js "关键词1" "keyword2"`',
   '一次传 3-4 个关键词（中文+英文+函数名），`--facts` 只搜事实，`--sessions` 只搜会话。',
+  '',
+  '## Intent Engine（Hook 意图识别）',
+  '每次 UserPromptSubmit 自动运行意图检测，按需注入提示。当前意图模块：',
+  '- `team_dispatch` — 团队联络意图 → dispatch_to 提示（默认开）',
+  '- `ops_assist` — 运维意图 → /undo /restart /logs /gc 提示（默认开）',
+  '- `task_create` — 任务调度意图 → /task-add 提示（默认开）',
+  '开关：daemon.yaml `hooks:` 段设 `false` 可禁用任意模块。',
+  '查询配置/新增意图模块 → 先 `cat ~/.metame/docs/hook-config.md` 再操作。',
   '',
   '## Skills',
   '能力不足/工具缺失/任务失败 → 先查 `cat ~/.claude/skills/skill-manager/SKILL.md`，不要自己猜。',
