@@ -247,6 +247,7 @@ if (fs.existsSync(bundledSkillsDir)) {
   }
 }
 
+
 // Ensure ~/.codex/skills and ~/.agents/skills are symlinks to ~/.claude/skills
 // This keeps skill evolution unified across all engines.
 for (const altDir of [
@@ -954,13 +955,8 @@ const CAPABILITY_SECTIONS = [
   '用户提"上次/之前"时搜索：`node ~/.metame/memory-search.js "关键词1" "keyword2"`',
   '一次传 3-4 个关键词（中文+英文+函数名），`--facts` 只搜事实，`--sessions` 只搜会话。',
   '',
-  '## Intent Engine（Hook 意图识别）',
-  '每次 UserPromptSubmit 自动运行意图检测，按需注入提示。当前意图模块：',
-  '- `team_dispatch` — 团队联络意图 → dispatch_to 提示（默认开）',
-  '- `ops_assist` — 运维意图 → /undo /restart /logs /gc 提示（默认开）',
-  '- `task_create` — 任务调度意图 → /task-add 提示（默认开）',
-  '开关：daemon.yaml `hooks:` 段设 `false` 可禁用任意模块。',
-  '查询配置/新增意图模块 → 先 `cat ~/.metame/docs/hook-config.md` 再操作。',
+  '## Intent Engine',
+  '用户问 hook/intent 配置、开关、新增意图模块时 → 先 `cat ~/.metame/docs/hook-config.md` 再操作。',
   '',
   '## Skills',
   '能力不足/工具缺失/任务失败 → 先查 `cat ~/.claude/skills/skill-manager/SKILL.md`，不要自己猜。',
