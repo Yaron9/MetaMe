@@ -15,6 +15,7 @@ const net = require('net');
 const crypto = require('crypto');
 const os = require('os');
 const { socketPath } = require('../platform');
+const yaml = require('../resolve-yaml');
 const { buildEnrichedPrompt, buildTeamRosterHint } = require('../team-dispatch');
 
 const METAME_DIR = path.join(os.homedir(), '.metame');
@@ -59,64 +60,69 @@ function getDispatchSecret() {
 }
 
 function sendOne(memberTarget, memberPrompt, opts = {}) {
-  const ts = new Date().toISOString();
-  const secret = getDispatchSecret();
-  const enriched = buildEnrichedPrompt(memberTarget, memberPrompt, METAME_DIR);
-  const sigPayload = JSON.stringify({ target: memberTarget, prompt: enriched, ts });
-  const sig = crypto.createHmac('sha256', secret).update(sigPayload).digest('hex');
+  return new Promise((resolve) => {
+    const ts = new Date().toISOString();
+    const secret = getDispatchSecret();
+    const enriched = buildEnrichedPrompt(memberTarget, memberPrompt, METAME_DIR);
+    const sigPayload = JSON.stringify({ target: memberTarget, prompt: enriched, ts });
+    const sig = crypto.createHmac('sha256', secret).update(sigPayload).digest('hex');
 
-  const callback = fromKey !== '_claude_session';
-  const msg = {
-    target: memberTarget,
-    prompt: enriched,
-    from: fromKey,
-    new_session: newSession,
-    created_at: ts,
-    ts,
-    sig,
-    team_roster_injected: opts.team_roster_injected || false,
-    ...(callback && { callback: true }),
-  };
+    const callback = fromKey !== '_claude_session';
+    const msg = {
+      target: memberTarget,
+      prompt: enriched,
+      from: fromKey,
+      new_session: newSession,
+      created_at: ts,
+      ts,
+      sig,
+      team_roster_injected: opts.team_roster_injected || false,
+      ...(callback && { callback: true }),
+    };
 
-  // Ensure target inbox dir
-  fs.mkdirSync(path.join(METAME_DIR, 'memory', 'inbox', memberTarget, 'read'), { recursive: true });
+    // Ensure target inbox dir
+    fs.mkdirSync(path.join(METAME_DIR, 'memory', 'inbox', memberTarget, 'read'), { recursive: true });
 
-  function fallback() {
-    fs.mkdirSync(DISPATCH_DIR, { recursive: true });
-    fs.appendFileSync(PENDING, JSON.stringify(msg) + '\n');
-    console.log(`DISPATCH_OK(file): ${memberTarget} → ${memberPrompt.slice(0, 60)}${newSession ? ' [new session]' : ''}`);
-  }
+    function fallback() {
+      fs.mkdirSync(DISPATCH_DIR, { recursive: true });
+      fs.appendFileSync(PENDING, JSON.stringify(msg) + '\n');
+      console.log(`DISPATCH_OK(file): ${memberTarget} → ${memberPrompt.slice(0, 60)}${newSession ? ' [new session]' : ''}`);
+      resolve();
+    }
 
-  const sock = net.createConnection({ path: SOCK_PATH });
-  let done = false;
+    const sock = net.createConnection({ path: SOCK_PATH });
+    let done = false;
 
-  const timer = setTimeout(() => {
-    if (done) return;
-    done = true;
-    sock.destroy();
-    fallback();
-  }, 2000);
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      sock.destroy();
+      fallback();
+    }, 2000);
 
-  sock.on('connect', () => { sock.write(JSON.stringify(msg)); sock.end(); });
-  sock.on('data', (data) => {
-    if (done) return;
-    done = true;
-    clearTimeout(timer);
-    try {
-      const res = JSON.parse(data.toString().trim());
-      if (res.ok) {
-        console.log(`DISPATCH_OK(socket): ${memberTarget} → ${memberPrompt.slice(0, 60)}${newSession ? ' [new session]' : ''}`);
-      } else {
-        fallback();
-      }
-    } catch { fallback(); }
-    sock.destroy();
-  });
-  sock.on('error', () => {
-    if (done) return;
-    done = true;
-    clearTimeout(timer);
-    fallback();
+    sock.on('connect', () => { sock.write(JSON.stringify(msg)); sock.end(); });
+    sock.on('data', (data) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        const res = JSON.parse(data.toString().trim());
+        if (res.ok) {
+          console.log(`DISPATCH_OK(socket): ${memberTarget} → ${memberPrompt.slice(0, 60)}${newSession ? ' [new session]' : ''}`);
+        } else {
+          fallback();
+          return;
+        }
+      } catch { fallback(); return; }
+      sock.destroy();
+      resolve();
+    });
+    sock.on('error', () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      fallback();
+    });
   });
 }
 
@@ -124,9 +130,7 @@ function sendOne(memberTarget, memberPrompt, opts = {}) {
 if (teamMode) {
   let config = null;
   try {
-    const yaml = require('js-yaml');
-    const cfgPath = path.join(METAME_DIR, 'daemon.yaml');
-    config = yaml.load(fs.readFileSync(cfgPath, 'utf8'));
+    config = yaml.load(fs.readFileSync(path.join(METAME_DIR, 'daemon.yaml'), 'utf8'));
   } catch (e) {
     console.error(`dispatch_to --team: failed to load daemon.yaml: ${e.message}`);
     process.exit(1);
@@ -146,14 +150,15 @@ if (teamMode) {
 
   console.log(`📢 Team broadcast → ${target} (${team.length} members): ${prompt.slice(0, 60)}`);
 
-  for (const member of team) {
+  // Await all dispatches before exiting so async socket/file ops complete
+  Promise.all(team.map((member) => {
     const roster = buildTeamRosterHint(target, member.key, config.projects);
-    const memberPrompt = roster ? `${roster}\n\n---\n${prompt}` : prompt;
-    sendOne(member.key, memberPrompt, { team_roster_injected: true });
-  }
-
-  process.exit(0);
+    // Enrich first (shared context), then prepend roster so Claude sees it at top
+    const enriched = buildEnrichedPrompt(member.key, prompt, METAME_DIR);
+    const memberPrompt = roster ? `${roster}\n\n---\n${enriched}` : enriched;
+    return sendOne(member.key, memberPrompt, { team_roster_injected: true });
+  })).then(() => process.exit(0));
 }
 
 // ── Normal single-target dispatch ─────────────────────────────────────────────
-sendOne(target, prompt);
+sendOne(target, prompt).then(() => process.exit(0));

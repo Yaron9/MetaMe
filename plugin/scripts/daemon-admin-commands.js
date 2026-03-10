@@ -41,8 +41,25 @@ function createAdminCommandHandler(deps) {
   } = deps;
 
   // resolveProjectKey: imported from team-dispatch.js (shared with dispatch_to and daemon.js)
-  function resolveProjectKey(targetName, projects) {
-    return _resolveProjectKey(targetName, projects);
+  const resolveProjectKey = _resolveProjectKey;
+
+  /**
+   * Resolve a target name to { dispatchKey, projInfo }.
+   * resolveProjectKey returns 'parent/member' for team members; this splits
+   * it into the bare dispatch key and looks up the project/member config.
+   */
+  function resolveDispatchTarget(targetName, projects) {
+    const resolved = resolveProjectKey(targetName, projects || {});
+    if (!resolved) return null;
+    if (!resolved.includes('/')) {
+      return { dispatchKey: resolved, projInfo: (projects || {})[resolved] || {} };
+    }
+    const [parentKey, memberKey] = resolved.split('/');
+    const parent = (projects || {})[parentKey] || {};
+    const member = Array.isArray(parent.team)
+      ? (parent.team.find(m => m.key === memberKey) || {})
+      : {};
+    return { dispatchKey: memberKey, projInfo: member };
   }
 
   function resolveSenderKey(chatId, config) {
@@ -612,17 +629,17 @@ function createAdminCommandHandler(deps) {
         const targetName = toMatch[1];
         const prompt = toMatch[2].trim();
 
-        // Resolve target by project key or nickname
-        const targetKey = resolveProjectKey(targetName, config.projects || {});
-        if (!targetKey) {
+        // Resolve target by project key or nickname (handles team members via compound key)
+        const resolved = resolveDispatchTarget(targetName, config.projects || {});
+        if (!resolved) {
           await bot.sendMessage(chatId, `未找到 agent: ${targetName}\n可用: ${Object.keys(config.projects || {}).join(', ')}`);
           return { handled: true, config };
         }
+        const { dispatchKey: targetKey, projInfo } = resolved;
 
         // Determine sender from current chat's project mapping
         const senderKey = resolveSenderKey(chatId, config);
 
-        const projInfo = config.projects[targetKey] || {};
         // Find the target project's own Feishu chat (reverse lookup of chat_agent_map)
         const feishuChatAgentMap = (config.feishu && config.feishu.chat_agent_map) || {};
         const targetChatId = Object.entries(feishuChatAgentMap).find(([, v]) => v === targetKey)?.[0] || null;
@@ -675,16 +692,16 @@ function createAdminCommandHandler(deps) {
       const targetName = msgMatch[1];
       const message = msgMatch[2].trim();
 
-      // Resolve target by nickname or key (checks team members + top-level projects)
+      // Resolve target by nickname or key (handles team members via compound key)
       const senderKey = resolveSenderKey(chatId, config);
-      const targetKey = resolveProjectKey(targetName, config.projects || {});
+      const resolved = resolveDispatchTarget(targetName, config.projects || {});
 
-      if (!targetKey) {
+      if (!resolved) {
         await bot.sendMessage(chatId, `未找到 agent: ${targetName}`);
         return { handled: true, config };
       }
+      const { dispatchKey: targetKey, projInfo: toProj } = resolved;
 
-      const toProj = config.projects[targetKey] || {};
       const result = dispatchTask(targetKey, {
         from: senderKey,
         type: 'message',

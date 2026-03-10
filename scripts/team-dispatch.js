@@ -17,6 +17,8 @@ const os = require('os');
 
 const METAME_DIR = path.join(os.homedir(), '.metame');
 
+function _escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Resolution helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -52,7 +54,6 @@ function resolveProjectKey(targetName, projects) {
  * or null if no match.
  */
 function findTeamMember(text, team) {
-  function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
   const t = String(text || '').trim();
   for (const member of team) {
     const nicks = Array.isArray(member.nicknames) ? member.nicknames : [];
@@ -60,7 +61,7 @@ function findTeamMember(text, team) {
       const n = String(nick || '').trim();
       if (!n) continue;
       if (t.toLowerCase() === n.toLowerCase()) return { member, rest: '' };
-      const re = new RegExp(`^${escapeRe(n)}[\\s,，、:：]+`, 'i');
+      const re = new RegExp(`^${_escapeRe(n)}[\\s,，、:：]+`, 'i');
       const m = t.match(re);
       if (m) return { member, rest: t.slice(m[0].length).trim() };
     }
