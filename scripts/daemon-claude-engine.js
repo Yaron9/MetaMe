@@ -530,7 +530,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         const now = Date.now();
         if (!force && now - _lastStreamFlush < STREAM_THROTTLE) return;
         _lastStreamFlush = now;
-        onStatus('__STREAM_TEXT__' + _streamText).catch(() => {});
+        onStatus('__STREAM_TEXT__' + _streamText).catch(() => { });
       }
       const writtenFiles = [];
       const toolUsageLog = [];
@@ -583,7 +583,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           if (onStatus) {
             const milestoneMsg = parts.join(' | ');
             const msg = _streamText ? `__TOOL_OVERLAY__${_streamText}\n\n> ${milestoneMsg}` : milestoneMsg;
-            onStatus(msg).catch(() => {});
+            onStatus(msg).catch(() => { });
           }
         }
       }, 30000);
@@ -721,7 +721,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             if (onStatus) {
               // Overlay tool status on top of streamed text (if any); else show plain status
               const msg = _streamText ? `__TOOL_OVERLAY__${_streamText}\n\n> ${status}` : status;
-              onStatus(msg).catch(() => {});
+              onStatus(msg).catch(() => { });
             }
           }
         }
@@ -890,239 +890,259 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     // kill the handler, leaving the typing indicator spinning forever.
     try { // ── safety-net-start ──
 
-    // Agent nickname routing: "贾维斯" / "小美，帮我..." → switch project session
-    // Strict chats (chat_agent_map bound groups) must NOT switch agents via nickname
-    const _strictAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
-    const _isStrictChatSession = !!(_strictAgentMap[String(chatId)] || projectKeyFromVirtualChatId(String(chatId)));
-    const agentMatch = _isStrictChatSession ? null : routeAgent(prompt, config);
-    if (agentMatch) {
-      const { key, proj, rest } = agentMatch;
-      const projCwd = normalizeCwd(proj.cwd);
-      attachOrCreateSession(chatId, projCwd, proj.name || key, proj.engine ? normalizeEngineName(proj.engine) : getDefaultEngine());
-      log('INFO', `Agent switch via nickname: ${key} (${projCwd})`);
-      if (!rest) {
-        // Pure nickname call — confirm switch and stop
-        clearInterval(typingTimer);
-        await bot.sendMessage(chatId, `${proj.icon || '🤖'} ${proj.name || key} 在线`);
-        return { ok: true };
-      }
-      // Nickname + content — strip nickname, continue with rest as prompt
-      prompt = rest;
-    }
-
-    // Skill routing: detect skill first, then decide session
-    // BUT: skip skill routing if agent addressed by nickname OR chat already has an active session
-    // (active conversation should never be hijacked by keyword-based skill matching)
-    const chatIdStr = String(chatId);
-    const chatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
-    const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
-    const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
-    // Each virtual chatId (including clones) keeps its own isolated session.
-    // Parallel tasks must not share JSONL files — concurrent writes cause corruption.
-    const sessionChatId = boundProjectKey ? `_agent_${boundProjectKey}` : chatId;
-    const sessionRaw = getSession(sessionChatId);
-    const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
-    const boundEngineName = (boundProject && boundProject.engine) ? normalizeEngineName(boundProject.engine) : getDefaultEngine();
-
-    // Engine is determined from config only — bound agent config wins, then global default.
-    const engineName = normalizeEngineName(
-      (boundProject && boundProject.engine) || getDefaultEngine()
-    );
-    const runtime = getEngineRuntime(engineName);
-
-    // hasActiveSession: does the current engine have an ongoing conversation?
-    const hasActiveSession = sessionRaw && (
-      sessionRaw.engines ? !!(sessionRaw.engines[engineName]?.started) : !!sessionRaw.started
-    );
-    const skill = (agentMatch || hasActiveSession) ? null : routeSkill(prompt);
-
-    if (!sessionRaw) {
-      // No saved state for this chatId: start a fresh session.
-      // Note: daemon_state.json persists across restarts, so this only happens on truly first use
-      // or after an explicit /new command.
-      createSession(sessionChatId, boundCwd || undefined, boundProject && boundProject.name ? boundProject.name : '', boundEngineName);
-    }
-
-    // Resolve flat view for current engine (id + started are engine-specific; cwd is shared)
-    let session = getSessionForEngine(sessionChatId, engineName) || { cwd: boundCwd || HOME, engine: engineName, id: null, started: false };
-    session.engine = engineName; // keep local copy for Codex resume detection below
-
-    // Pre-spawn session validation: unified for all engines.
-    // Claude checks JSONL file existence; Codex checks SQLite. Same interface, different backend.
-    // Skip warning for virtual agents (team members) - they may use worktrees with fresh sessions
-    const isVirtualAgent = String(sessionChatId).startsWith('_agent_');
-    if (session.started && session.id && session.id !== '__continue__' && session.cwd) {
-      const valid = isEngineSessionValid(engineName, session.id, session.cwd);
-      if (!valid) {
-        log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${sessionChatId}; starting fresh ${engineName} session`);
-        if (!isVirtualAgent) {
-          await bot.sendMessage(chatId, '⚠️ 上次 session 已失效，已自动开启新 session。').catch(() => {});
+      // Agent nickname routing: "贾维斯" / "小美，帮我..." → switch project session
+      // Strict chats (chat_agent_map bound groups) must NOT switch agents via nickname
+      const _strictAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
+      const _isStrictChatSession = !!(_strictAgentMap[String(chatId)] || projectKeyFromVirtualChatId(String(chatId)));
+      const agentMatch = _isStrictChatSession ? null : routeAgent(prompt, config);
+      if (agentMatch) {
+        const { key, proj, rest } = agentMatch;
+        const projCwd = normalizeCwd(proj.cwd);
+        attachOrCreateSession(chatId, projCwd, proj.name || key, proj.engine ? normalizeEngineName(proj.engine) : getDefaultEngine());
+        log('INFO', `Agent switch via nickname: ${key} (${projCwd})`);
+        if (!rest) {
+          // Pure nickname call — confirm switch and stop
+          clearInterval(typingTimer);
+          await bot.sendMessage(chatId, `${proj.icon || '🤖'} ${proj.name || key} 在线`);
+          return { ok: true };
         }
-        session = createSession(sessionChatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', engineName);
+        // Nickname + content — strip nickname, continue with rest as prompt
+        prompt = rest;
       }
-    }
 
-    const daemonCfg = (config && config.daemon) || {};
-    const mentorCfg = (daemonCfg.mentor && typeof daemonCfg.mentor === 'object') ? daemonCfg.mentor : {};
-    const mentorEnabled = !!(mentorEngine && mentorCfg.enabled);
-    const excludeAgents = new Set(
-      (Array.isArray(mentorCfg.exclude_agents) ? mentorCfg.exclude_agents : [])
-        .map(x => String(x || '').trim())
-        .filter(Boolean)
-    );
-    const chatAgentKey = boundProjectKey || 'personal';
-    const mentorExcluded = excludeAgents.has(chatAgentKey);
-    let mentorSuppressed = false;
+      // Skill routing: detect skill first, then decide session
+      // BUT: skip skill routing if agent addressed by nickname OR chat already has an active session
+      // (active conversation should never be hijacked by keyword-based skill matching)
+      const chatIdStr = String(chatId);
+      const chatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
+      const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
+      const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
+      // Each virtual chatId (including clones) keeps its own isolated session.
+      // Parallel tasks must not share JSONL files — concurrent writes cause corruption.
+      const sessionChatId = boundProjectKey ? `_agent_${boundProjectKey}` : chatId;
+      const sessionRaw = getSession(sessionChatId);
+      const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
+      const boundEngineName = (boundProject && boundProject.engine) ? normalizeEngineName(boundProject.engine) : getDefaultEngine();
 
-    // Mentor pre-flight breaker: first hit sends a short reassurance; cooldown does not block normal answers.
-    if (mentorEnabled && !mentorExcluded) {
+      // Engine is determined from config only — bound agent config wins, then global default.
+      const engineName = normalizeEngineName(
+        (boundProject && boundProject.engine) || getDefaultEngine()
+      );
+      const runtime = getEngineRuntime(engineName);
+
+      // hasActiveSession: does the current engine have an ongoing conversation?
+      const hasActiveSession = sessionRaw && (
+        sessionRaw.engines ? !!(sessionRaw.engines[engineName]?.started) : !!sessionRaw.started
+      );
+      const skill = (agentMatch || hasActiveSession) ? null : routeSkill(prompt);
+
+      if (!sessionRaw) {
+        // No saved state for this chatId: start a fresh session.
+        // Note: daemon_state.json persists across restarts, so this only happens on truly first use
+        // or after an explicit /new command.
+        createSession(sessionChatId, boundCwd || undefined, boundProject && boundProject.name ? boundProject.name : '', boundEngineName);
+      }
+
+      // Resolve flat view for current engine (id + started are engine-specific; cwd is shared)
+      let session = getSessionForEngine(sessionChatId, engineName) || { cwd: boundCwd || HOME, engine: engineName, id: null, started: false };
+      session.engine = engineName; // keep local copy for Codex resume detection below
+
+      // Pre-spawn session validation: unified for all engines.
+      // Claude checks JSONL file existence; Codex checks SQLite. Same interface, different backend.
+      // Skip warning for virtual agents (team members) - they may use worktrees with fresh sessions
+      const isVirtualAgent = String(sessionChatId).startsWith('_agent_');
+      if (session.started && session.id && session.id !== '__continue__' && session.cwd) {
+        const valid = isEngineSessionValid(engineName, session.id, session.cwd);
+        if (!valid) {
+          log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${sessionChatId}; starting fresh ${engineName} session`);
+          if (!isVirtualAgent) {
+            await bot.sendMessage(chatId, '⚠️ 上次 session 已失效，已自动开启新 session。').catch(() => { });
+          }
+          session = createSession(sessionChatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', engineName);
+        }
+      }
+
+      const daemonCfg = (config && config.daemon) || {};
+      const mentorCfg = (daemonCfg.mentor && typeof daemonCfg.mentor === 'object') ? daemonCfg.mentor : {};
+      const mentorEnabled = !!(mentorEngine && mentorCfg.enabled);
+      const excludeAgents = new Set(
+        (Array.isArray(mentorCfg.exclude_agents) ? mentorCfg.exclude_agents : [])
+          .map(x => String(x || '').trim())
+          .filter(Boolean)
+      );
+      const chatAgentKey = boundProjectKey || 'personal';
+      const mentorExcluded = excludeAgents.has(chatAgentKey);
+      let mentorSuppressed = false;
+
+      // Mentor pre-flight breaker: first hit sends a short reassurance; cooldown does not block normal answers.
+      if (mentorEnabled && !mentorExcluded) {
+        try {
+          const breaker = mentorEngine.checkEmotionBreaker(prompt, mentorCfg);
+          if (breaker && breaker.tripped) {
+            mentorSuppressed = true;
+            if (breaker.reason !== 'cooldown_active' && breaker.response) {
+              await bot.sendMessage(chatId, breaker.response).catch(() => { });
+            }
+          }
+        } catch (e) {
+          log('WARN', `Mentor breaker failed: ${e.message}`);
+        }
+      }
+
+      // Build engine command — prefer per-engine model, fall back to legacy daemon.model
+      const model = resolveEngineModel(runtime.name, daemonCfg, boundProject && boundProject.model);
+      const args = runtime.buildArgs({
+        model,
+        readOnly,
+        daemonCfg,
+        session,
+        cwd: session.cwd,
+      });
+
+      // Codex: write/refresh AGENTS.md = CLAUDE.md + SOUL.md on every new session.
+      // Written as a real file (not a symlink) for Windows compatibility.
+      // Refreshed each session so edits to CLAUDE.md or SOUL.md are always picked up.
+      // Codex auto-loads AGENTS.md from cwd and all parent dirs up to ~.
+      if (engineName === 'codex' && session.cwd && !session.started) {
+        try {
+          const parts = [];
+          const claudeMd = path.join(session.cwd, 'CLAUDE.md');
+          const soulMd = path.join(session.cwd, 'SOUL.md');
+          if (fs.existsSync(claudeMd)) parts.push(fs.readFileSync(claudeMd, 'utf8').trim());
+          if (fs.existsSync(soulMd)) {
+            const soulContent = fs.readFileSync(soulMd, 'utf8').trim();
+            if (soulContent) parts.push(soulContent);
+          }
+          if (parts.length > 0) {
+            fs.writeFileSync(path.join(session.cwd, 'AGENTS.md'), parts.join('\n\n'), 'utf8');
+            log('INFO', `Refreshed AGENTS.md (${parts.length} section(s)) in ${session.cwd}`);
+          }
+        } catch (e) {
+          log('WARN', `AGENTS.md refresh failed: ${e.message}`);
+        }
+      }
+
+      let agentHint = '';
+      if (!session.started && (boundProject || (session && session.cwd))) {
+        try {
+          // Engine-aware: Codex gets memory only (soul is already in AGENTS.md);
+          // Claude gets soul + memory (SOUL.md is not auto-loaded by Claude).
+          agentHint = buildAgentContextForEngine(
+            boundProject || { cwd: session.cwd },
+            engineName,
+            HOME,
+          ).hint || '';
+        } catch (e) {
+          log('WARN', `Agent context injection failed: ${e.message}`);
+        }
+      }
+
+      // Memory & Knowledge Injection (RAG)
+      let memoryHint = '';
+      // projectKey must be declared outside the try block so the daemonHint template below can reference it.
+      const _cid0 = String(chatId);
+      const _agentMap0 = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
+      const projectKey = _agentMap0[_cid0] || projectKeyFromVirtualChatId(_cid0);
       try {
-        const breaker = mentorEngine.checkEmotionBreaker(prompt, mentorCfg);
-        if (breaker && breaker.tripped) {
-          mentorSuppressed = true;
-          if (breaker.reason !== 'cooldown_active' && breaker.response) {
-            await bot.sendMessage(chatId, breaker.response).catch(() => { });
+        const memory = require('./memory');
+
+        // L1: NOW.md per-agent whiteboard injection（按 projectKey 隔离，防并发冲突）
+        if (!session.started) {
+          try {
+            const nowDir = path.join(HOME, '.metame', 'memory', 'now');
+            const nowKey = projectKey || 'default';
+            const nowPath = path.join(nowDir, `${nowKey}.md`);
+            if (fs.existsSync(nowPath)) {
+              const nowContent = fs.readFileSync(nowPath, 'utf8').trim();
+              if (nowContent) {
+                memoryHint += `\n\n[Current task context:\n${nowContent}]`;
+              }
+            }
+          } catch { /* non-critical */ }
+        }
+
+        // 1. Inject recent session memories ONLY on first message of a session
+        if (!session.started) {
+          const recent = memory.recentSessions({ limit: 1, project: projectKey || undefined });
+          if (recent.length > 0) {
+            const items = recent.map(r => `- [${r.created_at}] ${r.summary}${r.keywords ? ' (keywords: ' + r.keywords + ')' : ''}`).join('\n');
+            memoryHint += `\n\n[Past session memory:\n${items}]`;
           }
         }
-      } catch (e) {
-        log('WARN', `Mentor breaker failed: ${e.message}`);
-      }
-    }
 
-    // Build engine command — prefer per-engine model, fall back to legacy daemon.model
-    const model = resolveEngineModel(runtime.name, daemonCfg, boundProject && boundProject.model);
-    const args = runtime.buildArgs({
-      model,
-      readOnly,
-      daemonCfg,
-      session,
-      cwd: session.cwd,
-    });
+        // 2. Dynamic Fact Injection (RAG) — first message only
+        // Facts stay in Claude's context for the rest of the session; no need to repeat.
+        // Uses QMD hybrid search if available, falls back to FTS5.
+        if (!session.started) {
+          const searchFn = memory.searchFactsAsync || memory.searchFacts;
+          const factQuery = buildFactSearchQuery(prompt, projectKey);
+          const facts = await Promise.resolve(searchFn(factQuery, { limit: 3, project: projectKey || undefined }));
+          if (facts.length > 0) {
+            // Separate capsule facts from regular facts
+            const capsuleFacts = facts.filter(f => f.relation === 'knowledge_capsule');
+            const regularFacts = facts.filter(f => f.relation !== 'knowledge_capsule');
 
-    // Codex: write/refresh AGENTS.md = CLAUDE.md + SOUL.md on every new session.
-    // Written as a real file (not a symlink) for Windows compatibility.
-    // Refreshed each session so edits to CLAUDE.md or SOUL.md are always picked up.
-    // Codex auto-loads AGENTS.md from cwd and all parent dirs up to ~.
-    if (engineName === 'codex' && session.cwd && !session.started) {
-      try {
-        const parts = [];
-        const claudeMd = path.join(session.cwd, 'CLAUDE.md');
-        const soulMd = path.join(session.cwd, 'SOUL.md');
-        if (fs.existsSync(claudeMd)) parts.push(fs.readFileSync(claudeMd, 'utf8').trim());
-        if (fs.existsSync(soulMd)) {
-          const soulContent = fs.readFileSync(soulMd, 'utf8').trim();
-          if (soulContent) parts.push(soulContent);
+            // Inject regular facts as before
+            if (regularFacts.length > 0) {
+              const factItems = regularFacts.map(f => `- [${f.relation}] ${f.value}`).join('\n');
+              memoryHint += `\n\n[Relevant facts:\n${factItems}]`;
+            }
+
+            // Capsule facts: derive file path from entity and inject as direct "must read" hint
+            // Entity pattern: capsule.metame_daemon_dispatch → capsules/metame-daemon-dispatch-playbook.md
+            if (capsuleFacts.length > 0) {
+              const capsulePaths = capsuleFacts.map(f => {
+                const slug = f.entity.replace(/^capsule\./, '').replace(/_/g, '-');
+                return path.join(HOME, '.metame', 'memory', 'capsules', `${slug}-playbook.md`);
+              }).filter(p => fs.existsSync(p));
+              if (capsulePaths.length > 0) {
+                memoryHint += `\n\n[Relevant playbook detected — read before answering:\n${capsulePaths.map(p => `  cat "${p}"`).join('\n')}]`;
+              }
+            }
+
+            log('INFO', `[MEMORY] Injected ${regularFacts.length} facts, ${capsuleFacts.length} capsule(s) (query_len=${factQuery.length})`);
+          }
         }
-        if (parts.length > 0) {
-          fs.writeFileSync(path.join(session.cwd, 'AGENTS.md'), parts.join('\n\n'), 'utf8');
-          log('INFO', `Refreshed AGENTS.md (${parts.length} section(s)) in ${session.cwd}`);
-        }
+
+        memory.close();
       } catch (e) {
-        log('WARN', `AGENTS.md refresh failed: ${e.message}`);
+        if (e.code !== 'MODULE_NOT_FOUND') log('WARN', `Memory injection failed: ${e.message}`);
       }
-    }
 
-    let agentHint = '';
-    if (!session.started && (boundProject || (session && session.cwd))) {
-      try {
-        // Engine-aware: Codex gets memory only (soul is already in AGENTS.md);
-        // Claude gets soul + memory (SOUL.md is not auto-loaded by Claude).
-        agentHint = buildAgentContextForEngine(
-          boundProject || { cwd: session.cwd },
-          engineName,
-          HOME,
-        ).hint || '';
-      } catch (e) {
-        log('WARN', `Agent context injection failed: ${e.message}`);
-      }
-    }
-
-    // Memory & Knowledge Injection (RAG)
-    let memoryHint = '';
-    // projectKey must be declared outside the try block so the daemonHint template below can reference it.
-    const _cid0 = String(chatId);
-    const _agentMap0 = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
-    const projectKey = _agentMap0[_cid0] || projectKeyFromVirtualChatId(_cid0);
-    try {
-      const memory = require('./memory');
-
-      // L1: NOW.md per-agent whiteboard injection（按 projectKey 隔离，防并发冲突）
+      // ZPD: build competence hint from brain profile
+      let zdpHint = '';
+      let brainDoc = null;
       if (!session.started) {
         try {
-          const nowDir = path.join(HOME, '.metame', 'memory', 'now');
-          const nowKey = projectKey || 'default';
-          const nowPath = path.join(nowDir, `${nowKey}.md`);
-          if (fs.existsSync(nowPath)) {
-            const nowContent = fs.readFileSync(nowPath, 'utf8').trim();
-            if (nowContent) {
-              memoryHint += `\n\n[Current task context:\n${nowContent}]`;
+          const brainPath = path.join(HOME, '.claude_profile.yaml');
+          if (fs.existsSync(brainPath)) {
+            const brain = yaml.load(fs.readFileSync(brainPath, 'utf8'));
+            brainDoc = brain;
+            const cmap = brain && brain.user_competence_map;
+            if (cmap && typeof cmap === 'object' && Object.keys(cmap).length > 0) {
+              const lines = Object.entries(cmap)
+                .map(([domain, level]) => `  ${domain}: ${level}`)
+                .join('\n');
+              zdpHint = `\n- User competence map (adjust explanation depth accordingly):\n${lines}\n  Rule: expert→skip basics; intermediate→brief rationale; beginner→one-line analogy.`;
             }
           }
         } catch { /* non-critical */ }
       }
-
-      // 1. Inject recent session memories ONLY on first message of a session
-      if (!session.started) {
-        const recent = memory.recentSessions({ limit: 1, project: projectKey || undefined });
-        if (recent.length > 0) {
-          const items = recent.map(r => `- [${r.created_at}] ${r.summary}${r.keywords ? ' (keywords: ' + r.keywords + ')' : ''}`).join('\n');
-          memoryHint += `\n\n[Past session memory:\n${items}]`;
-        }
+      if (!brainDoc) {
+        try {
+          const brainPath = path.join(HOME, '.claude_profile.yaml');
+          if (fs.existsSync(brainPath)) brainDoc = yaml.load(fs.readFileSync(brainPath, 'utf8')) || {};
+        } catch { /* ignore */ }
       }
 
-      // 2. Dynamic Fact Injection (RAG) — first message only
-      // Facts stay in Claude's context for the rest of the session; no need to repeat.
-      // Uses QMD hybrid search if available, falls back to FTS5.
+      // Inject daemon hints only on first message of a session
+      // Task-specific rules (3-5) are injected only when isTaskIntent() returns true (~250 token saving for casual chat)
+      let daemonHint = '';
       if (!session.started) {
-        const searchFn = memory.searchFactsAsync || memory.searchFacts;
-        const factQuery = buildFactSearchQuery(prompt, projectKey);
-        const facts = await Promise.resolve(searchFn(factQuery, { limit: 3, project: projectKey || undefined }));
-        if (facts.length > 0) {
-          const factItems = facts.map(f => `- [${f.relation}] ${f.value}`).join('\n');
-          memoryHint += `\n\n[Relevant facts:\n${factItems}]`;
-          log('INFO', `[MEMORY] Injected ${facts.length} facts (query_len=${factQuery.length})`);
-        }
-      }
-
-      memory.close();
-    } catch (e) {
-      if (e.code !== 'MODULE_NOT_FOUND') log('WARN', `Memory injection failed: ${e.message}`);
-    }
-
-    // ZPD: build competence hint from brain profile
-    let zdpHint = '';
-    let brainDoc = null;
-    if (!session.started) {
-      try {
-        const brainPath = path.join(HOME, '.claude_profile.yaml');
-        if (fs.existsSync(brainPath)) {
-          const brain = yaml.load(fs.readFileSync(brainPath, 'utf8'));
-          brainDoc = brain;
-          const cmap = brain && brain.user_competence_map;
-          if (cmap && typeof cmap === 'object' && Object.keys(cmap).length > 0) {
-            const lines = Object.entries(cmap)
-              .map(([domain, level]) => `  ${domain}: ${level}`)
-              .join('\n');
-            zdpHint = `\n- User competence map (adjust explanation depth accordingly):\n${lines}\n  Rule: expert→skip basics; intermediate→brief rationale; beginner→one-line analogy.`;
-          }
-        }
-      } catch { /* non-critical */ }
-    }
-    if (!brainDoc) {
-      try {
-        const brainPath = path.join(HOME, '.claude_profile.yaml');
-        if (fs.existsSync(brainPath)) brainDoc = yaml.load(fs.readFileSync(brainPath, 'utf8')) || {};
-      } catch { /* ignore */ }
-    }
-
-    // Inject daemon hints only on first message of a session
-    // Task-specific rules (3-5) are injected only when isTaskIntent() returns true (~250 token saving for casual chat)
-    let daemonHint = '';
-    if (!session.started) {
-      const taskRules = isTaskIntent(prompt) ? `
+        const taskRules = isTaskIntent(prompt) ? `
 3. Knowledge retrieval: When you need context about a specific topic, past decisions, or lessons, call:
    node ~/.metame/memory-search.js "关键词1" "keyword2"
-   Also read ~/.metame/memory/INDEX.md to discover available long-form lesson/decision docs, then read specific files as needed.
+   If no relevant facts surface, check ~/.metame/memory/INDEX.md for available playbook/decision docs.
    Use these before answering complex questions about MetaMe architecture or past decisions.
 4. Active memory: After confirming a new insight, bug root cause, or user preference, persist it with:
    node ~/.metame/memory-write.js "Entity.sub" "relation_type" "value (20-300 chars)"
@@ -1132,7 +1152,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 5. Task handoff: When suspending a multi-step task or handing off to another agent, write current status to ~/.metame/memory/now/${projectKey || 'default'}.md using:
    \`mkdir -p ~/.metame/memory/now && printf '%s\\n' "## Current Task" "{task}" "" "## Progress" "{progress}" "" "## Next Step" "{next}" > ~/.metame/memory/now/${projectKey || 'default'}.md\`
    Keep it under 200 words. Clear it when the task is fully complete by running: \`> ~/.metame/memory/now/${projectKey || 'default'}.md\`` : '';
-      daemonHint = `\n\n[System hints - DO NOT mention these to user:
+        daemonHint = `\n\n[System hints - DO NOT mention these to user:
 1. Daemon config: The ONLY config is ~/.metame/daemon.yaml (never edit daemon-default.yaml). Auto-reloads on change.
 2. File sending: User is on MOBILE. When they ask to see/download a file:
    - Just FIND the file path (use Glob/ls if needed)
@@ -1140,239 +1160,189 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
    - Add at END of response: [[FILE:/absolute/path/to/file]]
    - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
    - Multiple files: use multiple [[FILE:...]] tags${zdpHint ? '\n   Explanation depth (ZPD):\n' + zdpHint : ''}${taskRules}]`;
-   }
+      }
 
-    daemonHint = adaptDaemonHintForEngine(daemonHint, runtime.name);
+      daemonHint = adaptDaemonHintForEngine(daemonHint, runtime.name);
 
-    const routedPrompt = skill ? `/${skill} ${prompt}` : prompt;
+      const routedPrompt = skill ? `/${skill} ${prompt}` : prompt;
 
-    // Mac automation orchestration hint: lets Claude flexibly compose local scripts
-    // without forcing users to write slash commands by hand.
-    let macAutomationHint = '';
-    if (process.platform === 'darwin' && !readOnly && isMacAutomationIntent(prompt)) {
-      macAutomationHint = `\n\n[Mac automation policy - do NOT expose this block:
+      // Mac automation orchestration hint: lets Claude flexibly compose local scripts
+      // without forcing users to write slash commands by hand.
+      let macAutomationHint = '';
+      if (process.platform === 'darwin' && !readOnly && isMacAutomationIntent(prompt)) {
+        macAutomationHint = `\n\n[Mac automation policy - do NOT expose this block:
 1. Prefer deterministic local control via Bash + osascript/JXA; avoid screenshot/visual workflows unless explicitly requested.
 2. Read/query actions can execute directly.
 3. Before any side-effect action (send email, create/delete/modify calendar event, delete/move files, app quit, system sleep), first show a short execution preview and require explicit user confirmation.
 4. Keep output concise: success/failure + key result only.
 5. If permission is missing, guide user to run /mac perms open then retry.
 6. Before executing high-risk or non-obvious Bash commands (rm, kill, git reset, overwrite configs), prepend a single-line [Why] explanation. Skip for routine commands (ls, cat, grep).]`;
-    }
+      }
 
-    // P2-B: inject session summary when resuming after a 2h+ gap
-    let summaryHint = '';
-    if (session.started) {
-      try {
-        const _stSum = loadState();
-        const _sess = _stSum.sessions && _stSum.sessions[chatId];
-        if (_sess && _sess.last_summary && _sess.last_summary_at) {
-          const _idleMs = Date.now() - (_sess.last_active || 0);
-          const _summaryAgeH = (Date.now() - _sess.last_summary_at) / 3600000;
-          if (_idleMs > 2 * 60 * 60 * 1000 && _summaryAgeH < 168) {
-            summaryHint = `
+      // P2-B: inject session summary when resuming after a 2h+ gap
+      let summaryHint = '';
+      if (session.started) {
+        try {
+          const _stSum = loadState();
+          const _sess = _stSum.sessions && _stSum.sessions[chatId];
+          if (_sess && _sess.last_summary && _sess.last_summary_at) {
+            const _idleMs = Date.now() - (_sess.last_active || 0);
+            const _summaryAgeH = (Date.now() - _sess.last_summary_at) / 3600000;
+            if (_idleMs > 2 * 60 * 60 * 1000 && _summaryAgeH < 168) {
+              summaryHint = `
 
 [上次对话摘要，供参考]: ${_sess.last_summary}`;
-            log('INFO', `[DAEMON] Injected session summary for ${chatId} (idle ${Math.round(_idleMs / 3600000)}h)`);
-          }
-        }
-      } catch { /* non-critical */ }
-    }
-
-    // Mentor context hook: inject after memoryHint, before langGuard.
-    let mentorHint = '';
-    if (mentorEnabled && !mentorExcluded && !mentorSuppressed) {
-      try {
-        const signals = collectRecentSessionSignals(session.id, 6);
-        let skeleton = null;
-        if (sessionAnalytics && typeof sessionAnalytics.extractSkeleton === 'function') {
-          const file = findSessionFile(session.id);
-          if (file && fs.existsSync(file)) {
-            const st = fs.statSync(file);
-            if (st.size <= 2 * 1024 * 1024) {
-              skeleton = sessionAnalytics.extractSkeleton(file);
+              log('INFO', `[DAEMON] Injected session summary for ${chatId} (idle ${Math.round(_idleMs / 3600000)}h)`);
             }
           }
-        }
-        const zone = skeleton && mentorEngine.computeZone
-          ? mentorEngine.computeZone(skeleton).zone
-          : 'stretch';
-        const sessionState = {
-          zone,
-          recentMessages: signals.recentMessages,
-          cwd: session.cwd,
-          skeleton,
-          sessionStartTime: signals.sessionStartTime || new Date().toISOString(),
-          topic: String(prompt || '').slice(0, 120),
-          currentTopic: String(prompt || '').slice(0, 120),
-          lastUserMessage: String(prompt || '').slice(0, 200),
-        };
-        const built = mentorEngine.buildMentorPrompt(sessionState, brainDoc || {}, mentorCfg);
-        if (built && String(built).trim()) mentorHint = `\n\n${String(built).trim()}`;
-
-        // Collect reflection debt: if user returns to same project+topic, inject recall prompt.
-        // Suppressed by quiet_until (user explicitly asked for silence), but NOT by expert skip
-        // (even experts may not have reviewed AI-generated code).
-        const quietUntil = brainDoc && brainDoc.growth ? brainDoc.growth.quiet_until : null;
-        const quietMs = quietUntil ? new Date(quietUntil).getTime() : 0;
-        const isQuiet = quietMs && quietMs > Date.now();
-        if (!isQuiet && mentorEngine.collectDebt) {
-          const info = deriveProjectInfo(session && session.cwd ? session.cwd : '');
-          const projectId = info && info.project_id ? info.project_id : '';
-          if (projectId) {
-            const debt = mentorEngine.collectDebt(projectId, String(prompt || '').slice(0, 120));
-            if (debt && debt.prompt) {
-              mentorHint += `\n\n[Reflection debt] ${debt.prompt}`;
-            }
-          }
-        }
-      } catch (e) {
-        log('WARN', `Mentor prompt build failed: ${e.message}`);
+        } catch { /* non-critical */ }
       }
-    }
 
-    // Language guard: only inject on first message of a new session to avoid
-    // linearly growing token cost on every turn in long conversations.
-    // Claude Code preserves session context, so the guard persists after initial injection.
-    const langGuard = session.started
-      ? ''
-      : '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
-    const fullPrompt = routedPrompt + daemonHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
-
-    // Git checkpoint before Claude modifies files (for /undo).
-    // Skip for virtual agents (team clones like _agent_yi) — each has its own worktree,
-    // but checkpoint uses `git add -A` which could interfere with parallel work.
-    const _isVirtualAgent = String(chatId).startsWith('_agent_') || String(chatId).startsWith('_scope_');
-    if (!_isVirtualAgent) {
-      (gitCheckpointAsync || gitCheckpoint)(session.cwd, prompt).catch?.(() => {});
-    }
-    log('INFO', `[TIMING:${chatId}] pre-spawn +${Date.now() - _t0}ms (engine:${runtime.name} started:${session.started})`);
-
-    // Use streaming mode to show progress
-    // Telegram: edit status msg in-place; Feishu: edit or fallback to new messages
-    let editFailed = false;
-    let lastFallbackStatus = 0;
-    const FALLBACK_THROTTLE = fallbackThrottleMs;
-    const onStatus = async (status) => {
-      try {
-        if (typeof status !== 'string') return;
-
-        // __STREAM_TEXT__: streamed model text — edit card and track for final dedup
-        if (status.startsWith('__STREAM_TEXT__')) {
-          const content = status.slice('__STREAM_TEXT__'.length);
-          // Set synchronously BEFORE await — this is the critical race fix.
-          // flushStream(true) is called from the 'done' event (before process close),
-          // so by setting here synchronously, _lastStatusCardContent is guaranteed to be
-          // set before the child 'close' event fires and finalize() resolves.
-          _lastStatusCardContent = content;
-          if (statusMsgId && bot.editMessage && !editFailed) {
-            const ok = await bot.editMessage(chatId, statusMsgId, content, _ackCardHeader);
-            if (ok === false) editFailed = true;
+      // Mentor context hook: inject after memoryHint, before langGuard.
+      let mentorHint = '';
+      if (mentorEnabled && !mentorExcluded && !mentorSuppressed) {
+        try {
+          const signals = collectRecentSessionSignals(session.id, 6);
+          let skeleton = null;
+          if (sessionAnalytics && typeof sessionAnalytics.extractSkeleton === 'function') {
+            const file = findSessionFile(session.id);
+            if (file && fs.existsSync(file)) {
+              const st = fs.statSync(file);
+              if (st.size <= 2 * 1024 * 1024) {
+                skeleton = sessionAnalytics.extractSkeleton(file);
+              }
+            }
           }
-          return; // skip fallback — final reply logic will use existing card
-        }
+          const zone = skeleton && mentorEngine.computeZone
+            ? mentorEngine.computeZone(skeleton).zone
+            : 'stretch';
+          const sessionState = {
+            zone,
+            recentMessages: signals.recentMessages,
+            cwd: session.cwd,
+            skeleton,
+            sessionStartTime: signals.sessionStartTime || new Date().toISOString(),
+            topic: String(prompt || '').slice(0, 120),
+            currentTopic: String(prompt || '').slice(0, 120),
+            lastUserMessage: String(prompt || '').slice(0, 200),
+          };
+          const built = mentorEngine.buildMentorPrompt(sessionState, brainDoc || {}, mentorCfg);
+          if (built && String(built).trim()) mentorHint = `\n\n${String(built).trim()}`;
 
-        // __TOOL_OVERLAY__: text + tool status line — edit card but don't update _lastStatusCardContent
-        if (status.startsWith('__TOOL_OVERLAY__')) {
-          const content = status.slice('__TOOL_OVERLAY__'.length);
-          if (statusMsgId && bot.editMessage && !editFailed) {
-            await bot.editMessage(chatId, statusMsgId, content, _ackCardHeader);
-            // intentionally NOT updating _lastStatusCardContent — overlay is transient
+          // Collect reflection debt: if user returns to same project+topic, inject recall prompt.
+          // Suppressed by quiet_until (user explicitly asked for silence), but NOT by expert skip
+          // (even experts may not have reviewed AI-generated code).
+          const quietUntil = brainDoc && brainDoc.growth ? brainDoc.growth.quiet_until : null;
+          const quietMs = quietUntil ? new Date(quietUntil).getTime() : 0;
+          const isQuiet = quietMs && quietMs > Date.now();
+          if (!isQuiet && mentorEngine.collectDebt) {
+            const info = deriveProjectInfo(session && session.cwd ? session.cwd : '');
+            const projectId = info && info.project_id ? info.project_id : '';
+            if (projectId) {
+              const debt = mentorEngine.collectDebt(projectId, String(prompt || '').slice(0, 120));
+              if (debt && debt.prompt) {
+                mentorHint += `\n\n[Reflection debt] ${debt.prompt}`;
+              }
+            }
           }
-          return;
+        } catch (e) {
+          log('WARN', `Mentor prompt build failed: ${e.message}`);
         }
+      }
 
-        // Plain status (tool names before any text, milestone timers, etc.)
-        if (statusMsgId && bot.editMessage && !editFailed) {
-          const ok = await bot.editMessage(chatId, statusMsgId, status, _ackCardHeader);
-          if (ok !== false) {
-            _lastStatusCardContent = status;
+      // Language guard: only inject on first message of a new session to avoid
+      // linearly growing token cost on every turn in long conversations.
+      // Claude Code preserves session context, so the guard persists after initial injection.
+      const langGuard = session.started
+        ? ''
+        : '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
+      const fullPrompt = routedPrompt + daemonHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
+
+      // Git checkpoint before Claude modifies files (for /undo).
+      // Skip for virtual agents (team clones like _agent_yi) — each has its own worktree,
+      // but checkpoint uses `git add -A` which could interfere with parallel work.
+      const _isVirtualAgent = String(chatId).startsWith('_agent_') || String(chatId).startsWith('_scope_');
+      if (!_isVirtualAgent) {
+        (gitCheckpointAsync || gitCheckpoint)(session.cwd, prompt).catch?.(() => { });
+      }
+      log('INFO', `[TIMING:${chatId}] pre-spawn +${Date.now() - _t0}ms (engine:${runtime.name} started:${session.started})`);
+
+      // Use streaming mode to show progress
+      // Telegram: edit status msg in-place; Feishu: edit or fallback to new messages
+      let editFailed = false;
+      let lastFallbackStatus = 0;
+      const FALLBACK_THROTTLE = fallbackThrottleMs;
+      const onStatus = async (status) => {
+        try {
+          if (typeof status !== 'string') return;
+
+          // __STREAM_TEXT__: streamed model text — edit card and track for final dedup
+          if (status.startsWith('__STREAM_TEXT__')) {
+            const content = status.slice('__STREAM_TEXT__'.length);
+            // Set synchronously BEFORE await — this is the critical race fix.
+            // flushStream(true) is called from the 'done' event (before process close),
+            // so by setting here synchronously, _lastStatusCardContent is guaranteed to be
+            // set before the child 'close' event fires and finalize() resolves.
+            _lastStatusCardContent = content;
+            if (statusMsgId && bot.editMessage && !editFailed) {
+              const ok = await bot.editMessage(chatId, statusMsgId, content, _ackCardHeader);
+              if (ok === false) editFailed = true;
+            }
+            return; // skip fallback — final reply logic will use existing card
+          }
+
+          // __TOOL_OVERLAY__: text + tool status line — edit card but don't update _lastStatusCardContent
+          if (status.startsWith('__TOOL_OVERLAY__')) {
+            const content = status.slice('__TOOL_OVERLAY__'.length);
+            if (statusMsgId && bot.editMessage && !editFailed) {
+              await bot.editMessage(chatId, statusMsgId, content, _ackCardHeader);
+              // intentionally NOT updating _lastStatusCardContent — overlay is transient
+            }
             return;
           }
-          editFailed = true;
-        }
-        // Fallback: send as new message with throttle to avoid spam
-        const now = Date.now();
-        if (now - lastFallbackStatus < FALLBACK_THROTTLE) return;
-        lastFallbackStatus = now;
-        await bot.sendMessage(chatId, status);
-      } catch { /* ignore status update failures */ }
-    };
 
-    const wasCodexResumeAttempt = runtime.name === 'codex'
-      && !!(session && session.started && session.id && session.id !== '__continue__');
-    const onSession = async (nextSessionId) => {
-      const safeNextId = String(nextSessionId || '').trim();
-      if (!safeNextId) return;
-      const prevSessionId = session && session.id ? String(session.id) : '';
-      const wasStarted = !!(session && session.started);
-      session = {
-        ...session,
-        id: safeNextId,
-        engine: runtime.name,
-        started: true,
+          // Plain status (tool names before any text, milestone timers, etc.)
+          if (statusMsgId && bot.editMessage && !editFailed) {
+            const ok = await bot.editMessage(chatId, statusMsgId, status, _ackCardHeader);
+            if (ok !== false) {
+              _lastStatusCardContent = status;
+              return;
+            }
+            editFailed = true;
+          }
+          // Fallback: send as new message with throttle to avoid spam
+          const now = Date.now();
+          if (now - lastFallbackStatus < FALLBACK_THROTTLE) return;
+          lastFallbackStatus = now;
+          await bot.sendMessage(chatId, status);
+        } catch { /* ignore status update failures */ }
       };
-      await patchSessionSerialized(sessionChatId, (cur) => {
-        const engines = { ...(cur.engines || {}) };
-        engines[runtime.name] = { ...(engines[runtime.name] || {}), id: safeNextId, started: true };
-        return { ...cur, cwd: session.cwd || cur.cwd || HOME, engines };
-      });
-      if (runtime.name === 'codex' && wasStarted && prevSessionId && prevSessionId !== safeNextId && prevSessionId !== '__continue__') {
-        log('WARN', `Codex thread migrated for ${chatId}: ${prevSessionId.slice(0, 8)} -> ${safeNextId.slice(0, 8)}`);
-      }
-    };
 
-    let output, error, errorCode, files, toolUsageLog, timedOut, usage, sessionId;
-    try {
-      ({
-        output,
-        error,
-        errorCode,
-        timedOut,
-        files,
-        toolUsageLog,
-        usage,
-        sessionId,
-      } = await spawnClaudeStreaming(
-        args,
-        fullPrompt,
-        session.cwd,
-        onStatus,
-        600000,
-        chatId,
-        boundProjectKey || '',
-        runtime,
-        onSession,
-      ));
-
-      if (sessionId) await onSession(sessionId);
-
-      if (shouldRetryCodexResumeFallback({
-        runtimeName: runtime.name,
-        wasResumeAttempt: wasCodexResumeAttempt,
-        output,
-        error,
-        errorCode,
-        canRetry: canRetryCodexResume(chatId),
-      })) {
-        markCodexResumeRetried(chatId);
-        log('WARN', `Codex resume failed for ${chatId}, retrying once with fresh exec: ${String(error).slice(0, 120)}`);
-        // Notify user explicitly — silent context loss is worse than a visible warning.
-        await bot.sendMessage(chatId, '⚠️ Codex session 已过期，上下文丢失。正在以全新 session 重试，请在回复后补充必要背景。').catch(() => {});
-        session = createSession(
-          sessionChatId,
-          session.cwd,
-          boundProject && boundProject.name ? boundProject.name : '',
-          'codex'
-        );
-        const retryArgs = runtime.buildArgs({
-          model,
-          readOnly,
-          daemonCfg,
-          session,
-          cwd: session.cwd,
+      const wasCodexResumeAttempt = runtime.name === 'codex'
+        && !!(session && session.started && session.id && session.id !== '__continue__');
+      const onSession = async (nextSessionId) => {
+        const safeNextId = String(nextSessionId || '').trim();
+        if (!safeNextId) return;
+        const prevSessionId = session && session.id ? String(session.id) : '';
+        const wasStarted = !!(session && session.started);
+        session = {
+          ...session,
+          id: safeNextId,
+          engine: runtime.name,
+          started: true,
+        };
+        await patchSessionSerialized(sessionChatId, (cur) => {
+          const engines = { ...(cur.engines || {}) };
+          engines[runtime.name] = { ...(engines[runtime.name] || {}), id: safeNextId, started: true };
+          return { ...cur, cwd: session.cwd || cur.cwd || HOME, engines };
         });
-        // Prepend a context-loss marker so Codex knows this is a fresh session mid-conversation.
-        const retryPrompt = `[Note: previous Codex session expired and could not be resumed. Treating this as a new session. User message follows:]\n\n${fullPrompt}`;
+        if (runtime.name === 'codex' && wasStarted && prevSessionId && prevSessionId !== safeNextId && prevSessionId !== '__continue__') {
+          log('WARN', `Codex thread migrated for ${chatId}: ${prevSessionId.slice(0, 8)} -> ${safeNextId.slice(0, 8)}`);
+        }
+      };
+
+      let output, error, errorCode, files, toolUsageLog, timedOut, usage, sessionId;
+      try {
         ({
           output,
           error,
@@ -1383,245 +1353,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           usage,
           sessionId,
         } = await spawnClaudeStreaming(
-          retryArgs,
-          retryPrompt,
-          session.cwd,
-          onStatus,
-          600000,
-          chatId,
-          boundProjectKey || '',
-          runtime,
-          onSession,
-        ));
-        if (sessionId) await onSession(sessionId);
-      }
-    } catch (spawnErr) {
-      clearInterval(typingTimer);
-      if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => { });
-      log('ERROR', `spawnClaudeStreaming crashed for ${chatId}: ${spawnErr.message}`);
-      await bot.sendMessage(chatId, `❌ 内部错误: ${spawnErr.message}`).catch(() => { });
-      return { ok: false, error: spawnErr.message };
-    }
-    clearInterval(typingTimer);
-
-    // Skill evolution: capture signal + hot path heuristic check
-    if (skillEvolution) {
-      try {
-        const signal = skillEvolution.extractSkillSignal(fullPrompt, output, error, files, session.cwd, toolUsageLog);
-        if (signal) {
-          skillEvolution.appendSkillSignal(signal);
-          skillEvolution.checkHotEvolution(signal);
-        }
-      } catch (e) { log('WARN', `Skill evolution signal capture failed: ${e.message}`); }
-    }
-
-    // statusMsgId is always available for final reply handling (edit or delete).
-    const _statusMsgIdForReply = statusMsgId || null;
-
-    // Mentor post-flight debt registration (intense mode only).
-    if (mentorEnabled && !mentorExcluded && !mentorSuppressed && mentorEngine && typeof mentorEngine.registerDebt === 'function' && output) {
-      try {
-        const mode = resolveMentorMode(mentorCfg);
-        if (mode === 'intense') {
-          const codeLines = countCodeLines(output);
-          if (codeLines > 30) {
-            const info = deriveProjectInfo(session && session.cwd ? session.cwd : '');
-            const projectId = info && info.project_id ? info.project_id : 'proj_default';
-            mentorEngine.registerDebt(projectId, String(prompt || '').slice(0, 120), codeLines);
-            log('INFO', `[MENTOR] Registered reflection debt (${projectId}, lines=${codeLines})`);
-          }
-        }
-      } catch (e) {
-        log('WARN', `Mentor post-flight failed: ${e.message}`);
-      }
-    }
-
-    // When Claude completes with no text output (pure tool work), send a done notice
-    if (output === '' && !error) {
-      // Special case: if dispatch_to was called, send a "forwarded" confirmation
-      const dispatchedTargets = (toolUsageLog || [])
-        .filter(t => t.tool === 'Bash' && typeof t.context === 'string' && t.context.includes('dispatch_to'))
-        .map(t => { const m = t.context.match(/dispatch_to\s+(\S+)/); return m ? m[1] : null; })
-        .filter(Boolean);
-      if (dispatchedTargets.length > 0) {
-        const allProjects = (config && config.projects) || {};
-        const names = dispatchedTargets.map(k => (allProjects[k] && allProjects[k].name) || k).join('、');
-        const doneMsg = await bot.sendMessage(chatId, `✉️ 已转达给 ${names}，处理中…`);
-        if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session, String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null);
-        const wasNew = !session.started;
-        if (wasNew) markSessionStarted(sessionChatId, engineName);
-        return { ok: true };
-      }
-      const filesDesc = files && files.length > 0 ? `\n修改了 ${files.length} 个文件` : '';
-      const doneMsg = await bot.sendMessage(chatId, `✅ 完成${filesDesc}`);
-      if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session, String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null);
-      const wasNew = !session.started;
-      if (wasNew) markSessionStarted(sessionChatId, engineName);
-      return { ok: true };
-    }
-
-    if (output) {
-      if (runtime.name === 'codex') _codexResumeRetryTs.delete(String(chatId));
-      // Detect provider/model errors disguised as output (e.g., "model not found", API errors)
-      if (runtime.name === 'claude') {
-        const activeProvCheck = providerMod ? providerMod.getActiveName() : 'anthropic';
-        const builtinModelsCheck = ['sonnet', 'opus', 'haiku'];
-        const looksLikeError = output.length < 300 && /\b(not found|invalid model|unauthorized|401|403|404|error|failed)\b/i.test(output);
-        if (looksLikeError && (activeProvCheck !== 'anthropic' || !builtinModelsCheck.includes(model))) {
-          try {
-            config = fallbackToDefaultProvider(`output looks like error for ${activeProvCheck}/${model}`);
-            await bot.sendMessage(chatId, `⚠️ ${activeProvCheck}/${model} 疑似失败，已回退到 anthropic/opus\n输出: ${output.slice(0, 150)}`);
-          } catch (fbErr) {
-            log('ERROR', `Fallback failed: ${fbErr.message}`);
-            await bot.sendMarkdown(chatId, output);
-          }
-          return { ok: false, error: output };
-        }
-      }
-
-      // Mark session as started after first successful call
-      const wasNew = !session.started;
-      if (wasNew) markSessionStarted(sessionChatId, engineName);
-
-      const estimated = Math.ceil((prompt.length + output.length) / 4);
-      const chatCategory = classifyChatUsage(chatId, {
-        projectKey: boundProjectKey || '',
-        cwd: session && session.cwd,
-        homeDir: HOME,
-      });
-      recordTokens(loadState(), estimated, { category: chatCategory });
-
-      // Parse [[FILE:...]] markers from output (Claude's explicit file sends)
-      let { markedFiles, cleanOutput } = parseFileMarkers(output);
-
-      // Timeout with partial results: prepend warning
-      if (timedOut) {
-        cleanOutput = `⚠️ **任务超时，以下是已完成的部分结果：**\n\n${cleanOutput}`;
-      }
-
-      // Match current session to a project for colored card display.
-      // Prefer the bound project (known by virtual chatId or chat_agent_map) — avoids ambiguity
-      // when multiple projects share the same cwd (e.g. team members with parent project cwd).
-      let activeProject = boundProject || null;
-      if (!activeProject && session && session.cwd && config && config.projects) {
-        const sessionCwd = path.resolve(normalizeCwd(session.cwd));
-        for (const [, proj] of Object.entries(config.projects)) {
-          if (!proj.cwd) continue;
-          const projCwd = path.resolve(normalizeCwd(proj.cwd));
-          if (sessionCwd === projCwd) { activeProject = proj; break; }
-        }
-      }
-
-      let replyMsg;
-      try {
-        log('DEBUG', `[REPLY:${chatId}] statusMsgId=${statusMsgId} editFailed=${editFailed} activeProject=${activeProject && activeProject.name} lastCard=${_lastStatusCardContent ? _lastStatusCardContent.slice(0,40) : 'null'}`);
-
-        // Strategy: always try to update the status card first (avoids sending a new card
-        // while the old 🤔 card lingers, which would produce two messages).
-        // If edit fails: try to delete the status card (awaited, not fire-and-forget).
-        // If delete also fails: fall through to sending a new card.
-        if (_statusMsgIdForReply && bot.editMessage) {
-          // Skip redundant edit: streaming already wrote the final content to the card.
-          // _lastStatusCardContent tracks the last __STREAM_TEXT__ write, so if it matches
-          // cleanOutput the card is already showing the right content — no update needed.
-          if (_lastStatusCardContent !== null && _lastStatusCardContent === cleanOutput) {
-            log('DEBUG', `[REPLY:${chatId}] skipping editMessage — card already shows final content`);
-            replyMsg = { message_id: _statusMsgIdForReply };
-          } else {
-            const editOk = await bot.editMessage(chatId, _statusMsgIdForReply, cleanOutput, _ackCardHeader);
-            log('DEBUG', `[REPLY:${chatId}] editMessage result=${editOk}`);
-            if (editOk !== false) {
-              replyMsg = { message_id: _statusMsgIdForReply };
-            } else if (bot.deleteMessage) {
-              const deleted = await bot.deleteMessage(chatId, _statusMsgIdForReply).then(() => true).catch(() => false);
-              log('DEBUG', `[REPLY:${chatId}] deleteMessage result=${deleted}`);
-              if (!deleted) {
-                // Both edit and delete failed — try one more edit attempt to avoid leaving 🤔
-                log('WARN', `[REPLY:${chatId}] deleteMessage failed — status card may linger alongside new reply`);
-              }
-            }
-          }
-        } else if (_statusMsgIdForReply && bot.deleteMessage) {
-          // No editMessage — delete the status card
-          await bot.deleteMessage(chatId, _statusMsgIdForReply).catch(() => { });
-        }
-
-        if (!replyMsg) {
-          if (activeProject && bot.sendCard) {
-            log('DEBUG', `[REPLY:${chatId}] sending sendCard`);
-            replyMsg = await bot.sendCard(chatId, {
-              title: `${activeProject.icon || '🤖'} ${activeProject.name || ''}`,
-              body: cleanOutput,
-              color: activeProject.color || 'blue',
-            });
-            log('DEBUG', `[REPLY:${chatId}] sendCard done msgId=${replyMsg && replyMsg.message_id}`);
-          } else {
-            log('DEBUG', `[REPLY:${chatId}] sending sendMarkdown`);
-            replyMsg = await bot.sendMarkdown(chatId, cleanOutput);
-            log('DEBUG', `[REPLY:${chatId}] sendMarkdown done msgId=${replyMsg && replyMsg.message_id}`);
-          }
-        }
-      } catch (sendErr) {
-        log('WARN', `sendCard/sendMarkdown failed (${sendErr.message}), falling back to sendMessage`);
-        try { replyMsg = await bot.sendMessage(chatId, cleanOutput); } catch (e2) {
-          log('ERROR', `sendMessage fallback also failed: ${e2.message}`);
-        }
-      }
-      if (replyMsg && replyMsg.message_id && session) trackMsgSession(replyMsg.message_id, session, String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null);
-
-      await sendFileButtons(bot, chatId, mergeFileCollections(markedFiles, files));
-
-      // Timeout: also send the reason after the partial result
-      if (timedOut && error) {
-        try { await bot.sendMessage(chatId, error); } catch { /* */ }
-      }
-
-      // Auto-name: if this was the first message and session has no name, generate one
-      if (runtime.name === 'claude' && wasNew && !getSessionName(session.id)) {
-        autoNameSession(chatId, session.id, prompt, session.cwd).catch(() => { });
-      }
-
-      // Auto-refresh memory-snapshot.md for this agent on first session message (fire-and-forget)
-      if (wasNew && boundProject && boundProject.agent_id) {
-        setImmediate(async () => {
-          try {
-            const memory = require('./memory');
-            const pKey = boundProjectKey || '';
-            const sessions = memory.recentSessions({ limit: 5, project: pKey });
-            const factsRaw = memory.searchFacts('', { limit: 10, project: pKey });
-            const facts = Array.isArray(factsRaw) ? factsRaw : [];
-            memory.close();
-            const snapshotContent = buildMemorySnapshotContent(sessions, facts);
-            const agentId = boundProject.agent_id;
-            if (refreshMemorySnapshot(agentId, snapshotContent, HOME)) {
-              log('DEBUG', `[AGENT] Memory snapshot refreshed for ${agentId}`);
-            }
-          } catch { /* non-critical — memory module may not be available */ }
-        });
-      }
-      return { ok: !timedOut };
-    } else {
-      const errMsg = error || 'Unknown error';
-      const userErrMsg = (errorCode === 'AUTH_REQUIRED' || errorCode === 'RATE_LIMIT')
-        ? errMsg
-        : `Error: ${errMsg.slice(0, 200)}`;
-      log('ERROR', `ask${runtime.name === 'codex' ? 'Codex' : 'Claude'} failed for ${chatId}: ${errMsg.slice(0, 300)} (${errorCode || 'NO_CODE'})`);
-
-      // If session not found (expired/deleted), create new and retry once (Claude path)
-      if (runtime.name === 'claude' && (errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use'))) {
-        log('WARN', `Session ${session.id} unusable (${errMsg.includes('already in use') ? 'locked' : 'not found'}), creating new`);
-        session = createSession(sessionChatId, session.cwd, '', runtime.name);
-
-        const retryArgs = runtime.buildArgs({
-          model,
-          readOnly,
-          daemonCfg,
-          session,
-          cwd: session.cwd,
-        });
-
-        const retry = await spawnClaudeStreaming(
-          retryArgs,
+          args,
           fullPrompt,
           session.cwd,
           onStatus,
@@ -1630,41 +1362,345 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           boundProjectKey || '',
           runtime,
           onSession,
-        );
-        if (retry.sessionId) await onSession(retry.sessionId);
-        if (retry.output) {
-          markSessionStarted(sessionChatId, runtime.name);
-          const { markedFiles: retryMarked, cleanOutput: retryClean } = parseFileMarkers(retry.output);
-          await bot.sendMarkdown(chatId, retryClean);
-          await sendFileButtons(bot, chatId, mergeFileCollections(retryMarked, retry.files));
-          return { ok: true };
-        } else {
-          log('ERROR', `askClaude retry failed: ${(retry.error || '').slice(0, 200)}`);
-          try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
-          return { ok: false, error: retry.error || errMsg };
+        ));
+
+        if (sessionId) await onSession(sessionId);
+
+        if (shouldRetryCodexResumeFallback({
+          runtimeName: runtime.name,
+          wasResumeAttempt: wasCodexResumeAttempt,
+          output,
+          error,
+          errorCode,
+          canRetry: canRetryCodexResume(chatId),
+        })) {
+          markCodexResumeRetried(chatId);
+          log('WARN', `Codex resume failed for ${chatId}, retrying once with fresh exec: ${String(error).slice(0, 120)}`);
+          // Notify user explicitly — silent context loss is worse than a visible warning.
+          await bot.sendMessage(chatId, '⚠️ Codex session 已过期，上下文丢失。正在以全新 session 重试，请在回复后补充必要背景。').catch(() => { });
+          session = createSession(
+            sessionChatId,
+            session.cwd,
+            boundProject && boundProject.name ? boundProject.name : '',
+            'codex'
+          );
+          const retryArgs = runtime.buildArgs({
+            model,
+            readOnly,
+            daemonCfg,
+            session,
+            cwd: session.cwd,
+          });
+          // Prepend a context-loss marker so Codex knows this is a fresh session mid-conversation.
+          const retryPrompt = `[Note: previous Codex session expired and could not be resumed. Treating this as a new session. User message follows:]\n\n${fullPrompt}`;
+          ({
+            output,
+            error,
+            errorCode,
+            timedOut,
+            files,
+            toolUsageLog,
+            usage,
+            sessionId,
+          } = await spawnClaudeStreaming(
+            retryArgs,
+            retryPrompt,
+            session.cwd,
+            onStatus,
+            600000,
+            chatId,
+            boundProjectKey || '',
+            runtime,
+            onSession,
+          ));
+          if (sessionId) await onSession(sessionId);
         }
-      } else {
-        // Auto-fallback: if custom provider/model fails, revert to anthropic + opus (Claude path only)
+      } catch (spawnErr) {
+        clearInterval(typingTimer);
+        if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => { });
+        log('ERROR', `spawnClaudeStreaming crashed for ${chatId}: ${spawnErr.message}`);
+        await bot.sendMessage(chatId, `❌ 内部错误: ${spawnErr.message}`).catch(() => { });
+        return { ok: false, error: spawnErr.message };
+      }
+      clearInterval(typingTimer);
+
+      // --- Antigravity Raw Session Logging (Lossless Diary) ---
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        const ym = today.slice(0, 7); // YYYY-MM
+        const sessDir = path.join(HOME, '.metame', 'sessions', ym);
+        if (!fs.existsSync(sessDir)) fs.mkdirSync(sessDir, { recursive: true });
+
+        const diaryPath = path.join(sessDir, `${today}_${chatId}.md`);
+        const MAX_OUTPUT_LOG = 8000;
+        const outputLog = (output || error || 'No output.').slice(0, MAX_OUTPUT_LOG);
+        const outputTruncated = (output || '').length > MAX_OUTPUT_LOG ? '\n\n[truncated]' : '';
+        const diaryHeader = `\n---\ndate: ${new Date().toISOString()}\nproject: ${boundProjectKey || 'global'}\n---\n\n## 🙋‍♂️ 用户指令\n\`\`\`text\n${prompt}\n\`\`\`\n\n## 🤖 执行实录\n${outputLog}${outputTruncated}\n`;
+        fs.appendFileSync(diaryPath, diaryHeader, 'utf8');
+      } catch (e) { log('WARN', `Raw session logging failed: ${e.message}`); }
+      // ---------------------------------------------------------
+
+      // Skill evolution: capture signal + hot path heuristic check
+      if (skillEvolution) {
+        try {
+          const signal = skillEvolution.extractSkillSignal(fullPrompt, output, error, files, session.cwd, toolUsageLog);
+          if (signal) {
+            skillEvolution.appendSkillSignal(signal);
+            skillEvolution.checkHotEvolution(signal);
+          }
+        } catch (e) { log('WARN', `Skill evolution signal capture failed: ${e.message}`); }
+      }
+
+      // statusMsgId is always available for final reply handling (edit or delete).
+      const _statusMsgIdForReply = statusMsgId || null;
+
+      // Mentor post-flight debt registration (intense mode only).
+      if (mentorEnabled && !mentorExcluded && !mentorSuppressed && mentorEngine && typeof mentorEngine.registerDebt === 'function' && output) {
+        try {
+          const mode = resolveMentorMode(mentorCfg);
+          if (mode === 'intense') {
+            const codeLines = countCodeLines(output);
+            if (codeLines > 30) {
+              const info = deriveProjectInfo(session && session.cwd ? session.cwd : '');
+              const projectId = info && info.project_id ? info.project_id : 'proj_default';
+              mentorEngine.registerDebt(projectId, String(prompt || '').slice(0, 120), codeLines);
+              log('INFO', `[MENTOR] Registered reflection debt (${projectId}, lines=${codeLines})`);
+            }
+          }
+        } catch (e) {
+          log('WARN', `Mentor post-flight failed: ${e.message}`);
+        }
+      }
+
+      // When Claude completes with no text output (pure tool work), send a done notice
+      if (output === '' && !error) {
+        // Special case: if dispatch_to was called, send a "forwarded" confirmation
+        const dispatchedTargets = (toolUsageLog || [])
+          .filter(t => t.tool === 'Bash' && typeof t.context === 'string' && t.context.includes('dispatch_to'))
+          .map(t => { const m = t.context.match(/dispatch_to\s+(\S+)/); return m ? m[1] : null; })
+          .filter(Boolean);
+        if (dispatchedTargets.length > 0) {
+          const allProjects = (config && config.projects) || {};
+          const names = dispatchedTargets.map(k => (allProjects[k] && allProjects[k].name) || k).join('、');
+          const doneMsg = await bot.sendMessage(chatId, `✉️ 已转达给 ${names}，处理中…`);
+          if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session, String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null);
+          const wasNew = !session.started;
+          if (wasNew) markSessionStarted(sessionChatId, engineName);
+          return { ok: true };
+        }
+        const filesDesc = files && files.length > 0 ? `\n修改了 ${files.length} 个文件` : '';
+        const doneMsg = await bot.sendMessage(chatId, `✅ 完成${filesDesc}`);
+        if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session, String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null);
+        const wasNew = !session.started;
+        if (wasNew) markSessionStarted(sessionChatId, engineName);
+        return { ok: true };
+      }
+
+      if (output) {
+        if (runtime.name === 'codex') _codexResumeRetryTs.delete(String(chatId));
+        // Detect provider/model errors disguised as output (e.g., "model not found", API errors)
         if (runtime.name === 'claude') {
-          const activeProv = providerMod ? providerMod.getActiveName() : 'anthropic';
-          const builtinModels = ENGINE_MODEL_CONFIG.claude.options;
-          if ((activeProv !== 'anthropic' || !builtinModels.includes(model)) && !errMsg.includes('Stopped by user')) {
+          const activeProvCheck = providerMod ? providerMod.getActiveName() : 'anthropic';
+          const builtinModelsCheck = ['sonnet', 'opus', 'haiku'];
+          const looksLikeError = output.length < 300 && /\b(not found|invalid model|unauthorized|401|403|404|error|failed)\b/i.test(output);
+          if (looksLikeError && (activeProvCheck !== 'anthropic' || !builtinModelsCheck.includes(model))) {
             try {
-              config = fallbackToDefaultProvider(`${activeProv}/${model} error: ${errMsg.slice(0, 100)}`);
-              await bot.sendMessage(chatId, `⚠️ ${activeProv}/${model} 失败，已回退到 anthropic/opus\n原因: ${errMsg.slice(0, 100)}`);
-            } catch (fallbackErr) {
-              log('ERROR', `Fallback failed: ${fallbackErr.message}`);
+              config = fallbackToDefaultProvider(`output looks like error for ${activeProvCheck}/${model}`);
+              await bot.sendMessage(chatId, `⚠️ ${activeProvCheck}/${model} 疑似失败，已回退到 anthropic/opus\n输出: ${output.slice(0, 150)}`);
+            } catch (fbErr) {
+              log('ERROR', `Fallback failed: ${fbErr.message}`);
+              await bot.sendMarkdown(chatId, output);
+            }
+            return { ok: false, error: output };
+          }
+        }
+
+        // Mark session as started after first successful call
+        const wasNew = !session.started;
+        if (wasNew) markSessionStarted(sessionChatId, engineName);
+
+        const estimated = Math.ceil((prompt.length + output.length) / 4);
+        const chatCategory = classifyChatUsage(chatId, {
+          projectKey: boundProjectKey || '',
+          cwd: session && session.cwd,
+          homeDir: HOME,
+        });
+        recordTokens(loadState(), estimated, { category: chatCategory });
+
+        // Parse [[FILE:...]] markers from output (Claude's explicit file sends)
+        let { markedFiles, cleanOutput } = parseFileMarkers(output);
+
+        // Timeout with partial results: prepend warning
+        if (timedOut) {
+          cleanOutput = `⚠️ **任务超时，以下是已完成的部分结果：**\n\n${cleanOutput}`;
+        }
+
+        // Match current session to a project for colored card display.
+        // Prefer the bound project (known by virtual chatId or chat_agent_map) — avoids ambiguity
+        // when multiple projects share the same cwd (e.g. team members with parent project cwd).
+        let activeProject = boundProject || null;
+        if (!activeProject && session && session.cwd && config && config.projects) {
+          const sessionCwd = path.resolve(normalizeCwd(session.cwd));
+          for (const [, proj] of Object.entries(config.projects)) {
+            if (!proj.cwd) continue;
+            const projCwd = path.resolve(normalizeCwd(proj.cwd));
+            if (sessionCwd === projCwd) { activeProject = proj; break; }
+          }
+        }
+
+        let replyMsg;
+        try {
+          log('DEBUG', `[REPLY:${chatId}] statusMsgId=${statusMsgId} editFailed=${editFailed} activeProject=${activeProject && activeProject.name} lastCard=${_lastStatusCardContent ? _lastStatusCardContent.slice(0, 40) : 'null'}`);
+
+          // Strategy: always try to update the status card first (avoids sending a new card
+          // while the old 🤔 card lingers, which would produce two messages).
+          // If edit fails: try to delete the status card (awaited, not fire-and-forget).
+          // If delete also fails: fall through to sending a new card.
+          if (_statusMsgIdForReply && bot.editMessage) {
+            // Skip redundant edit: streaming already wrote the final content to the card.
+            // _lastStatusCardContent tracks the last __STREAM_TEXT__ write, so if it matches
+            // cleanOutput the card is already showing the right content — no update needed.
+            if (_lastStatusCardContent !== null && _lastStatusCardContent === cleanOutput) {
+              log('DEBUG', `[REPLY:${chatId}] skipping editMessage — card already shows final content`);
+              replyMsg = { message_id: _statusMsgIdForReply };
+            } else {
+              const editOk = await bot.editMessage(chatId, _statusMsgIdForReply, cleanOutput, _ackCardHeader);
+              log('DEBUG', `[REPLY:${chatId}] editMessage result=${editOk}`);
+              if (editOk !== false) {
+                replyMsg = { message_id: _statusMsgIdForReply };
+              } else if (bot.deleteMessage) {
+                const deleted = await bot.deleteMessage(chatId, _statusMsgIdForReply).then(() => true).catch(() => false);
+                log('DEBUG', `[REPLY:${chatId}] deleteMessage result=${deleted}`);
+                if (!deleted) {
+                  // Both edit and delete failed — try one more edit attempt to avoid leaving 🤔
+                  log('WARN', `[REPLY:${chatId}] deleteMessage failed — status card may linger alongside new reply`);
+                }
+              }
+            }
+          } else if (_statusMsgIdForReply && bot.deleteMessage) {
+            // No editMessage — delete the status card
+            await bot.deleteMessage(chatId, _statusMsgIdForReply).catch(() => { });
+          }
+
+          if (!replyMsg) {
+            if (activeProject && bot.sendCard) {
+              log('DEBUG', `[REPLY:${chatId}] sending sendCard`);
+              replyMsg = await bot.sendCard(chatId, {
+                title: `${activeProject.icon || '🤖'} ${activeProject.name || ''}`,
+                body: cleanOutput,
+                color: activeProject.color || 'blue',
+              });
+              log('DEBUG', `[REPLY:${chatId}] sendCard done msgId=${replyMsg && replyMsg.message_id}`);
+            } else {
+              log('DEBUG', `[REPLY:${chatId}] sending sendMarkdown`);
+              replyMsg = await bot.sendMarkdown(chatId, cleanOutput);
+              log('DEBUG', `[REPLY:${chatId}] sendMarkdown done msgId=${replyMsg && replyMsg.message_id}`);
+            }
+          }
+        } catch (sendErr) {
+          log('WARN', `sendCard/sendMarkdown failed (${sendErr.message}), falling back to sendMessage`);
+          try { replyMsg = await bot.sendMessage(chatId, cleanOutput); } catch (e2) {
+            log('ERROR', `sendMessage fallback also failed: ${e2.message}`);
+          }
+        }
+        if (replyMsg && replyMsg.message_id && session) trackMsgSession(replyMsg.message_id, session, String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null);
+
+        await sendFileButtons(bot, chatId, mergeFileCollections(markedFiles, files));
+
+        // Timeout: also send the reason after the partial result
+        if (timedOut && error) {
+          try { await bot.sendMessage(chatId, error); } catch { /* */ }
+        }
+
+        // Auto-name: if this was the first message and session has no name, generate one
+        if (runtime.name === 'claude' && wasNew && !getSessionName(session.id)) {
+          autoNameSession(chatId, session.id, prompt, session.cwd).catch(() => { });
+        }
+
+        // Auto-refresh memory-snapshot.md for this agent on first session message (fire-and-forget)
+        if (wasNew && boundProject && boundProject.agent_id) {
+          setImmediate(async () => {
+            try {
+              const memory = require('./memory');
+              const pKey = boundProjectKey || '';
+              const sessions = memory.recentSessions({ limit: 5, project: pKey });
+              const factsRaw = memory.searchFacts('', { limit: 10, project: pKey });
+              const facts = Array.isArray(factsRaw) ? factsRaw : [];
+              memory.close();
+              const snapshotContent = buildMemorySnapshotContent(sessions, facts);
+              const agentId = boundProject.agent_id;
+              if (refreshMemorySnapshot(agentId, snapshotContent, HOME)) {
+                log('DEBUG', `[AGENT] Memory snapshot refreshed for ${agentId}`);
+              }
+            } catch { /* non-critical — memory module may not be available */ }
+          });
+        }
+        return { ok: !timedOut };
+      } else {
+        const errMsg = error || 'Unknown error';
+        const userErrMsg = (errorCode === 'AUTH_REQUIRED' || errorCode === 'RATE_LIMIT')
+          ? errMsg
+          : `Error: ${errMsg.slice(0, 200)}`;
+        log('ERROR', `ask${runtime.name === 'codex' ? 'Codex' : 'Claude'} failed for ${chatId}: ${errMsg.slice(0, 300)} (${errorCode || 'NO_CODE'})`);
+
+        // If session not found (expired/deleted), create new and retry once (Claude path)
+        if (runtime.name === 'claude' && (errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use'))) {
+          log('WARN', `Session ${session.id} unusable (${errMsg.includes('already in use') ? 'locked' : 'not found'}), creating new`);
+          session = createSession(sessionChatId, session.cwd, '', runtime.name);
+
+          const retryArgs = runtime.buildArgs({
+            model,
+            readOnly,
+            daemonCfg,
+            session,
+            cwd: session.cwd,
+          });
+
+          const retry = await spawnClaudeStreaming(
+            retryArgs,
+            fullPrompt,
+            session.cwd,
+            onStatus,
+            600000,
+            chatId,
+            boundProjectKey || '',
+            runtime,
+            onSession,
+          );
+          if (retry.sessionId) await onSession(retry.sessionId);
+          if (retry.output) {
+            markSessionStarted(sessionChatId, runtime.name);
+            const { markedFiles: retryMarked, cleanOutput: retryClean } = parseFileMarkers(retry.output);
+            await bot.sendMarkdown(chatId, retryClean);
+            await sendFileButtons(bot, chatId, mergeFileCollections(retryMarked, retry.files));
+            return { ok: true };
+          } else {
+            log('ERROR', `askClaude retry failed: ${(retry.error || '').slice(0, 200)}`);
+            try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
+            return { ok: false, error: retry.error || errMsg };
+          }
+        } else {
+          // Auto-fallback: if custom provider/model fails, revert to anthropic + opus (Claude path only)
+          if (runtime.name === 'claude') {
+            const activeProv = providerMod ? providerMod.getActiveName() : 'anthropic';
+            const builtinModels = ENGINE_MODEL_CONFIG.claude.options;
+            if ((activeProv !== 'anthropic' || !builtinModels.includes(model)) && !errMsg.includes('Stopped by user')) {
+              try {
+                config = fallbackToDefaultProvider(`${activeProv}/${model} error: ${errMsg.slice(0, 100)}`);
+                await bot.sendMessage(chatId, `⚠️ ${activeProv}/${model} 失败，已回退到 anthropic/opus\n原因: ${errMsg.slice(0, 100)}`);
+              } catch (fallbackErr) {
+                log('ERROR', `Fallback failed: ${fallbackErr.message}`);
+                try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
+              }
+            } else {
               try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
             }
           } else {
             try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
           }
-        } else {
-          try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
+          return { ok: false, error: errMsg, errorCode };
         }
-        return { ok: false, error: errMsg, errorCode };
       }
-    }
 
     } catch (fatalErr) { // ── safety-net-catch ──
       clearInterval(typingTimer);

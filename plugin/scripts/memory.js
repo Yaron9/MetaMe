@@ -99,8 +99,8 @@ function getDb() {
   }
 
   // Backward-compatible migration for old DBs without `scope`
-  try { _db.exec('ALTER TABLE sessions ADD COLUMN scope TEXT DEFAULT NULL'); } catch {}
-  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_scope ON sessions(scope)'); } catch {}
+  try { _db.exec('ALTER TABLE sessions ADD COLUMN scope TEXT DEFAULT NULL'); } catch { }
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_scope ON sessions(scope)'); } catch { }
 
 
   // ── Facts table: atomic knowledge triples ──
@@ -167,27 +167,27 @@ function getDb() {
   }
 
   // Indexes
-  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_entity  ON facts(entity)'); } catch {}
-  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_entity_relation ON facts(entity, relation)'); } catch {}
-  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_project ON facts(project)'); } catch {}
-  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_fact_labels_label ON fact_labels(label)'); } catch {}
-  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_fact_labels_domain ON fact_labels(domain)'); } catch {}
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_entity  ON facts(entity)'); } catch { }
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_entity_relation ON facts(entity, relation)'); } catch { }
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_project ON facts(project)'); } catch { }
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_fact_labels_label ON fact_labels(label)'); } catch { }
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_fact_labels_domain ON fact_labels(domain)'); } catch { }
 
   // Backward-compatible migration for old DBs without `scope`
-  try { _db.exec('ALTER TABLE facts ADD COLUMN scope TEXT DEFAULT NULL'); } catch {}
-  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_scope   ON facts(scope)'); } catch {}
+  try { _db.exec('ALTER TABLE facts ADD COLUMN scope TEXT DEFAULT NULL'); } catch { }
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_scope   ON facts(scope)'); } catch { }
 
   // Search frequency tracking: counts how many times a fact appeared in search results.
   // This is a RELEVANCE PROXY, not a usefulness score — "searched" ≠ "actually helpful".
   // Renamed from recall_count (was ambiguous). Migration copies existing data forward.
-  try { _db.exec('ALTER TABLE facts ADD COLUMN recall_count INTEGER DEFAULT 0'); } catch {}
-  try { _db.exec('ALTER TABLE facts ADD COLUMN search_count INTEGER DEFAULT 0'); } catch {}
-  try { _db.exec('ALTER TABLE facts ADD COLUMN last_searched_at TEXT'); } catch {}
+  try { _db.exec('ALTER TABLE facts ADD COLUMN recall_count INTEGER DEFAULT 0'); } catch { }
+  try { _db.exec('ALTER TABLE facts ADD COLUMN search_count INTEGER DEFAULT 0'); } catch { }
+  try { _db.exec('ALTER TABLE facts ADD COLUMN last_searched_at TEXT'); } catch { }
   // One-time migration: copy recall_count → search_count for existing rows
-  try { _db.exec('UPDATE facts SET search_count = recall_count WHERE recall_count > 0 AND search_count = 0'); } catch {}
+  try { _db.exec('UPDATE facts SET search_count = recall_count WHERE recall_count > 0 AND search_count = 0'); } catch { }
 
   // conflict_status: 'OK' (default) | 'CONFLICT' — set by _detectConflict for non-stateful relations
-  try { _db.exec("ALTER TABLE facts ADD COLUMN conflict_status TEXT NOT NULL DEFAULT 'OK'"); } catch {}
+  try { _db.exec("ALTER TABLE facts ADD COLUMN conflict_status TEXT NOT NULL DEFAULT 'OK'"); } catch { }
 
   return _db;
 }
@@ -317,8 +317,10 @@ function saveFacts(sessionId, project, facts, { scope = null } = {}) {
       insert.run(id, f.entity, f.relation, f.value.slice(0, 300),
         f.confidence || 'medium', sourceType, sessionId, normalizedProject, normalizedScope, tags);
       batchDedup.add(dedupKey);
-      savedFacts.push({ id, entity: f.entity, relation: f.relation, value: f.value,
-        project: normalizedProject, scope: normalizedScope, tags: f.tags || [], created_at: new Date().toISOString() });
+      savedFacts.push({
+        id, entity: f.entity, relation: f.relation, value: f.value,
+        project: normalizedProject, scope: normalizedScope, tags: f.tags || [], created_at: new Date().toISOString()
+      });
       saved++;
 
       // For stateful relations, mark older active facts with same entity::relation as superseded
@@ -440,7 +442,7 @@ function _trackSearch(ids) {
 }
 
 const SUPERSEDE_LOG = path.join(os.homedir(), '.metame', 'memory_supersede_log.jsonl');
-const CONFLICT_LOG  = path.join(os.homedir(), '.metame', 'memory_conflict_log.jsonl');
+const CONFLICT_LOG = path.join(os.homedir(), '.metame', 'memory_conflict_log.jsonl');
 
 /**
  * Append supersede operations to audit log (append-only, never mutated).
@@ -766,6 +768,42 @@ function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
         }
       }
     } catch { /* fact_labels table may not exist yet */ }
+  }
+  // Entity path expansion: supplement with entity hierarchy matches per query term.
+  // Handles multi-word queries like "daemon dispatch" that won't match dotted entity paths
+  // (e.g. "MetaMe.daemon.dispatch.cross-bot") via LIKE '%daemon dispatch%'.
+  if (likeResults.length < limit) {
+    const terms = query.trim().split(/\s+/).filter(t => t.length >= 3);
+    if (terms.length > 0) {
+      try {
+        const likeIds = new Set(likeResults.map(r => r.id));
+        const entityOrClauses = terms.map(() => `entity LIKE ?`).join(' OR ');
+        const entityParams = terms.map(t => `%${t}%`);
+        let entityExpSql = `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
+          FROM facts WHERE (${entityOrClauses})
+            AND superseded_by IS NULL
+            AND (conflict_status IS NULL OR conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))`;
+        if (scope && project) {
+          entityExpSql += ` AND ((scope = ? OR scope = '*') OR (scope IS NULL AND (project = ? OR project = '*')))`;
+          entityParams.push(scope, project);
+        } else if (scope) {
+          entityExpSql += ` AND (scope = ? OR scope = '*')`;
+          entityParams.push(scope);
+        } else if (project) {
+          entityExpSql += ` AND (project = ? OR project = '*')`;
+          entityParams.push(project);
+        }
+        entityExpSql += ` ORDER BY created_at DESC LIMIT ?`;
+        entityParams.push(limit);
+        const entityRows = db.prepare(entityExpSql).all(...entityParams);
+        for (const row of entityRows) {
+          if (!likeIds.has(row.id) && likeResults.length < limit) {
+            likeIds.add(row.id);
+            likeResults.push(row);
+          }
+        }
+      } catch { /* entity expansion failed */ }
+    }
   }
   if (likeResults.length > 0) _trackSearch(likeResults.map(r => r.id));
   return likeResults;

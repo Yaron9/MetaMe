@@ -108,13 +108,13 @@ function writeReflectLog(record) {
  * Query hot zone facts from memory.db.
  * Returns array of plain objects.
  */
-function queryHotFacts(db) {
+function queryHotFacts(db, windowDays = WINDOW_DAYS) {
   const relationPlaceholders = EXCLUDED_RELATIONS.map(() => '?').join(', ');
   const stmt = db.prepare(`
     SELECT id, entity, relation, value, confidence, search_count, created_at
     FROM facts
     WHERE search_count >= ${MIN_SEARCH_COUNT}
-      AND created_at >= datetime('now', '-${WINDOW_DAYS} days')
+      AND created_at >= datetime('now', '-${windowDays} days')
       AND superseded_by IS NULL
       AND (conflict_status IS NULL OR conflict_status = 'OK')
       AND relation NOT IN (${relationPlaceholders})
@@ -212,10 +212,8 @@ function parseJsonFromLlm(raw) {
   try { return JSON.parse(cleaned); } catch { return null; }
 }
 
-function writeCapsuleFile(filePath, capsule, facts, today, prefix) {
-  const related = Array.isArray(capsule.related_concepts) ? capsule.related_concepts.slice(0, 8) : [];
-  const supporting = Array.isArray(capsule.supporting_facts) ? capsule.supporting_facts.slice(0, 8) : [];
-  const content = `---
+function writeCapsuleFile(filePath, markdownContent, facts, today, prefix) {
+  const frontmatter = `---
 date: ${today}
 source: nightly-reflect
 type: knowledge-capsule
@@ -223,21 +221,30 @@ entity_prefix: ${prefix}
 facts_analyzed: ${Array.isArray(facts) ? facts.length : 0}
 ---
 
-# ${capsule.title}
-
-## 核心结论
-${capsule.core_conclusion}
-
-## 适用场景
-${capsule.applicable_scenarios}
-
-## 关联概念
-${related.length > 0 ? related.map(x => `- ${x}`).join('\n') : '- (none)'}
-
-## 支撑事实
-${supporting.length > 0 ? supporting.map(x => `- ${x}`).join('\n') : '- (none)'}
 `;
-  fs.writeFileSync(filePath, content, 'utf8');
+  try {
+    fs.writeFileSync(filePath, frontmatter + markdownContent, 'utf8');
+    return true;
+  } catch (e) {
+    console.log(`[NIGHTLY-REFLECT] Warning: failed to write capsule ${filePath}: ${e.message}`);
+    return false;
+  }
+}
+
+function appendCapsuleUpdate(filePath, markdownContent, today) {
+  // Idempotency: skip if same-day update already appended
+  try {
+    const existing = fs.readFileSync(filePath, 'utf8');
+    if (existing.includes(`## 🔄 增量研判 (${today})`)) return false;
+  } catch { /* file may not be readable, proceed */ }
+  try {
+    const section = `\n\n## 🔄 增量研判 (${today})\n\n${markdownContent}\n`;
+    fs.appendFileSync(filePath, section, 'utf8');
+    return true;
+  } catch (e) {
+    console.log(`[NIGHTLY-REFLECT] Warning: failed to append capsule update ${filePath}: ${e.message}`);
+    return false;
+  }
 }
 
 /**
@@ -272,7 +279,10 @@ async function run() {
     db.exec('PRAGMA busy_timeout = 5000');
 
     const hotFacts = queryHotFacts(db);
-    console.log(`[NIGHTLY-REFLECT] Found ${hotFacts.length} hot-zone facts.`);
+    // Recent facts (last 1 day) used exclusively for incremental capsule appends,
+    // preventing the 7-day rolling window from re-distilling the same facts repeatedly.
+    const recentFacts = queryHotFacts(db, 1);
+    console.log(`[NIGHTLY-REFLECT] Found ${hotFacts.length} hot-zone facts (${recentFacts.length} from last 24h).`);
 
     if (hotFacts.length < 3) {
       console.log('[NIGHTLY-REFLECT] Insufficient hot facts (< 3), skipping distillation.');
@@ -332,6 +342,7 @@ Rules:
     } catch (e) {
       console.log(`[NIGHTLY-REFLECT] Haiku call failed: ${e.message}`);
       writeReflectLog({ status: 'error', reason: 'haiku_failed', error: e.message, facts_found: hotFacts.length });
+      releaseLock();
       return;
     }
 
@@ -340,6 +351,7 @@ Rules:
     if (!parsed || typeof parsed !== 'object') {
       console.log('[NIGHTLY-REFLECT] Failed to parse Haiku output.');
       writeReflectLog({ status: 'error', reason: 'parse_failed', facts_found: hotFacts.length });
+      releaseLock();
       return;
     }
 
@@ -377,50 +389,104 @@ Rules:
       }
 
       // 3C: knowledge capsule aggregation by entity prefix.
+      // Cold start uses full hotFacts (7 days); incremental uses recentFacts (1 day)
+      // to prevent the same facts from being re-distilled every night.
       const capsuleGroups = collectCapsuleGroups(hotFacts, 3).slice(0, 3);
       for (const group of capsuleGroups) {
-        const groupFacts = group.items.map(f => ({
+        const capsuleSlug = sanitizeSlug(group.prefix.replace(/\./g, '-'), 'capsule');
+        const capsuleFile = path.join(CAPSULES_DIR, `${capsuleSlug}-playbook.md`);
+        const playbookExists = fs.existsSync(capsuleFile);
+
+        // For incremental appends, only use facts from the last 24 hours
+        const factsForGroup = playbookExists
+          ? collectCapsuleGroups(recentFacts, 1).find(g => g.prefix === group.prefix)
+          : group;
+        // Skip append if no new facts in the last 24 hours
+        if (playbookExists && !factsForGroup) continue;
+
+        const sourceItems = factsForGroup ? factsForGroup.items : group.items;
+        const groupFacts = sourceItems.map(f => ({
           entity: f.entity,
           relation: f.relation,
           value: f.value,
           search_count: f.search_count,
         }));
-        const capsulePrompt = `你是知识胶囊生成器。请将同一主题下的事实聚合成结构化胶囊。
+        const capsulePrompt = playbookExists
+          ? `你是知识胶囊维护者。以下是该主题近期新增的原始事实，请提炼成简洁的增量段落（不超过300字），直接追加到现有手册。不要重复旧内容，不要输出大标题。
 
 entity_prefix: ${group.prefix}
-facts(json): ${JSON.stringify(groupFacts, null, 2).slice(0, 5000)}
+新增 facts(json): ${JSON.stringify(groupFacts, null, 2).slice(0, 3000)}
 
-输出 JSON：
-{
-  "title":"标题",
-  "core_conclusion":"一句核心结论",
-  "applicable_scenarios":"适用场景（1-2句）",
-  "related_concepts":["概念1","概念2"],
-  "supporting_facts":["支撑点1","支撑点2"]
-}
+输出格式（仅段落内容，Markdown 列表）：
+- **[具体要点/报错/红线]**：[原因与解法，含变量名/路径/报错原文]`
+          : `你是首席布道师与底层架构师。请将以下零散的开发者流水账，升维提炼成一本《硬核架构与避坑手册》(Playbook)。
 
-规则：
-- 只基于输入事实，不虚构
-- 每个字段简洁具体
-- 仅输出 JSON`;
+entity_prefix: ${group.prefix}
+输入事实(JSON): ${JSON.stringify(groupFacts, null, 2).slice(0, 5000)}
 
-        let capsule = null;
+【输出信仰与戒律】
+1. 绝对的业务原子性：必须写具体的变量名、报错信息、文件路径，不要写"遇到了问题解决问题"。
+2. 倒金字塔结构：致命错误、架构红线必须写在最前面的 🩸 血泪避坑指南 中。
+3. 如果输入事实中包含报错原文（如 Exception 栈），必须保留在 🔍 历史报错指纹 中。
+4. 必须使用 Markdown 格式输出，不要有任何 JSON 包装。
+5. 去除一切废话：不要用"总而言之"、"这体现了"等水文词汇，全本必须干货。
+
+请按以下 Markdown 模板输出：
+# 📕 Playbook: [你提炼的主题名称]
+
+> **胶囊摘要**：[一句话核心]
+> **覆盖实体**：${group.prefix}
+> **核心标签**：[tag1, tag2, tag3]
+
+---
+
+## 1. 🩸 血泪避坑指南 (Critical Red Lines)
+- **[问题名]**：[具体诱因与解法]
+
+## 2. 🏗️ 架构决议 (Architecture Decisions)
+- **[为什么选X不选Y]**：[理由]
+
+## 3. 🔍 历史报错指纹 (Error Fingerprints)
+- \`[报错原文]\`
+  - **诱因**：...
+  - **解法**：...
+
+## 4. 🔗 图谱扩展 (Related Concepts)
+- [相关主题或文件引用]`;
+
+        let capsuleMarkdown = null;
         try {
           const rawCapsule = await Promise.race([
             callHaiku(capsulePrompt, distillEnv, 60000),
             new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 65000)),
           ]);
-          capsule = parseJsonFromLlm(rawCapsule);
+          capsuleMarkdown = typeof rawCapsule === 'string' ? rawCapsule.trim() : null;
         } catch { /* non-fatal */ }
-        if (!capsule || !capsule.title || !capsule.core_conclusion || !capsule.applicable_scenarios) continue;
+        // Strip markdown code fences that Haiku may wrap around output
+        if (capsuleMarkdown) {
+          capsuleMarkdown = capsuleMarkdown
+            .replace(/^```(markdown)?\s*/i, '')
+            .replace(/```\s*$/i, '')
+            .trim();
+        }
+        if (!capsuleMarkdown || capsuleMarkdown.length < 50) continue;
 
-        const capsuleSlug = sanitizeSlug(group.prefix.replace(/\./g, '-'), 'capsule');
-        const capsuleFile = path.join(CAPSULES_DIR, `${capsuleSlug}-${today}.md`);
-        writeCapsuleFile(capsuleFile, capsule, group.items, today, group.prefix);
+        if (playbookExists) {
+          appendCapsuleUpdate(capsuleFile, capsuleMarkdown, today);
+        } else {
+          writeCapsuleFile(capsuleFile, capsuleMarkdown, sourceItems, today, group.prefix);
+        }
         capsulesWritten++;
 
         if (memory && typeof memory.saveFacts === 'function') {
-          const capsuleValue = stripMd(`${capsule.title}: ${capsule.core_conclusion}`).slice(0, 280);
+          const titleMatch = capsuleMarkdown.match(/^# 📕 Playbook:\s*(.+)$/m)
+            || capsuleMarkdown.match(/^## (.+)$/m);
+          const capsuleTitle = (titleMatch ? titleMatch[1].trim() : group.prefix).slice(0, 80);
+          const summaryMatch = capsuleMarkdown.match(/\*\*胶囊摘要\*\*[：:]\s*(.+)/);
+          const capsuleSummary = summaryMatch
+            ? summaryMatch[1].trim()
+            : stripMd(capsuleMarkdown.slice(0, 120));
+          const capsuleValue = `${capsuleTitle}: ${capsuleSummary}`.slice(0, 280);
           if (capsuleValue.length >= 20) {
             const saveCapsule = memory.saveFacts(`capsule-${today}-${capsuleSlug}`, '*', [{
               entity: `capsule.${group.prefix.replace(/\./g, '_')}`,
