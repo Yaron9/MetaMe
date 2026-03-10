@@ -60,23 +60,6 @@
 /agent new team
 ```
 
-### 向导流程
-
-1. **输入团队名称**：如 `短剧团队`
-2. **输入成员列表**，格式为 `名称:icon:颜色`，支持逗号或换行分隔：
-   ```
-   编剧:✍️:green, 审核:🔍:yellow, 推广:📢:red
-   ```
-   可用颜色：`green` `yellow` `red` `blue` `purple` `orange` `pink` `indigo`
-3. **选择父工作目录**（通过文件浏览器）
-
-### 创建结果
-
-- 在 `<父目录>/team/<成员key>/` 下创建成员目录及 `CLAUDE.md`
-- 自动执行 `git init` 以支持 checkpoint
-- 若选择的父目录对应 daemon.yaml 中已有项目，自动将成员配置写入该项目的 `team` 数组
-- 若未找到父项目，提示手动在 daemon.yaml 中注册 `team` 段
-
 ## 创建分身（Clone Wizard）
 
 为当前 Agent 创建一个克隆分身——共享同一个 `CLAUDE.md` 角色定义（symlink），运行在独立的工作目录。
@@ -89,17 +72,7 @@
 /agent new clone
 ```
 
-### 向导流程
-
-1. **识别父项目**：根据当前群绑定的项目确认克隆来源
-2. **输入名称和目录**：新分身的名称 + 工作目录
-3. **链接角色**：将父项目的 `CLAUDE.md` 以 symlink（macOS）/ hardlink（Windows）/ copy 形式链接到新目录
-
-### 创建结果
-
-- 新目录下的 `CLAUDE.md` 指向父 Agent 的角色定义（改父 Agent 角色，分身同步生效）
-- `SOUL.md` / `MEMORY.md` 同样通过 `createLinkOrMirror()` 链接
-- 需手动绑定群：新建群 → 加 bot → `/activate`
+分身的 `CLAUDE.md` 指向父 Agent 角色定义（改父角色分身同步生效），需手动绑定群：新建群 → 加 bot → `/activate`
 
 ## 常用命令速查
 
@@ -114,13 +87,9 @@
 | 解绑群 | `/agent unbind` |
 | 切换 Agent | 直接@昵称（仅非专属群） |
 | 向团队成员发消息 | `/msg <昵称> <内容>` |
-| 切换团队广播 | `/broadcast on` / `/broadcast off` |
-| 停止指定成员 | `/stop <昵称>` |
-| 修复 soul 层 | `/agent soul repair` |
 
 ## 注意事项
 - 专属群（chat_agent_map 中的群）永远绑定同一个 Agent，不能通过昵称切换
 - 新群必须发 `/activate` 才能使用，未授权群会提示"此群未授权"
 - Codex 当前限制（MVP）：`/sessions` 列表暂只展示 Claude 本地会话，Codex 会话暂不可见
 - Codex 当前限制（MVP）：`/compact` 暂不支持，请继续在同一会话中对话
-- 需要定位脚本入口、升级步骤或文件落点时，先看 `~/.metame/docs/pointer-map.md`
