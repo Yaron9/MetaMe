@@ -680,6 +680,59 @@ function createAdminCommandHandler(deps) {
       return { handled: true, config };
     }
 
+    // /msg — team internal messaging (like sessions_send)
+    if (text.startsWith('/msg ')) {
+      const args = text.slice('/msg '.length).trim();
+      const msgMatch = args.match(/^(\S+)\s+(.+)$/s);
+      if (!msgMatch) {
+        await bot.sendMessage(chatId, '用法: /msg <agent> <消息内容>\n示例: /msg 甲 帮我看看这个文档');
+        return { handled: true, config };
+      }
+      const targetName = msgMatch[1];
+      const message = msgMatch[2].trim();
+
+      // Resolve target - check team members first, then projects
+      let targetKey = null;
+      const senderKey = resolveSenderKey(chatId, config);
+      const senderProj = config.projects ? config.projects[senderKey] : null;
+
+      // Check if sender has a team
+      if (senderProj && Array.isArray(senderProj.team)) {
+        for (const member of senderProj.team) {
+          const nicks = Array.isArray(member.nicknames) ? member.nicknames : [];
+          if (member.key === targetName || nicks.some(n => n === targetName)) {
+            targetKey = member.key;
+            break;
+          }
+        }
+      }
+      // Fall back to project lookup
+      if (!targetKey) {
+        targetKey = resolveProjectKey(targetName, config.projects || {});
+      }
+
+      if (!targetKey) {
+        await bot.sendMessage(chatId, `未找到 agent: ${targetName}`);
+        return { handled: true, config };
+      }
+
+      const toProj = config.projects[targetKey] || {};
+      const result = dispatchTask(targetKey, {
+        from: senderKey,
+        type: 'message',
+        priority: 'normal',
+        payload: { title: 'team message', prompt: `[来自团队的消息]\n\n${message}` },
+        callback: false,
+      }, config, null, null);
+
+      if (result.success) {
+        await bot.sendMessage(chatId, `📬 已发送消息给 ${toProj.icon || '🤖'} ${toProj.name || targetKey}`);
+      } else {
+        await bot.sendMessage(chatId, `❌ 发送失败: ${result.error}`);
+      }
+      return { handled: true, config };
+    }
+
     if (text === '/budget') {
       const limit = (config.budget && config.budget.daily_limit) || 50000;
       const used = state.budget.tokens_used;

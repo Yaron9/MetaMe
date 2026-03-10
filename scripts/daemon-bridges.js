@@ -162,17 +162,23 @@ function createBridgeStarter(deps) {
       }
     }
 
-    // Symlink CLAUDE.md from parent if not exists
+    // Set up CLAUDE.md: use existing专属, or create symlink from parent
     const claudeMd = path.join(memberDir, 'CLAUDE.md');
     const parentClaudeMd = path.join(parentCwd, 'CLAUDE.md');
-    if (!existsSync(claudeMd) && existsSync(parentClaudeMd)) {
-      try {
-        // Use 'file' type for directory symlinks, 'junction' on Windows
-        const linkType = process.platform === 'win32' ? 'junction' : 'dir';
-        symlinkSync(parentClaudeMd, claudeMd, 'file');
-        log('INFO', `Symlinked CLAUDE.md for ${key}`);
-      } catch (e) {
-        log('WARN', `Failed to symlink CLAUDE.md for ${key}: ${e.message}`);
+    if (!existsSync(claudeMd)) {
+      // No专属 CLAUDE.md, create from template or parent
+      const templatePath = path.join(parentCwd, 'agents', key, 'CLAUDE.md');
+      if (existsSync(templatePath)) {
+        // Use the template we created manually
+        log('INFO', `Using专属 CLAUDE.md for ${key}`);
+      } else if (existsSync(parentClaudeMd)) {
+        // Fall back to parent symlink
+        try {
+          symlinkSync(parentClaudeMd, claudeMd, 'file');
+          log('INFO', `Symlinked CLAUDE.md for ${key}`);
+        } catch (e) {
+          log('WARN', `Failed to symlink CLAUDE.md for ${key}: ${e.message}`);
+        }
       }
     }
 

@@ -129,64 +129,60 @@ function createBridgeStarter(deps) {
       },
     });
   }
-  // Get team member's working directory. Prefers git worktree if parent is a git repo.
-  // Falls back to regular directory if parent is not a git repo.
-  const _worktreeLocks = new Map(); // per-key lock to prevent TOCTOU races
+  // Get team member's working directory using subdir (not worktree).
+  // Creates agents/<key>/ directory and symlinks CLAUDE.md from parent.
   function _getMemberCwd(parentCwd, key) {
-    const { existsSync, mkdirSync } = require('fs');
+    const { existsSync, mkdirSync, symlinkSync, readlinkSync } = require('fs');
     const { execFileSync } = require('child_process');
     const WIN_HIDE = process.platform === 'win32' ? { windowsHide: true } : {};
 
-    // Ensure git repository exists in directory (for checkpoint support)
-    function _ensureGitInitialized(dir) {
-      const gitDir = path.join(dir, '.git');
-      if (existsSync(gitDir)) return true;
+    // Use agents/<key>/ as the working directory
+    const agentsDir = path.join(parentCwd, 'agents');
+    const memberDir = path.join(agentsDir, key);
+
+    // Create agents directory if not exists
+    if (!existsSync(agentsDir)) {
+      mkdirSync(agentsDir, { recursive: true });
+    }
+
+    // Create member directory if not exists
+    if (!existsSync(memberDir)) {
+      mkdirSync(memberDir, { recursive: true });
+      log('INFO', `Created agent directory: ${memberDir}`);
+    }
+
+    // Initialize git for checkpoint support
+    const gitDir = path.join(memberDir, '.git');
+    if (!existsSync(gitDir)) {
       try {
-        execFileSync('git', ['init'], { cwd: dir, stdio: 'ignore', ...WIN_HIDE });
-        log('INFO', `Git repo initialized: ${dir}`);
-        return true;
+        execFileSync('git', ['init'], { cwd: memberDir, stdio: 'ignore', ...WIN_HIDE });
+        log('INFO', `Git repo initialized: ${memberDir}`);
       } catch (e) {
-        log('WARN', `Failed to init git for ${dir}: ${e.message}`);
-        return false;
+        log('WARN', `Failed to init git for ${memberDir}: ${e.message}`);
       }
     }
 
-    const memberDir = path.join(parentCwd, 'team', key);
-    // Check if parent is a git repo
-    let isGitRepo = false;
-    try {
-      execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: parentCwd, stdio: 'ignore' });
-      isGitRepo = true;
-    } catch { isGitRepo = false; }
-    // If not a git repo, use regular directory but initialize git for checkpoint
-    if (!isGitRepo) {
-      if (!existsSync(memberDir)) {
-        mkdirSync(memberDir, { recursive: true });
+    // Set up CLAUDE.md: use existing专属, or create symlink from parent
+    const claudeMd = path.join(memberDir, 'CLAUDE.md');
+    const parentClaudeMd = path.join(parentCwd, 'CLAUDE.md');
+    if (!existsSync(claudeMd)) {
+      // No专属 CLAUDE.md, create from template or parent
+      const templatePath = path.join(parentCwd, 'agents', key, 'CLAUDE.md');
+      if (existsSync(templatePath)) {
+        // Use the template we created manually
+        log('INFO', `Using专属 CLAUDE.md for ${key}`);
+      } else if (existsSync(parentClaudeMd)) {
+        // Fall back to parent symlink
+        try {
+          symlinkSync(parentClaudeMd, claudeMd, 'file');
+          log('INFO', `Symlinked CLAUDE.md for ${key}`);
+        } catch (e) {
+          log('WARN', `Failed to symlink CLAUDE.md for ${key}: ${e.message}`);
+        }
       }
-      _ensureGitInitialized(memberDir);
-      return memberDir;
     }
-    // Git repo: use worktree
-    const wtDir = path.join(parentCwd, '.worktree', key);
-    if (existsSync(path.join(wtDir, '.git'))) return wtDir;
-    // Concurrency guard
-    if (_worktreeLocks.has(key)) return _worktreeLocks.get(key);
-    _worktreeLocks.set(key, wtDir);
-    mkdirSync(path.join(parentCwd, '.worktree'), { recursive: true });
-    const branch = `team/${key}`;
-    try {
-      try { execFileSync('git', ['branch', branch, 'HEAD'], { cwd: parentCwd, stdio: 'ignore' }); } catch { /* branch exists */ }
-      execFileSync('git', ['worktree', 'add', wtDir, branch], { cwd: parentCwd, stdio: 'ignore', timeout: 10000 });
-      log('INFO', `Worktree created: ${wtDir} (branch: ${branch})`);
-    } catch (e) {
-      _worktreeLocks.delete(key);
-      if (existsSync(path.join(wtDir, '.git'))) return wtDir;
-      log('ERROR', `Worktree creation failed for ${key}: ${e.message} — falling back to regular dir`);
-      if (!existsSync(memberDir)) mkdirSync(memberDir, { recursive: true });
-      _ensureGitInitialized(memberDir);
-      return memberDir;
-    }
-    return wtDir;
+
+    return memberDir;
   }
 
   function _dispatchToTeamMember(member, boundProj, text, cfg, bot, realChatId, executeTaskByName, acl) {
@@ -195,10 +191,11 @@ function createBridgeStarter(deps) {
     const resolvedParentCwd = parentCwd.replace(/^~/, require('os').homedir());
     const memberCwd = _getMemberCwd(resolvedParentCwd, member.key);
     if (!memberCwd) {
-      log('ERROR', `Team [${member.key}] cannot start: worktree unavailable`);
+      log('ERROR', `Team [${member.key}] cannot start: directory unavailable`);
       bot.sendMessage(realChatId, `❌ ${member.icon || '🤖'} ${member.name} 启动失败：工作目录创建失败`).catch(() => {});
       return;
     }
+    log('INFO', `Team [${member.key}] using cwd: ${memberCwd}`);
     const teamCfg = {
       ...cfg,
       projects: {
