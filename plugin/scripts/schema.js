@@ -91,8 +91,8 @@ const SCHEMA = {
     type: 'map',         // dynamic key-value, keys are domain names
     valueType: 'enum',
     values: ['beginner', 'intermediate', 'expert'],
-    maxKeys: 20,
-    description: 'Per-domain skill level for ZPD-based explanation depth'
+    maxKeys: 8,
+    description: 'Per-domain skill level for ZPD-based explanation depth. Keep broad, merge synonyms.'
   },
 
   // === T5: Evolution (system-managed) ===

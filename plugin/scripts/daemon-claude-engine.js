@@ -1426,6 +1426,22 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       }
       clearInterval(typingTimer);
 
+      // --- Antigravity Raw Session Logging (Lossless Diary) ---
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        const ym = today.slice(0, 7); // YYYY-MM
+        const sessDir = path.join(HOME, '.metame', 'sessions', ym);
+        if (!fs.existsSync(sessDir)) fs.mkdirSync(sessDir, { recursive: true });
+
+        const diaryPath = path.join(sessDir, `${today}_${chatId}.md`);
+        const MAX_OUTPUT_LOG = 8000;
+        const outputLog = (output || error || 'No output.').slice(0, MAX_OUTPUT_LOG);
+        const outputTruncated = (output || '').length > MAX_OUTPUT_LOG ? '\n\n[truncated]' : '';
+        const diaryHeader = `\n---\ndate: ${new Date().toISOString()}\nproject: ${boundProjectKey || 'global'}\n---\n\n## 🙋‍♂️ 用户指令\n\`\`\`text\n${prompt}\n\`\`\`\n\n## 🤖 执行实录\n${outputLog}${outputTruncated}\n`;
+        fs.appendFileSync(diaryPath, diaryHeader, 'utf8');
+      } catch (e) { log('WARN', `Raw session logging failed: ${e.message}`); }
+      // ---------------------------------------------------------
+
       // Skill evolution: capture signal + hot path heuristic check
       if (skillEvolution) {
         try {

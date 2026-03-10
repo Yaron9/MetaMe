@@ -19,12 +19,83 @@ const METAME_DIR = path.join(HOME, '.metame');
 const BUFFER_FILE = path.join(HOME, '.metame', 'raw_signals.jsonl');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const LOCK_FILE = path.join(HOME, '.metame', 'distill.lock');
+const GROWTH_BACKUP_FILE = path.join(HOME, '.metame', 'growth_backup.yaml');
 const MEMORY_DIR = path.join(METAME_DIR, 'memory');
 const POSTMORTEM_DIR = path.join(MEMORY_DIR, 'postmortems');
 
 const { hasKey, isLocked, getTier, getDefinition, getWritableKeysForPrompt, estimateTokens, TOKEN_BUDGET } = require('./schema');
 const { loadPending, savePending, upsertPending, getPromotable, removePromoted, expireStale } = require('./pending-traits');
 const { writeBrainFileSafe, normalizeProjectPath, deriveProjectInfo } = require('./utils');
+
+/**
+ * Returns true only when daemon.yaml has mentor.enabled = true.
+ * Growth tracking (patterns, zone_history) is mentor-exclusive — skip all
+ * growth writes when mentor is off to keep the profile lean.
+ */
+function isMentorEnabled() {
+  try {
+    const yaml = require('js-yaml');
+    const cfgPath = path.join(HOME, '.metame', 'daemon.yaml');
+    const cfg = yaml.load(fs.readFileSync(cfgPath, 'utf8')) || {};
+    return !!(cfg.mentor && cfg.mentor.enabled);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Save growth data to backup file (mentor off → don't lose data).
+ * Merges with any existing backup so cumulative patterns are preserved.
+ */
+function backupGrowth(growth) {
+  if (!growth || typeof growth !== 'object') return false;
+  try {
+    const yaml = require('js-yaml');
+    let existing = {};
+    if (fs.existsSync(GROWTH_BACKUP_FILE)) {
+      existing = yaml.load(fs.readFileSync(GROWTH_BACKUP_FILE, 'utf8')) || {};
+    }
+    // Deep merge: arrays are unioned, scalars prefer incoming
+    const merged = { ...existing, ...growth };
+    if (Array.isArray(existing.patterns) && Array.isArray(growth.patterns)) {
+      const seen = new Set(existing.patterns.map(p => p.value || p));
+      const extra = growth.patterns.filter(p => !seen.has(p.value || p));
+      merged.patterns = [...existing.patterns, ...extra].slice(-3);
+    }
+    if (Array.isArray(existing.zone_history) && Array.isArray(growth.zone_history)) {
+      merged.zone_history = [...existing.zone_history, ...growth.zone_history].slice(-10);
+    }
+    const tmp = GROWTH_BACKUP_FILE + '.tmp';
+    fs.writeFileSync(tmp, yaml.dump(merged, { lineWidth: -1 }), 'utf8');
+    fs.renameSync(tmp, GROWTH_BACKUP_FILE);
+    return true;
+  } catch (e) {
+    console.warn('[distill] growth backup failed:', e.message);
+    return false;
+  }
+}
+
+/**
+ * Restore growth data from backup into the profile, then remove the backup.
+ * Called when mentor is re-enabled.
+ */
+function restoreGrowthToProfile() {
+  if (!fs.existsSync(GROWTH_BACKUP_FILE)) return;
+  try {
+    const yaml = require('js-yaml');
+    const growth = yaml.load(fs.readFileSync(GROWTH_BACKUP_FILE, 'utf8'));
+    if (!growth || typeof growth !== 'object') return;
+    const profile = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
+    profile.growth = growth;
+    const tmp = BRAIN_FILE + '.restore-tmp';
+    fs.writeFileSync(tmp, yaml.dump(profile, { lineWidth: -1 }), 'utf8');
+    fs.renameSync(tmp, BRAIN_FILE); // atomic
+    fs.unlinkSync(GROWTH_BACKUP_FILE);
+    console.log('[distill] Growth data restored from backup.');
+  } catch (e) {
+    console.warn('[distill] growth restore failed:', e.message);
+  }
+}
 
 // Session analytics — local skeleton extraction (zero API cost)
 let sessionAnalytics = null;
@@ -96,11 +167,11 @@ function mergeCompetenceMap(currentMap, competenceSignals) {
   }
 
   const entries = Object.entries(next);
-  if (entries.length <= 20) return { map: next, changed };
+  if (entries.length <= 8) return { map: next, changed };
 
-  // Keep top-20 by level score to avoid unbounded growth.
+  // Keep top-8 by level score to avoid unbounded growth.
   entries.sort((a, b) => (COMPETENCE_SCORE[b[1]] || 0) - (COMPETENCE_SCORE[a[1]] || 0));
-  const compact = Object.fromEntries(entries.slice(0, 20));
+  const compact = Object.fromEntries(entries.slice(0, 8));
   return { map: compact, changed: true };
 }
 
@@ -387,9 +458,17 @@ async function distill() {
     }
   }
 
+  // Restore growth data inside the lock — safe against concurrent distill processes.
+  if (isMentorEnabled()) restoreGrowthToProfile();
+
   let remainingSignalLines = lines;
   let ackSignals = false;
-  const finalize = () => cleanup({ ack: ackSignals, remainingLines: remainingSignalLines });
+  let finalized = false;
+  const finalize = () => {
+    if (finalized) return;
+    finalized = true;
+    cleanup({ ack: ackSignals, remainingLines: remainingSignalLines });
+  };
 
   try {
     // 3. Parse signals (preserve confidence + type from signal-capture)
@@ -483,6 +562,17 @@ async function distill() {
     const INPUT_TOKEN_BUDGET = 4000; // ~12K chars mixed zh/en
 
     const writableKeys = getWritableKeysForPrompt();
+
+    // Extract existing competence map keys to prevent Haiku from inventing synonyms
+    let existingCompetenceKeys = '';
+    try {
+      const yaml = require('js-yaml');
+      const parsedProfile = yaml.load(currentProfile) || {};
+      const cmap = parsedProfile.user_competence_map;
+      if (cmap && typeof cmap === 'object' && Object.keys(cmap).length > 0) {
+        existingCompetenceKeys = Object.entries(cmap).map(([k, v]) => `${k}:${v}`).join(' | ');
+      }
+    } catch { /* non-critical */ }
 
     // Reserve budget for fixed parts (system prompt template ~600 tokens, profile, writable keys)
     const fixedOverhead = 600; // system prompt template + rules
@@ -593,6 +683,7 @@ RULES:
 7. Add _confidence and _source blocks mapping field keys to confidence level and triggering quote.
 8. NEVER extract agent identity or role definitions. Messages like "你是贾维斯/你的角色是.../you are Jarvis" define the AGENT, not the USER. The profile is about the USER's cognition only.
 9. Recalled long-term facts are context signals only. Use them to support/deny persistent cognition, never copy them as factual output.
+10. growth.zone_history entries: context field MUST be ≤30 chars (short phrase only, no sentences).
 
 BIAS PREVENTION:
 - Single observation = STATE, not TRAIT. T3 cognition needs 3+ observations.
@@ -611,11 +702,12 @@ BEHAVIORAL ANALYSIS — _behavior block (always output, use null if insufficient
   friction: []                   # max 3 keywords describing pain points
   goal_alignment: aligned | partial | drifted | null
   drift_note: "max 30 char explanation" or null
-  competence_signals:            # optional, max 5
-    - domain: "领域名"
+  competence_signals:            # optional, max 3
+    - domain: "领域名 — MUST reuse existing key if semantically similar"
       level: beginner | intermediate | expert
       evidence: "触发证据"
       downgrade_evidence: "只有在明确降级时填写，否则省略"
+  # EXISTING competence keys (reuse exact string if applicable):${existingCompetenceKeys ? ' ' + existingCompetenceKeys : ' (none yet)'}
 ${sessionContext ? '\nHint: high tool_calls + routine messages → zone likely higher. If DECLARED_GOALS exist, assess goal_alignment.' : ''}
 OUTPUT — respond with ONLY a YAML code block. If nothing worth saving AND no behavior: respond with exactly NO_UPDATE.
 Do NOT repeat existing unchanged values.`;
@@ -707,6 +799,34 @@ Do NOT repeat existing unchanged values.`;
       const sourceMap = updates._source || {};
       const merged = strategicMerge(profile, filtered, lockedKeys, pendingTraits, confidenceMap, sourceMap);
       savePending(pendingTraits);
+
+      // When mentor is disabled: back up growth data and strip from profile.
+      if (!isMentorEnabled()) {
+        if (merged.growth) {
+          const backupOk = backupGrowth(merged.growth);
+          if (!backupOk) {
+            // Backup failed — keep growth in profile rather than silently lose it
+            const alertFile = path.join(HOME, '.metame', 'distill_alerts.jsonl');
+            try {
+              fs.appendFileSync(alertFile, JSON.stringify({ ts: new Date().toISOString(), type: 'growth_backup_failed' }) + '\n', 'utf8');
+            } catch { /* non-fatal */ }
+          } else {
+            delete merged.growth;
+          }
+        } else {
+          delete merged.growth;
+        }
+      } else {
+        // Enforce zone_history context length limit (max 30 chars per entry)
+        if (Array.isArray(merged.growth && merged.growth.zone_history)) {
+          merged.growth.zone_history = merged.growth.zone_history.map(e => {
+            if (e && typeof e === 'object' && typeof e.context === 'string' && e.context.length > 30) {
+              return { ...e, context: e.context.slice(0, 30) };
+            }
+            return e;
+          });
+        }
+      }
 
       // Merge competence signals into user_competence_map (upgrade by default).
       const competenceSignals = Array.isArray(behavior && behavior.competence_signals)
@@ -1253,6 +1373,7 @@ function bootstrapSessionLog() {
  * Writes results to profile growth.patterns (max 3).
  */
 async function detectPatterns(forceRun) {
+  if (!isMentorEnabled()) return; // growth tracking is mentor-exclusive
   const yaml = require('js-yaml');
 
   // Read session log
@@ -1380,6 +1501,7 @@ If no clear patterns found: respond with exactly NO_PATTERNS`;
  * Runs after every distill — no-op if all sessions already have reflection.
  */
 async function fillSessionReflections() {
+  if (!isMentorEnabled()) return; // reflection tagging is mentor-exclusive
   const yaml = require('js-yaml');
   if (!fs.existsSync(SESSION_LOG_FILE)) return;
 
