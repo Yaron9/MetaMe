@@ -132,13 +132,19 @@ function createBridgeStarter(deps) {
   // Get team member's working directory using subdir (not worktree).
   // Creates agents/<key>/ directory and symlinks CLAUDE.md from parent.
   function _getMemberCwd(parentCwd, key) {
-    const { existsSync, mkdirSync, symlinkSync, readlinkSync } = require('fs');
+    const { existsSync, mkdirSync, symlinkSync, readFileSync, writeFileSync } = require('fs');
     const { execFileSync } = require('child_process');
     const WIN_HIDE = process.platform === 'win32' ? { windowsHide: true } : {};
 
+    // Sanitize key to prevent path traversal
+    const safeKey = String(key).replace(/[^a-zA-Z0-9_\-]/g, '').slice(0, 50);
+    if (safeKey !== key) {
+      log('WARN', `Sanitized team member key: ${key} -> ${safeKey}`);
+    }
+
     // Use agents/<key>/ as the working directory
     const agentsDir = path.join(parentCwd, 'agents');
-    const memberDir = path.join(agentsDir, key);
+    const memberDir = path.join(agentsDir, safeKey);
 
     // Create agents directory if not exists
     if (!existsSync(agentsDir)) {
@@ -162,22 +168,37 @@ function createBridgeStarter(deps) {
       }
     }
 
-    // Set up CLAUDE.md: use existing专属, or create symlink from parent
+    // Set up CLAUDE.md: use dedicated, or template, or symlink from parent
     const claudeMd = path.join(memberDir, 'CLAUDE.md');
     const parentClaudeMd = path.join(parentCwd, 'CLAUDE.md');
     if (!existsSync(claudeMd)) {
-      // No专属 CLAUDE.md, create from template or parent
-      const templatePath = path.join(parentCwd, 'agents', key, 'CLAUDE.md');
-      if (existsSync(templatePath)) {
-        // Use the template we created manually
-        log('INFO', `Using专属 CLAUDE.md for ${key}`);
-      } else if (existsSync(parentClaudeMd)) {
-        // Fall back to parent symlink
+      // Priority 1: dedicated CLAUDE.md in agents/<key>/ directory
+      const dedicatedPath = path.join(parentCwd, 'agents', safeKey, 'CLAUDE.md');
+      if (existsSync(dedicatedPath)) {
         try {
-          symlinkSync(parentClaudeMd, claudeMd, 'file');
-          log('INFO', `Symlinked CLAUDE.md for ${key}`);
+          // Copy instead of symlink to avoid cross-device issues
+          const content = readFileSync(dedicatedPath, 'utf8');
+          writeFileSync(claudeMd, content, 'utf8');
+          log('INFO', `Copied dedicated CLAUDE.md for ${safeKey}`);
         } catch (e) {
-          log('WARN', `Failed to symlink CLAUDE.md for ${key}: ${e.message}`);
+          log('WARN', `Failed to copy CLAUDE.md for ${safeKey}: ${e.message}`);
+        }
+      } else if (existsSync(parentClaudeMd)) {
+        // Priority 2: symlink to parent CLAUDE.md
+        try {
+          // Use 'junction' on Windows for directories, 'file' for files
+          const linkType = process.platform === 'win32' ? 'junction' : 'file';
+          symlinkSync(parentClaudeMd, claudeMd, linkType);
+          log('INFO', `Symlinked CLAUDE.md for ${safeKey}`);
+        } catch (e) {
+          // Fallback: copy file
+          try {
+            const content = readFileSync(parentClaudeMd, 'utf8');
+            writeFileSync(claudeMd, content, 'utf8');
+            log('INFO', `Copied CLAUDE.md for ${safeKey} (symlink failed)`);
+          } catch (e2) {
+            log('WARN', `Failed to create CLAUDE.md for ${safeKey}: ${e2.message}`);
+          }
         }
       }
     }
