@@ -26,18 +26,17 @@ curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bas
 
 ---
 
-> ### 🚀 v1.5.3 — Unified Intent Engine & Team Broadcast
+> ### 🚀 v1.6.0 — Cross-Device Dispatch & Team Unification
 >
-> - **Unified intent engine**: Config-driven intent dispatcher replacing standalone hooks for team communication, ops assist, and task creation.
+> - **Cross-device dispatch**: Team members can run on remote machines. Add `peer: windows` to a member and messages route automatically via a Feishu relay chat — HMAC-signed, dedup-protected, zero manual routing.
+> - **`/dispatch peers`**: View remote dispatch config, relay chat, and all remote team members from mobile.
+> - **`dispatch_to peer:project`**: Dispatch tasks to remote peers from CLI, admin commands, or Claude sessions.
+> - **Unified team dispatch**: Shared `team-dispatch.js` module — single source of truth for project/member resolution, roster hints, and prompt enrichment.
 > - **Team broadcast**: Real-time cross-agent visibility in shared group chats with nickname routing and sticky follow.
+> - **Unified intent engine**: Config-driven intent dispatcher replacing standalone hooks for team communication, ops assist, and task creation.
 > - **Modular agent wizards**: New streamlined CLI flows for creating teams and cloning agents.
 > - **Dynamic default engine**: auto-detects installed CLI (claude/codex) at startup; pure-codex users work out of the box with zero config.
-> - **`/engine` command**: switch global default engine from mobile (`/engine codex`), with three-layer priority: `project.engine > /engine setting > auto-detect`.
-> - **Engine–distill coupling**: switching engine auto-pairs the distill model (claude→haiku, codex→gpt-5.1-codex-mini) and distill binary.
-> - **Engine-aware distill**: `callDistillModel` now routes through the correct CLI binary and parses codex JSON stream output.
-> - **`/doctor` engine checks**: health check now validates CLI availability against the configured default engine.
 > - **Multi-engine runtime adapter**: daemon supports engine routing by project (`project.engine`) with shared execution flow for Claude/Codex.
-> - **Codex session continuity**: supports `exec`/`resume`, thread id backfill, one-shot resume fallback, and auth/rate-limit error mapping.
 > - **Mentor mode hooks**: pre-flight emotion breaker, context-time mentor prompt, and post-flight reflection debt registration.
 > - **Multi-user ACL**: role-based permissions (admin / member / stranger) with binding protection.
 > - **Windows native support**: cross-platform path handling, Named Pipes IPC, GBK-safe encoding.
@@ -320,6 +319,7 @@ systemctl --user start metame
 | **Heartbeat System** | Three-layer programmable nervous system. Layer 0 kernel always-on (zero config). Layer 1 system evolution built-in (5 tasks: distill + memory + skills + nightly reflection + memory index). Layer 2 your custom scheduled tasks with `require_idle`, `precondition`, `notify`, workflows. |
 | **Multi-Agent** | Multiple projects with dedicated chat groups. `/agent bind` for one-tap setup. True parallel execution. |
 | **Team Routing** | Project-level team clones: multiple AI agents work in parallel within a single chat group. Nickname routing, sticky follow, `/stop` per member, broadcast visibility. |
+| **Cross-Device Dispatch** | Team members can run on different machines. `member.peer` marks remote agents — messages route via a Feishu relay chat with HMAC-SHA256 signing and 5-minute TTL dedup. `/dispatch peers` to view config, `dispatch_to peer:project` for explicit routing. |
 | **Browser Automation** | Built-in Playwright MCP. Browser control out of the box for every user. |
 | **Cross-Platform** | Native support for macOS and Windows. Platform abstraction layer handles spawn, IPC, process management, and terminal encoding automatically. |
 | **Provider Relay** | Route through any Anthropic-compatible API. Use GPT-4, DeepSeek, Gemini — zero config file mutation. |
@@ -422,7 +422,7 @@ All agents share your cognitive profile (`~/.claude_profile.yaml`) — they all 
 
 ## Team Routing
 
-MetaMe supports project-level team clones — multiple AI agents (digital twins) sharing the same workspace, working in parallel within a single Feishu group.
+MetaMe supports project-level team clones — multiple AI agents (digital twins) sharing the same workspace, working in parallel within a single Feishu group. Team members can run locally or on remote machines.
 
 ### Configuration
 
@@ -443,6 +443,12 @@ projects:
         nicknames:
           - 甲
         auto_dispatch: true
+      - key: hunter
+        name: 猎手
+        icon: 🎯
+        peer: windows            # runs on another machine
+        nicknames:
+          - 猎手
 ```
 
 ### Key Features
@@ -452,8 +458,24 @@ projects:
 - **`/stop` precision**: `/stop 乙` stops a specific member; `/stop` stops the sticky member; reply-quote `/stop` stops the quoted member
 - **Auto-dispatch**: when the main agent is busy, messages are automatically routed to idle `auto_dispatch` members
 - **Broadcast**: with `broadcast: true`, inter-member `dispatch_to` messages are shown as cards in the group chat
+- **Cross-device members**: add `peer: <device>` to a team member — messages route via a Feishu relay chat with HMAC signing and dedup protection
 
 Each team member runs on a virtual chatId (`_agent_{key}`) and appears with its own card title (e.g. `🤖 Jarvis · 乙`).
+
+### Cross-Device Dispatch
+
+Team members with `peer` field run on a different machine. Configure `feishu.remote_dispatch` on both machines with the same relay chat and shared secret:
+
+```yaml
+feishu:
+  remote_dispatch:
+    enabled: true
+    self: mac                  # unique peer name per machine
+    chat_id: oc_relay_xxx      # shared relay group
+    secret: shared-secret-key  # HMAC signing key
+```
+
+Use from mobile: `/dispatch to windows:hunter research competitors` or just mention by nickname — routing is automatic. Use `/dispatch peers` to check remote config status.
 
 ## Mobile Commands
 
@@ -490,6 +512,8 @@ Each team member runs on a virtual chatId (`_agent_{key}`) and appears with its 
 | `/user list` | List all configured users |
 | `/user remove <open_id>` | Remove a user |
 | `/sessions` | Browse recent sessions with last message preview |
+| `/dispatch peers` | View remote dispatch configuration and remote team members |
+| `/dispatch to <target> <prompt>` | Dispatch task to agent or remote peer (`peer:project` format supported) |
 | `/teamtask create <agent> <goal>` | Create a cross-agent collaboration task |
 | `/teamtask` | List recent TeamTasks (last 10) |
 | `/teamtask <task_id>` | View task detail |
@@ -528,7 +552,7 @@ If hook installation fails, MetaMe logs and continues the session (non-blocking 
 
 ```
 ┌─────────────┐     Telegram/Feishu      ┌──────────────────────────────┐
-│  Your Phone  │ ◄──────────────────────► │   MetaMe Daemon              │
+│  Your Phone  │ ◄──────────────────────► │   MetaMe Daemon (Mac)        │
 └─────────────┘                           │   (your machine, 24/7)       │
                                           │                              │
                                           │   ┌──────────────┐           │
@@ -537,18 +561,20 @@ If hook installation fails, MetaMe logs and continues the session (non-blocking 
                                           │   └──────────────┘           │
                                           │                              │
                                           │   ~/.claude_profile          │
-                                          │   (6-dim soul schema)        │
-                                          │                              │
                                           │   ~/.metame/memory.db        │
-                                          │   session_tags.json          │
-                                          │   (5-layer memory)           │
-                                          │                              │
                                           │   dispatch_to (auto-deployed)│
+                                          └──────────┬───────────────────┘
+                                                     │
+                                          ┌──────────▼───────────────────┐
+                                          │   Feishu Relay Chat          │
+                                          │   (HMAC-signed packets)      │
+                                          └──────────┬───────────────────┘
+                                                     │
+                                          ┌──────────▼───────────────────┐
+                                          │   MetaMe Daemon (Windows)    │
+                                          │   peer: "windows"            │
+                                          │   Remote team members here   │
                                           └──────────────────────────────┘
-                                                       ↑
-                                          idle → summaries + memory tasks
-                                          01:00 → nightly reflection
-                                          01:30 → memory index rebuild
 ```
 
 - **Profile** (`~/.claude_profile.yaml`): 6-dimension soul schema. Injected into every Claude session via `CLAUDE.md`.

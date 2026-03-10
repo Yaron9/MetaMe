@@ -26,18 +26,17 @@ curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bas
 
 ---
 
-> ### 🚀 v1.5.3 — 统一意图引擎与团队播报
+> ### 🚀 v1.6.0 — 跨设备 Dispatch 与团队统一
 >
-> - **统一意图引擎**：由配置驱动的意图分发器，取代了孤立的 Hook，提供协作团队通信、操作辅助和任务创建等上下文提示。
+> - **跨设备 Dispatch**：团队成员可运行在不同机器上。给成员加 `peer: windows` 字段即可，消息自动通过飞书 relay 群中转——HMAC 签名、去重保护、零手动路由。
+> - **`/dispatch peers`**：手机端查看远端配置、relay 群和所有远端成员列表。
+> - **`dispatch_to peer:project`**：从 CLI、管理命令或 Claude 会话向远端设备派发任务。
+> - **统一团队 Dispatch**：共享 `team-dispatch.js` 模块——项目/成员解析、roster 提示、prompt enrichment 唯一源。
 > - **团队协作播报**：共享群聊中跨 Agent 状态流转可视化，支持昵称路由及黏性跟随。
-> - **模块化向导**：提供精简配置流的 CLI 工具，快速组建团队和克隆 Agent。
+> - **统一意图引擎**：配置驱动的意图分发器，提供协作通信、操作辅助和任务创建等上下文提示。
+> - **模块化向导**：精简 CLI 工具，快速组建团队和克隆 Agent。
 > - **动态默认引擎**：启动时自动检测已安装的 CLI（claude/codex），纯 codex 用户零配置即可运行。
-> - **`/engine` 命令**：手机端一键切换全局默认引擎（`/engine codex`），三层优先级：`project.engine > /engine 设置 > 自动检测`。
-> - **引擎–蒸馏联动**：切引擎自动切配套蒸馏模型（claude→haiku, codex→gpt-5.1-codex-mini）和执行二进制。
-> - **引擎感知蒸馏**：`callDistillModel` 根据当前引擎选择正确的 CLI 和参数，解析 codex JSON stream 输出。
-> - **`/doctor` 引擎检查**：健康检查增加 CLI 可用性与当前引擎的一致性校验。
 > - **多引擎 runtime 适配**：daemon 按 `project.engine` 进行 Claude/Codex 路由，执行链路统一。
-> - **Codex 会话连续性**：支持 `exec`/`resume`、thread id 回写、resume 失败自动重试、认证/限流错误映射。
 > - **Mentor Mode Hook**：预检情绪熔断、上下文摩擦注入、后置反思债务。
 > - **多用户 ACL / Team Task / 跨平台支持**：保持现有能力并与新链路兼容。
 >
@@ -313,6 +312,7 @@ systemctl --user start metame
 | **技能进化** | 队列化技能进化：采集任务信号、生成工作流提案，并通过 `/skill-evo` 显式审批/结案。 |
 | **心跳系统** | 三层可编程神经系统。Layer 0 内核永远在线（零配置）。Layer 1 系统自进化内置（蒸馏+记忆+技能+nightly+index）。Layer 2 自定义定时任务，支持 `require_idle`、`precondition`、`notify`、工作流。 |
 | **多 Agent** | 多项目独立群聊，`/agent bind` 一键配置，真正并行执行。 |
+| **跨设备 Dispatch** | 团队成员可运行在不同机器上。`member.peer` 标记远端 Agent——消息通过飞书 relay 群中转，HMAC-SHA256 签名 + 5 分钟 TTL 去重。`/dispatch peers` 查看配置，`dispatch_to peer:project` 显式路由。 |
 | **浏览器自动化** | 内置 Playwright MCP，开箱即用。配合 Skill 实现发布、填表、抓取等自动化。 |
 | **跨平台** | 原生支持 macOS 和 Windows。平台抽象层自动处理进程管理、IPC、终端编码差异，一套代码两平台。 |
 | **模型中继** | 兼容任何 Anthropic API 中继。GPT-4、DeepSeek、Gemini 随意切换，零文件污染。 |
@@ -448,6 +448,8 @@ feishu:
 | `/user list` | 查看所有已配置用户 |
 | `/user remove <open_id>` | 移除用户 |
 | `/sessions` | 浏览最近会话，显示最后一条消息预览 |
+| `/dispatch peers` | 查看远端 Dispatch 配置和远端团队成员 |
+| `/dispatch to <目标> <任务>` | 向 Agent 或远端设备派发任务（支持 `peer:project` 格式） |
 | `/teamtask create <agent> <目标>` | 创建跨 Agent 协作任务 |
 | `/teamtask` | 查看所有 TeamTask（最近10条） |
 | `/teamtask <task_id>` | 查看任务详情 |
@@ -486,7 +488,7 @@ Hook 安装失败不会阻断会话；MetaMe 会记录日志并继续运行。
 
 ```
 ┌─────────────┐     Telegram / 飞书      ┌──────────────────────────────┐
-│   你的手机   │ ◄──────────────────────► │   MetaMe Daemon              │
+│   你的手机   │ ◄──────────────────────► │   MetaMe Daemon (Mac)        │
 └─────────────┘                           │  （你的电脑，7×24）           │
                                           │                              │
                                           │   ┌──────────────┐           │
@@ -495,15 +497,20 @@ Hook 安装失败不会阻断会话；MetaMe 会记录日志并继续运行。
                                           │   └──────────────┘           │
                                           │                              │
                                           │   ~/.claude_profile          │
-                                          │  （认知画像层）               │
-                                          │                              │
                                           │   ~/.metame/memory.db        │
-                                          │   session_tags.json          │
-                                          │  （记忆层）← 新增             │
+                                          │   dispatch_to (自动部署)     │
+                                          └──────────┬───────────────────┘
+                                                     │
+                                          ┌──────────▼───────────────────┐
+                                          │   飞书 Relay 群              │
+                                          │  （HMAC 签名 packet）        │
+                                          └──────────┬───────────────────┘
+                                                     │
+                                          ┌──────────▼───────────────────┐
+                                          │   MetaMe Daemon (Windows)    │
+                                          │   peer: "windows"            │
+                                          │   远端 team 成员在此执行     │
                                           └──────────────────────────────┘
-                                                       ↑
-                                          闲置触发 → 会话摘要 + 背景记忆任务
-                                                  （后台自动，受守卫控制）
 ```
 
 - **画像**（`~/.claude_profile.yaml`）：你的认知指纹，通过 `CLAUDE.md` 注入每个 Claude 会话。

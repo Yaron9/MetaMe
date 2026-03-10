@@ -1,6 +1,6 @@
 # MetaMe 脚本/文档指针地图
 
-> 目的：回答“这段能力在哪个文件”“当前升级做到哪一步”“先看哪个脚本”。
+> 目的：回答"这段能力在哪个文件""当前升级做到哪一步""先看哪个脚本"。
 
 ## 快速入口
 
@@ -55,11 +55,56 @@
 
 - 会话命令与兼容边界：
   - `scripts/daemon-exec-commands.js`
-  - 关键点：`/stop` 引擎中性；`/compact` 在 codex 会话返回“暂不支持”
+  - 关键点：`/stop` 引擎中性；`/compact` 在 codex 会话返回"暂不支持"
 
 - 运行时引擎切换与诊断：
   - `scripts/daemon-admin-commands.js`
   - 关键点：`/engine` 切换默认引擎；`/doctor` 按默认引擎检查 CLI 可用性（Claude/Codex）并兼容自定义 provider 模型名
+
+## 团队 Dispatch 与跨设备通信定位
+
+- 共享 Dispatch 工具：
+  - `scripts/team-dispatch.js`
+  - 关键点：`resolveProjectKey()` 名称/昵称解析（含 team member `parent/member` 复合键）；
+    `findTeamMember()` 文本前缀匹配团队成员昵称；
+    `buildTeamRosterHint()` 生成团队上下文块（远端成员自动带 `peer:key` 前缀）；
+    `buildEnrichedPrompt()` 注入共享上下文（now.md + _latest.md + inbox）
+
+- 远端 Dispatch 协议：
+  - `scripts/daemon-remote-dispatch.js`
+  - 关键点：`normalizeRemoteDispatchConfig()` 解析 `feishu.remote_dispatch` 配置；
+    `parseRemoteTargetRef()` 解析 `peer:project` 格式；
+    `encodePacket()`/`decodePacket()` Base64 + HMAC-SHA256 编解码；
+    `verifyPacket()` 签名验证；
+    `isDuplicate()` 5 分钟 TTL 去重；
+    `isRemoteMember()` 检测 `member.peer` 字段
+
+- Daemon 远端 Dispatch 入口：
+  - `scripts/daemon.js`
+  - 关键点：`sendRemoteDispatch()` 构造签名 packet → 飞书 bot 发 relay 群；
+    `handleRemoteDispatchMessage()` 接收端逻辑（decode → verify → dedup → 按 type 路由）；
+    `remote-pending.jsonl` drain（heartbeat 中处理 dispatch_to CLI 写入的远端队列）
+
+- Bridge 集成：
+  - `scripts/daemon-bridges.js`
+  - 关键点：Feishu bridge `startReceiving` 回调最前面拦截 relay 群消息 → `handleRemoteDispatchMessage`；
+    `_dispatchToTeamMember` 检测 `isRemoteMember(member)` → 走 `sendRemoteDispatch` 而非本地 handleCommand
+
+- Dispatch CLI：
+  - `scripts/bin/dispatch_to`
+  - 关键点：支持 `peer:project` 格式 → `sendRemoteViaRelay()`；
+    `--team` broadcast 自动分流远端成员写 `remote-pending.jsonl`；
+    本地走 Unix socket / `pending.jsonl` 降级
+
+- 管理命令：
+  - `scripts/daemon-admin-commands.js`
+  - 关键点：`/dispatch peers` 查看远端配置；
+    `/dispatch to peer:project` 手动远端派发；
+    按昵称解析到远端 member 时自动走 `sendRemoteDispatch`
+
+- Intent Hook：
+  - `scripts/hooks/team-context.js`
+  - 关键点：检测通信意图 → 注入 dispatch_to 命令提示；远端成员自动带 `peer:key` 前缀
 
 ## Mentor Mode（Step 1-4）定位
 
@@ -94,6 +139,11 @@
 - 夜间反思文档：`~/.metame/memory/decisions/`、`~/.metame/memory/lessons/`
 - 知识胶囊：`~/.metame/memory/capsules/`
 - 复盘文档：`~/.metame/memory/postmortems/`
+- Dispatch 队列：`~/.metame/dispatch/pending.jsonl`（本地 socket 降级）
+- 远端 Dispatch 队列：`~/.metame/dispatch/remote-pending.jsonl`（跨设备中继）
+- 共享进度白板：`~/.metame/memory/now/shared.md`
+- Agent 最新产出：`~/.metame/memory/agents/{key}_latest.md`
+- Agent 收件箱：`~/.metame/memory/inbox/{key}/`（未读），`read/`（已归档）
 - **Agent Soul 层**：`~/.metame/agents/<agent_id>/`
   - `agent.yaml` — id / name / engine / aliases
   - `soul.md` — 身份定义（主文件，项目目录的 SOUL.md 是其链接）
@@ -106,7 +156,8 @@
 1. 先看配置：`~/.metame/daemon.yaml` 与 `scripts/daemon-default.yaml`
 2. 再看命令入口：`scripts/daemon-admin-commands.js`、`scripts/daemon-command-router.js`、`scripts/daemon-exec-commands.js`
 3. 再看执行链路：`scripts/daemon-engine-runtime.js` → `scripts/daemon-claude-engine.js` → `scripts/mentor-engine.js`
-4. 最后看离线任务：`scripts/distill.js`、`scripts/memory-extract.js`、`scripts/memory-nightly-reflect.js`
+4. 团队/跨设备：`scripts/team-dispatch.js` → `scripts/daemon-remote-dispatch.js` → `scripts/daemon-bridges.js`
+5. 最后看离线任务：`scripts/distill.js`、`scripts/memory-extract.js`、`scripts/memory-nightly-reflect.js`
 
 ## 同步提示
 
