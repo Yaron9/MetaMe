@@ -1432,21 +1432,10 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         if (!fs.existsSync(sessDir)) fs.mkdirSync(sessDir, { recursive: true });
 
         const diaryPath = path.join(sessDir, `${today}_${chatId}.md`);
-        const diaryHeader = `---
-date: ${new Date().toISOString()}
-session_id: ${chatId}
-project: ${boundProjectKey || 'global'}
----
-
-## 🙋‍♂️ 用户指令 (Prompt)
-\`\`\`text
-${fullPrompt}
-\`\`\`
-
-## 🤖 执行实录 (Raw Transcript)
-${output || error || 'No output.'}
-
-`;
+        const MAX_OUTPUT_LOG = 8000;
+        const outputLog = (output || error || 'No output.').slice(0, MAX_OUTPUT_LOG);
+        const outputTruncated = (output || '').length > MAX_OUTPUT_LOG ? '\n\n[truncated]' : '';
+        const diaryHeader = `\n---\ndate: ${new Date().toISOString()}\nproject: ${boundProjectKey || 'global'}\n---\n\n## 🙋‍♂️ 用户指令\n\`\`\`text\n${prompt}\n\`\`\`\n\n## 🤖 执行实录\n${outputLog}${outputTruncated}\n`;
         fs.appendFileSync(diaryPath, diaryHeader, 'utf8');
       } catch (e) { log('WARN', `Raw session logging failed: ${e.message}`); }
       // ---------------------------------------------------------
