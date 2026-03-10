@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 /**
- * dispatch_to [--new] [--from <project_key>] <project_key> "<prompt>"
+ * dispatch_to [--new] [--from <project_key>] [--team] <project_key> "<prompt>"
+ *
+ * --team: broadcast to all members of the named project team.
+ *         Each member receives the full task + a team roster hint so they know
+ *         who their teammates are and how to dispatch_to them.
+ *
  * Tries Unix socket / Named Pipe first (low-latency), falls back to pending.jsonl.
  */
 'use strict';
@@ -10,24 +15,7 @@ const net = require('net');
 const crypto = require('crypto');
 const os = require('os');
 const { socketPath } = require('../platform');
-
-const args = process.argv.slice(2);
-const newSession = args[0] === '--new' ? (args.shift(), true) : false;
-
-// --from <project_key>: identifies the calling agent for callback routing
-// Auto-detect from METAME_PROJECT env var (set by daemon when spawning agent sessions)
-let fromKey = process.env.METAME_PROJECT || '_claude_session';
-const fromIdx = args.indexOf('--from');
-if (fromIdx !== -1 && args[fromIdx + 1]) {
-  fromKey = args.splice(fromIdx, 2)[1];
-}
-
-const [target, ...rest] = args;
-const prompt = rest.join(' ').replace(/^["']|["']$/g, '');
-if (!target || !prompt) {
-  console.error('Usage: dispatch_to [--new] [--from <project_key>] <project_key> "<prompt>"');
-  process.exit(1);
-}
+const { buildEnrichedPrompt, buildTeamRosterHint } = require('../team-dispatch');
 
 const METAME_DIR = path.join(os.homedir(), '.metame');
 const DISPATCH_DIR = path.join(METAME_DIR, 'dispatch');
@@ -35,100 +23,137 @@ const PENDING = path.join(DISPATCH_DIR, 'pending.jsonl');
 const DISPATCH_SECRET_FILE = path.join(METAME_DIR, '.dispatch_secret');
 const SOCK_PATH = socketPath(METAME_DIR);
 
+// ── Parse flags ──────────────────────────────────────────────────────────────
+const args = process.argv.slice(2);
+const newSession = args[0] === '--new' ? (args.shift(), true) : false;
+
+let fromKey = process.env.METAME_PROJECT || '_claude_session';
+const fromIdx = args.indexOf('--from');
+if (fromIdx !== -1 && args[fromIdx + 1]) {
+  fromKey = args.splice(fromIdx, 2)[1];
+}
+
+const teamMode = args[0] === '--team' ? (args.shift(), true) : false;
+
+const [target, ...rest] = args;
+const prompt = rest.join(' ').replace(/^["']|["']$/g, '');
+
+if (!target || !prompt) {
+  console.error(
+    'Usage: dispatch_to [--new] [--from <key>] [--team] <project_key> "<prompt>"\n' +
+    '       --team: broadcast to all members of the named project team'
+  );
+  process.exit(1);
+}
+
+// ── Shared helpers ────────────────────────────────────────────────────────────
 function getDispatchSecret() {
   try {
     if (fs.existsSync(DISPATCH_SECRET_FILE)) {
       return fs.readFileSync(DISPATCH_SECRET_FILE, 'utf8').trim();
     }
-  } catch { /* fall through to generate */ }
+  } catch { /* fall through */ }
   const secret = crypto.randomBytes(32).toString('hex');
-  try {
-    fs.writeFileSync(DISPATCH_SECRET_FILE, secret, { mode: 0o600 });
-  } catch { /* ignore write errors */ }
+  try { fs.writeFileSync(DISPATCH_SECRET_FILE, secret, { mode: 0o600 }); } catch {}
   return secret;
 }
 
-const ts = new Date().toISOString();
-const secret = getDispatchSecret();
+function sendOne(memberTarget, memberPrompt, opts = {}) {
+  const ts = new Date().toISOString();
+  const secret = getDispatchSecret();
+  const enriched = buildEnrichedPrompt(memberTarget, memberPrompt, METAME_DIR);
+  const sigPayload = JSON.stringify({ target: memberTarget, prompt: enriched, ts });
+  const sig = crypto.createHmac('sha256', secret).update(sigPayload).digest('hex');
 
-// Auto-inject shared context: now/shared.md + target's _latest.md
-function buildEnrichedPrompt(rawPrompt) {
-  const nowFile = path.join(METAME_DIR, 'memory', 'now', 'shared.md');
-  const agentFile = path.join(METAME_DIR, 'memory', 'agents', `${target}_latest.md`);
-  let ctx = '';
-  try { if (fs.existsSync(nowFile)) ctx += `[共享进度 now.md]\n${fs.readFileSync(nowFile, 'utf8').trim()}\n\n`; } catch {}
-  try { if (fs.existsSync(agentFile)) ctx += `[${target} 上次产出]\n${fs.readFileSync(agentFile, 'utf8').trim()}\n\n`; } catch {}
-  // Push model: inject unread inbox messages and immediately archive them
-  try {
-    const inboxDir = path.join(METAME_DIR, 'memory', 'inbox', target);
-    const readDir = path.join(inboxDir, 'read');
-    const files = fs.readdirSync(inboxDir).filter(f => f.endsWith('.md')).sort();
-    if (files.length > 0) {
-      ctx += `[📬 Agent Inbox — ${files.length} 条未读消息]\n`;
-      fs.mkdirSync(readDir, { recursive: true });
-      for (const f of files) {
-        const filePath = path.join(inboxDir, f);
-        ctx += fs.readFileSync(filePath, 'utf8').trim() + '\n---\n';
-        fs.renameSync(filePath, path.join(readDir, f));
-      }
-      ctx += '\n';
-    }
-  } catch {}
-  return ctx ? `${ctx}---\n${rawPrompt}` : rawPrompt;
-}
+  const callback = fromKey !== '_claude_session';
+  const msg = {
+    target: memberTarget,
+    prompt: enriched,
+    from: fromKey,
+    new_session: newSession,
+    created_at: ts,
+    ts,
+    sig,
+    team_roster_injected: opts.team_roster_injected || false,
+    ...(callback && { callback: true }),
+  };
 
-const enrichedPrompt = buildEnrichedPrompt(prompt);
-const sigPayload = JSON.stringify({ target, prompt: enrichedPrompt, ts });
-const sig = crypto.createHmac('sha256', secret).update(sigPayload).digest('hex');
+  // Ensure target inbox dir
+  fs.mkdirSync(path.join(METAME_DIR, 'memory', 'inbox', memberTarget, 'read'), { recursive: true });
 
-// Set callback: true when dispatched by another agent (not a user session)
-const callback = fromKey !== '_claude_session';
-const msg = { target, prompt: enrichedPrompt, from: fromKey, new_session: newSession, created_at: ts, ts, sig, ...(callback && { callback: true }) };
-
-// Ensure target's inbox exists — lazy init, safe for new users and new agents
-fs.mkdirSync(path.join(METAME_DIR, 'memory', 'inbox', target, 'read'), { recursive: true });
-
-function fallbackToFile() {
-  fs.mkdirSync(DISPATCH_DIR, { recursive: true });
-  fs.appendFileSync(PENDING, JSON.stringify(msg) + '\n');
-  console.log(`DISPATCH_OK(file): ${target} → ${prompt.slice(0, 60)}${newSession ? ' [new session]' : ''}`);
-}
-
-const sock = net.createConnection({ path: SOCK_PATH });
-let done = false;
-
-const timer = setTimeout(() => {
-  if (done) return;
-  done = true;
-  sock.destroy();
-  fallbackToFile();
-}, 2000);
-
-sock.on('connect', () => {
-  sock.write(JSON.stringify(msg));
-  sock.end();
-});
-
-sock.on('data', (data) => {
-  if (done) return;
-  done = true;
-  clearTimeout(timer);
-  try {
-    const res = JSON.parse(data.toString().trim());
-    if (res.ok) {
-      console.log(`DISPATCH_OK(socket): ${target} → ${prompt.slice(0, 60)}${newSession ? ' [new session]' : ''}`);
-    } else {
-      fallbackToFile();
-    }
-  } catch {
-    fallbackToFile();
+  function fallback() {
+    fs.mkdirSync(DISPATCH_DIR, { recursive: true });
+    fs.appendFileSync(PENDING, JSON.stringify(msg) + '\n');
+    console.log(`DISPATCH_OK(file): ${memberTarget} → ${memberPrompt.slice(0, 60)}${newSession ? ' [new session]' : ''}`);
   }
-  sock.destroy();
-});
 
-sock.on('error', () => {
-  if (done) return;
-  done = true;
-  clearTimeout(timer);
-  fallbackToFile();
-});
+  const sock = net.createConnection({ path: SOCK_PATH });
+  let done = false;
+
+  const timer = setTimeout(() => {
+    if (done) return;
+    done = true;
+    sock.destroy();
+    fallback();
+  }, 2000);
+
+  sock.on('connect', () => { sock.write(JSON.stringify(msg)); sock.end(); });
+  sock.on('data', (data) => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    try {
+      const res = JSON.parse(data.toString().trim());
+      if (res.ok) {
+        console.log(`DISPATCH_OK(socket): ${memberTarget} → ${memberPrompt.slice(0, 60)}${newSession ? ' [new session]' : ''}`);
+      } else {
+        fallback();
+      }
+    } catch { fallback(); }
+    sock.destroy();
+  });
+  sock.on('error', () => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    fallback();
+  });
+}
+
+// ── Team broadcast mode ───────────────────────────────────────────────────────
+if (teamMode) {
+  let config = null;
+  try {
+    const yaml = require('js-yaml');
+    const cfgPath = path.join(METAME_DIR, 'daemon.yaml');
+    config = yaml.load(fs.readFileSync(cfgPath, 'utf8'));
+  } catch (e) {
+    console.error(`dispatch_to --team: failed to load daemon.yaml: ${e.message}`);
+    process.exit(1);
+  }
+
+  const project = config && config.projects && config.projects[target];
+  if (!project) {
+    console.error(`dispatch_to --team: project "${target}" not found in daemon.yaml`);
+    process.exit(1);
+  }
+
+  const team = Array.isArray(project.team) ? project.team : [];
+  if (team.length === 0) {
+    console.error(`dispatch_to --team: project "${target}" has no team members`);
+    process.exit(1);
+  }
+
+  console.log(`📢 Team broadcast → ${target} (${team.length} members): ${prompt.slice(0, 60)}`);
+
+  for (const member of team) {
+    const roster = buildTeamRosterHint(target, member.key, config.projects);
+    const memberPrompt = roster ? `${roster}\n\n---\n${prompt}` : prompt;
+    sendOne(member.key, memberPrompt, { team_roster_injected: true });
+  }
+
+  process.exit(0);
+}
+
+// ── Normal single-target dispatch ─────────────────────────────────────────────
+sendOne(target, prompt);

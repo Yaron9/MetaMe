@@ -204,9 +204,24 @@ feishu:
 - `/stop`：停止 sticky 成员
 - 引用回复 `/stop`：停止对应成员
 
-### Team Broadcast
+### /msg — 团队直接消息
+
+格式：`/msg <agent昵称> <消息内容>`
+
+- 例如：`/msg 乙 帮我看看这个文件`
+- 按昵称解析目标（先查 team 成员，再查 projects）
+- 以 `type='message', priority='normal'` 调度
+- 实现文件：`daemon-admin-commands.js` resolveProjectKey 函数
+
+### Team Broadcast（团队广播 = 可观察模式）
 
 `broadcast: true` 时，team 成员之间通过 `dispatch_to` 互发消息会在群里用卡片广播。
+
+**这就是"观察模式"**：开启 broadcast 后，你在群里可以实时看到成员之间互相传递任务的全过程（哪个成员发给了哪个成员、发了什么内容），以飞书卡片形式展示。
+
+切换命令：`/broadcast on` / `/broadcast off`（实时生效，写入 daemon.yaml）
+
+实现入口：`daemon.js` `_findTeamBroadcastContext()` + `handleDispatchItem()` 的广播分支。
 
 ### 虚拟 chatId
 

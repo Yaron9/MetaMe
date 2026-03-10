@@ -7,6 +7,7 @@ const {
 } = require('./usage-classifier');
 const { IS_WIN } = require('./platform');
 const { ENGINE_MODEL_CONFIG, resolveEngineModel } = require('./daemon-engine-runtime');
+const { resolveProjectKey: _resolveProjectKey } = require('./team-dispatch');
 let mentorEngine = null;
 try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
 
@@ -39,26 +40,9 @@ function createAdminCommandHandler(deps) {
     getDistillModel = () => 'haiku',
   } = deps;
 
+  // resolveProjectKey: imported from team-dispatch.js (shared with dispatch_to and daemon.js)
   function resolveProjectKey(targetName, projects) {
-    if (!targetName || !projects) return null;
-    for (const [key, proj] of Object.entries(projects || {})) {
-      const nicknames = Array.isArray(proj.nicknames)
-        ? proj.nicknames
-        : (proj.nicknames ? [proj.nicknames] : []);
-      if (key === targetName || nicknames.some(n => n === targetName)) return key;
-
-      // Also search team members (nested projects)
-      if (Array.isArray(proj.team)) {
-        for (const member of proj.team) {
-          const memberNicks = Array.isArray(member.nicknames) ? member.nicknames : [];
-          if (member.key === targetName || memberNicks.some(n => n === targetName)) {
-            // Return full path: parentKey/teamMemberKey
-            return `${key}/${member.key}`;
-          }
-        }
-      }
-    }
-    return null;
+    return _resolveProjectKey(targetName, projects);
   }
 
   function resolveSenderKey(chatId, config) {
@@ -691,25 +675,9 @@ function createAdminCommandHandler(deps) {
       const targetName = msgMatch[1];
       const message = msgMatch[2].trim();
 
-      // Resolve target - check team members first, then projects
-      let targetKey = null;
+      // Resolve target by nickname or key (checks team members + top-level projects)
       const senderKey = resolveSenderKey(chatId, config);
-      const senderProj = config.projects ? config.projects[senderKey] : null;
-
-      // Check if sender has a team
-      if (senderProj && Array.isArray(senderProj.team)) {
-        for (const member of senderProj.team) {
-          const nicks = Array.isArray(member.nicknames) ? member.nicknames : [];
-          if (member.key === targetName || nicks.some(n => n === targetName)) {
-            targetKey = member.key;
-            break;
-          }
-        }
-      }
-      // Fall back to project lookup
-      if (!targetKey) {
-        targetKey = resolveProjectKey(targetName, config.projects || {});
-      }
+      const targetKey = resolveProjectKey(targetName, config.projects || {});
 
       if (!targetKey) {
         await bot.sendMessage(chatId, `未找到 agent: ${targetName}`);

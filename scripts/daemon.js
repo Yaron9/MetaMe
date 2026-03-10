@@ -147,6 +147,7 @@ const { createSessionCommandHandler } = require('./daemon-session-commands');
 const { createSessionStore } = require('./daemon-session-store');
 const { createCheckpointUtils } = require('./daemon-checkpoints');
 const { createBridgeStarter } = require('./daemon-bridges');
+const { buildTeamRosterHint } = require('./team-dispatch');
 const { createFileBrowser } = require('./daemon-file-browser');
 const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lifecycle');
 const { createNotifier } = require('./daemon-notify');
@@ -791,6 +792,17 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
     scope_id: envelope ? envelope.scope_id : null,
     created_at: new Date().toISOString(),
   };
+
+  // Inject team roster hint if target is a team member and hint not already present
+  if (!message.team_roster_injected && config && config.projects && fullMsg.payload.prompt) {
+    for (const [parentKey, parent] of Object.entries(config.projects)) {
+      if (Array.isArray(parent.team) && parent.team.some(m => m.key === targetProject)) {
+        const hint = buildTeamRosterHint(parentKey, targetProject, config.projects);
+        if (hint) fullMsg.payload.prompt = `${hint}\n\n---\n${fullMsg.payload.prompt}`;
+        break;
+      }
+    }
+  }
 
   if (envelope && taskBoard) {
     const nowIso = new Date().toISOString();

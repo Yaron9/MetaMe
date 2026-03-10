@@ -427,7 +427,14 @@ feishu:
 | `/distill-model` | 查看/设置后台蒸馏模型（默认 `haiku`） |
 | `/mentor` | 导师模式控制：on/off/level/status |
 | `/activate` | 在新群里激活并绑定最近创建的 Agent |
+| `/agent new` | 交互式向导新建 Agent |
+| `/agent new team` | 团队向导：在一个项目下创建多个并行 Agent 分身 |
+| `/agent new clone` | 分身向导：克隆当前 Agent 的角色创建新分身 |
 | `/agent bind <名称> [目录]` | 手动将群注册为专属 Agent |
+| `/agent soul repair` | 幂等重建 soul 层（修复 SOUL.md / MEMORY.md 链接） |
+| `/msg <agent> <消息>` | 向团队成员或 Agent 发送直接消息（例如 `/msg 乙 帮我查下这个`） |
+| `/broadcast [on\|off]` | 切换当前项目的团队广播（将成员间 dispatch 以卡片形式展示在群里） |
+| `/stop <昵称>` | 停止指定团队成员（例如 `/stop 乙`） |
 | `/mac` | macOS 控制助手：权限检查/跳转 + AppleScript/JXA 执行 |
 | `/sh <命令>` | 原始 shell——绕过 Claude |
 | `/memory` | 记忆统计：事实数量、已标签 session 数、DB 大小 |

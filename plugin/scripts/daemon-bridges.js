@@ -2,6 +2,7 @@
 
 let userAcl = null;
 try { userAcl = require('./daemon-user-acl'); } catch { /* optional */ }
+const { findTeamMember: _findTeamMember } = require('./team-dispatch');
 
 function createBridgeStarter(deps) {
   const {
@@ -96,26 +97,7 @@ function createBridgeStarter(deps) {
     const proj = key && cfg.projects ? cfg.projects[key] : null;
     return { key: key || null, project: proj || null };
   }
-
-  function _escapeRe(s) {
-    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-
-  function _findTeamMember(text, team) {
-    const t = String(text || '').trim();
-    for (const member of team) {
-      const nicks = Array.isArray(member.nicknames) ? member.nicknames : [];
-      for (const nick of nicks) {
-        const n = String(nick || '').trim();
-        if (!n) continue;
-        if (t.toLowerCase() === n.toLowerCase()) return { member, rest: '' };
-        const re = new RegExp(`^${_escapeRe(n)}[\\s,，、:：]+`, 'i');
-        const m = t.match(re);
-        if (m) return { member, rest: t.slice(m[0].length).trim() };
-      }
-    }
-    return null;
-  }
+  // _findTeamMember is imported from team-dispatch.js (shared with admin-commands)
 
   // Creates a bot proxy that redirects all send methods to replyChatId
   function _createTeamProxyBot(bot, replyChatId) {

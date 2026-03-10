@@ -469,7 +469,14 @@ Each team member runs on a virtual chatId (`_agent_{key}`) and appears with its 
 | `/distill-model` | Show/update background distill model (default: `haiku`) |
 | `/mentor` | Mentor mode control: on/off/level/status |
 | `/activate` | Activate and bind the most recently created pending agent in a new group |
+| `/agent new` | Interactive wizard to create a new agent |
+| `/agent new team` | Team wizard: create multiple parallel agent clones under a project |
+| `/agent new clone` | Clone wizard: create a clone sharing the current agent's role |
 | `/agent bind <name> [dir]` | Manually register group as dedicated agent |
+| `/agent soul repair` | Idempotent rebuild of agent soul layer (links SOUL.md / MEMORY.md) |
+| `/msg <agent> <message>` | Send a direct message to a team member or agent (e.g. `/msg 乙 check this`) |
+| `/broadcast [on\|off]` | Toggle team broadcast for the current project (show inter-agent dispatches as cards) |
+| `/stop <nickname>` | Stop a specific team member (e.g. `/stop 乙`) |
 | `/mac` | macOS control helper: permissions check/open + AppleScript/JXA execution |
 | `/sh <cmd>` | Raw shell — bypasses Claude |
 | `/memory` | Memory stats: fact count, session tags, DB size |

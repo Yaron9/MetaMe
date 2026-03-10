@@ -83,8 +83,15 @@ if (!fs.existsSync(METAME_DIR)) {
 // DEPLOY PHASE: sync scripts, docs, bin to ~/.metame/
 // ---------------------------------------------------------
 
+// Dev mode: when running from git repo, symlink instead of copy.
+// This ensures source files and runtime files are always the same,
+// preventing agents from accidentally editing copies instead of source.
+const IS_DEV_MODE = fs.existsSync(path.join(__dirname, '.git'));
+
 /**
- * Sync files from srcDir to destDir. Only writes when content differs.
+ * Sync files from srcDir to destDir.
+ * - Dev mode (git repo): creates symlinks so source === runtime.
+ * - Production (npm install): copies files, only writes when content differs.
  * @param {string} srcDir - source directory
  * @param {string} destDir - destination directory
  * @param {object} [opts]
@@ -102,12 +109,35 @@ function syncDirFiles(srcDir, destDir, { fileList, chmod } = {}) {
     const dest = path.join(destDir, f);
     try {
       if (!fs.existsSync(src)) continue;
-      const srcContent = fs.readFileSync(src, 'utf8');
-      const destContent = fs.existsSync(dest) ? fs.readFileSync(dest, 'utf8') : '';
-      if (srcContent !== destContent) {
-        fs.writeFileSync(dest, srcContent, 'utf8');
-        if (chmod) try { fs.chmodSync(dest, chmod); } catch { /* Windows */ }
-        updated = true;
+
+      if (IS_DEV_MODE) {
+        // Dev mode: symlink dest → src (replace copy/stale symlink if needed)
+        const srcReal = fs.realpathSync(src);
+        let needLink = true;
+        try {
+          const existing = fs.lstatSync(dest);
+          if (existing.isSymbolicLink()) {
+            if (fs.realpathSync(dest) === srcReal) needLink = false;
+            else fs.unlinkSync(dest);
+          } else {
+            // Replace regular file with symlink
+            fs.unlinkSync(dest);
+          }
+        } catch { /* dest doesn't exist */ }
+        if (needLink) {
+          fs.symlinkSync(srcReal, dest);
+          if (chmod) try { fs.chmodSync(dest, chmod); } catch { /* Windows */ }
+          updated = true;
+        }
+      } else {
+        // Production: copy when content differs
+        const srcContent = fs.readFileSync(src, 'utf8');
+        const destContent = fs.existsSync(dest) ? fs.readFileSync(dest, 'utf8') : '';
+        if (srcContent !== destContent) {
+          fs.writeFileSync(dest, srcContent, 'utf8');
+          if (chmod) try { fs.chmodSync(dest, chmod); } catch { /* Windows */ }
+          updated = true;
+        }
       }
     } catch { /* non-fatal per file */ }
   }
@@ -168,7 +198,7 @@ if (syntaxErrors.length > 0) {
   // and has defer logic (waits for active Claude tasks to finish before restarting).
   // Killing here bypasses that and interrupts ongoing conversations.
   if (scriptsUpdated) {
-    console.log(`${icon("pkg")} Scripts synced to ~/.metame/ — daemon will auto-restart when idle.`);
+    console.log(`${icon("pkg")} Scripts ${IS_DEV_MODE ? 'symlinked' : 'synced'} to ~/.metame/ — daemon will auto-restart when idle.`);
   }
 }
 
@@ -346,6 +376,27 @@ function ensureHookInstalled() {
       });
       modified = true;
       console.log(`${icon("hook")} MetaMe: Stop session capture hook installed.`);
+    }
+
+    // Ensure team-context hook (team roster injection for team member sessions)
+    const teamCtxScript = path.join(METAME_DIR, 'hooks', 'team-context.js').replace(/\\/g, '/');
+    const teamCtxCommand = `node "${teamCtxScript}"`;
+    const teamCtxInstalled = (settings.hooks?.UserPromptSubmit || []).some(entry =>
+      entry.hooks?.some(h => h.command && h.command.includes('team-context.js'))
+    );
+
+    if (!teamCtxInstalled) {
+      if (!settings.hooks) settings.hooks = {};
+      if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
+
+      settings.hooks.UserPromptSubmit.push({
+        hooks: [{
+          type: 'command',
+          command: teamCtxCommand,
+        }]
+      });
+      modified = true;
+      console.log(`${icon("hook")} MetaMe: Team context hook installed.`);
     }
 
     if (modified) {
