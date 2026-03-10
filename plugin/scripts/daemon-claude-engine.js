@@ -1648,7 +1648,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         if (runtime.name === 'claude') {
           const activeProv = providerMod ? providerMod.getActiveName() : 'anthropic';
           const builtinModels = ENGINE_MODEL_CONFIG.claude.options;
-          if (activeProv !== 'anthropic' || !builtinModels.includes(model)) {
+          if ((activeProv !== 'anthropic' || !builtinModels.includes(model)) && !errMsg.includes('Stopped by user')) {
             try {
               config = fallbackToDefaultProvider(`${activeProv}/${model} error: ${errMsg.slice(0, 100)}`);
               await bot.sendMessage(chatId, `⚠️ ${activeProv}/${model} 失败，已回退到 anthropic/opus\n原因: ${errMsg.slice(0, 100)}`);
