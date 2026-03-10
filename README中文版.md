@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bas
 
 ---
 
-> ### 🚀 v1.6.0 — 跨设备 Dispatch 与团队统一
+> ### 🚀 v1.5.4 — Agent Soul 层自动修复 & Intent Engine
 >
 > - **跨设备 Dispatch**：团队成员可运行在不同机器上。给成员加 `peer: windows` 字段即可，消息自动通过飞书 relay 群中转——HMAC 签名、去重保护、零手动路由。
 > - **`/dispatch peers`**：手机端查看远端配置、relay 群和所有远端成员列表。

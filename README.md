@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bas
 
 ---
 
-> ### 🚀 v1.6.0 — Cross-Device Dispatch & Team Unification
+> ### 🚀 v1.5.4 — Agent Soul Layer Auto-Repair & Intent Engine
 >
 > - **Cross-device dispatch**: Team members can run on remote machines. Add `peer: windows` to a member and messages route automatically via a Feishu relay chat — HMAC-signed, dedup-protected, zero manual routing.
 > - **`/dispatch peers`**: View remote dispatch config, relay chat, and all remote team members from mobile.
