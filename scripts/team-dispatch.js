@@ -92,9 +92,11 @@ function buildTeamRosterHint(parentKey, memberKey, projects) {
   const dispatchBin = path.join(METAME_DIR, 'bin', 'dispatch_to');
   const teammates = parent.team.filter(m => m.key !== memberKey);
 
-  const lines = teammates.map(m =>
-    `- ${m.key}（${m.name || m.key}）: \`${dispatchBin} --from ${memberKey} ${m.key} "消息"\``
-  );
+  const lines = teammates.map(m => {
+    const target = m.peer ? `${m.peer}:${m.key}` : m.key;
+    const location = m.peer ? ` [远端:${m.peer}]` : '';
+    return `- ${m.key}（${m.name || m.key}${location}）: \`${dispatchBin} --from ${memberKey} ${target} "消息"\``;
+  });
   // Parent project as escalation target
   lines.push(
     `- ${parentKey}（${parent.name || parentKey}, 向上汇报）: \`${dispatchBin} --from ${memberKey} ${parentKey} "消息"\``

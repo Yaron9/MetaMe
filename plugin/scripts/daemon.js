@@ -74,6 +74,7 @@ const {
   encodePacket: encodeRemoteDispatchPacket,
   decodePacket: decodeRemoteDispatchPacket,
   verifyPacket: verifyRemoteDispatchPacket,
+  isDuplicate: isRemoteDispatchDuplicate,
 } = require('./daemon-remote-dispatch');
 
 // ---------------------------------------------------------
@@ -539,6 +540,7 @@ async function sendRemoteDispatch(packet, config) {
       id,
       ts,
       ...packet,
+      from_peer: rd.selfPeer,
     }, rd.secret);
     await liveBot.sendMessage(rd.chatId, body);
     return { success: true, id };
@@ -1251,6 +1253,10 @@ async function handleRemoteDispatchMessage({ chatId, text, config }) {
   }
   if (packet.from_peer === rd.selfPeer) return true;
   if (packet.to_peer !== rd.selfPeer) return true;
+  if (isRemoteDispatchDuplicate(packet.id)) {
+    log('DEBUG', `Remote dispatch ignored: duplicate id=${packet.id}`);
+    return true;
+  }
 
   if (packet.type === 'task') {
     const replyFn = async (output) => {
@@ -1379,6 +1385,31 @@ function physiologicalHeartbeat(config) {
     }
   } catch (e) {
     log('WARN', `Pending dispatch drain failed: ${e.message}`);
+  }
+
+  // 2b. Drain remote-pending.jsonl — remote dispatch packets written by dispatch_to CLI
+  const REMOTE_PENDING = path.join(DISPATCH_DIR, 'remote-pending.jsonl');
+  const REMOTE_PENDING_TMP = REMOTE_PENDING + '.processing';
+  try {
+    if (fs.existsSync(REMOTE_PENDING)) {
+      fs.renameSync(REMOTE_PENDING, REMOTE_PENDING_TMP);
+      const content = fs.readFileSync(REMOTE_PENDING_TMP, 'utf8').trim();
+      fs.unlinkSync(REMOTE_PENDING_TMP);
+      if (content) {
+        const items = content.split('\n').filter(Boolean)
+          .map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+        const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
+        for (const item of items) {
+          if (item.relay_chat_id && item.body && liveBot && typeof liveBot.sendMessage === 'function') {
+            liveBot.sendMessage(item.relay_chat_id, item.body).catch(e2 =>
+              log('WARN', `Remote dispatch relay send failed: ${e2.message}`)
+            );
+          }
+        }
+      }
+    }
+  } catch (e) {
+    log('WARN', `Remote pending dispatch drain failed: ${e.message}`);
   }
 
   // 2. Rotate dispatch-log if > 512KB (keep 7 days)
@@ -2061,6 +2092,8 @@ const { startTelegramBridge, startFeishuBridge } = createBridgeStarter({
   pendingActivations,
   activeProcesses,
   messageQueue,
+  sendRemoteDispatch,
+  handleRemoteDispatchMessage,
 });
 
 const { killExistingDaemon, writePid, cleanPid } = createPidManager({

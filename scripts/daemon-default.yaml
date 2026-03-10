@@ -11,6 +11,11 @@ feishu:
   app_id: null
   app_secret: null
   allowed_chat_ids: []
+  remote_dispatch:
+    enabled: false
+    self: ""
+    chat_id: ""
+    secret: ""
 
 projects:
   # Per-project heartbeat tasks. Each project's tasks are isolated and

@@ -124,8 +124,10 @@ function run(data) {
 
   // Build targeted hint for matched members only
   const lines = hits.map(({ member, isParent }) => {
-    const label = isParent ? `${member.key}（${member.name || member.key}, 向上汇报）` : `${member.key}（${member.name || member.key}）`;
-    return `- ${label}: \`${dispatchBin} --from ${projectKey} ${member.key} "消息"\``;
+    const target = member.peer ? `${member.peer}:${member.key}` : member.key;
+    const location = member.peer ? ` [远端:${member.peer}]` : '';
+    const label = isParent ? `${member.key}（${member.name || member.key}, 向上汇报）` : `${member.key}（${member.name || member.key}${location}）`;
+    return `- ${label}: \`${dispatchBin} --from ${projectKey} ${target} "消息"\``;
   });
 
   const hint = [

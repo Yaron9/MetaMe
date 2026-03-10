@@ -3,6 +3,7 @@
 let userAcl = null;
 try { userAcl = require('./daemon-user-acl'); } catch { /* optional */ }
 const { findTeamMember: _findTeamMember } = require('./team-dispatch');
+const { isRemoteMember } = require('./daemon-remote-dispatch');
 
 function createBridgeStarter(deps) {
   const {
@@ -19,6 +20,8 @@ function createBridgeStarter(deps) {
     pendingActivations,  // optional — used to show smart activation hint
     activeProcesses,     // optional — used for auto-dispatch to clones
     messageQueue,        // optional — used for /stop to clear queued messages
+    sendRemoteDispatch,          // optional — send packet to remote peer via relay chat
+    handleRemoteDispatchMessage, // optional — intercept relay chat messages
   } = deps;
 
   async function sendAclReply(bot, chatId, text) {
@@ -189,6 +192,25 @@ function createBridgeStarter(deps) {
   }
 
   function _dispatchToTeamMember(member, boundProj, text, cfg, bot, realChatId, executeTaskByName, acl) {
+    // Remote member → send via relay chat
+    if (isRemoteMember(member) && sendRemoteDispatch) {
+      sendRemoteDispatch({
+        type: 'task',
+        to_peer: member.peer,
+        target_project: member.key,
+        prompt: text,
+        source_chat_id: String(realChatId),
+        source_sender_key: acl.senderId || 'user',
+      }, cfg).then(res => {
+        if (res.success) {
+          bot.sendMessage(realChatId, `📡 已发送给 ${member.icon || '🤖'} ${member.name} (${member.peer})`).catch(() => {});
+        } else {
+          bot.sendMessage(realChatId, `❌ 远端派发失败: ${res.error}`).catch(() => {});
+        }
+      });
+      return;
+    }
+
     const virtualChatId = `_agent_${member.key}`;
     const parentCwd = member.cwd || boundProj.cwd;
     const resolvedParentCwd = parentCwd.replace(/^~/, require('os').homedir());
@@ -486,6 +508,12 @@ function createBridgeStarter(deps) {
     try {
       const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo, senderId) => {
         const liveCfg = loadConfig();
+
+        // ── Remote dispatch interception (before ACL) ──
+        if (handleRemoteDispatchMessage && text) {
+          const handled = await handleRemoteDispatchMessage({ chatId, text, config: liveCfg });
+          if (handled) return;
+        }
 
         const allowedIds = (liveCfg.feishu && liveCfg.feishu.allowed_chat_ids) || [];
         const trimmedText = text && text.trim();

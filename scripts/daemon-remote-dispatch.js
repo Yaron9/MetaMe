@@ -50,6 +50,26 @@ function verifyPacket(packet, secret) {
   return signPacket(packet, secret) === packet.sig;
 }
 
+// TTL dedup map — prevents replayed packets (5 min window)
+const _seenPackets = new Map();
+const DEDUP_TTL_MS = 5 * 60 * 1000;
+
+function isDuplicate(packetId) {
+  if (!packetId) return false;
+  const now = Date.now();
+  // Evict expired entries on each check
+  for (const [id, ts] of _seenPackets) {
+    if (now - ts > DEDUP_TTL_MS) _seenPackets.delete(id);
+  }
+  if (_seenPackets.has(packetId)) return true;
+  _seenPackets.set(packetId, now);
+  return false;
+}
+
+function isRemoteMember(member) {
+  return !!(member && member.peer);
+}
+
 module.exports = {
   REMOTE_DISPATCH_PREFIX,
   normalizeRemoteDispatchConfig,
@@ -57,4 +77,6 @@ module.exports = {
   encodePacket,
   decodePacket,
   verifyPacket,
+  isDuplicate,
+  isRemoteMember,
 };

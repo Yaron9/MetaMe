@@ -8,6 +8,7 @@ const {
 const { IS_WIN } = require('./platform');
 const { ENGINE_MODEL_CONFIG, resolveEngineModel } = require('./daemon-engine-runtime');
 const { resolveProjectKey: _resolveProjectKey } = require('./team-dispatch');
+const { parseRemoteTargetRef, normalizeRemoteDispatchConfig } = require('./daemon-remote-dispatch');
 let mentorEngine = null;
 try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
 
@@ -623,11 +624,54 @@ function createAdminCommandHandler(deps) {
         return { handled: true, config };
       }
 
+      // /dispatch peers — show remote dispatch config
+      if (args === 'peers') {
+        const rd = normalizeRemoteDispatchConfig(config);
+        if (!rd) {
+          await bot.sendMessage(chatId, '📡 远端 Dispatch 未配置\n\n在 daemon.yaml 中设置 feishu.remote_dispatch 启用。');
+          return { handled: true, config };
+        }
+        let msg = `📡 远端 Dispatch 配置\n─────────────\nself: ${rd.selfPeer}\nrelay chat: ${rd.chatId}\n\n远端成员:\n`;
+        let hasRemote = false;
+        for (const [key, proj] of Object.entries(config.projects || {})) {
+          if (!Array.isArray(proj.team)) continue;
+          for (const m of proj.team) {
+            if (m.peer) {
+              hasRemote = true;
+              msg += `- ${m.icon || '🤖'} ${m.name || m.key} → peer:${m.peer} (${key}/${m.key})\n`;
+            }
+          }
+        }
+        if (!hasRemote) msg += '(无远端成员)\n';
+        await bot.sendMessage(chatId, msg.trim());
+        return { handled: true, config };
+      }
+
       // /dispatch to <agent> <prompt>
       const toMatch = args.match(/^to\s+(\S+)\s+(.+)$/s);
       if (toMatch) {
         const targetName = toMatch[1];
         const prompt = toMatch[2].trim();
+        const senderKey = resolveSenderKey(chatId, config);
+
+        // Check for remote target (peer:project format)
+        const remoteTarget = parseRemoteTargetRef(targetName);
+        if (remoteTarget && deps.sendRemoteDispatch) {
+          const res = await deps.sendRemoteDispatch({
+            type: 'task',
+            to_peer: remoteTarget.peer,
+            target_project: remoteTarget.project,
+            prompt,
+            source_chat_id: String(chatId),
+            source_sender_key: senderKey,
+          }, config);
+          if (res.success) {
+            await bot.sendMessage(chatId, `📡 已发送给 ${remoteTarget.peer}:${remoteTarget.project}`);
+          } else {
+            await bot.sendMessage(chatId, `❌ 远端派发失败: ${res.error}`);
+          }
+          return { handled: true, config };
+        }
 
         // Resolve target by project key or nickname (handles team members via compound key)
         const resolved = resolveDispatchTarget(targetName, config.projects || {});
@@ -637,8 +681,23 @@ function createAdminCommandHandler(deps) {
         }
         const { dispatchKey: targetKey, projInfo } = resolved;
 
-        // Determine sender from current chat's project mapping
-        const senderKey = resolveSenderKey(chatId, config);
+        // Check if resolved target is a remote team member
+        if (projInfo.peer && deps.sendRemoteDispatch) {
+          const res = await deps.sendRemoteDispatch({
+            type: 'task',
+            to_peer: projInfo.peer,
+            target_project: targetKey,
+            prompt,
+            source_chat_id: String(chatId),
+            source_sender_key: senderKey,
+          }, config);
+          if (res.success) {
+            await bot.sendMessage(chatId, `📡 已发送给 ${projInfo.icon || '🤖'} ${projInfo.name || targetKey} (${projInfo.peer})`);
+          } else {
+            await bot.sendMessage(chatId, `❌ 远端派发失败: ${res.error}`);
+          }
+          return { handled: true, config };
+        }
 
         // Find the target project's own Feishu chat (reverse lookup of chat_agent_map)
         const feishuChatAgentMap = (config.feishu && config.feishu.chat_agent_map) || {};
@@ -674,7 +733,9 @@ function createAdminCommandHandler(deps) {
         '用法:',
         '/dispatch status — 查看状态',
         '/dispatch log — 查看记录',
+        '/dispatch peers — 查看远端配置',
         '/dispatch to <agent> <任务内容> — 直接跨 agent 派发',
+        '/dispatch to <peer:project> <任务内容> — 跨设备派发',
         '/TeamTask create <agent> <目标> [--scope <id>] [--parent <id>] — 创建/续接 TeamTask',
         '/TeamTask — 查看 TeamTask 列表',
       ].join('\n'));

@@ -17,6 +17,7 @@ const os = require('os');
 const { socketPath } = require('../platform');
 const yaml = require('../resolve-yaml');
 const { buildEnrichedPrompt, buildTeamRosterHint } = require('../team-dispatch');
+const { parseRemoteTargetRef, normalizeRemoteDispatchConfig, encodePacket } = require('../daemon-remote-dispatch');
 
 const METAME_DIR = path.join(os.homedir(), '.metame');
 const DISPATCH_DIR = path.join(METAME_DIR, 'dispatch');
@@ -63,7 +64,7 @@ function sendOne(memberTarget, memberPrompt, opts = {}) {
   return new Promise((resolve) => {
     const ts = new Date().toISOString();
     const secret = getDispatchSecret();
-    const enriched = buildEnrichedPrompt(memberTarget, memberPrompt, METAME_DIR);
+    const enriched = opts.skipEnrich ? memberPrompt : buildEnrichedPrompt(memberTarget, memberPrompt, METAME_DIR);
     const sigPayload = JSON.stringify({ target: memberTarget, prompt: enriched, ts });
     const sig = crypto.createHmac('sha256', secret).update(sigPayload).digest('hex');
 
@@ -126,6 +127,39 @@ function sendOne(memberTarget, memberPrompt, opts = {}) {
   });
 }
 
+// ── Remote dispatch helpers ───────────────────────────────────────────────────
+function sendRemoteViaRelay(peer, project, memberPrompt) {
+  let config;
+  try {
+    config = yaml.load(fs.readFileSync(path.join(METAME_DIR, 'daemon.yaml'), 'utf8'));
+  } catch (e) {
+    console.error(`dispatch_to: failed to load daemon.yaml: ${e.message}`);
+    process.exit(1);
+  }
+  const rd = normalizeRemoteDispatchConfig(config);
+  if (!rd) {
+    console.error('dispatch_to: feishu.remote_dispatch not configured or disabled');
+    process.exit(1);
+  }
+  const ts = new Date().toISOString();
+  const id = `${rd.selfPeer}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const body = encodePacket({
+    v: 1, id, ts,
+    type: 'task',
+    from_peer: rd.selfPeer,
+    to_peer: peer,
+    target_project: project,
+    prompt: memberPrompt,
+    source_sender_key: fromKey,
+  }, rd.secret);
+
+  // Write to dispatch/remote-pending.jsonl for daemon to pick up and send via bot
+  const remotePending = path.join(DISPATCH_DIR, 'remote-pending.jsonl');
+  fs.mkdirSync(DISPATCH_DIR, { recursive: true });
+  fs.appendFileSync(remotePending, JSON.stringify({ relay_chat_id: rd.chatId, body }) + '\n');
+  console.log(`DISPATCH_OK(remote): ${peer}:${project} → ${memberPrompt.slice(0, 60)}`);
+}
+
 // ── Team broadcast mode ───────────────────────────────────────────────────────
 if (teamMode) {
   let config = null;
@@ -153,12 +187,24 @@ if (teamMode) {
   // Await all dispatches before exiting so async socket/file ops complete
   Promise.all(team.map((member) => {
     const roster = buildTeamRosterHint(target, member.key, config.projects);
-    // Enrich first (shared context), then prepend roster so Claude sees it at top
     const enriched = buildEnrichedPrompt(member.key, prompt, METAME_DIR);
     const memberPrompt = roster ? `${roster}\n\n---\n${enriched}` : enriched;
-    return sendOne(member.key, memberPrompt, { team_roster_injected: true });
+    // Remote member → relay dispatch
+    if (member.peer) {
+      sendRemoteViaRelay(member.peer, member.key, memberPrompt);
+      return Promise.resolve();
+    }
+    return sendOne(member.key, memberPrompt, { team_roster_injected: true, skipEnrich: true });
   })).then(() => process.exit(0));
-}
+} else {
 
 // ── Normal single-target dispatch ─────────────────────────────────────────────
-sendOne(target, prompt).then(() => process.exit(0));
+const remoteTarget = parseRemoteTargetRef(target);
+if (remoteTarget) {
+  const enriched = buildEnrichedPrompt(remoteTarget.project, prompt, METAME_DIR);
+  sendRemoteViaRelay(remoteTarget.peer, remoteTarget.project, enriched);
+  process.exit(0);
+} else {
+  sendOne(target, prompt).then(() => process.exit(0));
+}
+}
