@@ -411,6 +411,24 @@ function saveState(state) {
     if (currentUsageUpdated && currentUsageUpdated > nextUsageUpdated) {
       next.usage.updated_at = currentUsageUpdated;
     }
+
+    // Merge sessions: prevent concurrent agents from wiping each other's session data.
+    // When a stale state object is saved (e.g. after a long spawnClaudeStreaming await),
+    // preserve any sessions that were added/updated by other agents in the interim.
+    if (current.sessions && typeof current.sessions === 'object') {
+      if (!next.sessions || typeof next.sessions !== 'object') next.sessions = {};
+      for (const [key, curSession] of Object.entries(current.sessions)) {
+        if (!next.sessions[key]) {
+          // Session exists in cache but not in incoming state → preserve it
+          next.sessions[key] = curSession;
+        } else {
+          // Both have it → keep whichever has newer last_active
+          const curActive = Number(curSession && curSession.last_active) || 0;
+          const nextActive = Number(next.sessions[key] && next.sessions[key].last_active) || 0;
+          if (curActive > nextActive) next.sessions[key] = curSession;
+        }
+      }
+    }
   }
 
   _cachedState = next;
