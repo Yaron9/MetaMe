@@ -28,16 +28,24 @@ const { sanitizePrompt, isInternalPrompt } = require('./hook-utils');
 
 // Default: all intents enabled unless explicitly set to false in daemon.yaml
 const DEFAULTS = {
-  team_dispatch: true,
-  ops_assist:    true,
-  task_create:   true,
+  team_dispatch:  true,
+  ops_assist:     true,
+  task_create:    true,
+  file_transfer:  true,
+  memory_recall:  true,
+  agent_manage:   true,
+  hook_config:    true,
 };
 
 // Intent registry — loaded lazily so startup is fast even if a module has issues
 const INTENT_MODULES = {
-  team_dispatch: './intent-team-dispatch',
-  ops_assist:    './intent-ops-assist',
-  task_create:   './intent-task-create',
+  team_dispatch:  './intent-team-dispatch',
+  ops_assist:     './intent-ops-assist',
+  task_create:    './intent-task-create',
+  file_transfer:  './intent-file-transfer',
+  memory_recall:  './intent-memory-recall',
+  agent_manage:   './intent-agent-manage',
+  hook_config:    './intent-hook-config',
 };
 
 function exit() { process.exit(0); }
@@ -81,7 +89,9 @@ function run(data) {
       const detect = require(modulePath);
       const result = detect(prompt, config, projectKey);
       if (result) hints.push(result);
-    } catch { /* never block user workflow */ }
+    } catch (e) {
+      process.stderr.write(`[intent-engine] ${key}: ${e.message}\n`);
+    }
   }
 
   if (hints.length === 0) return exit();

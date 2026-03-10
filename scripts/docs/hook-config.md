@@ -27,6 +27,10 @@ Stop (每轮结束)
 | `team_dispatch` | `intent-team-dispatch.js` | 检测到"告诉/让/发给 + 成员名"等联络意图 | `dispatch_to` 命令提示（仅匹配成员） |
 | `ops_assist` | `intent-ops-assist.js` | 回退/日志/重启/gc/状态 相关语境 | `/undo` `/restart` `/logs` `/gc` `/status` 命令提示 |
 | `task_create` | `intent-task-create.js` | 定时/提醒/每天X点 等调度语境 | `/task-add` 命令用法提示 |
+| `file_transfer` | `intent-file-transfer.js` | "发给我/发过来/导出" 等文件传输语境 | `[[FILE:...]]` 协议 + 收发规则 |
+| `memory_recall` | `intent-memory-recall.js` | "上次/之前/还记得" 等跨会话回忆语境 | `memory-search.js` 命令用法 |
+| `agent_manage` | `intent-agent-manage.js` | "创建/绑定 Agent" 或 "代码结构/脚本入口" | agent-guide / pointer-map 文档指引 |
+| `hook_config` | `intent-hook-config.js` | "hook/intent 配置/开关" 等引擎配置语境 | hook-config.md 文档指引 |
 ---
 
 ## 开关控制

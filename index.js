@@ -938,29 +938,11 @@ const KERNEL_BODY = PROTOCOL_NORMAL
   .replace(/^<!-- METAME:START -->\n/, '')  // remove project-level marker
   .trimEnd();
 
+// Most capability hints migrated to intent engine (on-demand injection).
+// Only keep Skills here — it's a fallback behavior that can't be keyword-matched.
 const CAPABILITY_SECTIONS = [
-  '## Agent Dispatch',
-  '识别到"告诉X/让X/通知X"等转发意图时 → 先 `cat ~/.metame/docs/dispatch-table.md` 获取路由表（昵称→project_key），再执行转发。不要凭记忆猜测昵称对应关系。',
-  '',
-  '## Agent 创建与管理',
-  '用户问创建/管理/绑定 Agent 时 → 先 `cat ~/.metame/docs/agent-guide.md` 再回答。',
-  '用户问代码结构/升级进度/脚本入口时 → 先 `cat ~/.metame/docs/pointer-map.md` 再回答。',
-  '',
-  '## 手机端文件交互',
-  '用户要文件（"发给我"/"发过来"/"导出"）→ 先 `cat ~/.metame/docs/file-transfer.md` 再执行。',
-  '**收**：用户发图片/文件自动存到 `upload/`，用 Read 查看。',
-  '**发**：回复末尾加 `[[FILE:/absolute/path]]`，daemon 自动发手机。不要读内容再复述。',
-  '',
-  '## 跨会话记忆',
-  '用户提"上次/之前"时搜索：`node ~/.metame/memory-search.js "关键词1" "keyword2"`',
-  '一次传 3-4 个关键词（中文+英文+函数名），`--facts` 只搜事实，`--sessions` 只搜会话。',
-  '',
-  '## Intent Engine',
-  '用户问 hook/intent 配置、开关、新增意图模块时 → 先 `cat ~/.metame/docs/hook-config.md` 再操作。',
-  '',
   '## Skills',
   '能力不足/工具缺失/任务失败 → 先查 `cat ~/.claude/skills/skill-manager/SKILL.md`，不要自己猜。',
-
 ].join('\n');
 
 try {
