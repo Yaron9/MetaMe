@@ -826,6 +826,76 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
   if (!fs.existsSync(DISPATCH_DIR)) fs.mkdirSync(DISPATCH_DIR, { recursive: true });
   fs.appendFileSync(DISPATCH_LOG, JSON.stringify({ ...fullMsg, dispatched_at: new Date().toISOString() }) + '\n', 'utf8');
 
+  // Auto-update now/shared.md and team shared files for cross-agent visibility
+  try {
+    const NOW_DIR = path.join(HOME, '.metame', 'memory', 'now');
+    const SHARED_FILE = path.join(NOW_DIR, 'shared.md');
+    const SHARED_DIR = path.join(HOME, '.metame', 'memory', 'shared');
+    if (!fs.existsSync(NOW_DIR)) fs.mkdirSync(NOW_DIR, { recursive: true });
+
+    const now = new Date();
+    const timeStr = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+    const dateStr = now.toISOString().slice(0, 10);
+
+    // Get sender display name
+    const fromProj = config && config.projects ? config.projects[fullMsg.from] : null;
+    const fromName = fromProj ? (fromProj.name || fullMsg.from) : (fullMsg.from || 'unknown');
+    const fromIcon = fromProj ? (fromProj.icon || '🤖') : '🤖';
+
+    // Get target display name
+    const toProj = config && config.projects ? config.projects[targetProject] : null;
+    const toName = toProj ? (toProj.name || targetProject) : targetProject;
+    const toIcon = toProj ? (toProj.icon || '🤖') : '🤖';
+
+    const taskTitle = payload.title || '';
+    const taskPrompt = payload.prompt || '';
+
+    // Update shared.md
+    const content = `# 共享当前状态
+**最后更新**: ${timeStr} **更新者**: ${fromName} (${fullMsg.from})
+
+## 当前任务
+- **派发给**: ${toIcon} ${toName} (${targetProject})
+- **任务**: ${taskTitle || taskPrompt.slice(0, 60)}
+- **时间**: ${timeStr}
+
+## 任务链
+${fullMsg.chain ? fullMsg.chain.join(' → ') : fullMsg.from} → ${targetProject}
+`;
+    fs.writeFileSync(SHARED_FILE, content, 'utf8');
+
+    // Update tasks.md if shared directory exists
+    const tasksFile = path.join(SHARED_DIR, 'tasks.md');
+    if (fs.existsSync(SHARED_DIR)) {
+      const taskLine = `- [${dateStr}] ${fromIcon} ${fromName} → ${toIcon} ${toName}: ${taskTitle || taskPrompt.slice(0, 40)}`;
+      let tasksContent = '';
+      if (fs.existsSync(tasksFile)) {
+        tasksContent = fs.readFileSync(tasksFile, 'utf8');
+      } else {
+        tasksContent = '# 任务看板\n\n## 🔄 进行中\n\n## ✅ 已完成\n\n## 📅 待开始\n';
+      }
+      // Insert task under "进行中" section
+      if (!tasksContent.includes(taskLine)) {
+        const lines = tasksContent.split('\n');
+        const newLines = [];
+        let inProgress = false;
+        for (const line of lines) {
+          newLines.push(line);
+          if (line.includes('## 🔄 进行中')) {
+            inProgress = true;
+          } else if (inProgress && line.startsWith('## ')) {
+            newLines.push(taskLine);
+            inProgress = false;
+          }
+        }
+        if (inProgress) newLines.push(taskLine);
+        fs.writeFileSync(tasksFile, newLines.join('\n'), 'utf8');
+      }
+    }
+  } catch (e) {
+    log('WARN', `Failed to update shared files: ${e.message}`);
+  }
+
   const rawPrompt = envelope
     ? buildPromptFromTaskEnvelope(envelope, fullMsg.payload.prompt || fullMsg.payload.title || '')
     : (fullMsg.payload.prompt || fullMsg.payload.title || 'No prompt provided');
