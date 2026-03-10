@@ -21,7 +21,11 @@ function createAgentCommandHandler(deps) {
     getSessionRecentContext,
     pendingBinds,
     pendingAgentFlows,
+    pendingTeamFlows,
     pendingActivations,
+    writeConfigSafe,
+    backupConfig,
+    execSync,
     doBindAgent,
     mergeAgentRole,
     agentTools,
@@ -244,6 +248,25 @@ function createAgentCommandHandler(deps) {
     const config = ctx.config || {};
     const text = ctx.text || '';
 
+    // /cancel — 取消任何挂起的向导流
+    if (text === '/cancel') {
+      let cancelled = false;
+      if (pendingTeamFlows && pendingTeamFlows.has(String(chatId))) {
+        pendingTeamFlows.delete(String(chatId));
+        cancelled = true;
+      }
+      if (pendingAgentFlows && pendingAgentFlows.has(String(chatId))) {
+        pendingAgentFlows.delete(String(chatId));
+        cancelled = true;
+      }
+      if (pendingBinds && pendingBinds.has(String(chatId))) {
+        pendingBinds.delete(String(chatId));
+        cancelled = true;
+      }
+      await bot.sendMessage(chatId, cancelled ? '✅ 已取消当前操作' : '没有进行中的操作');
+      return true;
+    }
+
     if (text === '/resume' || text.startsWith('/resume ')) {
       const arg = text.slice(7).trim();
 
@@ -341,6 +364,93 @@ function createAgentCommandHandler(deps) {
 
     // wizard state machine removed — use natural language to create agents
 
+    // /agent new 多步向导状态机（name/desc 步骤）
+    if (pendingAgentFlows) {
+      const flow = pendingAgentFlows.get(String(chatId));
+      if (flow && text && !text.startsWith('/')) {
+        if (flow.step === 'name') {
+          flow.name = text.trim();
+          flow.step = 'desc';
+          pendingAgentFlows.set(String(chatId), flow);
+          await bot.sendMessage(chatId, `好的，Agent 名称是「${flow.name}」\n\n步骤3/3：请描述这个 Agent 的角色和职责（用自然语言）：`);
+          return true;
+        }
+        if (flow.step === 'desc') {
+          pendingAgentFlows.delete(String(chatId));
+          const { dir, name, isClone, parentCwd } = flow;
+          const description = text.trim();
+          await bot.sendMessage(chatId, `⏳ 正在配置 Agent「${name}」，稍等...`);
+          try {
+            await doBindAgent(bot, chatId, name, dir);
+            const mergeResult = await mergeAgentRole(dir, description, isClone, parentCwd);
+            if (mergeResult && mergeResult.error) {
+              await bot.sendMessage(chatId, `⚠️ CLAUDE.md 合并失败: ${mergeResult.error}，其他配置已保存`);
+            } else if (mergeResult && mergeResult.symlinked) {
+              await bot.sendMessage(chatId, `🔗 CLAUDE.md 已链接到父 Agent（分身模式）\n✅ Agent「${name}」创建完成`);
+            } else if (mergeResult && mergeResult.created) {
+              await bot.sendMessage(chatId, `📝 已创建 CLAUDE.md\n✅ Agent「${name}」创建完成`);
+            } else {
+              await bot.sendMessage(chatId, `📝 已更新 CLAUDE.md\n✅ Agent「${name}」创建完成`);
+            }
+          } catch (e) {
+            await bot.sendMessage(chatId, `❌ 创建 Agent 失败: ${e.message}`);
+          }
+          return true;
+        }
+      }
+    }
+
+    // /agent new team 多步向导状态机
+    if (pendingTeamFlows) {
+      const teamFlow = pendingTeamFlows.get(String(chatId));
+      if (teamFlow && text && !text.startsWith('/')) {
+        if (teamFlow.step === 'name') {
+          teamFlow.name = text.trim();
+          teamFlow.step = 'members';
+          pendingTeamFlows.set(String(chatId), teamFlow);
+          await bot.sendMessage(chatId, `团队名称：「${teamFlow.name}」
+
+请输入成员列表，格式：
+名称:icon:颜色
+
+可用颜色：green, yellow, red, blue, purple, orange, pink, indigo
+
+示例：
+编剧:✍️:green, 审核:🔍:yellow, 推广:📢:red
+
+一行一个成员，或用逗号分隔多个`);
+          return true;
+        }
+
+        if (teamFlow.step === 'members') {
+          const validColors = ['green', 'yellow', 'red', 'blue', 'purple', 'orange', 'pink', 'indigo'];
+          const memberLines = text.split(/[,，\n]/).filter(l => l.trim());
+          const members = [];
+          for (const line of memberLines) {
+            const parts = line.trim().split(':');
+            const name = parts[0] && parts[0].trim();
+            const icon = (parts[1] && parts[1].trim()) || '🤖';
+            const rawColor = parts[2] && parts[2].trim().toLowerCase();
+            const color = validColors.includes(rawColor) ? rawColor : validColors[members.length % validColors.length];
+            if (name) {
+              members.push({ key: name, name: `${teamFlow.name} · ${name}`, icon, color, nicknames: [name] });
+            }
+          }
+          if (members.length === 0) {
+            await bot.sendMessage(chatId, '⚠️ 请至少添加一个成员，格式：名称:icon:颜色');
+            return true;
+          }
+          teamFlow.members = members;
+          teamFlow.step = 'cwd';
+          pendingTeamFlows.set(String(chatId), teamFlow);
+          const memberList = members.map(m => `${m.icon} ${m.name} (${m.color})`).join('\n');
+          await bot.sendMessage(chatId, `✅ 成员配置：\n\n${memberList}\n\n正在选择父目录...`);
+          await sendBrowse(bot, chatId, 'team-new', HOME, `为「${teamFlow.name}」选择父工作目录`);
+          return true;
+        }
+      }
+    }
+
     // /agent edit wait-input flow (kept for command compatibility)
     {
       const editFlow = getFreshFlow(String(chatId) + ':edit');
@@ -362,6 +472,41 @@ function createAgentCommandHandler(deps) {
       const agentArg = text === '/agent' ? '' : text.slice(7).trim();
       const agentParts = agentArg.split(/\s+/).filter(Boolean);
       const agentSub = agentParts[0] || ''; // bind / list / new / edit / reset / unbind / ''
+
+      // /agent new [team] — 创建新 Agent 或团队
+      if (agentSub === 'new') {
+        const secondArg = agentParts[1];
+        if (secondArg === 'team') {
+          if (!pendingTeamFlows) {
+            await bot.sendMessage(chatId, '❌ 团队向导暂不可用');
+            return true;
+          }
+          pendingTeamFlows.set(String(chatId), { step: 'name' });
+          await bot.sendMessage(chatId, `🏗️ **团队创建向导**
+
+请输入团队名称（如：短剧团队、销售团队）：
+
+输入 /cancel 可取消`);
+          return true;
+        }
+        // /agent new clone — 分身模式
+        const isClone = secondArg === 'clone';
+        let parentCwd = null;
+        if (isClone) {
+          const cfg = loadConfig();
+          const agentMap = {
+            ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}),
+            ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}),
+          };
+          const boundKey = agentMap[String(chatId)];
+          const boundProj = boundKey && cfg.projects && cfg.projects[boundKey];
+          if (boundProj && boundProj.cwd) parentCwd = normalizeCwd(boundProj.cwd);
+        }
+        pendingAgentFlows.set(String(chatId), { step: 'dir', isClone, parentCwd, __ts: Date.now() });
+        const hint = isClone ? `（${parentCwd ? '分身模式：将链接父 Agent 的 CLAUDE.md' : '⚠️ 当前群未绑定 Agent'})` : '';
+        await sendBrowse(bot, chatId, 'agent-new', HOME, `步骤1/3：选择 Agent 的工作目录${hint}`);
+        return true;
+      }
 
       // /agent bind <名称> [目录]
       if (agentSub === 'bind') {
@@ -644,6 +789,23 @@ function createAgentCommandHandler(deps) {
       return true;
     }
 
+    // /agent-dir <path>: /agent new 向导的目录选择回调（步骤1→步骤2）
+    if (text.startsWith('/agent-dir ')) {
+      const dirPath = expandPath(text.slice(11).trim());
+      const flow = pendingAgentFlows && pendingAgentFlows.get(String(chatId));
+      if (!flow || flow.step !== 'dir') {
+        await bot.sendMessage(chatId, '❌ 没有待完成的 /agent new，请重新发送 /agent new');
+        return true;
+      }
+      flow.dir = dirPath;
+      flow.step = 'name';
+      pendingAgentFlows.set(String(chatId), flow);
+      const displayPath = dirPath.replace(HOME, '~');
+      const cloneHint = flow.isClone ? '（分身模式）' : '';
+      await bot.sendMessage(chatId, `✓ 已选择目录：${displayPath}${cloneHint}\n\n步骤2/3：给这个 Agent 起个名字？`);
+      return true;
+    }
+
     // /agent-bind-dir <path>: internal callback for bind picker
     if (text.startsWith('/agent-bind-dir ')) {
       const dirPath = expandPath(text.slice(16).trim());
@@ -654,6 +816,90 @@ function createAgentCommandHandler(deps) {
       }
       pendingBinds.delete(String(chatId));
       await bindViaUnifiedApi(bot, chatId, agentName, dirPath);
+      return true;
+    }
+
+    // /agent-team-dir <path>: directory picker callback for team creation
+    if (text.startsWith('/agent-team-dir ')) {
+      const dirPath = expandPath(text.slice(16).trim());
+      const teamFlow = pendingTeamFlows && pendingTeamFlows.get(String(chatId));
+      if (!teamFlow || teamFlow.step !== 'cwd') {
+        await bot.sendMessage(chatId, '❌ 没有待完成的团队创建，请重新发送 /agent new team');
+        return true;
+      }
+      teamFlow.step = 'creating';
+      pendingTeamFlows.set(String(chatId), teamFlow);
+      await bot.sendMessage(chatId, `⏳ 正在创建团队「${teamFlow.name}」...`);
+
+      try {
+        const teamDir = path.join(dirPath, 'team');
+        if (!fs.existsSync(teamDir)) fs.mkdirSync(teamDir, { recursive: true });
+
+        const members = Array.isArray(teamFlow.members) ? teamFlow.members : [];
+        const results = [];
+        for (const member of members) {
+          const memberDir = path.join(teamDir, member.key);
+          if (!fs.existsSync(memberDir)) fs.mkdirSync(memberDir, { recursive: true });
+          const claudeMdPath = path.join(memberDir, 'CLAUDE.md');
+          if (!fs.existsSync(claudeMdPath)) {
+            fs.writeFileSync(claudeMdPath, `# ${member.name}\n\n（团队成员：${teamFlow.name}）\n`, 'utf8');
+          }
+          // Init git repo for checkpoint support
+          try {
+            if (execSync) execSync('git init -q', { cwd: memberDir, stdio: 'ignore' });
+          } catch { /* non-critical */ }
+          results.push(`✅ ${member.icon} ${member.key}: ${memberDir.replace(HOME, '~')}`);
+        }
+
+        // Register in daemon.yaml under parent project's team array
+        const cfg = loadConfig();
+        let parentProjectKey = null;
+        if (cfg.projects) {
+          for (const [projKey, proj] of Object.entries(cfg.projects)) {
+            if (normalizeCwd(proj.cwd || '') === normalizeCwd(dirPath)) {
+              parentProjectKey = projKey;
+              break;
+            }
+          }
+        }
+
+        if (parentProjectKey && cfg.projects[parentProjectKey]) {
+          const proj = cfg.projects[parentProjectKey];
+          if (!proj.team) proj.team = [];
+          for (const member of members) {
+            if (!proj.team.some(m => m.key === member.key)) {
+              proj.team.push({
+                key: member.key,
+                name: member.name,
+                icon: member.icon,
+                color: member.color,
+                cwd: path.join(teamDir, member.key),
+                nicknames: member.nicknames,
+              });
+            }
+          }
+          if (writeConfigSafe) writeConfigSafe(cfg);
+          if (backupConfig) backupConfig();
+        }
+
+        const memberList = members.map(m => `${m.icon} ${m.key}`).join('  |  ');
+        const yamlNote = parentProjectKey
+          ? `📝 已更新 daemon.yaml：${parentProjectKey}.team`
+          : '⚠️ 未找到父项目，请手动在 daemon.yaml 中注册 team 段';
+        await bot.sendMessage(chatId, `🎉 **团队创建完成！**
+
+**${teamFlow.name}**
+${memberList}
+
+📁 目录：${teamDir.replace(HOME, '~')}/
+${yamlNote}
+
+💡 发 \`/agent\` 可切换到成员对话`);
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ 创建失败: ${e.message}`);
+      }
+
+      pendingTeamFlows.delete(String(chatId));
       return true;
     }
 

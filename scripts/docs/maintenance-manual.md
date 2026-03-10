@@ -151,6 +151,25 @@ feishu:
 
 一个项目可以有多个 team 成员（数字分身），共享同一个 `cwd`，通过虚拟 chatId 并行工作。
 
+### 创建团队成员（向导）
+
+在手机端（飞书/Telegram）发送以下任一方式触发创建向导：
+
+- 自然语言：`创建团队`、`新建工作组`、`建个团队` 等（`_detectTeamIntent` 识别，位于 `daemon-command-router.js`）
+- 命令：`/agent new team`
+
+向导分三步，全部在 `daemon-agent-commands.js` 中实现：
+1. **name**：输入团队名称
+2. **members**：输入成员列表，格式 `名称:icon:颜色`，一行或逗号分隔多个
+3. **cwd**：通过文件浏览器（`daemon-file-browser.js` `team-new` 模式）选择父目录
+
+目录确认（`/agent-team-dir` 回调）后：
+- 在 `<父目录>/team/<成员key>/` 下创建工作目录及 CLAUDE.md
+- 自动执行 `git init`（支持 checkpoint）
+- 若父目录对应已有项目，自动写入 `daemon.yaml` 的 `team` 数组；否则提示手动注册
+
+中间状态保存在 `pendingTeamFlows` Map（`daemon.js` 中定义）。
+
 ### 配置
 
 在 `~/.metame/daemon.yaml` 的项目下添加 `team` 数组和 `broadcast: true`：

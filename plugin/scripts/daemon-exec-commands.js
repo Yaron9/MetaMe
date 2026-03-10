@@ -20,6 +20,7 @@ function createExecCommandHandler(deps) {
     loadState,
     saveState,
     getSession,
+    getSessionForEngine,
     getSessionName,
     createSession,
     findSessionFile,
@@ -243,12 +244,14 @@ function createExecCommandHandler(deps) {
 
     // /compact — compress current session context to save tokens
     if (text === '/compact') {
-      const session = getSession(chatId);
-      if (!session || !session.started) {
+      const rawSession = getSession(chatId);
+      const engine = rawSession?.engine || 'claude';
+      const session = getSessionForEngine(chatId, engine);
+      if (!session || !session.id || !session.started) {
         await bot.sendMessage(chatId, '❌ No active session to compact.');
         return true;
       }
-      if (String(session.engine || '').toLowerCase() === 'codex') {
+      if (String(engine).toLowerCase() === 'codex') {
         await bot.sendMessage(chatId, '⚠️ Codex 会话暂不支持 /compact，请继续在同一会话里对话。');
         return true;
       }

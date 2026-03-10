@@ -41,13 +41,17 @@
 - Agent 命令处理（新）：
   - `scripts/daemon-agent-commands.js`
   - 关键点：`createAgentCommandHandler()` 处理 `/agent`、`/activate`、`/resume`；
-    `/agent soul [repair|edit]`；`pendingActivations` 无 TTL（消费即删）；防止创建群自激活
+    `/agent soul [repair|edit]`；`pendingActivations` 无 TTL（消费即删）；防止创建群自激活；
+    `/agent new team` 三步向导（name → members → cwd）；
+    `/agent-team-dir` 回调处理目录选择并最终写入 daemon.yaml `team` 段；
+    `pendingTeamFlows` Map 维护向导中间状态
 
 - 路由与 Agent 创建：
   - `scripts/daemon-command-router.js`
   - `scripts/daemon-agent-tools.js`
   - 关键点：自然语言提取 `codex` 关键词；默认 `claude` 不写 `engine` 字段，仅 `codex` 持久化 `engine: codex`；
-    `bindAgentToChat()` 自动调用 `ensureAgentMetadata()` 建立 soul 层
+    `bindAgentToChat()` 自动调用 `ensureAgentMetadata()` 建立 soul 层；
+    `_detectTeamIntent()` 自然语言意图识别（含负样本过滤），识别"建团队"意图后自动路由到 `/agent new team` 向导
 
 - 会话命令与兼容边界：
   - `scripts/daemon-exec-commands.js`

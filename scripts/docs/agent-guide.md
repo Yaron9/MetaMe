@@ -43,11 +43,41 @@
 
 `/activate` 会自动将群与最近创建的 Agent 绑定（30分钟内有效）。
 
+## 创建团队成员（Team Wizard）
+
+用于在一个项目下创建多个并行工作的 Agent 分身（team members）。
+
+### 触发方式
+
+手机端发送自然语言（如"创建团队"、"建个工作组"）或直接发送：
+
+```
+/agent new team
+```
+
+### 向导流程
+
+1. **输入团队名称**：如 `短剧团队`
+2. **输入成员列表**，格式为 `名称:icon:颜色`，支持逗号或换行分隔：
+   ```
+   编剧:✍️:green, 审核:🔍:yellow, 推广:📢:red
+   ```
+   可用颜色：`green` `yellow` `red` `blue` `purple` `orange` `pink` `indigo`
+3. **选择父工作目录**（通过文件浏览器）
+
+### 创建结果
+
+- 在 `<父目录>/team/<成员key>/` 下创建成员目录及 `CLAUDE.md`
+- 自动执行 `git init` 以支持 checkpoint
+- 若选择的父目录对应 daemon.yaml 中已有项目，自动将成员配置写入该项目的 `team` 数组
+- 若未找到父项目，提示手动在 daemon.yaml 中注册 `team` 段
+
 ## 常用命令速查
 
 | 操作 | 手机端命令 |
 |------|-----------|
 | 新建 Agent | `/agent new` 或自然语言"创建agent" |
+| 创建团队成员 | `/agent new team` 或自然语言"创建团队" |
 | 绑定群 | `/activate` 或 `/agent bind <名称> [目录]` |
 | 查看列表 | `/agent list` |
 | 编辑角色 | `/agent edit` |

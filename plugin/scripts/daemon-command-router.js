@@ -350,12 +350,83 @@ function createCommandRouter(deps) {
     });
   }
 
+  function _detectCloneIntent(text) {
+    if (!text || text.startsWith('/') || text.length < 3) return false;
+    const cloneKeywords = ['分身', '再造', '克隆', '副本', '另一个自己', '另一个我'];
+    const hasCloneKeyword = cloneKeywords.some(k => text.includes(k));
+    if (hasCloneKeyword) {
+      const excludePatterns = [/已经/, /存在/, /有了/, /好了/, /完成/, /搞定/, /配置好/, /怎么建/, /如何建/, /方法/, /步骤/];
+      if (excludePatterns.some(p => p.test(text))) return false;
+      return true;
+    }
+    const actionKeywords = ['新建', '创建', '造', '做一个', '加一个', '增加', '添加'];
+    const hasAction = actionKeywords.some(k => text.includes(k));
+    if (hasAction && /分身|数字/.test(text)) return true;
+    if (/让.*做分身|叫.*做分身|甲.*做分身/.test(text)) return true;
+    return false;
+  }
+
+  function _detectNewAgentIntent(text) {
+    if (!text || text.startsWith('/') || text.length < 3) return false;
+    if (_detectCloneIntent(text)) return false;
+    if (_detectTeamIntent(text)) return false;
+    const agentKeywords = ['agent', '助手', '机器人', '小助手'];
+    const hasAgentKeyword = agentKeywords.some(k => text.toLowerCase().includes(k.toLowerCase()));
+    const actionKeywords = ['新建', '创建', '造', '做一个', '加一个', '增加', '添加', '开一个'];
+    const hasAction = actionKeywords.some(k => text.includes(k));
+    if (hasAgentKeyword && hasAction) {
+      const excludePatterns = [/已经/, /存在/, /有了/, /好了/, /完成/, /搞定/, /配置好/, /怎么建/, /如何建/, /方法/, /步骤/, /是什么/, /哪个/];
+      if (excludePatterns.some(p => p.test(text))) return false;
+      return true;
+    }
+    if (/^(给我|帮我|我要|我想|给我加|帮我加)/.test(text) && hasAgentKeyword) return true;
+    return false;
+  }
+
+  function _detectTeamIntent(text) {
+    if (!text || text.startsWith('/') || text.length < 4) return false;
+    // Exclude: only mentioning team, no creation intent
+    if (/走team|用team|通过team|team里|team中|团队里|团队中|走团队|用团队|在team|在团队|team.*已经|团队.*已经|team.*讨论|团队.*讨论/.test(text)) return false;
+    // Positive match: team + action word
+    if ((text.includes('团队') || text.includes('工作组'))) {
+      if (/(新建|创建|造一个|加一个|组建|设置|建|搞)/.test(text)) {
+        if (/怎么|如何|方法|步骤/.test(text)) return false;
+        return true;
+      }
+    }
+    // Pattern: "建个团队" / "搞个团队"
+    if (/^(新建|创建|建|搞).*团队/.test(text)) return true;
+    return false;
+  }
+
   async function tryHandleAgentIntent(bot, chatId, text, config) {
     if (!agentTools || !text || text.startsWith('/')) return false;
     const key = String(chatId);
     if (hasFreshPendingFlow(key) || hasFreshPendingFlow(key + ':edit')) return false;
     const input = text.trim();
     if (!input) return false;
+
+    // Clone intent — route to /agent new clone wizard
+    if (_detectCloneIntent(input)) {
+      log('INFO', `[CloneIntent] "${input.slice(0, 80)}" → /agent new clone`);
+      await handleAgentCommand({ bot, chatId, text: '/agent new clone', config });
+      return true;
+    }
+
+    // New agent intent — route to /agent new wizard
+    if (_detectNewAgentIntent(input)) {
+      log('INFO', `[NewAgentIntent] "${input.slice(0, 80)}" → /agent new`);
+      await handleAgentCommand({ bot, chatId, text: '/agent new', config });
+      return true;
+    }
+
+    // Team creation intent — route to /agent new team wizard
+    if (_detectTeamIntent(input)) {
+      log('INFO', `[TeamIntent] "${input.slice(0, 80)}" → /agent new team`);
+      await handleAgentCommand({ bot, chatId, text: '/agent new team', config });
+      return true;
+    }
+
     const directAction = isLikelyDirectAgentAction(input);
     const issueReport = looksLikeAgentIssueReport(input);
     if (issueReport && !directAction) return false;

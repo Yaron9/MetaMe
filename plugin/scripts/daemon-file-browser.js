@@ -87,6 +87,7 @@ function createFileBrowser(deps) {
       const cmd = mode === 'new' ? '/new'
         : mode === 'bind' ? '/agent-bind-dir'
         : mode === 'agent-new' ? '/agent-dir'
+        : mode === 'team-new' ? '/agent-team-dir'
         : '/cd';
 
       const PAGE_SIZE = 10;

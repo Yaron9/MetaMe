@@ -1445,12 +1445,23 @@ function attachOrCreateSession(chatId, projCwd, name, engine) {
  * 主路径已迁移到 daemon-agent-tools.editAgentRoleDefinition。
  * 保留该实现仅用于兼容回退路径。
  */
-async function mergeAgentRole(cwd, description) {
+async function mergeAgentRole(cwd, description, isClone = false, parentCwd = null) {
   const claudeMdPath = path.join(cwd, 'CLAUDE.md');
   // Sanitize user input: strip control chars, cap length to prevent prompt stuffing
   const safeDesc = String(description || '').replace(/[\x00-\x1F\x7F]/g, ' ').slice(0, 500);
   if (!fs.existsSync(claudeMdPath)) {
-    // 直接创建，无需调 Claude
+    // 分身模式：symlink 到父 Agent 的 CLAUDE.md
+    if (isClone) {
+      const sourceCwd = parentCwd || path.dirname(cwd);
+      const parentClaudeMd = path.join(sourceCwd, 'CLAUDE.md');
+      if (fs.existsSync(parentClaudeMd)) {
+        try {
+          fs.symlinkSync(parentClaudeMd, claudeMdPath, 'file');
+          return { created: true, symlinked: true };
+        } catch { /* fall through to normal creation */ }
+      }
+    }
+    // 普通模式：直接创建
     const content = `## Agent 角色\n\n${safeDesc}\n`;
     fs.writeFileSync(claudeMdPath, content, 'utf8');
     return { created: true };
@@ -1765,6 +1776,10 @@ const pendingBinds = new Map(); // chatId -> agentName
 // chatId -> { step: 'dir'|'name'|'desc', dir: string, name: string }
 const pendingAgentFlows = new Map();
 
+// Pending /agent new team 多步向导状态机
+// chatId -> { step: 'name'|'members'|'cwd'|'creating', name, members, parentCwd }
+const pendingTeamFlows = new Map();
+
 // Pending activation: after creating an agent with skipChatBinding=true,
 // store here so any new unbound group can activate it with /activate
 // { agentKey, agentName, cwd, createdAt }
@@ -1924,6 +1939,7 @@ const { handleAgentCommand } = createAgentCommandHandler({
   getSessionRecentContext,
   pendingBinds,
   pendingAgentFlows,
+  pendingTeamFlows,
   pendingActivations,
   doBindAgent,
   mergeAgentRole,
@@ -1932,6 +1948,9 @@ const { handleAgentCommand } = createAgentCommandHandler({
   agentFlowTtlMs: getAgentFlowTtlMs,
   agentBindTtlMs: getAgentBindTtlMs,
   getDefaultEngine,
+  writeConfigSafe,
+  backupConfig,
+  execSync,
 });
 
 // Caffeinate process for /nosleep toggle (macOS only)
@@ -1953,6 +1972,7 @@ const { handleExecCommand } = createExecCommandHandler({
   loadState,
   saveState,
   getSession,
+  getSessionForEngine,
   getSessionName,
   createSession,
   findSessionFile,
