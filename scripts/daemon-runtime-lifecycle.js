@@ -58,9 +58,92 @@ function setupRuntimeWatchers(deps) {
     getHeartbeatTimer,
     setHeartbeatTimer,
     onRestartRequested,
+    // Agent soul layer auto-repair — optional, gracefully skipped if absent
+    repairAgentLayer,
+    writeConfigSafe,
+    expandPath,
+    HOME,
   } = deps;
 
+  /**
+   * After every config reload: ensure all project agent soul layers are healthy.
+   *
+   * For each project:
+   *   1. If cwd changed vs oldConfig → remove stale SOUL.md/MEMORY.md symlinks from old dir
+   *   2. Call repairAgentLayer (idempotent)
+   *   3. Persist missing agent_id back to daemon.yaml
+   */
+  function autoRepairAgentLayers(oldConfig, newConfig) {
+    if (typeof repairAgentLayer !== 'function') return;
+    const projects = newConfig && newConfig.projects;
+    if (!projects || typeof projects !== 'object') return;
+
+    const normCwd = (raw) => {
+      if (!raw) return null;
+      try {
+        const expanded = typeof expandPath === 'function'
+          ? expandPath(String(raw))
+          : String(raw).replace(/^~/, HOME || require('os').homedir());
+        return path.resolve(expanded);
+      } catch { return null; }
+    };
+
+    let repaired = 0;
+    let agentIdFixed = 0;
+    let needsWrite = false;
+
+    for (const [projectKey, project] of Object.entries(projects)) {
+      if (!project || !project.cwd) continue;
+      const newCwd = normCwd(project.cwd);
+      if (!newCwd) continue;
+
+      // Clean stale symlinks when cwd changed
+      const oldProject = oldConfig && oldConfig.projects && oldConfig.projects[projectKey];
+      if (oldProject && oldProject.cwd) {
+        const oldCwd = normCwd(oldProject.cwd);
+        if (oldCwd && oldCwd !== newCwd) {
+          for (const fname of ['SOUL.md', 'MEMORY.md']) {
+            const stale = path.join(oldCwd, fname);
+            try {
+              if (fs.existsSync(stale) && fs.lstatSync(stale).isSymbolicLink()) {
+                fs.unlinkSync(stale);
+                log('INFO', `[agent-repair] Removed stale ${fname} from ${oldCwd}`);
+              }
+            } catch { /* non-critical */ }
+          }
+        }
+      }
+
+      // Repair soul layer (idempotent — safe every reload)
+      try {
+        const ensured = repairAgentLayer(projectKey, project, HOME);
+        if (ensured) {
+          repaired++;
+          if (!project.agent_id && ensured.agentId) {
+            newConfig.projects[projectKey] = { ...project, agent_id: ensured.agentId };
+            needsWrite = true;
+            agentIdFixed++;
+          }
+        }
+      } catch (e) {
+        log('WARN', `[agent-repair] ${projectKey}: ${e.message}`);
+      }
+    }
+
+    if (needsWrite && typeof writeConfigSafe === 'function') {
+      try {
+        writeConfigSafe(newConfig);
+        log('INFO', `[agent-repair] Persisted ${agentIdFixed} agent_id(s) to daemon.yaml`);
+      } catch (e) {
+        log('WARN', `[agent-repair] writeConfigSafe failed: ${e.message}`);
+      }
+    }
+
+    if (repaired > 0) log('INFO', `[agent-repair] ${repaired} layer(s) ensured${agentIdFixed ? `, ${agentIdFixed} agent_id(s) added` : ''}`);
+  }
+
   function reloadConfig() {
+    const oldConfig = typeof getConfig === 'function' ? getConfig() : null;
     const strict = typeof loadConfigStrict === 'function'
       ? loadConfigStrict()
       : { ok: true, config: loadConfig() };
@@ -74,6 +157,10 @@ function setupRuntimeWatchers(deps) {
     const { general, project } = getAllTasks(newConfig);
     const totalCount = general.length + project.length;
     log('INFO', `Config reloaded: ${totalCount} tasks (${project.length} in projects)`);
+    // Auto-repair agent soul layers on every config change (idempotent, fire-and-forget)
+    try { autoRepairAgentLayers(oldConfig, newConfig); } catch (e) {
+      log('WARN', `[agent-repair] Unexpected error: ${e.message}`);
+    }
     return { success: true, tasks: totalCount };
   }
 

@@ -151,6 +151,7 @@ const { createBridgeStarter } = require('./daemon-bridges');
 const { buildTeamRosterHint } = require('./team-dispatch');
 const { createFileBrowser } = require('./daemon-file-browser');
 const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lifecycle');
+const { repairAgentLayer } = require('./agent-layer');
 const { createNotifier } = require('./daemon-notify');
 const { createClaudeEngine } = require('./daemon-claude-engine');
 const { createEngineRuntimeFactory, detectDefaultEngine, resolveEngineModel, ENGINE_MODEL_CONFIG, ENGINE_DISTILL_MAP, ENGINE_DEFAULT_MODEL } = require('./daemon-engine-runtime');
@@ -2386,6 +2387,11 @@ async function main() {
       // Reuse full shutdown logic, then self-spawn replacement.
       shutdown({ restartReason: 'daemon-script-changed' }).catch(() => process.exit(1));
     },
+    // Agent soul layer auto-repair on config hot-reload
+    repairAgentLayer,
+    writeConfigSafe,
+    expandPath,
+    HOME,
   });
   // Expose reloadConfig to handleCommand via closure
   global._metameReload = runtimeWatchers.reloadConfig;

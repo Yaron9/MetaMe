@@ -25,7 +25,7 @@
 
 > 用 codex 建一个代码审查 agent，目录 ~/projects/pr-review
 
-在桌面 Claude Code 终端，需要手动操作：
+在桌面 Claude Code 终端，操作步骤：
 1. 创建项目目录和 CLAUDE.md（角色定义）
 2. 编辑 `~/.metame/daemon.yaml`，在 `projects` 下新增：
    ```yaml
@@ -35,7 +35,12 @@
        cwd: "~/projects/my-bot"
        icon: "🤖"
    ```
-3. 运行 `touch ~/.metame/daemon.js` 触发热重载
+3. 保存文件即可 —— daemon 检测到变更后自动：
+   - 创建 `~/.metame/agents/my_bot/`（soul.md、memory-snapshot.md、agent.yaml）
+   - 在 cwd 里建 SOUL.md、MEMORY.md 软链
+   - 将 `agent_id` 写回 daemon.yaml
+
+**无需**手动执行 `/agent soul repair` 或 `touch` 任何文件。
 
 ### Step 3: 绑定群聊
 告知用户：
