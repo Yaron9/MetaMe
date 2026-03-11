@@ -260,6 +260,67 @@ function buildClaudeArgs(options = {}) {
   return args;
 }
 
+function normalizeCodexSandboxMode(value, fallback = 'danger-full-access') {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return fallback;
+  if (text === 'read-only' || text === 'readonly') return 'read-only';
+  if (text === 'workspace-write' || text === 'workspace') return 'workspace-write';
+  if (
+    text === 'danger-full-access'
+    || text === 'dangerous'
+    || text === 'full-access'
+    || text === 'full'
+    || text === 'bypass'
+    || text === 'writable'
+  ) return 'danger-full-access';
+  return fallback;
+}
+
+function normalizeCodexApprovalPolicy(value, fallback = 'never') {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return fallback;
+  if (text === 'never' || text === 'no' || text === 'none') return 'never';
+  if (text === 'on-failure' || text === 'on_failure' || text === 'failure') return 'on-failure';
+  if (text === 'on-request' || text === 'on_request' || text === 'request') return 'on-request';
+  if (text === 'untrusted') return 'untrusted';
+  return fallback;
+}
+
+function resolveCodexPermissionProfile(options = {}) {
+  const { readOnly = false, daemonCfg = {}, session = {} } = options;
+  if (readOnly) {
+    return {
+      sandboxMode: 'read-only',
+      approvalPolicy: 'never',
+      permissionMode: 'read-only',
+    };
+  }
+
+  const codexCfg = (daemonCfg && daemonCfg.codex && typeof daemonCfg.codex === 'object') ? daemonCfg.codex : {};
+  const sandboxMode = normalizeCodexSandboxMode(
+    codexCfg.sandbox_mode
+      || codexCfg.sandboxMode
+      || codexCfg.sandbox
+      || codexCfg.permission_mode
+      || codexCfg.permissionMode
+      || session.sandboxMode
+      || session.permissionMode,
+    'danger-full-access'
+  );
+  const approvalPolicy = normalizeCodexApprovalPolicy(
+    codexCfg.approval_policy
+      || codexCfg.approvalPolicy
+      || session.approvalPolicy,
+    sandboxMode === 'danger-full-access' ? 'never' : 'on-failure'
+  );
+
+  return {
+    sandboxMode,
+    approvalPolicy,
+    permissionMode: sandboxMode,
+  };
+}
+
 function buildCodexArgs(options = {}) {
   const { model = ENGINE_MODEL_CONFIG.codex.main, readOnly = false, daemonCfg = {}, session = {}, cwd } = options;
   const isResume = (session && session.started && session.id && session.id !== '__continue__');
@@ -275,12 +336,13 @@ function buildCodexArgs(options = {}) {
   // Permission flags are only valid on fresh exec, not resume.
   // `codex exec resume` does not accept -s or --dangerously-bypass-approvals-and-sandbox.
   if (!isResume) {
-    if (readOnly) {
-      args.push('-s', 'read-only');
-    } else {
-      // Mobile sessions: user cannot click permission dialogs.
-      // Security relies on allowed_chat_ids whitelist, not tool restrictions.
+    const permissionProfile = resolveCodexPermissionProfile({ readOnly, daemonCfg, session });
+    if (permissionProfile.sandboxMode === 'danger-full-access' && permissionProfile.approvalPolicy === 'never') {
+      // Keep the legacy shortcut for the fully-trusted mobile/default path.
       args.push('--dangerously-bypass-approvals-and-sandbox');
+    } else {
+      args.push('-s', permissionProfile.sandboxMode);
+      args.push('--ask-for-approval', permissionProfile.approvalPolicy);
     }
   }
 
@@ -362,6 +424,9 @@ module.exports = {
     buildClaudeArgs,
     buildCodexArgs,
     buildCodexEnv,
+    normalizeCodexSandboxMode,
+    normalizeCodexApprovalPolicy,
+    resolveCodexPermissionProfile,
     BUILTIN_CLAUDE_MODEL_VALUES,
   },
 };

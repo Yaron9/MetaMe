@@ -2,7 +2,13 @@
 
 const { classifyChatUsage } = require('./usage-classifier');
 const { deriveProjectInfo } = require('./utils');
-const { createEngineRuntimeFactory, normalizeEngineName, resolveEngineModel, ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
+const {
+  createEngineRuntimeFactory,
+  normalizeEngineName,
+  resolveEngineModel,
+  ENGINE_MODEL_CONFIG,
+  _private: { resolveCodexPermissionProfile },
+} = require('./daemon-engine-runtime');
 const { buildAgentContextForEngine, buildMemorySnapshotContent, refreshMemorySnapshot } = require('./agent-layer');
 
 /**
@@ -60,6 +66,7 @@ function createClaudeEngine(deps) {
     writeSessionName,
     markSessionStarted,
     isEngineSessionValid,
+    getCodexSessionSandboxProfile,
     getCodexSessionPermissionMode,
     gitCheckpoint,
     gitCheckpointAsync,
@@ -73,6 +80,28 @@ function createClaudeEngine(deps) {
   } = deps;
   function getDefaultEngine() {
     return (typeof _getDefaultEngine === 'function') ? _getDefaultEngine() : 'claude';
+  }
+  function resolveSessionForEngine(chatId, engineName) {
+    if (typeof getSessionForEngine === 'function') {
+      return getSessionForEngine(chatId, engineName);
+    }
+    const legacy = typeof getSession === 'function' ? getSession(chatId) : null;
+    if (!legacy) return null;
+    if (!legacy.engines) return legacy;
+    const slot = legacy.engines[engineName] || null;
+    if (!slot) return null;
+    return {
+      ...legacy,
+      ...slot,
+      cwd: legacy.cwd || HOME,
+      engine: engineName,
+    };
+  }
+  function validateEngineSession(engineName, sessionId, cwd) {
+    if (typeof isEngineSessionValid === 'function') {
+      return isEngineSessionValid(engineName, sessionId, cwd);
+    }
+    return true;
   }
   let mentorEngine = null;
   try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
@@ -148,7 +177,11 @@ function createClaudeEngine(deps) {
       if (!state.sessions) state.sessions = {};
       const cur = state.sessions[chatId] || {};
       const patched = typeof patchFn === 'function' ? patchFn(cur) : cur;
-      state.sessions[chatId] = patched && typeof patched === 'object' ? patched : cur;
+      if (patched && typeof patched === 'object') {
+        state.sessions[chatId] = { ...patched, last_active: Date.now() };
+      } else {
+        state.sessions[chatId] = cur;
+      }
       saveState(state);
     }).catch((e) => {
       log('WARN', `patchSessionSerialized failed for ${chatId}: ${e.message}`);
@@ -206,18 +239,39 @@ function createClaudeEngine(deps) {
     return out;
   }
 
-  function getCodexPermissionMode(readOnly) {
-    return readOnly ? 'read-only' : 'writable';
+  function getCodexPermissionProfile(readOnly, daemonCfg = {}, session = {}) {
+    return resolveCodexPermissionProfile({ readOnly, daemonCfg, session });
   }
 
-  function shouldStartFreshCodexSessionForPermissions(session, readOnly) {
+  function sameCodexPermissionProfile(left, right) {
+    if (!left || !right) return false;
+    const sameSandbox = String(left.sandboxMode || left.permissionMode || '').trim() === String(right.sandboxMode || right.permissionMode || '').trim();
+    const leftApproval = String(left.approvalPolicy || '').trim();
+    const rightApproval = String(right.approvalPolicy || '').trim();
+    if (!leftApproval || !rightApproval) return sameSandbox;
+    return sameSandbox && leftApproval === rightApproval;
+  }
+
+  function shouldStartFreshCodexSessionForPermissions(session, requestedProfile) {
     if (!session || !session.started || !session.id || session.id === '__continue__') return false;
-    return String(session.permissionMode || '').trim() !== getCodexPermissionMode(readOnly);
+    const sessionProfile = {
+      sandboxMode: session.sandboxMode || session.permissionMode || null,
+      approvalPolicy: session.approvalPolicy || null,
+      permissionMode: session.permissionMode || session.sandboxMode || null,
+    };
+    return !sameCodexPermissionProfile(sessionProfile, requestedProfile);
   }
 
-  function getActualCodexPermissionMode(session) {
-    if (!session || !session.id || typeof getCodexSessionPermissionMode !== 'function') return null;
-    return getCodexSessionPermissionMode(session.id);
+  function getActualCodexPermissionProfile(session) {
+    if (!session || !session.id) return null;
+    if (typeof getCodexSessionSandboxProfile === 'function') {
+      return getCodexSessionSandboxProfile(session.id);
+    }
+    if (typeof getCodexSessionPermissionMode === 'function') {
+      const permissionMode = getCodexSessionPermissionMode(session.id);
+      return permissionMode ? { sandboxMode: permissionMode, approvalPolicy: null, permissionMode } : null;
+    }
+    return null;
   }
 
   function inspectClaudeResumeSession(session) {
@@ -898,7 +952,15 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     if (!messageId || !session || !session.id) return;
     const st = loadState();
     if (!st.msg_sessions) st.msg_sessions = {};
-    st.msg_sessions[messageId] = { id: session.id, cwd: session.cwd, engine: session.engine || getDefaultEngine(), agentKey: agentKey || null };
+    st.msg_sessions[messageId] = {
+      id: session.id,
+      cwd: session.cwd,
+      engine: session.engine || getDefaultEngine(),
+      agentKey: agentKey || null,
+      ...(session.sandboxMode ? { sandboxMode: session.sandboxMode } : {}),
+      ...(session.approvalPolicy ? { approvalPolicy: session.approvalPolicy } : {}),
+      ...(session.permissionMode ? { permissionMode: session.permissionMode } : {}),
+    };
     const keys = Object.keys(st.msg_sessions);
     if (keys.length > 200) {
       for (const k of keys.slice(0, keys.length - 200)) delete st.msg_sessions[k];
@@ -999,6 +1061,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const chatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
       const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
       const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
+      const daemonCfg = (config && config.daemon) || {};
       // Each virtual chatId (including clones) keeps its own isolated session.
       // Parallel tasks must not share JSONL files — concurrent writes cause corruption.
       const sessionChatId = boundProjectKey ? `_agent_${boundProjectKey}` : chatId;
@@ -1011,6 +1074,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         (boundProject && boundProject.engine) || getDefaultEngine()
       );
       const runtime = getEngineRuntime(engineName);
+      const requestedCodexPermissionProfile = engineName === 'codex'
+        ? getCodexPermissionProfile(readOnly, daemonCfg)
+        : null;
 
       // hasActiveSession: does the current engine have an ongoing conversation?
       const hasActiveSession = sessionRaw && (
@@ -1027,12 +1093,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           boundCwd || undefined,
           boundProject && boundProject.name ? boundProject.name : '',
           boundEngineName,
-          boundEngineName === 'codex' ? { permissionMode: getCodexPermissionMode(readOnly) } : undefined
+          boundEngineName === 'codex' ? requestedCodexPermissionProfile : undefined
         );
       }
 
       // Resolve flat view for current engine (id + started are engine-specific; cwd is shared)
-      let session = getSessionForEngine(sessionChatId, engineName) || { cwd: boundCwd || HOME, engine: engineName, id: null, started: false };
+      let session = resolveSessionForEngine(sessionChatId, engineName) || { cwd: boundCwd || HOME, engine: engineName, id: null, started: false };
       session.engine = engineName; // keep local copy for Codex resume detection below
 
       // Pre-spawn session validation: unified for all engines.
@@ -1040,7 +1106,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       // Skip warning for virtual agents (team members) - they may use worktrees with fresh sessions
       const isVirtualAgent = String(sessionChatId).startsWith('_agent_');
       if (session.started && session.id && session.id !== '__continue__' && session.cwd) {
-        const valid = isEngineSessionValid(engineName, session.id, session.cwd);
+        const valid = validateEngineSession(engineName, session.id, session.cwd);
         if (!valid) {
           log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${sessionChatId}; starting fresh ${engineName} session`);
           if (!isVirtualAgent) {
@@ -1051,15 +1117,15 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             session.cwd,
             boundProject && boundProject.name ? boundProject.name : '',
             engineName,
-            engineName === 'codex' ? { permissionMode: getCodexPermissionMode(readOnly) } : undefined
+            engineName === 'codex' ? requestedCodexPermissionProfile : undefined
           );
         }
       }
 
-      if (runtime.name === 'codex' && shouldStartFreshCodexSessionForPermissions(session, readOnly)) {
-        const requestedPermissionMode = getCodexPermissionMode(readOnly);
-        const priorPermissionMode = String(session.permissionMode || 'unknown');
-        log('WARN', `Codex session ${session.id.slice(0, 8)} permission mismatch for ${sessionChatId}: ${priorPermissionMode} -> ${requestedPermissionMode}; starting fresh session`);
+      if (runtime.name === 'codex' && shouldStartFreshCodexSessionForPermissions(session, requestedCodexPermissionProfile)) {
+        const priorPermissionSummary = `${String(session.sandboxMode || session.permissionMode || 'unknown')}/${String(session.approvalPolicy || 'unknown')}`;
+        const requestedPermissionSummary = `${requestedCodexPermissionProfile.sandboxMode}/${requestedCodexPermissionProfile.approvalPolicy}`;
+        log('WARN', `Codex session ${session.id.slice(0, 8)} permission mismatch for ${sessionChatId}: ${priorPermissionSummary} -> ${requestedPermissionSummary}; starting fresh session`);
         if (!isVirtualAgent) {
           await bot.sendMessage(chatId, '⚠️ 当前 Codex session 的权限模式不匹配，已自动开启新 session。').catch(() => { });
         }
@@ -1068,15 +1134,16 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           session.cwd,
           boundProject && boundProject.name ? boundProject.name : '',
           'codex',
-          { permissionMode: requestedPermissionMode }
+          requestedCodexPermissionProfile
         );
       }
 
       if (runtime.name === 'codex' && session.started && session.id) {
-        const actualPermissionMode = getActualCodexPermissionMode(session);
-        const requestedPermissionMode = getCodexPermissionMode(readOnly);
-        if (actualPermissionMode && actualPermissionMode !== requestedPermissionMode) {
-          log('WARN', `Codex session ${session.id.slice(0, 8)} actual sandbox mismatch for ${sessionChatId}: ${actualPermissionMode} -> ${requestedPermissionMode}; starting fresh session`);
+        const actualPermissionProfile = getActualCodexPermissionProfile(session);
+        if (actualPermissionProfile && !sameCodexPermissionProfile(actualPermissionProfile, requestedCodexPermissionProfile)) {
+          const actualSummary = `${actualPermissionProfile.sandboxMode || actualPermissionProfile.permissionMode || 'unknown'}/${actualPermissionProfile.approvalPolicy || 'unknown'}`;
+          const requestedSummary = `${requestedCodexPermissionProfile.sandboxMode}/${requestedCodexPermissionProfile.approvalPolicy}`;
+          log('WARN', `Codex session ${session.id.slice(0, 8)} actual sandbox mismatch for ${sessionChatId}: ${actualSummary} -> ${requestedSummary}; starting fresh session`);
           if (!isVirtualAgent) {
             await bot.sendMessage(chatId, '⚠️ 当前 Codex session 的真实沙箱权限不匹配，已自动开启新 session。').catch(() => { });
           }
@@ -1085,12 +1152,10 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             session.cwd,
             boundProject && boundProject.name ? boundProject.name : '',
             'codex',
-            { permissionMode: requestedPermissionMode }
+            requestedCodexPermissionProfile
           );
         }
       }
-
-      const daemonCfg = (config && config.daemon) || {};
       const mentorCfg = (daemonCfg.mentor && typeof daemonCfg.mentor === 'object') ? daemonCfg.mentor : {};
       const mentorEnabled = !!(mentorEngine && mentorCfg.enabled);
       const excludeAgents = new Set(
@@ -1283,33 +1348,24 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       }
 
       // Inject daemon hints only on first message of a session
-      // Task-specific rules (3-5) are injected only when isTaskIntent() returns true (~250 token saving for casual chat)
+      // Task-specific rules (3-4) are injected only when isTaskIntent() returns true (~250 token saving for casual chat)
       let daemonHint = '';
       if (!session.started) {
         const mentorRadarHint = (config && config.daemon && config.daemon.mentor && config.daemon.mentor.enabled)
           ? '\n   When you observe the user is clearly expert or beginner in a domain, note it in your response and suggest: "要不要把你的 {domain} 水平 ({level}) 记录到能力雷达？"'
           : '';
         const taskRules = isTaskIntent(prompt) ? `
-3. Knowledge retrieval: When you need context about a specific topic, past decisions, or lessons, call:
-   node ~/.metame/memory-search.js "关键词1" "keyword2"
-   If no relevant facts surface, check ~/.metame/memory/INDEX.md for available playbook/decision docs.
-   Use these before answering complex questions about MetaMe architecture or past decisions.
-4. Active memory: After confirming a new insight, bug root cause, or user preference, persist it with:
+3. Active memory: After confirming a new insight, bug root cause, or user preference, persist it with:
    node ~/.metame/memory-write.js "Entity.sub" "relation_type" "value (20-300 chars)"
    Valid relations: tech_decision, bug_lesson, arch_convention, config_fact, config_change, workflow_rule, project_milestone
    Only write verified facts. Do not write speculative or process-description entries.
 ${mentorRadarHint}
-5. Task handoff: When suspending a multi-step task or handing off to another agent, write current status to ~/.metame/memory/now/${projectKey || 'default'}.md using:
+4. Task handoff: When suspending a multi-step task or handing off to another agent, write current status to ~/.metame/memory/now/${projectKey || 'default'}.md using:
    \`mkdir -p ~/.metame/memory/now && printf '%s\\n' "## Current Task" "{task}" "" "## Progress" "{progress}" "" "## Next Step" "{next}" > ~/.metame/memory/now/${projectKey || 'default'}.md\`
    Keep it under 200 words. Clear it when the task is fully complete by running: \`> ~/.metame/memory/now/${projectKey || 'default'}.md\`` : '';
         daemonHint = `\n\n[System hints - DO NOT mention these to user:
 1. Daemon config: The ONLY config is ~/.metame/daemon.yaml (never edit daemon-default.yaml). Auto-reloads on change.
-2. File sending: User is on MOBILE. When they ask to see/download a file:
-   - Just FIND the file path (use Glob/ls if needed)
-   - Do NOT read or summarize the file content (wastes tokens)
-   - Add at END of response: [[FILE:/absolute/path/to/file]]
-   - Keep response brief: "请查收~! [[FILE:/path/to/file]]"
-   - Multiple files: use multiple [[FILE:...]] tags${zdpHint ? '\n   Explanation depth (ZPD):\n' + zdpHint : ''}${taskRules}]`;
+2. Explanation depth (ZPD):${zdpHint ? zdpHint : '\n- User competence map unavailable. Default to concise expert-first explanations unless the user asks for teaching mode.'}${taskRules}]`;
       }
 
       daemonHint = adaptDaemonHintForEngine(daemonHint, runtime.name);
@@ -1413,7 +1469,12 @@ ${mentorRadarHint}
       // but checkpoint uses `git add -A` which could interfere with parallel work.
       const _isVirtualAgent = String(chatId).startsWith('_agent_') || String(chatId).startsWith('_scope_');
       if (!_isVirtualAgent) {
-        (gitCheckpointAsync || gitCheckpoint)(session.cwd, prompt).catch?.(() => { });
+        try {
+          const checkpointResult = (gitCheckpointAsync || gitCheckpoint)(session.cwd, prompt);
+          if (checkpointResult && typeof checkpointResult.catch === 'function') {
+            checkpointResult.catch(() => { });
+          }
+        } catch { /* non-critical */ }
       }
       log('INFO', `[TIMING:${chatId}] pre-spawn +${Date.now() - _t0}ms (engine:${runtime.name} started:${session.started})`);
 
@@ -1483,14 +1544,15 @@ ${mentorRadarHint}
         };
         await patchSessionSerialized(sessionChatId, (cur) => {
           const engines = { ...(cur.engines || {}) };
-          const actualPermissionMode = runtime.name === 'codex'
-            ? getCodexSessionPermissionMode(safeNextId) || getCodexPermissionMode(readOnly)
+          const actualPermissionProfile = runtime.name === 'codex'
+            ? (getActualCodexPermissionProfile({ id: safeNextId }) || requestedCodexPermissionProfile)
             : null;
           engines[runtime.name] = {
             ...(engines[runtime.name] || {}),
             id: safeNextId,
             started: true,
-            ...(runtime.name === 'codex' ? { permissionMode: actualPermissionMode } : {}),
+            ...(runtime.name === 'codex' ? { runtimeSessionObserved: true } : {}),
+            ...(runtime.name === 'codex' ? actualPermissionProfile : {}),
           };
           return { ...cur, cwd: session.cwd || cur.cwd || HOME, engines };
         });
@@ -1541,7 +1603,7 @@ ${mentorRadarHint}
             session.cwd,
             boundProject && boundProject.name ? boundProject.name : '',
             'codex',
-            { permissionMode: getCodexPermissionMode(readOnly) }
+            requestedCodexPermissionProfile
           );
           const retryArgs = runtime.buildArgs({
             model,
@@ -1663,7 +1725,12 @@ ${mentorRadarHint}
 
         // Mark session as started after first successful call
         const wasNew = !session.started;
-        if (wasNew) markSessionStarted(sessionChatId, engineName);
+        if (wasNew) {
+          markSessionStarted(sessionChatId, engineName);
+          if (runtime.name === 'codex' && session.runtimeSessionObserved === false) {
+            log('WARN', `Codex completed without emitting thread id for ${chatId}; keeping session non-resumable until a real thread id is observed`);
+          }
+        }
 
         const estimated = Math.ceil((prompt.length + output.length) / 4);
         const chatCategory = classifyChatUsage(chatId, {
@@ -1749,9 +1816,17 @@ ${mentorRadarHint}
             log('ERROR', `sendMessage fallback also failed: ${e2.message}`);
           }
         }
-        if (replyMsg && replyMsg.message_id && session) trackMsgSession(replyMsg.message_id, session, String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null);
+        const trackedAgentKey = String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null;
+        if (replyMsg && replyMsg.message_id && session && !(runtime.name === 'codex' && session.runtimeSessionObserved === false)) {
+          trackMsgSession(replyMsg.message_id, session, trackedAgentKey);
+        }
 
-        await sendFileButtons(bot, chatId, mergeFileCollections(markedFiles, files));
+        const fileMsgs = await sendFileButtons(bot, chatId, mergeFileCollections(markedFiles, files));
+        if (session && Array.isArray(fileMsgs) && !(runtime.name === 'codex' && session.runtimeSessionObserved === false)) {
+          for (const msg of fileMsgs) {
+            if (msg && msg.message_id) trackMsgSession(msg.message_id, session, trackedAgentKey);
+          }
+        }
 
         // Timeout: also send the reason after the partial result
         if (timedOut && error) {
@@ -1875,8 +1950,9 @@ ${mentorRadarHint}
       shouldRetryCodexResumeFallback,
       formatEngineSpawnError,
       adaptDaemonHintForEngine,
-      getCodexPermissionMode,
-      getActualCodexPermissionMode,
+      getCodexPermissionProfile,
+      getActualCodexPermissionProfile,
+      sameCodexPermissionProfile,
       shouldStartFreshCodexSessionForPermissions,
       inspectClaudeResumeSession,
       isClaudeThinkingSignatureError,

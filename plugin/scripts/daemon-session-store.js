@@ -2,6 +2,53 @@
 
 const crypto = require('crypto');
 
+function normalizeCodexSandboxMode(value, fallback = null) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return fallback;
+  if (text === 'read-only' || text === 'readonly') return 'read-only';
+  if (text === 'workspace-write' || text === 'workspace') return 'workspace-write';
+  if (
+    text === 'danger-full-access'
+    || text === 'dangerous'
+    || text === 'full-access'
+    || text === 'full'
+    || text === 'bypass'
+    || text === 'writable'
+  ) return 'danger-full-access';
+  return fallback;
+}
+
+function normalizeCodexApprovalPolicy(value, fallback = null) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return fallback;
+  if (text === 'never' || text === 'no' || text === 'none') return 'never';
+  if (text === 'on-failure' || text === 'on_failure' || text === 'failure') return 'on-failure';
+  if (text === 'on-request' || text === 'on_request' || text === 'request') return 'on-request';
+  if (text === 'untrusted') return 'untrusted';
+  return fallback;
+}
+
+function normalizeCodexPermissionMeta(meta = {}) {
+  const sandboxMode = normalizeCodexSandboxMode(
+    meta.sandboxMode || meta.sandbox_mode || meta.permissionMode,
+    null
+  );
+  const approvalPolicy = normalizeCodexApprovalPolicy(
+    meta.approvalPolicy || meta.approval_policy,
+    null
+  );
+  if (!sandboxMode && !approvalPolicy) return null;
+  return {
+    sandboxMode: sandboxMode || 'danger-full-access',
+    approvalPolicy: approvalPolicy || 'never',
+    permissionMode: sandboxMode || 'danger-full-access',
+  };
+}
+
+function normalizeEngineName(name) {
+  return String(name || 'claude').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+}
+
 
 function createSessionStore(deps) {
   const {
@@ -160,10 +207,9 @@ function createSessionStore(deps) {
     return '';
   }
 
-  function scanAllSessions() {
-    if (_sessionCache && (Date.now() - _sessionCacheTime < SESSION_CACHE_TTL)) return _sessionCache;
+  function scanClaudeSessions() {
     try {
-      if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) { _sessionCache = []; _sessionCacheTime = Date.now(); return []; }
+      if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return [];
       const projects = fs.readdirSync(CLAUDE_PROJECTS_DIR);
       const sessionMap = new Map();
       const projPathCache = new Map();
@@ -212,13 +258,7 @@ function createSessionStore(deps) {
         } catch { /* skip */ }
       }
 
-      const all = Array.from(sessionMap.values());
-      all.sort((a, b) => {
-        const aTime = a.fileMtime || new Date(a.modified).getTime();
-        const bTime = b.fileMtime || new Date(b.modified).getTime();
-        return bTime - aTime;
-      });
-
+      const all = Array.from(sessionMap.values()).map((entry) => ({ ...entry, engine: 'claude' }));
       const ENRICH_LIMIT = 20;
       for (let i = 0; i < Math.min(all.length, ENRICH_LIMIT); i++) {
         const s = all[i];
@@ -276,7 +316,67 @@ function createSessionStore(deps) {
           s._enriched = true; // [M1] 标记已完成富化，下次跳过
         } catch { /* non-fatal */ }
       }
+      return all;
+    } catch {
+      return [];
+    }
+  }
 
+  function scanCodexSessions() {
+    let db = null;
+    try {
+      if (!fs.existsSync(CODEX_DB)) return [];
+      const { DatabaseSync } = require('node:sqlite');
+      db = new DatabaseSync(CODEX_DB, { readonly: true });
+      const rows = db.prepare(`
+        SELECT
+          id,
+          cwd,
+          title,
+          first_user_message,
+          created_at,
+          updated_at,
+          tokens_used,
+          archived
+        FROM threads
+        WHERE COALESCE(has_user_event, 1) = 1
+        ORDER BY updated_at DESC
+        LIMIT 200
+      `).all();
+      db.close();
+      db = null;
+      return rows
+        .filter((row) => !row.archived && row.id && row.cwd)
+        .map((row) => {
+          const updatedMs = Number(row.updated_at || row.created_at || 0) * 1000;
+          return {
+            sessionId: String(row.id),
+            projectPath: String(row.cwd),
+            fileMtime: updatedMs || 0,
+            modified: new Date(updatedMs || Date.now()).toISOString(),
+            messageCount: row.tokens_used ? '?' : 1,
+            customTitle: row.title || '',
+            firstPrompt: row.first_user_message || '',
+            lastUser: row.first_user_message || '',
+            _enriched: true,
+            engine: 'codex',
+          };
+        });
+    } catch {
+      if (db) { try { db.close(); } catch { /* ignore */ } }
+      return [];
+    }
+  }
+
+  function scanAllSessions() {
+    if (_sessionCache && (Date.now() - _sessionCacheTime < SESSION_CACHE_TTL)) return _sessionCache;
+    try {
+      const all = [...scanClaudeSessions(), ...scanCodexSessions()];
+      all.sort((a, b) => {
+        const aTime = a.fileMtime || new Date(a.modified).getTime();
+        const bTime = b.fileMtime || new Date(b.modified).getTime();
+        return bTime - aTime;
+      });
       _sessionCache = all;
       _sessionCacheTime = Date.now();
       return all;
@@ -285,10 +385,14 @@ function createSessionStore(deps) {
     }
   }
 
-  function listRecentSessions(limit, cwd) {
+  function listRecentSessions(limit, cwd, engine) {
     let all = scanAllSessions();
     if (cwd) {
       all = all.filter(s => s.projectPath === cwd);
+    }
+    if (engine) {
+      const safeEngine = String(engine).trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+      all = all.filter(s => (s.engine || 'claude') === safeEngine);
     }
     return all.slice(0, limit || 10);
   }
@@ -315,15 +419,16 @@ function createSessionStore(deps) {
     const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
     const ago = formatRelativeTime(new Date(timeMs).toISOString());
     const shortId = s.sessionId.slice(0, 4);
+    const engineTag = (s.engine || 'claude') === 'codex' ? '[codex] ' : '';
 
-    if (name) return `${ago} [${name}] ${proj} #${shortId}`;
+    if (name) return `${engineTag}${ago} [${name}] ${proj} #${shortId}`;
 
     let title = (s.summary || '').slice(0, 20);
     if (!title && s.firstPrompt) {
       title = s.firstPrompt.slice(0, 20);
       if (s.firstPrompt.length > 20) title += '..';
     }
-    return `${ago} ${proj ? proj + ': ' : ''}${title || ''} #${shortId}`;
+    return `${engineTag}${ago} ${proj ? proj + ': ' : ''}${title || ''} #${shortId}`;
   }
 
   function sessionDisplayTitle(s, maxLen, sessionTags) {
@@ -372,6 +477,7 @@ function createSessionStore(deps) {
     const ago = formatRelativeTime(new Date(timeMs).toISOString());
     const shortId = s.sessionId.slice(0, 8);
     const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 3);
+    const engineLabel = (s.engine || 'claude') === 'codex' ? 'codex' : 'claude';
 
     // [M2] 转义 markdown 特殊字符，防止用户历史消息破坏渲染
     const escapeMd = (t) => t.replace(/[_*`\\]/g, '\\$&');
@@ -379,7 +485,7 @@ function createSessionStore(deps) {
     const snippetRaw = s.lastUser || (s.firstPrompt || '').replace(/<[^>]+>/g, '').replace(/\[System hints[\s\S]*/i, '').trim().slice(0, 80);
     let line = `${index}. ${title}${title.length >= 50 ? '..' : ''}`;  // [M4] title 已有 sessionId 兜底，不会为空
     if (tags.length) line += `  ${tags.map(t => `#${t}`).join(' ')}`;
-    line += `\n   📁${proj} · ${ago}`;
+    line += `\n   📁${proj} · ${ago} · ${engineLabel}`;
     if (snippetRaw && snippetRaw.length > 2) {
       const snippet = escapeMd(snippetRaw.replace(/\n/g, ' ').slice(0, 60));
       line += `\n   💬 ${snippet}${snippetRaw.length > 60 ? '…' : ''}`;
@@ -400,10 +506,11 @@ function createSessionStore(deps) {
       const ago = formatRelativeTime(new Date(timeMs).toISOString());
       const shortId = s.sessionId.slice(0, 6);
       const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 4);
+      const engineLabel = (s.engine || 'claude') === 'codex' ? 'codex' : 'claude';
       // [M2] 转义 markdown 特殊字符；[M4] title 已有 sessionId 兜底
       const escapeMd = (t) => t.replace(/[_*`\\]/g, '\\$&');
       const snippetRaw = s.lastUser || (s.firstPrompt || '').replace(/<[^>]+>/g, '').replace(/\[System hints[\s\S]*/i, '').trim().slice(0, 80);
-      let desc = `**${i + 1}. ${title}**\n📁${proj} · ${ago}`;
+      let desc = `**${i + 1}. ${title}**\n📁${proj} · ${ago} · ${engineLabel}`;
       if (tags.length) desc += `\n${tags.map(t => `\`${t}\``).join(' ')}`;
       if (snippetRaw && snippetRaw.length > 2) {
         const snippet = escapeMd(snippetRaw.replace(/\n/g, ' ').slice(0, 60));
@@ -451,7 +558,7 @@ function createSessionStore(deps) {
   function getSessionForEngine(chatId, engine) {
     const raw = getSession(chatId);
     if (!raw) return null;
-    const safeEngine = String(engine || 'claude').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+    const safeEngine = normalizeEngineName(engine);
     if (!raw.engines) return { cwd: raw.cwd, engine: safeEngine, id: raw.id || null, started: !!raw.started };
     const slot = raw.engines[safeEngine] || {};
     return {
@@ -463,25 +570,80 @@ function createSessionStore(deps) {
     };
   }
 
+  function upgradeSessionRecord(raw = {}, fallbackEngine = 'claude') {
+    const safeEngine = normalizeEngineName(fallbackEngine);
+    if (raw.engines && typeof raw.engines === 'object') {
+      return {
+        cwd: sanitizeCwd(raw.cwd),
+        engines: { ...raw.engines },
+        ...(raw.last_active ? { last_active: raw.last_active } : {}),
+      };
+    }
+    const slot = {
+      id: raw.id || null,
+      started: !!raw.started,
+    };
+    if (safeEngine === 'codex') {
+      const permissionMeta = normalizeCodexPermissionMeta(raw);
+      if (permissionMeta) Object.assign(slot, permissionMeta);
+    }
+    return {
+      cwd: sanitizeCwd(raw.cwd),
+      engines: { [safeEngine]: slot },
+      ...(raw.last_active ? { last_active: raw.last_active } : {}),
+    };
+  }
+
   function createSession(chatId, cwd, name, engine = 'claude', meta = {}) {
     const state = loadState();
-    const safeEngine = String(engine || 'claude').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+    const safeEngine = normalizeEngineName(engine);
     const safeCwd = sanitizeCwd(cwd);
     const sessionId = crypto.randomUUID();
-    const existing = state.sessions[chatId] || {};
+    const existing = upgradeSessionRecord(state.sessions[chatId] || {}, safeEngine);
     const existingEngines = existing.engines || {};
     const nextSlot = { id: sessionId, started: false };
-    if (safeEngine === 'codex' && meta && meta.permissionMode) {
-      nextSlot.permissionMode = String(meta.permissionMode);
+    if (safeEngine === 'codex') {
+      nextSlot.runtimeSessionObserved = false;
+      const permissionMeta = normalizeCodexPermissionMeta(meta);
+      if (permissionMeta) Object.assign(nextSlot, permissionMeta);
     }
     state.sessions[chatId] = {
       cwd: safeCwd,
       engines: { ...existingEngines, [safeEngine]: nextSlot },
+      last_active: Date.now(),
     };
     saveState(state);
     invalidateSessionCache();
     if (name) writeSessionName(sessionId, safeCwd, name);
     log('INFO', `New session for ${chatId}: ${sessionId}${name ? ' [' + name + ']' : ''} (cwd: ${safeCwd}) [${safeEngine}]`);
+    return getSessionForEngine(chatId, safeEngine);
+  }
+
+  function restoreSessionFromReply(chatId, mapped = {}) {
+    if (!chatId || !mapped || !mapped.id) return null;
+    const safeEngine = normalizeEngineName(mapped.engine);
+    const state = loadState();
+    if (!state.sessions) state.sessions = {};
+    const base = upgradeSessionRecord(state.sessions[chatId] || {}, safeEngine);
+    const restoredSlot = {
+      ...(base.engines[safeEngine] || {}),
+      id: String(mapped.id),
+      started: true,
+    };
+    if (safeEngine === 'codex') {
+      restoredSlot.runtimeSessionObserved = true;
+      const permissionMeta = normalizeCodexPermissionMeta(mapped) || normalizeCodexPermissionMeta(restoredSlot);
+      if (permissionMeta) Object.assign(restoredSlot, permissionMeta);
+    }
+    state.sessions[chatId] = {
+      cwd: sanitizeCwd(mapped.cwd || base.cwd),
+      engines: {
+        ...base.engines,
+        [safeEngine]: restoredSlot,
+      },
+      last_active: Date.now(),
+    };
+    saveState(state);
     return getSessionForEngine(chatId, safeEngine);
   }
 
@@ -568,11 +730,19 @@ function createSessionStore(deps) {
     const s = state.sessions[chatId];
     if (!s) return;
     if (s.engines) {
-      const safeEngine = String(engine || 'claude').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+      const safeEngine = normalizeEngineName(engine);
       if (!s.engines[safeEngine]) s.engines[safeEngine] = {};
-      s.engines[safeEngine].started = true;
+      const slot = s.engines[safeEngine];
+      if (safeEngine === 'codex' && slot.runtimeSessionObserved === false) {
+        s.last_active = Date.now();
+        saveState(state);
+        return;
+      }
+      slot.started = true;
+      s.last_active = Date.now();
     } else {
       s.started = true; // old flat format
+      s.last_active = Date.now();
     }
     saveState(state);
   }
@@ -678,7 +848,7 @@ function createSessionStore(deps) {
     }
   }
 
-  function getCodexSessionPermissionMode(sessionId) {
+  function getCodexSessionSandboxProfile(sessionId) {
     let db = null;
     try {
       if (!sessionId) return null;
@@ -689,11 +859,29 @@ function createSessionStore(deps) {
       db = null;
       if (!row || !row.sandbox_policy) return null;
       const policy = JSON.parse(String(row.sandbox_policy));
-      return policy && policy.type === 'read-only' ? 'read-only' : 'writable';
+      const sandboxMode = normalizeCodexSandboxMode(
+        policy && (policy.type || policy.mode || policy.sandbox_mode || policy.sandboxMode),
+        null
+      );
+      const approvalPolicy = normalizeCodexApprovalPolicy(
+        policy && (policy.approval_policy || policy.approvalPolicy || policy.ask_for_approval),
+        null
+      );
+      if (!sandboxMode && !approvalPolicy) return null;
+      return {
+        sandboxMode: sandboxMode || 'danger-full-access',
+        approvalPolicy,
+        permissionMode: sandboxMode || 'danger-full-access',
+      };
     } catch {
       if (db) { try { db.close(); } catch { /* ignore */ } }
       return null;
     }
+  }
+
+  function getCodexSessionPermissionMode(sessionId) {
+    const profile = getCodexSessionSandboxProfile(sessionId);
+    return profile ? profile.permissionMode : null;
   }
 
   function isEngineSessionValid(engine, sessionId, cwd) {
@@ -724,15 +912,18 @@ function createSessionStore(deps) {
     getSession,
     getSessionForEngine,
     createSession,
+    restoreSessionFromReply,
     getSessionName,
     writeSessionName,
     markSessionStarted,
     getSessionRecentContext,
     isEngineSessionValid,
+    getCodexSessionSandboxProfile,
     getCodexSessionPermissionMode,
     _private: {
       _readClaudeSessionMetadata,
       _isClaudeSessionValid,
+      upgradeSessionRecord,
     },
   };
 }

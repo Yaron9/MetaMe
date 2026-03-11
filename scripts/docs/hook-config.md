@@ -29,8 +29,7 @@ Stop (每轮结束)
 | `task_create` | `intent-task-create.js` | 定时/提醒/每天X点 等调度语境 | `/task-add` 命令用法提示 |
 | `file_transfer` | `intent-file-transfer.js` | "发给我/发过来/导出" 等文件传输语境 | `[[FILE:...]]` 协议 + 收发规则 |
 | `memory_recall` | `intent-memory-recall.js` | "上次/之前/还记得" 等跨会话回忆语境 | `memory-search.js` 命令用法 |
-| `agent_manage` | `intent-agent-manage.js` | "创建/绑定 Agent" 或 "代码结构/脚本入口" | agent-guide / pointer-map 文档指引 |
-| `hook_config` | `intent-hook-config.js` | "hook/intent 配置/开关" 等引擎配置语境 | hook-config.md 文档指引 |
+| `doc_router` | `intent-doc-router.js` | "创建/绑定 Agent"、"代码结构/脚本入口"、"hook/intent 配置" 等文档导向语境 | 统一 doc-router 文档指引 |
 ---
 
 ## 开关控制
@@ -84,6 +83,8 @@ const DEFAULTS = {
   your_name: true,  // ← 加这行（默认开启）
 };
 ```
+
+文档路由类场景优先复用 `scripts/hooks/doc-router.js`，只传 `patterns + title + docPath + summary`，不要再为每个文档问题单独建样板模块。
 
 3. **在 daemon.yaml 加开关**（可选，默认开）：
 

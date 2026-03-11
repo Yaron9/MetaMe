@@ -71,6 +71,14 @@ function createAdminCommandHandler(deps) {
     return map[String(chatId)] || 'user';
   }
 
+  function resolveBoundProjectKey(chatId, config) {
+    const map = {
+      ...(config && config.feishu ? config.feishu.chat_agent_map : {}),
+      ...(config && config.telegram ? config.telegram.chat_agent_map : {}),
+    };
+    return map[String(chatId)] || '';
+  }
+
   function popFlag(input, flagName) {
     const src = String(input || '');
     const re = new RegExp(`(?:^|\\s)--${flagName}\\s+(\\S+)`, 'i');
@@ -1288,21 +1296,30 @@ function createAdminCommandHandler(deps) {
     // Switching engine auto-syncs: distill model + preferred provider (if available)
     if (text === '/engine' || text.startsWith('/engine ')) {
       const arg = text.slice('/engine'.length).trim().toLowerCase();
+      const boundProjectKey = resolveBoundProjectKey(chatId, config);
+      const boundProject = boundProjectKey && config && config.projects ? config.projects[boundProjectKey] : null;
       if (!arg) {
-        const cur = getDefaultEngine();
-        const curEngineCfg = ENGINE_MODEL_CONFIG[cur] || ENGINE_MODEL_CONFIG.claude;
-        const activeProvider = (cur === 'claude' && providerMod)
+        const cur = boundProject && boundProject.engine ? String(boundProject.engine).trim().toLowerCase() : getDefaultEngine();
+        const safeCur = cur === 'codex' ? 'codex' : 'claude';
+        const curEngineCfg = ENGINE_MODEL_CONFIG[safeCur] || ENGINE_MODEL_CONFIG.claude;
+        const activeProvider = (safeCur === 'claude' && providerMod)
           ? providerMod.getActiveName()
           : curEngineCfg.provider;
         const distill = getDistillModel();
         const daemonCfg = config.daemon || {};
-        const currentModel = resolveEngineModel(cur, daemonCfg);
+        const currentModel = resolveEngineModel(safeCur, daemonCfg, boundProject && boundProject.model);
+        const scopeLine = boundProjectKey
+          ? `📍 当前 chat 绑定 Agent: ${boundProjectKey}`
+          : `📍 当前 chat 使用全局默认引擎`;
         await bot.sendMessage(chatId, [
-          `🔧 引擎: ${cur}  |  Provider: ${activeProvider}`,
+          `🔧 引擎: ${safeCur}  |  Provider: ${activeProvider}`,
           `🤖 会话模型: ${currentModel}  |  后台轻量: ${distill}`,
+          scopeLine,
           '',
           '用法: /engine claude 或 /engine codex',
-          '切换引擎将自动同步 distill model 和首选 provider',
+          boundProjectKey
+            ? '当前 chat 已绑定 Agent；切换时会同步更新该 Agent 的 engine/model'
+            : '切换引擎将自动同步 distill model 和首选 provider',
         ].join('\n'));
         return { handled: true, config };
       }
@@ -1315,9 +1332,22 @@ function createAdminCommandHandler(deps) {
 
       setDefaultEngine(arg); // syncs distill model + providerMod.setEngine (no longer resets session model)
       const distill = getDistillModel();
-      const freshCfg = loadConfig();
+      let freshCfg = loadConfig();
+      if (boundProjectKey && freshCfg && freshCfg.projects && freshCfg.projects[boundProjectKey]) {
+        const nextCfg = JSON.parse(JSON.stringify(freshCfg));
+        nextCfg.projects[boundProjectKey].engine = arg;
+        nextCfg.projects[boundProjectKey].model = resolveEngineModel(arg, nextCfg.daemon || {});
+        writeConfigSafe(nextCfg);
+        freshCfg = loadConfig();
+      }
       const freshDaemon = freshCfg.daemon || {};
-      const syncedModel = resolveEngineModel(arg, freshDaemon);
+      const syncedModel = resolveEngineModel(
+        arg,
+        freshDaemon,
+        boundProjectKey && freshCfg.projects && freshCfg.projects[boundProjectKey]
+          ? freshCfg.projects[boundProjectKey].model
+          : ''
+      );
 
       // Auto-switch provider if the preferred one exists in providers.yaml
       let providerNote = '';
@@ -1332,8 +1362,11 @@ function createAdminCommandHandler(deps) {
         }
       }
 
-      await bot.sendMessage(chatId, `✅ 引擎已切换: ${arg}\n🤖 会话模型: ${syncedModel}\n🧪 后台轻量模型: ${distill}${providerNote}`);
-      return { handled: true, config };
+      const scopeNote = boundProjectKey
+        ? `\n📍 已同步当前 Agent: ${boundProjectKey}`
+        : '';
+      await bot.sendMessage(chatId, `✅ 引擎已切换: ${arg}\n🤖 会话模型: ${syncedModel}\n🧪 后台轻量模型: ${distill}${scopeNote}${providerNote}`);
+      return { handled: true, config: freshCfg };
     }
 
     // /distill-model [name] — show or update distill model

@@ -26,7 +26,7 @@ const ABSOLUTE_MAX_CAPTURE_CHARS = 6000;
 
 // Strong directive signals → high confidence (direct write to T3)
 // Allow up to 6 chars between key words (e.g. "以后代码一律" = "以后" + "代码" + "一律")
-const STRONG_SIGNAL_ZH = /以后.{0,6}(都|一律|每次|全部|统一)|永远.{0,4}(不要|别|不能|要)|千万.{0,4}(别|不要)|记住|一定.{0,4}(要|得)|一律|统一用/;
+const STRONG_SIGNAL_ZH = /以后.{0,6}(都|总是|一律|每次|全部|统一)|永远.{0,4}(不要|别|不能|要)|千万.{0,4}(别|不要)|记住|一定.{0,4}(要|得)|一律|统一用/;
 const STRONG_SIGNAL_EN = /(from now on|always|never|don't ever|remember to|every time)/i;
 
 // Implicit preference signals → normal confidence (needs accumulation)

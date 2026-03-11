@@ -40,6 +40,57 @@ function createAgentCommandHandler(deps) {
     return n === 'codex' ? 'codex' : getDefaultEngine();
   }
 
+  function inferStoredEngine(rawSession) {
+    if (!rawSession || typeof rawSession !== 'object') return getDefaultEngine();
+    if (rawSession.engine) return normalizeEngineName(rawSession.engine);
+    const slots = rawSession.engines && typeof rawSession.engines === 'object' ? rawSession.engines : null;
+    if (!slots) return getDefaultEngine();
+    const started = Object.entries(slots).find(([, slot]) => slot && slot.started);
+    if (started) return normalizeEngineName(started[0]);
+    const available = Object.keys(slots);
+    return available.length === 1 ? normalizeEngineName(available[0]) : getDefaultEngine();
+  }
+
+  function getSessionRoute(chatId) {
+    const cfg = loadConfig();
+    const state = loadState();
+    const chatKey = String(chatId);
+    const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
+    const boundKey = agentMap[chatKey] || null;
+    const boundProj = boundKey && cfg.projects ? cfg.projects[boundKey] : null;
+    const stickyKey = state && state.team_sticky ? state.team_sticky[chatKey] : null;
+    const stickyMember = stickyKey && boundProj && Array.isArray(boundProj.team)
+      ? boundProj.team.find((m) => m && m.key === stickyKey)
+      : null;
+
+    if (stickyMember) {
+      return {
+        sessionChatId: `_agent_${stickyMember.key}`,
+        cwd: stickyMember.cwd ? normalizeCwd(stickyMember.cwd) : (boundProj && boundProj.cwd ? normalizeCwd(boundProj.cwd) : null),
+        engine: normalizeEngineName(stickyMember.engine || (boundProj && boundProj.engine)),
+      };
+    }
+
+    if (boundProj) {
+      return {
+        sessionChatId: `_agent_${boundKey}`,
+        cwd: boundProj.cwd ? normalizeCwd(boundProj.cwd) : null,
+        engine: normalizeEngineName(boundProj.engine),
+      };
+    }
+
+    const rawSession = getSession(chatId);
+    return {
+      sessionChatId: String(chatId),
+      cwd: rawSession && rawSession.cwd ? normalizeCwd(rawSession.cwd) : null,
+      engine: inferStoredEngine(rawSession),
+    };
+  }
+
+  function getCurrentEngine(chatId) {
+    return getSessionRoute(chatId).engine;
+  }
+
   function inferEngineByCwd(cfg, cwd) {
     if (!cfg || !cfg.projects || !cwd) return null;
     const targetCwd = normalizeCwd(cwd);
@@ -50,6 +101,17 @@ function createAgentCommandHandler(deps) {
       }
     }
     return null;
+  }
+
+  async function autoCreateSessionOnEmptyResume(bot, chatId, cwd, engine) {
+    const resolvedCwd = cwd ? normalizeCwd(cwd) : null;
+    if (!resolvedCwd || !fs.existsSync(resolvedCwd) || typeof attachOrCreateSession !== 'function') {
+      await bot.sendMessage(chatId, `No sessions found${resolvedCwd ? ' in ' + path.basename(resolvedCwd) : ''}. Try /new first.`);
+      return true;
+    }
+    attachOrCreateSession(getSessionRoute(chatId).sessionChatId, resolvedCwd, '', engine || getDefaultEngine());
+    await bot.sendMessage(chatId, `📁 ${path.basename(resolvedCwd)}\n✅ 已自动创建新会话`);
+    return true;
   }
 
   // Pending activations have no TTL — they persist until consumed.
@@ -271,32 +333,35 @@ function createAgentCommandHandler(deps) {
       const arg = text.slice(7).trim();
 
       // Get current workdir to scope session list — prefer bound project cwd over session cwd
-      const cfgForResume = loadConfig();
-      const chatAgentMapForResume = { ...(cfgForResume.telegram ? cfgForResume.telegram.chat_agent_map : {}), ...(cfgForResume.feishu ? cfgForResume.feishu.chat_agent_map : {}) };
-      const boundKeyForResume = chatAgentMapForResume[String(chatId)];
-      const boundProjForResume = boundKeyForResume && cfgForResume.projects ? cfgForResume.projects[boundKeyForResume] : null;
-      const boundCwdForResume = (boundProjForResume && boundProjForResume.cwd) ? normalizeCwd(boundProjForResume.cwd) : null;
-      const curSession = getSession(chatId);
-      const curCwd = boundCwdForResume || (curSession ? curSession.cwd : null);
-      const recentSessions = listRecentSessions(5, curCwd);
+      const route = getSessionRoute(chatId);
+      const curSession = getSession(route.sessionChatId) || getSession(chatId);
+      const curCwd = route.cwd || (curSession ? curSession.cwd : null);
+      const currentEngine = getCurrentEngine(chatId);
+      const recentSessions = listRecentSessions(5, curCwd, currentEngine);
+      const usedCrossEngineFallback = recentSessions.length === 0;
+      const fallbackRecentSessions = usedCrossEngineFallback
+        ? listRecentSessions(5, curCwd)
+        : recentSessions;
 
       if (!arg) {
-        if (recentSessions.length === 0) {
-          await bot.sendMessage(chatId, `No sessions found${curCwd ? ' in ' + path.basename(curCwd) : ''}. Try /new first.`);
-          return true;
+        if (fallbackRecentSessions.length === 0) {
+          return autoCreateSessionOnEmptyResume(bot, chatId, curCwd, currentEngine);
         }
-        const headerTitle = curCwd ? `📋 Sessions in ${path.basename(curCwd)}` : '📋 Recent Sessions';
+        const headerBase = curCwd ? `📋 Sessions in ${path.basename(curCwd)}` : '📋 Recent Sessions';
+        const headerTitle = usedCrossEngineFallback ? `${headerBase} · cross-engine` : headerBase;
         if (bot.sendRawCard) {
-          await bot.sendRawCard(chatId, headerTitle, buildSessionCardElements(recentSessions));
+          await bot.sendRawCard(chatId, headerTitle, buildSessionCardElements(fallbackRecentSessions));
         } else if (bot.sendButtons) {
-          const buttons = recentSessions.map(s => {
+          const buttons = fallbackRecentSessions.map(s => {
             return [{ text: sessionLabel(s), callback_data: `/resume ${s.sessionId}` }];
           });
           await bot.sendButtons(chatId, headerTitle, buttons);
         } else {
           const _tags2 = loadSessionTags();
-          let msg = `${headerTitle}\n\n`;
-          recentSessions.forEach((s, i) => {
+          let msg = `${headerTitle}\n`;
+          if (usedCrossEngineFallback) msg += `当前 ${currentEngine} 没有可恢复会话，已回退显示同目录其他引擎。\n`;
+          msg += '\n';
+          fallbackRecentSessions.forEach((s, i) => {
             msg += sessionRichLabel(s, i + 1, _tags2) + '\n';
           });
           await bot.sendMessage(chatId, msg);
@@ -312,7 +377,7 @@ function createAgentCommandHandler(deps) {
         fullMatch = allSessions.find(s => s.customTitle && s.customTitle.toLowerCase().includes(argLower));
       }
       if (!fullMatch) {
-        fullMatch = recentSessions.find(s => s.sessionId.startsWith(arg))
+        fullMatch = fallbackRecentSessions.find(s => s.sessionId.startsWith(arg))
           || allSessions.find(s => s.sessionId.startsWith(arg));
       }
       if (!fullMatch) {
@@ -321,20 +386,19 @@ function createAgentCommandHandler(deps) {
         return null;
       }
       const sessionId = fullMatch.sessionId;
-      const cwd = fullMatch.projectPath || (getSession(chatId) && getSession(chatId).cwd) || HOME;
+      const cwd = fullMatch.projectPath || (curSession && curSession.cwd) || HOME;
 
       const state2 = loadState();
       const cfgForEngine = loadConfig();
-      // For bound chats, write session to virtual chatId (_agent_{key}) so askClaude picks it up
-      const resumeChatAgentMap = { ...(cfgForEngine.telegram ? cfgForEngine.telegram.chat_agent_map : {}), ...(cfgForEngine.feishu ? cfgForEngine.feishu.chat_agent_map : {}) };
-      const resumeBoundKey = resumeChatAgentMap[String(chatId)];
-      const sessionKey = resumeBoundKey ? `_agent_${resumeBoundKey}` : String(chatId);
+      const sessionKey = route.sessionChatId;
       const existing = state2.sessions[sessionKey] || {};
-      const currentEngine = normalizeEngineName(
+      const existingEngine = normalizeEngineName(
         existing.engine
         || (existing.engines && Object.entries(existing.engines).find(([, slot]) => slot && slot.started)?.[0])
       );
-      const engineByTargetCwd = inferEngineByCwd(cfgForEngine, cwd) || currentEngine;
+      const engineByTargetCwd = normalizeEngineName(fullMatch.engine)
+        || inferEngineByCwd(cfgForEngine, cwd)
+        || existingEngine;
       const existingEngines = existing.engines || {};
       state2.sessions[sessionKey] = {
         ...existing,

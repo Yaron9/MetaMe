@@ -58,15 +58,71 @@ function createFileBrowser(deps) {
     return entry.path;
   }
 
+  function appendDebugLog(message) {
+    try {
+      fs.appendFileSync(path.join(HOME, '.metame', 'daemon.log'), `[${new Date().toISOString()}] [INFO] [file-browser] ${message}\n`);
+    } catch {}
+  }
+
   async function sendFileButtons(bot, chatId, files) {
-    if (!bot.sendButtons || files.size === 0) return;
+    if (files.size === 0) return;
     const validFiles = [...files].filter(f => fs.existsSync(f));
-    if (validFiles.length === 0) return;
-    const buttons = validFiles.map(filePath => {
-      const shortId = cacheFile(filePath);
-      return [{ text: `📎 ${path.basename(filePath)}`, callback_data: `/file ${shortId}` }];
-    });
-    await bot.sendButtons(chatId, '📂 文件:', buttons);
+    if (validFiles.length === 0) return [];
+    const fallbackText = `📂 文件已生成：\n${validFiles.map(filePath => `- ${filePath}`).join('\n')}`;
+    const sentMessages = [];
+    appendDebugLog(`sendFileButtons chat=${chatId} hasSendFile=${typeof bot.sendFile === 'function'} hasSendButtons=${typeof bot.sendButtons === 'function'} hasEditMessage=${typeof bot.editMessage === 'function'} hasSendCard=${typeof bot.sendCard === 'function'} files=${validFiles.map(filePath => path.basename(filePath)).join(',')}`);
+
+    // Prefer direct file delivery when the adapter supports it.
+    // This matches the user's expectation on mobile and avoids brittle
+    // button-card transport on platforms like Feishu.
+    if (bot.sendFile) {
+      try {
+        appendDebugLog(`attempting direct sendFile chat=${chatId}`);
+        for (const filePath of validFiles) {
+          const msg = await bot.sendFile(chatId, filePath);
+          if (msg && msg.message_id) sentMessages.push(msg);
+        }
+        appendDebugLog(`direct sendFile success chat=${chatId} count=${sentMessages.length}`);
+        return sentMessages;
+      } catch (err) {
+        const detail = err && err.stack ? err.stack : String(err && err.message ? err.message : err);
+        appendDebugLog(`sendFile failed chat=${chatId} err=${detail.split('\n')[0]}`);
+        if (bot.sendMessage) {
+          const msg = await bot.sendMessage(chatId, fallbackText);
+          if (msg && msg.message_id) sentMessages.push(msg);
+        }
+        appendDebugLog(`sendFile fallback text chat=${chatId} count=${sentMessages.length}`);
+        return sentMessages;
+      }
+    }
+
+    const isStreamCardBot = typeof bot.editMessage === 'function' || typeof bot.sendCard === 'function';
+    if (!bot.sendButtons || isStreamCardBot) {
+      appendDebugLog(`button fallback skipped chat=${chatId} hasSendButtons=${typeof bot.sendButtons === 'function'} isStreamCardBot=${isStreamCardBot}`);
+      if (bot.sendMessage) {
+        const msg = await bot.sendMessage(chatId, fallbackText);
+        if (msg && msg.message_id) sentMessages.push(msg);
+      }
+      return sentMessages;
+    }
+
+    try {
+      appendDebugLog(`attempting sendButtons chat=${chatId}`);
+      const buttons = validFiles.map(filePath => {
+        const shortId = cacheFile(filePath);
+        return [{ text: `📎 ${path.basename(filePath)}`, callback_data: `/file ${shortId}` }];
+      });
+      const msg = await bot.sendButtons(chatId, '📂 文件:', buttons);
+      if (msg && msg.message_id) sentMessages.push(msg);
+      appendDebugLog(`sendButtons success chat=${chatId}`);
+    } catch {
+      appendDebugLog(`sendButtons failed chat=${chatId}`);
+      if (bot.sendMessage) {
+        const msg = await bot.sendMessage(chatId, fallbackText);
+        if (msg && msg.message_id) sentMessages.push(msg);
+      }
+    }
+    return sentMessages;
   }
 
   async function sendDirPicker(bot, chatId, mode, title) {

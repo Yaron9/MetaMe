@@ -462,6 +462,123 @@ describe('daemon-admin-commands distill model controls', () => {
   });
 });
 
+describe('daemon-admin-commands /engine', () => {
+  it('updates bound agent engine/model when switching engine inside a bound chat', async (t) => {
+    const sent = [];
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-engine-cmd-'));
+    t.after(() => {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    });
+    const configFile = path.join(tmpDir, 'daemon.yaml');
+    const yaml = require('js-yaml');
+    const initial = {
+      feishu: {
+        chat_agent_map: {
+          'chat-personal': 'personal',
+        },
+      },
+      projects: {
+        personal: {
+          name: '小美',
+          engine: 'claude',
+          model: 'sonnet',
+        },
+      },
+      daemon: {
+        models: {
+          codex: 'gpt-5.4',
+        },
+      },
+    };
+    fs.writeFileSync(configFile, yaml.dump(initial), 'utf8');
+    const providerStub = {
+      getActiveName: () => 'anthropic',
+      setActive: () => { throw new Error('missing openai'); },
+      getDistillModel: () => 'gpt-5.1-codex-mini',
+      setDistillModel: () => {},
+      setEngine: () => {},
+    };
+    const loadCfg = () => yaml.load(fs.readFileSync(configFile, 'utf8')) || {};
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        yaml,
+        CONFIG_FILE: configFile,
+        providerMod: providerStub,
+        loadConfig: loadCfg,
+        writeConfigSafe: (cfg) => fs.writeFileSync(configFile, yaml.dump(cfg), 'utf8'),
+        getDefaultEngine: () => 'claude',
+        setDefaultEngine: () => {},
+        getDistillModel: () => 'gpt-5.1-codex-mini',
+      }
+    );
+    const bot = { sendMessage: async (_chatId, text) => { sent.push(String(text)); } };
+
+    const res = await handleAdminCommand({
+      bot,
+      chatId: 'chat-personal',
+      text: '/engine codex',
+      config: loadCfg(),
+      state: { tasks: {} },
+    });
+
+    assert.equal(res.handled, true);
+    const nextCfg = loadCfg();
+    assert.equal(nextCfg.projects.personal.engine, 'codex');
+    assert.equal(nextCfg.projects.personal.model, 'gpt-5.4');
+    assert.match(sent[0], /已同步当前 Agent: personal/);
+    assert.match(sent[0], /Provider: anthropic（如需切换请 \/provider openai）/);
+  });
+
+  it('shows effective bound agent engine in /engine status', async () => {
+    const sent = [];
+    const cfg = {
+      feishu: {
+        chat_agent_map: {
+          'chat-personal': 'personal',
+        },
+      },
+      projects: {
+        personal: {
+          name: '小美',
+          engine: 'claude',
+          model: 'sonnet',
+        },
+      },
+      daemon: {
+        models: {
+          codex: 'gpt-5.4',
+        },
+      },
+    };
+    const providerStub = {
+      getActiveName: () => 'anthropic',
+    };
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        providerMod: providerStub,
+        getDefaultEngine: () => 'codex',
+        getDistillModel: () => 'gpt-5.1-codex-mini',
+      }
+    );
+    const bot = { sendMessage: async (_chatId, text) => { sent.push(String(text)); } };
+
+    const res = await handleAdminCommand({
+      bot,
+      chatId: 'chat-personal',
+      text: '/engine',
+      config: cfg,
+      state: { tasks: {} },
+    });
+
+    assert.equal(res.handled, true);
+    assert.match(sent[0], /引擎: claude/);
+    assert.match(sent[0], /当前 chat 绑定 Agent: personal/);
+    assert.match(sent[0], /当前 chat 已绑定 Agent；切换时会同步更新该 Agent 的 engine\/model/);
+  });
+});
+
 describe('daemon-admin-commands /doctor', () => {
   it('does not fail codex-only environments when default engine is codex', async () => {
     const sent = [];

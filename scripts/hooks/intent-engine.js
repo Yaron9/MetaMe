@@ -33,8 +33,7 @@ const DEFAULTS = {
   task_create:    true,
   file_transfer:  true,
   memory_recall:  true,
-  agent_manage:   true,
-  hook_config:    true,
+  doc_router:     true,
 };
 
 // Intent registry — loaded lazily so startup is fast even if a module has issues
@@ -44,8 +43,7 @@ const INTENT_MODULES = {
   task_create:    './intent-task-create',
   file_transfer:  './intent-file-transfer',
   memory_recall:  './intent-memory-recall',
-  agent_manage:   './intent-agent-manage',
-  hook_config:    './intent-hook-config',
+  doc_router:     './intent-doc-router',
 };
 
 function exit() { process.exit(0); }

@@ -298,16 +298,8 @@ function createBot(config) {
         throw new Error(`File not found: ${filePath}`);
       }
       const fileName = path.basename(filePath);
-      const fileSize = fs.statSync(filePath).size;
-
-      // For text files under 4KB, just send as text
       const ext = path.extname(filePath).toLowerCase();
       const isText = ['.md', '.txt', '.json', '.yaml', '.yml', '.csv'].includes(ext);
-      if (isText && fileSize < 4096) {
-        const content = fs.readFileSync(filePath, 'utf8');
-        await this.sendMessage(chatId, `📄 ${fileName}:\n\`\`\`\n${content}\n\`\`\``);
-        return;
-      }
 
       // For larger/binary files, try file upload
       try {
@@ -332,7 +324,7 @@ function createBot(config) {
         }
 
         // 2. Send file message
-        await client.im.message.create({
+        const sendRes = await client.im.message.create({
           params: { receive_id_type: 'chat_id' },
           data: {
             receive_id: chatId,
@@ -340,6 +332,9 @@ function createBot(config) {
             content: JSON.stringify({ file_key: fileKey }),
           },
         });
+        const msgId = sendRes?.data?.message_id;
+        if (caption) await this.sendMessage(chatId, caption);
+        return msgId ? { message_id: msgId } : null;
       } catch (uploadErr) {
         // Log detailed error
         const errDetail = uploadErr.response?.data || uploadErr.message || uploadErr;
@@ -349,17 +344,14 @@ function createBot(config) {
         if (isText) {
           const content = fs.readFileSync(filePath, 'utf8');
           const truncated = content.length > 3000 ? content.slice(0, 3000) + '\n...(truncated)' : content;
-          await this.sendMessage(chatId, `📄 ${fileName}:\n\`\`\`\n${truncated}\n\`\`\``);
+          const textMsg = await this.sendMessage(chatId, `📄 ${fileName}:\n\`\`\`\n${truncated}\n\`\`\``);
+          if (caption) await this.sendMessage(chatId, caption);
+          return textMsg || null;
         } else {
           // For binary files, give more helpful error
           const errMsg = errDetail?.msg || errDetail?.message || '上传失败';
           throw new Error(`${errMsg} (请检查飞书应用权限: im:resource)`);
         }
-      }
-
-      // 3. Send caption as separate message if provided
-      if (caption) {
-        await this.sendMessage(chatId, caption);
       }
     },
 

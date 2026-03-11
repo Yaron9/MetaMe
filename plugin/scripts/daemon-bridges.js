@@ -16,6 +16,7 @@ function createBridgeStarter(deps) {
     loadState,
     saveState,
     getSession,
+    restoreSessionFromReply,
     handleCommand,
     pendingActivations,  // optional — used to show smart activation hint
     activeProcesses,     // optional — used for auto-dispatch to clones
@@ -104,7 +105,7 @@ function createBridgeStarter(deps) {
 
   // Creates a bot proxy that redirects all send methods to replyChatId
   function _createTeamProxyBot(bot, replyChatId) {
-    const SEND = new Set(['sendMessage', 'sendMarkdown', 'sendCard', 'editMessage', 'deleteMessage', 'sendTyping', 'sendFile', 'sendButtonCard']);
+    const SEND = new Set(['sendMessage', 'sendMarkdown', 'sendCard', 'editMessage', 'deleteMessage', 'sendTyping', 'sendFile', 'sendButtons', 'sendButtonCard']);
     return new Proxy(bot, {
       get(target, prop) {
         const orig = target[prop];
@@ -582,9 +583,13 @@ function createBridgeStarter(deps) {
           if (parentId) {
             const mapped = _st.msg_sessions && _st.msg_sessions[parentId];
             if (mapped) {
-              if (!_st.sessions) _st.sessions = {};
-              _st.sessions[chatId] = { id: mapped.id, cwd: mapped.cwd, started: true };
-              saveState(_st);
+              if (typeof restoreSessionFromReply === 'function') {
+                restoreSessionFromReply(chatId, mapped);
+              } else {
+                if (!_st.sessions) _st.sessions = {};
+                _st.sessions[chatId] = { id: mapped.id, cwd: mapped.cwd, started: true };
+                saveState(_st);
+              }
               log('INFO', `Session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
               _replyAgentKey = mapped.agentKey || null;
             }

@@ -35,23 +35,66 @@ function createSessionCommandHandler(deps) {
     return n === 'codex' ? 'codex' : getDefaultEngine();
   }
 
+  function inferStoredEngine(rawSession) {
+    if (!rawSession || typeof rawSession !== 'object') return getDefaultEngine();
+    if (rawSession.engine) return normalizeEngineName(rawSession.engine);
+    const slots = rawSession.engines && typeof rawSession.engines === 'object' ? rawSession.engines : null;
+    if (!slots) return getDefaultEngine();
+    const started = Object.entries(slots).find(([, slot]) => slot && slot.started);
+    if (started) return normalizeEngineName(started[0]);
+    const available = Object.keys(slots);
+    return available.length === 1 ? normalizeEngineName(available[0]) : getDefaultEngine();
+  }
+
+  function getSessionRoute(chatId) {
+    const cfg = loadConfig();
+    const state = loadState();
+    const chatKey = String(chatId);
+    const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
+    const boundKey = agentMap[chatKey] || null;
+    const boundProj = boundKey && cfg.projects ? cfg.projects[boundKey] : null;
+    const stickyKey = state && state.team_sticky ? state.team_sticky[chatKey] : null;
+    const stickyMember = stickyKey && boundProj && Array.isArray(boundProj.team)
+      ? boundProj.team.find((m) => m && m.key === stickyKey)
+      : null;
+
+    if (stickyMember) {
+      return {
+        sessionChatId: `_agent_${stickyMember.key}`,
+        cwd: stickyMember.cwd ? normalizeCwd(stickyMember.cwd) : (boundProj && boundProj.cwd ? normalizeCwd(boundProj.cwd) : null),
+        engine: normalizeEngineName(stickyMember.engine || (boundProj && boundProj.engine)),
+      };
+    }
+
+    if (boundProj) {
+      return {
+        sessionChatId: `_agent_${boundKey}`,
+        cwd: boundProj.cwd ? normalizeCwd(boundProj.cwd) : null,
+        engine: normalizeEngineName(boundProj.engine),
+      };
+    }
+
+    const rawSession = getSession(chatId);
+    return {
+      sessionChatId: String(chatId),
+      cwd: rawSession && rawSession.cwd ? normalizeCwd(rawSession.cwd) : null,
+      engine: inferStoredEngine(rawSession),
+    };
+  }
+
+  function getCurrentEngine(chatId) {
+    return getSessionRoute(chatId).engine;
+  }
+
   function getBoundCwd(chatId) {
     try {
-      const cfg = loadConfig();
-      const chatAgentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
-      const mappedKey = chatAgentMap[String(chatId)];
-      const proj = mappedKey && cfg.projects ? cfg.projects[mappedKey] : null;
-      return (proj && proj.cwd) ? normalizeCwd(proj.cwd) : null;
+      return getSessionRoute(chatId).cwd;
     } catch { return null; }
   }
 
   // Write per-engine session slot, preserving cwd and other engine slots.
   function attachEngineSession(state, chatId, engine, sessionId, cwd) {
-    // For bound chats, resolve to virtual chatId so askClaude picks up the session
-    const cfg = loadConfig();
-    const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
-    const boundKey = agentMap[String(chatId)];
-    const effectiveId = boundKey ? `_agent_${boundKey}` : String(chatId);
+    const effectiveId = getSessionRoute(chatId).sessionChatId;
     const existing = state.sessions[effectiveId] || {};
     const existingEngines = existing.engines || {};
     state.sessions[effectiveId] = {
@@ -69,6 +112,18 @@ function createSessionCommandHandler(deps) {
       if (normalizeCwd(proj.cwd) === target) return normalizeEngineName(proj.engine);
     }
     return null;
+  }
+
+  async function autoCreateSessionWhenEmpty(bot, chatId, cwd, engine) {
+    const resolvedCwd = cwd ? normalizeCwd(cwd) : null;
+    if (!resolvedCwd || !fs.existsSync(resolvedCwd)) {
+      await bot.sendMessage(chatId, `No sessions found${resolvedCwd ? ' in ' + path.basename(resolvedCwd) : ''}. Try /new first.`);
+      return true;
+    }
+    const route = getSessionRoute(chatId);
+    const session = createSession(route.sessionChatId, resolvedCwd, '', engine || getDefaultEngine());
+    await bot.sendMessage(chatId, `📁 ${path.basename(resolvedCwd)}\n✅ 已自动创建新会话\nWorkdir: ${session.cwd}`);
+    return true;
   }
 
   async function handleSessionCommand(ctx) {
@@ -98,13 +153,9 @@ function createSessionCommandHandler(deps) {
       const arg = text.slice(4).trim();
       if (!arg) {
         // In a dedicated agent group, use the agent's bound cwd directly
-        const newCfg = loadConfig();
-        const agentMap = { ...(newCfg.telegram ? newCfg.telegram.chat_agent_map : {}), ...(newCfg.feishu ? newCfg.feishu.chat_agent_map : {}) };
-        const boundKey = agentMap[String(chatId)];
-        const boundProj = boundKey && newCfg.projects && newCfg.projects[boundKey];
-        if (boundProj && boundProj.cwd) {
-          const boundCwd = normalizeCwd(boundProj.cwd);
-          const session = createSession(chatId, boundCwd, '', normalizeEngineName(boundProj.engine));
+        const route = getSessionRoute(chatId);
+        if (route.cwd) {
+          const session = createSession(route.sessionChatId, route.cwd, '', route.engine);
           await bot.sendMessage(chatId, `✅ 新会话已创建\nWorkdir: ${session.cwd}`);
           return true;
         }
@@ -174,17 +225,19 @@ function createSessionCommandHandler(deps) {
 
     // /last — smart resume: prefer current cwd, then most recent globally
     if (text === '/last') {
-      const curSession = getSession(chatId);
+      const currentEngine = getCurrentEngine(chatId);
+      const route = getSessionRoute(chatId);
+      const curSession = getSession(route.sessionChatId) || getSession(chatId);
       const curCwd = curSession ? curSession.cwd : null;
 
       // Strategy: try current cwd first, then fall back to global
       let s = null;
       if (curCwd) {
-        const cwdSessions = listRecentSessions(1, curCwd);
+        const cwdSessions = listRecentSessions(1, curCwd, currentEngine);
         if (cwdSessions.length > 0) s = cwdSessions[0];
       }
       if (!s) {
-        const globalSessions = listRecentSessions(1);
+        const globalSessions = listRecentSessions(1, null, currentEngine);
         if (globalSessions.length > 0) s = globalSessions[0];
       }
 
@@ -192,7 +245,7 @@ function createSessionCommandHandler(deps) {
         // Last resort: use __continue__ to resume whatever Claude thinks is last
         const state2 = loadState();
         const cfgForEngine = loadConfig();
-        const engineByCwd = inferEngineByCwd(cfgForEngine, curCwd || HOME) || getDefaultEngine();
+        const engineByCwd = inferEngineByCwd(cfgForEngine, curCwd || HOME) || currentEngine;
         attachEngineSession(state2, chatId, engineByCwd, '__continue__', curCwd || HOME);
         saveState(state2);
         await bot.sendMessage(chatId, `⚡ Resuming last session in ${path.basename(curCwd || HOME)}`);
@@ -201,7 +254,7 @@ function createSessionCommandHandler(deps) {
 
       const state2 = loadState();
       const cfgForEngine = loadConfig();
-      const engineByCwd = inferEngineByCwd(cfgForEngine, s.projectPath || HOME) || getDefaultEngine();
+      const engineByCwd = normalizeEngineName(s.engine) || inferEngineByCwd(cfgForEngine, s.projectPath || HOME) || getDefaultEngine();
       attachEngineSession(state2, chatId, engineByCwd, s.sessionId, s.projectPath || HOME);
       saveState(state2);
       // Display: name/summary + id on separate lines
@@ -267,13 +320,14 @@ function createSessionCommandHandler(deps) {
 
     // /sessions — compact list, tap to see details, then tap to switch
     if (text === '/sessions') {
-      const currentEngine = getDefaultEngine();
-      const codexLimitTip = '⚠️ 当前为 Codex 会话：`/sessions` 列表暂仅展示 Claude 本地会话，Codex 会话暂不可见。';
-      const allSessions = listRecentSessions(15, getBoundCwd(chatId));
+      const allSessions = listRecentSessions(15, getBoundCwd(chatId), getCurrentEngine(chatId));
       if (allSessions.length === 0) {
-        const base = 'No sessions found. Try /new first.';
-        await bot.sendMessage(chatId, currentEngine === 'codex' ? `${base}\n\n${codexLimitTip}` : base);
-        return true;
+        return autoCreateSessionWhenEmpty(
+          bot,
+          chatId,
+          getBoundCwd(chatId) || (getSession(chatId) && getSession(chatId).cwd),
+          getCurrentEngine(chatId)
+        );
       }
       if (bot.sendButtons) {
         await bot.sendRawCard(chatId, '📋 Recent Sessions', buildSessionCardElements(allSessions));
@@ -283,11 +337,7 @@ function createSessionCommandHandler(deps) {
         allSessions.forEach((s, i) => {
           msg += sessionRichLabel(s, i + 1, _tags1) + '\n';
         });
-        if (currentEngine === 'codex') msg += `\n${codexLimitTip}\n`;
         await bot.sendMessage(chatId, msg);
-      }
-      if (bot.sendButtons && currentEngine === 'codex') {
-        await bot.sendMessage(chatId, codexLimitTip);
       }
       return true;
     }
@@ -295,7 +345,7 @@ function createSessionCommandHandler(deps) {
     // /sess <id> — show session detail card with switch button
     if (text.startsWith('/sess ')) {
       const sid = text.slice(6).trim();
-      const allSessions = listRecentSessions(50);
+      const allSessions = listRecentSessions(50, null, getCurrentEngine(chatId));
       const s = allSessions.find(x => x.sessionId === sid || x.sessionId.startsWith(sid));
       if (!s) {
         await bot.sendMessage(chatId, `Session not found: ${sid.slice(0, 8)}`);
@@ -373,9 +423,10 @@ function createSessionCommandHandler(deps) {
       }
       // /cd last — sync to computer: switch to most recent session AND its directory
       if (newCwd === 'last') {
-        const currentSession = getSession(chatId);
+        const route = getSessionRoute(chatId);
+        const currentSession = getSession(route.sessionChatId) || getSession(chatId);
         const excludeId = currentSession?.id;
-        const recent = listRecentSessions(10);
+        const recent = listRecentSessions(10, null, getCurrentEngine(chatId));
         const filtered = excludeId ? recent.filter(s => s.sessionId !== excludeId) : recent;
 
         // For bound chats, prefer sessions from the same project to avoid
@@ -416,7 +467,7 @@ function createSessionCommandHandler(deps) {
       }
       const state2 = loadState();
       // Try to find existing session in this directory
-      const recentInDir = listRecentSessions(1, newCwd);
+      const recentInDir = listRecentSessions(1, newCwd, getCurrentEngine(chatId));
       if (recentInDir.length > 0 && recentInDir[0].sessionId) {
         // Attach to existing session in this directory
         const target = recentInDir[0];
@@ -426,14 +477,14 @@ function createSessionCommandHandler(deps) {
         saveState(state2);
         const label = target.customTitle || target.summary?.slice(0, 30) || target.sessionId.slice(0, 8);
         await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)}\n🔄 Attached: ${label}`);
-      } else if (!state2.sessions[chatId]) {
+      } else if (!state2.sessions[getSessionRoute(chatId).sessionChatId]) {
         const cfgForEngine = loadConfig();
         const engineByCwd = inferEngineByCwd(cfgForEngine, newCwd);
         const currentEngine = getDefaultEngine();
-        createSession(chatId, newCwd, '', engineByCwd || currentEngine);
+        createSession(getSessionRoute(chatId).sessionChatId, newCwd, '', engineByCwd || currentEngine);
         await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)} (new session)`);
       } else {
-        state2.sessions[chatId].cwd = newCwd;
+        state2.sessions[getSessionRoute(chatId).sessionChatId].cwd = newCwd;
         saveState(state2);
         await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)}`);
       }
@@ -443,7 +494,8 @@ function createSessionCommandHandler(deps) {
 
     // /list [subdir|glob|fullpath] — list files (zero token, daemon-only)
     if (text === '/list' || text.startsWith('/list ')) {
-      const session = getSession(chatId);
+      const route = getSessionRoute(chatId);
+      const session = getSession(route.sessionChatId) || getSession(chatId);
       const cwd = session?.cwd || HOME;
       const arg = text.slice(5).trim();
       // If arg is an absolute or ~ path, list that directly
@@ -466,7 +518,8 @@ function createSessionCommandHandler(deps) {
         await bot.sendMessage(chatId, 'Usage: /name <session name>');
         return true;
       }
-      const session = getSession(chatId);
+      const route = getSessionRoute(chatId);
+      const session = getSession(route.sessionChatId) || getSession(chatId);
       if (!session) {
         await bot.sendMessage(chatId, 'No active session. Start one first.');
         return true;
@@ -482,7 +535,8 @@ function createSessionCommandHandler(deps) {
     }
 
     if (text === '/session') {
-      const session = getSession(chatId);
+      const route = getSessionRoute(chatId);
+      const session = getSession(route.sessionChatId) || getSession(chatId);
       if (!session) {
         await bot.sendMessage(chatId, 'No active session. Send any message to start one.');
       } else {

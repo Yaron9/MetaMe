@@ -1642,11 +1642,13 @@ const {
   getSession,
   getSessionForEngine,
   createSession,
+  restoreSessionFromReply,
   getSessionName,
   writeSessionName,
   markSessionStarted,
   watchSessionFiles,
   isEngineSessionValid,
+  getCodexSessionSandboxProfile,
   getCodexSessionPermissionMode,
 } = createSessionStore({
   fs,
@@ -1935,6 +1937,7 @@ const { spawnClaudeAsync, askClaude } = createClaudeEngine({
   findSessionFile,
   listRecentSessions,
   isEngineSessionValid,
+  getCodexSessionSandboxProfile,
   getCodexSessionPermissionMode,
   getSession,
   getSessionForEngine,
@@ -2109,6 +2112,7 @@ const { startTelegramBridge, startFeishuBridge } = createBridgeStarter({
   loadState,
   saveState,
   getSession,
+  restoreSessionFromReply,
   handleCommand,
   pendingActivations,
   activeProcesses,
@@ -2460,6 +2464,10 @@ async function main() {
     process.exit(0);
   };
 
+  process.on('SIGUSR2', () => {
+    shutdown({ restartReason: process.env.METAME_DEPLOY_RESTART_REASON || 'external-restart' })
+      .catch(() => process.exit(1));
+  });
   process.on('SIGTERM', () => { shutdown().catch(() => process.exit(0)); });
   process.on('SIGINT', () => { shutdown().catch(() => process.exit(0)); });
 

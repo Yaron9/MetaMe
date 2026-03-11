@@ -44,6 +44,7 @@ function createEngineWithState(state) {
     writeSessionName: () => {},
     markSessionStarted: () => {},
     isEngineSessionValid: () => true,
+    getCodexSessionSandboxProfile: () => null,
     getCodexSessionPermissionMode: () => null,
     gitCheckpoint: () => {},
     recordTokens: () => {},
@@ -78,6 +79,28 @@ describe('daemon-claude-engine private helpers', () => {
 
     await Promise.all([p1, p2]);
     assert.deepEqual(state.sessions.chat1.order, ['a', 'b']);
+  });
+
+  it('tracks message ids returned by file delivery helpers', () => {
+    const state = { sessions: {} };
+    const engine = createEngineWithState(state);
+    const session = {
+      id: 'sid-file',
+      cwd: '/tmp/agent-jia',
+      engine: 'codex',
+      sandboxMode: 'danger-full-access',
+      approvalPolicy: 'never',
+      permissionMode: 'danger-full-access',
+    };
+
+    engine.trackMsgSession('msg-main-1', session, 'jia');
+    engine.trackMsgSession('msg-file-1', session, 'jia');
+
+    assert.equal(state.msg_sessions['msg-main-1'].agentKey, 'jia');
+    assert.equal(state.msg_sessions['msg-file-1'].agentKey, 'jia');
+    assert.equal(state.msg_sessions['msg-file-1'].id, 'sid-file');
+    assert.equal(state.msg_sessions['msg-file-1'].sandboxMode, 'danger-full-access');
+    assert.equal(state.msg_sessions['msg-file-1'].approvalPolicy, 'never');
   });
 
   it('decides codex resume fallback retry correctly', () => {
@@ -143,15 +166,15 @@ describe('daemon-claude-engine private helpers', () => {
     const engine = createEngineWithState(state);
     assert.equal(
       engine._private.shouldStartFreshCodexSessionForPermissions(
-        { started: true, id: 'sid-1', permissionMode: 'read-only' },
-        false
+        { started: true, id: 'sid-1', permissionMode: 'read-only', approvalPolicy: 'never' },
+        { sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' }
       ),
       true
     );
     assert.equal(
       engine._private.shouldStartFreshCodexSessionForPermissions(
-        { started: true, id: 'sid-1', permissionMode: 'writable' },
-        false
+        { started: true, id: 'sid-1', permissionMode: 'danger-full-access', sandboxMode: 'danger-full-access', approvalPolicy: 'never' },
+        { sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' }
       ),
       false
     );
@@ -279,7 +302,7 @@ describe('daemon-claude-engine private helpers', () => {
     );
   });
 
-  it('reads actual codex permission mode from store helper', () => {
+  it('reads actual codex permission profile from store helper', () => {
     const state = { sessions: {} };
     const engine = createClaudeEngine({
       fs,
@@ -314,6 +337,7 @@ describe('daemon-claude-engine private helpers', () => {
       writeSessionName: () => {},
       markSessionStarted: () => {},
       isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: () => ({ sandboxMode: 'read-only', approvalPolicy: 'never', permissionMode: 'read-only' }),
       getCodexSessionPermissionMode: () => 'read-only',
       gitCheckpoint: () => {},
       recordTokens: () => {},
@@ -331,6 +355,9 @@ describe('daemon-claude-engine private helpers', () => {
       }),
     });
 
-    assert.equal(engine._private.getActualCodexPermissionMode({ id: 'thread-1' }), 'read-only');
+    assert.deepEqual(
+      engine._private.getActualCodexPermissionProfile({ id: 'thread-1' }),
+      { sandboxMode: 'read-only', approvalPolicy: 'never', permissionMode: 'read-only' }
+    );
   });
 });

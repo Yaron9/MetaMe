@@ -50,6 +50,70 @@ function spawnCodex(args, options) {
   return spawnViaNode('codex', args, { ...options, env });
 }
 
+function readLatestClaudeSession(projectsRoot, cwd) {
+  let bestSession = null;
+  const findLatest = (dir) => {
+    try {
+      return fs.readdirSync(dir)
+        .filter(f => f.endsWith('.jsonl'))
+        .map(f => ({ id: f.replace('.jsonl', ''), mtime: fs.statSync(path.join(dir, f)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime)[0] || null;
+    } catch { return null; }
+  };
+
+  try {
+    const projDir = path.join(projectsRoot, cwd.replace(/\//g, '-'));
+    const localBest = findLatest(projDir);
+    let globalBest = null;
+    try {
+      for (const d of fs.readdirSync(projectsRoot)) {
+        const s = findLatest(path.join(projectsRoot, d));
+        if (s && (!globalBest || s.mtime > globalBest.mtime)) globalBest = s;
+      }
+    } catch { /* ignore */ }
+    if (localBest && globalBest && globalBest.mtime > localBest.mtime) {
+      bestSession = { ...globalBest, scope: 'global' };
+    } else {
+      bestSession = localBest ? { ...localBest, scope: 'local' } : (globalBest ? { ...globalBest, scope: 'global' } : null);
+    }
+  } catch { /* ignore */ }
+
+  return bestSession ? { ...bestSession, engine: 'claude' } : null;
+}
+
+function readLatestCodexSession(cwd) {
+  let db;
+  try {
+    const codeDb = path.join(HOME_DIR, '.codex', 'state_5.sqlite');
+    if (!fs.existsSync(codeDb)) return null;
+    const { DatabaseSync } = require('node:sqlite');
+    db = new DatabaseSync(codeDb, { readonly: true });
+    const row = db.prepare(`
+      SELECT id, cwd, updated_at, created_at
+      FROM threads
+      WHERE COALESCE(has_user_event, 1) = 1
+        AND archived = 0
+      ORDER BY
+        CASE WHEN cwd = ? THEN 0 ELSE 1 END ASC,
+        COALESCE(updated_at, created_at, 0) DESC
+      LIMIT 1
+    `).get(cwd);
+    db.close();
+    db = null;
+    if (!row || !row.id) return null;
+    const ts = Number(row.updated_at || row.created_at || 0) * 1000;
+    return {
+      id: String(row.id),
+      mtime: ts || 0,
+      engine: 'codex',
+      scope: String(row.cwd || '') === String(cwd) ? 'local' : 'global',
+    };
+  } catch {
+    if (db) { try { db.close(); } catch { /* ignore */ } }
+    return null;
+  }
+}
+
 // Quick flags (before heavy init)
 const pkgVersion = require('./package.json').version;
 if (process.argv.includes('-V') || process.argv.includes('--version')) {
@@ -144,6 +208,72 @@ function syncDirFiles(srcDir, destDir, { fileList, chmod } = {}) {
   return updated;
 }
 
+function readRunningDaemonPid({ pidFile, lockFile }) {
+  if (fs.existsSync(pidFile)) {
+    try {
+      const pid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+      if (pid && pid !== process.pid) {
+        process.kill(pid, 0);
+        return pid;
+      }
+    } catch { /* stale pid file */ }
+  }
+  if (fs.existsSync(lockFile)) {
+    try {
+      const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+      const pid = parseInt(lock && lock.pid, 10);
+      if (pid && pid !== process.pid) {
+        process.kill(pid, 0);
+        return pid;
+      }
+    } catch { /* stale or invalid lock */ }
+  }
+  return null;
+}
+
+function requestDaemonRestart({
+  reason = 'manual-restart',
+  daemonPidFile = path.join(METAME_DIR, 'daemon.pid'),
+  daemonLockFile = path.join(METAME_DIR, 'daemon.lock'),
+  daemonScript = path.join(METAME_DIR, 'daemon.js'),
+} = {}) {
+  const pid = readRunningDaemonPid({ pidFile: daemonPidFile, lockFile: daemonLockFile });
+  if (!pid) return { ok: false, status: 'not_running' };
+
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(pid, 'SIGUSR2');
+      return { ok: true, status: 'signaled', pid };
+    } catch (e) {
+      return { ok: false, status: 'signal_failed', pid, error: e.message };
+    }
+  }
+
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch (e) {
+    return { ok: false, status: 'stop_failed', pid, error: e.message };
+  }
+
+  let stopped = false;
+  for (let i = 0; i < 12; i++) {
+    sleepSync(500);
+    try { process.kill(pid, 0); } catch { stopped = true; break; }
+  }
+  if (!stopped) {
+    try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  }
+
+  const bg = spawn(process.execPath, [daemonScript], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+    env: { ...process.env, HOME: HOME_DIR, METAME_ROOT: __dirname, METAME_DEPLOY_RESTART_REASON: reason },
+  });
+  bg.unref();
+  return { ok: true, status: 'restarted', pid, nextPid: bg.pid };
+}
+
 // Auto-deploy bundled scripts to ~/.metame/
 // IMPORTANT: daemon.yaml is USER CONFIG — never overwrite it. Only daemon-default.yaml (template) is synced.
 const scriptsDir = path.join(__dirname, 'scripts');
@@ -192,22 +322,36 @@ if (syntaxErrors.length > 0) {
   console.error('Fix the errors before deploying. Daemon continues running with old code.');
 } else {
   scriptsUpdated = syncDirFiles(scriptsDir, METAME_DIR, { fileList: BUNDLED_SCRIPTS });
-
-  // Daemon restart on script update:
-  // Don't kill daemon here — daemon's own file watcher detects ~/.metame/daemon.js changes
-  // and has defer logic (waits for active Claude tasks to finish before restarting).
-  // Killing here bypasses that and interrupts ongoing conversations.
   if (scriptsUpdated) {
-    console.log(`${icon("pkg")} Scripts ${IS_DEV_MODE ? 'symlinked' : 'synced'} to ~/.metame/ — daemon will auto-restart when idle.`);
+    console.log(`${icon("pkg")} Scripts ${IS_DEV_MODE ? 'symlinked' : 'synced'} to ~/.metame/.`);
   }
 }
 
 // Docs: lazy-load references for CLAUDE.md pointer instructions
 syncDirFiles(path.join(__dirname, 'scripts', 'docs'), path.join(METAME_DIR, 'docs'));
 // Bin: CLI tools (dispatch_to etc.)
-syncDirFiles(path.join(__dirname, 'scripts', 'bin'), path.join(METAME_DIR, 'bin'), { chmod: 0o755 });
+const binUpdated = syncDirFiles(path.join(__dirname, 'scripts', 'bin'), path.join(METAME_DIR, 'bin'), { chmod: 0o755 });
 // Hooks: Claude Code event hooks (Stop, PostToolUse, etc.)
-syncDirFiles(path.join(__dirname, 'scripts', 'hooks'), path.join(METAME_DIR, 'hooks'));
+const hooksUpdated = syncDirFiles(path.join(__dirname, 'scripts', 'hooks'), path.join(METAME_DIR, 'hooks'));
+
+const daemonCodeUpdated = scriptsUpdated || binUpdated || hooksUpdated;
+const shouldAutoRestartAfterDeploy = (() => {
+  const [cmd] = process.argv.slice(2);
+  if (!cmd) return true;
+  if (cmd === 'daemon') return false;
+  if (['start', 'stop', 'restart', 'status', 'logs'].includes(cmd)) return false;
+  return ['codex', 'continue', 'sync'].includes(cmd);
+})();
+if (daemonCodeUpdated && shouldAutoRestartAfterDeploy) {
+  const restartResult = requestDaemonRestart({ reason: 'deploy-sync' });
+  if (restartResult.ok) {
+    console.log(`${icon("reload")} Daemon restart requested after deploy${restartResult.pid ? ` (PID: ${restartResult.pid})` : ''}.`);
+  } else if (restartResult.status === 'not_running') {
+    console.log(`${icon("info")}  Deploy finished. Daemon not running, so restart was skipped.`);
+  } else {
+    console.log(`${icon("warn")}  Deploy finished, but daemon restart failed: ${restartResult.error || restartResult.status}`);
+  }
+}
 
 // ---------------------------------------------------------
 // Deploy bundled skills to ~/.claude/skills/
@@ -1525,7 +1669,7 @@ if (isProvider) {
 // 5.7 DAEMON SUBCOMMANDS
 // ---------------------------------------------------------
 // Shorthand aliases: `metame start` → `metame daemon start`, etc.
-const DAEMON_SHORTCUTS = ['start', 'stop', 'status', 'logs'];
+const DAEMON_SHORTCUTS = ['start', 'stop', 'restart', 'status', 'logs'];
 if (DAEMON_SHORTCUTS.includes(process.argv[2])) {
   process.argv.splice(2, 0, 'daemon');
 }
@@ -1907,6 +2051,48 @@ WantedBy=default.target
     process.exit(0);
   }
 
+  if (subCmd === 'restart') {
+    if (!fs.existsSync(DAEMON_CONFIG)) {
+      console.error(`${icon("fail")} No config found. Run: metame daemon init`);
+      process.exit(1);
+    }
+    if (!fs.existsSync(DAEMON_SCRIPT)) {
+      console.error(`${icon("fail")} daemon.js not found. Reinstall MetaMe.`);
+      process.exit(1);
+    }
+    const result = requestDaemonRestart({
+      reason: 'cli-restart',
+      daemonPidFile: DAEMON_PID,
+      daemonLockFile: DAEMON_LOCK,
+      daemonScript: DAEMON_SCRIPT,
+    });
+    if (result.ok) {
+      if (result.status === 'restarted') {
+        console.log(`${icon("ok")} Daemon restarted (old PID: ${result.pid}, new PID: ${result.nextPid})`);
+      } else {
+        console.log(`${icon("ok")} Daemon graceful restart requested (PID: ${result.pid})`);
+      }
+      process.exit(0);
+    }
+    if (result.status === 'not_running') {
+      console.log(`${icon("info")}  No daemon running. Starting a fresh daemon instead.`);
+      const isMac = process.platform === 'darwin';
+      const cmd = isMac ? 'caffeinate' : process.execPath;
+      const args = isMac ? ['-i', process.execPath, DAEMON_SCRIPT] : [DAEMON_SCRIPT];
+      const bg = spawn(cmd, args, {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        env: { ...process.env, HOME: HOME_DIR, METAME_ROOT: __dirname, METAME_DEPLOY_RESTART_REASON: 'cli-restart' },
+      });
+      bg.unref();
+      console.log(`${icon("ok")} MetaMe daemon started (PID: ${bg.pid})`);
+      process.exit(0);
+    }
+    console.error(`${icon("fail")} Daemon restart failed: ${result.error || result.status}`);
+    process.exit(1);
+  }
+
   if (subCmd === 'status') {
     let state = {};
     try { state = JSON.parse(fs.readFileSync(DAEMON_STATE, 'utf8')); } catch { /* empty */ }
@@ -2010,6 +2196,7 @@ WantedBy=default.target
   console.log(`${icon("book")} Daemon Commands:`);
   console.log("   metame start                  — start background daemon");
   console.log("   metame stop                   — stop daemon");
+  console.log("   metame restart                — graceful restart daemon");
   console.log("   metame status                 — show status & budget");
   console.log("   metame logs                   — tail log file");
   console.log("   metame daemon init            — initialize config");
@@ -2073,58 +2260,48 @@ if (isCodex) {
 // ---------------------------------------------------------
 // 5.9 CONTINUE/SYNC — resume latest session from terminal
 // ---------------------------------------------------------
-// Usage: exit Claude first, then run `metame continue` from terminal.
-// Finds the most recent session and launches Claude with --resume.
+// Usage: exit current CLI first, then run `metame continue` from terminal.
+// Finds the most recent session across Claude/Codex and resumes with the matching engine.
 const isSync = process.argv.includes('sync') || process.argv.includes('continue');
 if (isSync) {
   const projectsRoot = path.join(HOME_DIR, '.claude', 'projects');
-  let bestSession = null;
-  try {
-    const cwd = process.cwd();
-    const projDir = path.join(projectsRoot, cwd.replace(/\//g, '-'));
-    const findLatest = (dir) => {
-      try {
-        return fs.readdirSync(dir)
-          .filter(f => f.endsWith('.jsonl'))
-          .map(f => ({ id: f.replace('.jsonl', ''), mtime: fs.statSync(path.join(dir, f)).mtimeMs }))
-          .sort((a, b) => b.mtime - a.mtime)[0] || null;
-      } catch { return null; }
-    };
-    const localBest = findLatest(projDir);
-    // Always scan globally to find the absolute most recent session
-    // (phone /continue may have worked in a different project's session)
-    let globalBest = null;
-    try {
-      for (const d of fs.readdirSync(projectsRoot)) {
-        const s = findLatest(path.join(projectsRoot, d));
-        if (s && (!globalBest || s.mtime > globalBest.mtime)) globalBest = s;
-      }
-    } catch { /* ignore */ }
-    // Use global best if it's more recent than local; prefer local otherwise
-    if (localBest && globalBest && globalBest.mtime > localBest.mtime) {
-      bestSession = globalBest;
-      console.log(`  (global session is newer than local — using global)`);
-    } else {
-      bestSession = localBest || globalBest;
-    }
-  } catch { }
+  const cwd = process.cwd();
+  const candidates = [
+    readLatestClaudeSession(projectsRoot, cwd),
+    readLatestCodexSession(cwd),
+  ].filter(Boolean);
+  const bestSession = candidates.sort((a, b) => (b.mtime || 0) - (a.mtime || 0))[0] || null;
 
   if (!bestSession) {
     console.error('No session found.');
     process.exit(1);
   }
 
+  if (bestSession.scope === 'global') {
+    console.log('  (global session is newer than local — using global)');
+  }
   console.log(`\n${icon("reload")} Resuming session ${bestSession.id.slice(0, 8)}...\n`);
-  const providerEnv = (() => { try { return require(path.join(__dirname, 'scripts', 'providers.js')).buildActiveEnv(); } catch { return {}; } })();
-  const resumeArgs = ['--resume', bestSession.id];
-  if (daemonCfg.dangerously_skip_permissions) resumeArgs.push('--dangerously-skip-permissions');
-  const syncChild = spawnClaude(resumeArgs, {
-    stdio: 'inherit',
-    env: { ...process.env, ...providerEnv, METAME_ACTIVE_SESSION: 'true' }
-  });
-  syncChild.on('error', () => {
-    console.error("Could not launch 'claude'. Is Claude Code installed?");
-  });
+  let syncChild;
+  if (bestSession.engine === 'codex') {
+    syncChild = spawnCodex(['exec', 'resume', bestSession.id], {
+      stdio: 'inherit',
+      env: { ...process.env, METAME_ACTIVE_SESSION: 'true' }
+    });
+    syncChild.on('error', () => {
+      console.error("Could not launch 'codex'. Is Codex CLI installed?");
+    });
+  } else {
+    const providerEnv = (() => { try { return require(path.join(__dirname, 'scripts', 'providers.js')).buildActiveEnv(); } catch { return {}; } })();
+    const resumeArgs = ['--resume', bestSession.id];
+    if (daemonCfg.dangerously_skip_permissions) resumeArgs.push('--dangerously-skip-permissions');
+    syncChild = spawnClaude(resumeArgs, {
+      stdio: 'inherit',
+      env: { ...process.env, ...providerEnv, METAME_ACTIVE_SESSION: 'true' }
+    });
+    syncChild.on('error', () => {
+      console.error("Could not launch 'claude'. Is Claude Code installed?");
+    });
+  }
   syncChild.on('close', (c) => process.exit(c || 0));
   return;
 }

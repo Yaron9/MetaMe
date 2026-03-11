@@ -80,6 +80,7 @@ function createFakeCodexProcess(events, exitCode = 0) {
 
 describe('Codex E2E Simulation — Mobile User Flow', () => {
   let state, spawnCalls, bot, config;
+  const sessionKey = '_agent_my_codex_project';
 
   beforeEach(() => {
     state = { sessions: {} };
@@ -154,6 +155,13 @@ describe('Codex E2E Simulation — Mobile User Flow', () => {
       findSessionFile: () => null,
       listRecentSessions: () => [],
       getSession: (chatId) => state.sessions[chatId] || null,
+      getSessionForEngine: (chatId, engine) => {
+        const session = state.sessions[chatId] || null;
+        if (!session) return null;
+        if (!session.engines) return session.engine === engine ? session : null;
+        const slot = session.engines[engine];
+        return slot ? { ...session, ...slot, engine } : null;
+      },
       createSession: (chatId, cwd, name, eng) => {
         const s = { id: `new-${Date.now()}`, cwd: cwd || '/tmp', started: false, engine: eng || 'claude' };
         state.sessions[chatId] = s;
@@ -198,7 +206,7 @@ describe('Codex E2E Simulation — Mobile User Flow', () => {
     assert.ok(bot.messages.length >= 1, 'should have sent messages to user');
 
     // 3. Session thread_id was persisted
-    const session = state.sessions['chat-codex-user'];
+    const session = state.sessions[sessionKey];
     console.log('\n=== Session State ===');
     console.log(JSON.stringify(session, null, 2));
     assert.ok(session, 'session should exist');
@@ -213,11 +221,14 @@ describe('Codex E2E Simulation — Mobile User Flow', () => {
 
   it('uses resume with thread_id on second message', async () => {
     // Pre-set session state as if first message already happened
-    state.sessions['chat-codex-user'] = {
+    state.sessions[sessionKey] = {
       id: 'thread-abc-123',
       cwd: '/tmp/codex-workspace',
       started: true,
       engine: 'codex',
+      sandboxMode: 'danger-full-access',
+      approvalPolicy: 'never',
+      permissionMode: 'danger-full-access',
     };
 
     const codexStreamEvents = [
@@ -264,6 +275,13 @@ describe('Codex E2E Simulation — Mobile User Flow', () => {
       findSessionFile: () => null,
       listRecentSessions: () => [],
       getSession: (chatId) => state.sessions[chatId] || null,
+      getSessionForEngine: (chatId, engine) => {
+        const session = state.sessions[chatId] || null;
+        if (!session) return null;
+        if (!session.engines) return session.engine === engine ? session : null;
+        const slot = session.engines[engine];
+        return slot ? { ...session, ...slot, engine } : null;
+      },
       createSession: (chatId, cwd, name, eng) => {
         const s = { id: `new-${Date.now()}`, cwd: cwd || '/tmp', started: false, engine: eng || 'claude' };
         state.sessions[chatId] = s;

@@ -41,6 +41,19 @@ describe('daemon-engine-runtime args builder', () => {
     assert.ok(!args.includes('--full-auto'));
   });
 
+  it('maps codex config into explicit sandbox and approval flags', () => {
+    const args = _private.buildCodexArgs({
+      model: 'gpt-5-codex',
+      daemonCfg: { codex: { sandbox_mode: 'workspace-write', approval_policy: 'on-request' } },
+      session: {},
+    });
+    assert.ok(args.includes('-s'));
+    assert.ok(args.includes('workspace-write'));
+    assert.ok(args.includes('--ask-for-approval'));
+    assert.ok(args.includes('on-request'));
+    assert.ok(!args.includes('--dangerously-bypass-approvals-and-sandbox'));
+  });
+
   it('strips nested-session env vars from codex runtime', () => {
     const env = _private.buildCodexEnv({
       CODEX_THREAD_ID: 'tid',
