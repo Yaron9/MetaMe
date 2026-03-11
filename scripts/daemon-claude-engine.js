@@ -1011,7 +1011,31 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       }
 
       // Build engine command — prefer per-engine model, fall back to legacy daemon.model
-      const model = resolveEngineModel(runtime.name, daemonCfg, boundProject && boundProject.model);
+      let model = resolveEngineModel(runtime.name, daemonCfg, boundProject && boundProject.model);
+
+      // When resuming a Claude session, use the same model that created it.
+      // Thinking block signatures are model-specific: resuming with a different model
+      // causes "Invalid signature in thinking block" (API 400).
+      if (runtime.name === 'claude' && session.started && session.id) {
+        try {
+          const sessionFile = findSessionFile && findSessionFile(session.id);
+          if (sessionFile) {
+            const lines = fs.readFileSync(sessionFile, 'utf8').split('\n').filter(Boolean);
+            for (const line of lines.slice(0, 30)) {
+              const entry = JSON.parse(line);
+              const sessionModel = entry && entry.message && entry.message.model;
+              if (sessionModel && sessionModel !== '<synthetic>') {
+                if (sessionModel !== model) {
+                  log('INFO', `[ModelPin] resuming ${session.id.slice(0, 8)} with original model ${sessionModel} (configured: ${model})`);
+                }
+                model = sessionModel;
+                break;
+              }
+            }
+          }
+        } catch { /* non-critical — fall back to configured model */ }
+      }
+
       const args = runtime.buildArgs({
         model,
         readOnly,
