@@ -60,6 +60,7 @@ function createClaudeEngine(deps) {
     writeSessionName,
     markSessionStarted,
     isEngineSessionValid,
+    getCodexSessionPermissionMode,
     gitCheckpoint,
     gitCheckpointAsync,
     recordTokens,
@@ -203,6 +204,66 @@ function createClaudeEngine(deps) {
     // The current daemonHint template ends with a single trailing `]`.
     out = out.replace(/\]\s*$/, '');
     return out;
+  }
+
+  function getCodexPermissionMode(readOnly) {
+    return readOnly ? 'read-only' : 'writable';
+  }
+
+  function shouldStartFreshCodexSessionForPermissions(session, readOnly) {
+    if (!session || !session.started || !session.id || session.id === '__continue__') return false;
+    return String(session.permissionMode || '').trim() !== getCodexPermissionMode(readOnly);
+  }
+
+  function getActualCodexPermissionMode(session) {
+    if (!session || !session.id || typeof getCodexSessionPermissionMode !== 'function') return null;
+    return getCodexSessionPermissionMode(session.id);
+  }
+
+  function inspectClaudeResumeSession(session) {
+    const result = {
+      shouldResume: true,
+      modelPin: null,
+      reason: '',
+    };
+    if (!session || !session.started || !session.id) return result;
+    try {
+      const sessionFile = findSessionFile && findSessionFile(session.id);
+      if (!sessionFile) return result;
+      const lines = fs.readFileSync(sessionFile, 'utf8').split('\n').filter(Boolean);
+      for (const line of lines.slice(0, 30)) {
+        const entry = JSON.parse(line);
+        const sessionModel = entry && entry.message && entry.message.model;
+        if (!sessionModel || sessionModel === '<synthetic>') continue;
+        if (!sessionModel.startsWith('claude-')) {
+          return {
+            shouldResume: false,
+            modelPin: null,
+            reason: 'non-claude-session',
+          };
+        }
+        return {
+          shouldResume: true,
+          modelPin: sessionModel,
+          reason: '',
+        };
+      }
+    } catch {
+      return result;
+    }
+    return result;
+  }
+
+  function isClaudeThinkingSignatureError(errMsg) {
+    const msg = String(errMsg || '');
+    return msg.includes('Invalid signature') || msg.includes('thinking block');
+  }
+
+  function formatClaudeResumeFallbackUserMessage(retryError) {
+    if (retryError) {
+      return '⚠️ 旧 session 无法继续，已自动切换到新 session，但本次请求仍失败。';
+    }
+    return '';
   }
 
 
@@ -961,7 +1022,13 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         // No saved state for this chatId: start a fresh session.
         // Note: daemon_state.json persists across restarts, so this only happens on truly first use
         // or after an explicit /new command.
-        createSession(sessionChatId, boundCwd || undefined, boundProject && boundProject.name ? boundProject.name : '', boundEngineName);
+        createSession(
+          sessionChatId,
+          boundCwd || undefined,
+          boundProject && boundProject.name ? boundProject.name : '',
+          boundEngineName,
+          boundEngineName === 'codex' ? { permissionMode: getCodexPermissionMode(readOnly) } : undefined
+        );
       }
 
       // Resolve flat view for current engine (id + started are engine-specific; cwd is shared)
@@ -979,7 +1046,47 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           if (!isVirtualAgent) {
             await bot.sendMessage(chatId, '⚠️ 上次 session 已失效，已自动开启新 session。').catch(() => { });
           }
-          session = createSession(sessionChatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', engineName);
+          session = createSession(
+            sessionChatId,
+            session.cwd,
+            boundProject && boundProject.name ? boundProject.name : '',
+            engineName,
+            engineName === 'codex' ? { permissionMode: getCodexPermissionMode(readOnly) } : undefined
+          );
+        }
+      }
+
+      if (runtime.name === 'codex' && shouldStartFreshCodexSessionForPermissions(session, readOnly)) {
+        const requestedPermissionMode = getCodexPermissionMode(readOnly);
+        const priorPermissionMode = String(session.permissionMode || 'unknown');
+        log('WARN', `Codex session ${session.id.slice(0, 8)} permission mismatch for ${sessionChatId}: ${priorPermissionMode} -> ${requestedPermissionMode}; starting fresh session`);
+        if (!isVirtualAgent) {
+          await bot.sendMessage(chatId, '⚠️ 当前 Codex session 的权限模式不匹配，已自动开启新 session。').catch(() => { });
+        }
+        session = createSession(
+          sessionChatId,
+          session.cwd,
+          boundProject && boundProject.name ? boundProject.name : '',
+          'codex',
+          { permissionMode: requestedPermissionMode }
+        );
+      }
+
+      if (runtime.name === 'codex' && session.started && session.id) {
+        const actualPermissionMode = getActualCodexPermissionMode(session);
+        const requestedPermissionMode = getCodexPermissionMode(readOnly);
+        if (actualPermissionMode && actualPermissionMode !== requestedPermissionMode) {
+          log('WARN', `Codex session ${session.id.slice(0, 8)} actual sandbox mismatch for ${sessionChatId}: ${actualPermissionMode} -> ${requestedPermissionMode}; starting fresh session`);
+          if (!isVirtualAgent) {
+            await bot.sendMessage(chatId, '⚠️ 当前 Codex session 的真实沙箱权限不匹配，已自动开启新 session。').catch(() => { });
+          }
+          session = createSession(
+            sessionChatId,
+            session.cwd,
+            boundProject && boundProject.name ? boundProject.name : '',
+            'codex',
+            { permissionMode: requestedPermissionMode }
+          );
         }
       }
 
@@ -1013,27 +1120,20 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       // Build engine command — prefer per-engine model, fall back to legacy daemon.model
       let model = resolveEngineModel(runtime.name, daemonCfg, boundProject && boundProject.model);
 
-      // When resuming a Claude session, use the same model that created it.
-      // Thinking block signatures are model-specific: resuming with a different model
-      // causes "Invalid signature in thinking block" (API 400).
+      // When resuming a Claude session, inspect the original model first.
+      // Thinking block signatures are model-specific; non-Claude JSONL sessions
+      // must not be resumed as Claude.
       if (runtime.name === 'claude' && session.started && session.id) {
-        try {
-          const sessionFile = findSessionFile && findSessionFile(session.id);
-          if (sessionFile) {
-            const lines = fs.readFileSync(sessionFile, 'utf8').split('\n').filter(Boolean);
-            for (const line of lines.slice(0, 30)) {
-              const entry = JSON.parse(line);
-              const sessionModel = entry && entry.message && entry.message.model;
-              if (sessionModel && sessionModel !== '<synthetic>') {
-                if (sessionModel !== model) {
-                  log('INFO', `[ModelPin] resuming ${session.id.slice(0, 8)} with original model ${sessionModel} (configured: ${model})`);
-                }
-                model = sessionModel;
-                break;
-              }
-            }
+        const resumeInspection = inspectClaudeResumeSession(session);
+        if (resumeInspection.shouldResume === false) {
+          log('INFO', `[ModelPin] session ${session.id.slice(0, 8)} flagged as ${resumeInspection.reason}; starting fresh Claude session`);
+          session = createSession(sessionChatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', runtime.name);
+        } else if (resumeInspection.modelPin) {
+          if (resumeInspection.modelPin !== model) {
+            log('INFO', `[ModelPin] resuming ${session.id.slice(0, 8)} with original model ${resumeInspection.modelPin} (configured: ${model})`);
           }
-        } catch { /* non-critical — fall back to configured model */ }
+          model = resumeInspection.modelPin;
+        }
       }
 
       const args = runtime.buildArgs({
@@ -1186,6 +1286,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       // Task-specific rules (3-5) are injected only when isTaskIntent() returns true (~250 token saving for casual chat)
       let daemonHint = '';
       if (!session.started) {
+        const mentorRadarHint = (config && config.daemon && config.daemon.mentor && config.daemon.mentor.enabled)
+          ? '\n   When you observe the user is clearly expert or beginner in a domain, note it in your response and suggest: "要不要把你的 {domain} 水平 ({level}) 记录到能力雷达？"'
+          : '';
         const taskRules = isTaskIntent(prompt) ? `
 3. Knowledge retrieval: When you need context about a specific topic, past decisions, or lessons, call:
    node ~/.metame/memory-search.js "关键词1" "keyword2"
@@ -1195,7 +1298,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
    node ~/.metame/memory-write.js "Entity.sub" "relation_type" "value (20-300 chars)"
    Valid relations: tech_decision, bug_lesson, arch_convention, config_fact, config_change, workflow_rule, project_milestone
    Only write verified facts. Do not write speculative or process-description entries.
-   When you observe the user is clearly expert or beginner in a domain, note it in your response and suggest: "要不要把你的 {domain} 水平 ({level}) 记录到能力雷达？"
+${mentorRadarHint}
 5. Task handoff: When suspending a multi-step task or handing off to another agent, write current status to ~/.metame/memory/now/${projectKey || 'default'}.md using:
    \`mkdir -p ~/.metame/memory/now && printf '%s\\n' "## Current Task" "{task}" "" "## Progress" "{progress}" "" "## Next Step" "{next}" > ~/.metame/memory/now/${projectKey || 'default'}.md\`
    Keep it under 200 words. Clear it when the task is fully complete by running: \`> ~/.metame/memory/now/${projectKey || 'default'}.md\`` : '';
@@ -1380,7 +1483,15 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         };
         await patchSessionSerialized(sessionChatId, (cur) => {
           const engines = { ...(cur.engines || {}) };
-          engines[runtime.name] = { ...(engines[runtime.name] || {}), id: safeNextId, started: true };
+          const actualPermissionMode = runtime.name === 'codex'
+            ? getCodexSessionPermissionMode(safeNextId) || getCodexPermissionMode(readOnly)
+            : null;
+          engines[runtime.name] = {
+            ...(engines[runtime.name] || {}),
+            id: safeNextId,
+            started: true,
+            ...(runtime.name === 'codex' ? { permissionMode: actualPermissionMode } : {}),
+          };
           return { ...cur, cwd: session.cwd || cur.cwd || HOME, engines };
         });
         if (runtime.name === 'codex' && wasStarted && prevSessionId && prevSessionId !== safeNextId && prevSessionId !== '__continue__') {
@@ -1429,7 +1540,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             sessionChatId,
             session.cwd,
             boundProject && boundProject.name ? boundProject.name : '',
-            'codex'
+            'codex',
+            { permissionMode: getCodexPermissionMode(readOnly) }
           );
           const retryArgs = runtime.buildArgs({
             model,
@@ -1678,9 +1790,10 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         log('ERROR', `ask${runtime.name === 'codex' ? 'Codex' : 'Claude'} failed for ${chatId}: ${errMsg.slice(0, 300)} (${errorCode || 'NO_CODE'})`);
 
         // If session not found / locked / thinking signature invalid — create new and retry once (Claude path)
-        const _isSessionResumeFail = errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use') || errMsg.includes('Invalid signature') || errMsg.includes('thinking block');
+        const _isThinkingSignatureError = isClaudeThinkingSignatureError(errMsg);
+        const _isSessionResumeFail = errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use') || _isThinkingSignatureError;
         if (runtime.name === 'claude' && _isSessionResumeFail) {
-          const _reason = errMsg.includes('already in use') ? 'locked' : errMsg.includes('Invalid signature') || errMsg.includes('thinking block') ? 'thinking-signature-invalid' : 'not found';
+          const _reason = errMsg.includes('already in use') ? 'locked' : _isThinkingSignatureError ? 'thinking-signature-invalid' : 'not found';
           log('WARN', `Session ${session.id} unusable (${_reason}), creating new`);
           session = createSession(sessionChatId, session.cwd, '', runtime.name);
 
@@ -1712,7 +1825,10 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             return { ok: true };
           } else {
             log('ERROR', `askClaude retry failed: ${(retry.error || '').slice(0, 200)}`);
-            try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
+            const retryUserMsg = _isThinkingSignatureError
+              ? formatClaudeResumeFallbackUserMessage(retry.error || errMsg)
+              : userErrMsg;
+            try { await bot.sendMessage(chatId, retryUserMsg); } catch { /* */ }
             return { ok: false, error: retry.error || errMsg };
           }
         } else {
@@ -1759,6 +1875,12 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       shouldRetryCodexResumeFallback,
       formatEngineSpawnError,
       adaptDaemonHintForEngine,
+      getCodexPermissionMode,
+      getActualCodexPermissionMode,
+      shouldStartFreshCodexSessionForPermissions,
+      inspectClaudeResumeSession,
+      isClaudeThinkingSignatureError,
+      formatClaudeResumeFallbackUserMessage,
       canRetryCodexResume,
       markCodexResumeRetried,
       CODEX_RESUME_RETRY_WINDOW_MS,

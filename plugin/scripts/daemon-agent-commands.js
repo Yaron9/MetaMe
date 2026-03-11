@@ -325,16 +325,23 @@ function createAgentCommandHandler(deps) {
 
       const state2 = loadState();
       const cfgForEngine = loadConfig();
-      const engineByTargetCwd = inferEngineByCwd(cfgForEngine, cwd) || getDefaultEngine();
       // For bound chats, write session to virtual chatId (_agent_{key}) so askClaude picks it up
       const resumeChatAgentMap = { ...(cfgForEngine.telegram ? cfgForEngine.telegram.chat_agent_map : {}), ...(cfgForEngine.feishu ? cfgForEngine.feishu.chat_agent_map : {}) };
       const resumeBoundKey = resumeChatAgentMap[String(chatId)];
       const sessionKey = resumeBoundKey ? `_agent_${resumeBoundKey}` : String(chatId);
       const existing = state2.sessions[sessionKey] || {};
+      const currentEngine = normalizeEngineName(
+        existing.engine
+        || (existing.engines && Object.entries(existing.engines).find(([, slot]) => slot && slot.started)?.[0])
+      );
+      const engineByTargetCwd = inferEngineByCwd(cfgForEngine, cwd) || currentEngine;
       const existingEngines = existing.engines || {};
       state2.sessions[sessionKey] = {
         ...existing,
         cwd,
+        id: sessionId,
+        started: true,
+        engine: engineByTargetCwd,
         engines: { ...existingEngines, [engineByTargetCwd]: { id: sessionId, started: true } },
       };
       saveState(state2);

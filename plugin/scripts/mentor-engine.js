@@ -54,6 +54,11 @@ function saveRuntime(runtime) {
   fs.renameSync(tmp, file);
 }
 
+function clearRuntime() {
+  saveRuntime(defaultRuntime());
+  return defaultRuntime();
+}
+
 function normalizeText(input) {
   return String(input || '').trim();
 }
@@ -394,6 +399,7 @@ module.exports = {
   gcExpiredDebts,
   detectPatterns,
   getRuntimeStatus,
+  clearRuntime,
   _private: {
     runtimeFilePath,
     loadRuntime,

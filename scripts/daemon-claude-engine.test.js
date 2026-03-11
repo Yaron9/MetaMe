@@ -38,10 +38,13 @@ function createEngineWithState(state) {
     findSessionFile: () => null,
     listRecentSessions: () => [],
     getSession: () => null,
+    getSessionForEngine: () => null,
     createSession: () => ({ id: 'sid', cwd: '/tmp', started: false, engine: 'claude' }),
     getSessionName: () => '',
     writeSessionName: () => {},
     markSessionStarted: () => {},
+    isEngineSessionValid: () => true,
+    getCodexSessionPermissionMode: () => null,
     gitCheckpoint: () => {},
     recordTokens: () => {},
     skillEvolution: null,
@@ -133,5 +136,201 @@ describe('daemon-claude-engine private helpers', () => {
     const out = engine._private.adaptDaemonHintForEngine(src, 'codex');
     assert.match(out, /System hints \(internal/);
     assert.equal(out.trim().endsWith(']'), false);
+  });
+
+  it('forces fresh codex session when permission mode mismatches', () => {
+    const state = { sessions: {} };
+    const engine = createEngineWithState(state);
+    assert.equal(
+      engine._private.shouldStartFreshCodexSessionForPermissions(
+        { started: true, id: 'sid-1', permissionMode: 'read-only' },
+        false
+      ),
+      true
+    );
+    assert.equal(
+      engine._private.shouldStartFreshCodexSessionForPermissions(
+        { started: true, id: 'sid-1', permissionMode: 'writable' },
+        false
+      ),
+      false
+    );
+  });
+
+  it('skips claude resume when session JSONL was created by non-claude model', () => {
+    const state = { sessions: {} };
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-engine-'));
+    const sessionFile = path.join(tempDir, 'session.jsonl');
+    fs.writeFileSync(sessionFile, `${JSON.stringify({ message: { model: 'gpt-5', cwd: '/tmp/project' } })}\n`, 'utf8');
+
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: () => { throw new Error('spawn not used in this test'); },
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses: new Map(),
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({}),
+      loadState: () => state,
+      saveState: () => {},
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => {},
+      findSessionFile: () => sessionFile,
+      listRecentSessions: () => [],
+      getSession: () => null,
+      getSessionForEngine: () => null,
+      createSession: () => ({ id: 'sid', cwd: '/tmp', started: false, engine: 'claude' }),
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      gitCheckpoint: () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getEngineRuntime: () => ({
+        name: 'claude',
+        binary: 'claude',
+        buildArgs: () => ['-p'],
+        buildEnv: () => ({ ...process.env }),
+        parseStreamEvent: () => [],
+        classifyError: () => null,
+        killSignal: 'SIGTERM',
+        timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: 2000 },
+      }),
+    });
+
+    assert.deepEqual(
+      engine._private.inspectClaudeResumeSession({ started: true, id: 'sid-1' }),
+      { shouldResume: false, modelPin: null, reason: 'non-claude-session' }
+    );
+  });
+
+  it('pins resumed claude session back to original model', () => {
+    const state = { sessions: {} };
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-engine-'));
+    const sessionFile = path.join(tempDir, 'session.jsonl');
+    fs.writeFileSync(sessionFile, `${JSON.stringify({ message: { model: 'claude-sonnet-4-20250514', cwd: '/tmp/project' } })}\n`, 'utf8');
+
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: () => { throw new Error('spawn not used in this test'); },
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses: new Map(),
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({}),
+      loadState: () => state,
+      saveState: () => {},
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => {},
+      findSessionFile: () => sessionFile,
+      listRecentSessions: () => [],
+      getSession: () => null,
+      getSessionForEngine: () => null,
+      createSession: () => ({ id: 'sid', cwd: '/tmp', started: false, engine: 'claude' }),
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      gitCheckpoint: () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getEngineRuntime: () => ({
+        name: 'claude',
+        binary: 'claude',
+        buildArgs: () => ['-p'],
+        buildEnv: () => ({ ...process.env }),
+        parseStreamEvent: () => [],
+        classifyError: () => null,
+        killSignal: 'SIGTERM',
+        timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: 2000 },
+      }),
+    });
+
+    assert.deepEqual(
+      engine._private.inspectClaudeResumeSession({ started: true, id: 'sid-1' }),
+      { shouldResume: true, modelPin: 'claude-sonnet-4-20250514', reason: '' }
+    );
+  });
+
+  it('reads actual codex permission mode from store helper', () => {
+    const state = { sessions: {} };
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: () => { throw new Error('spawn not used in this test'); },
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses: new Map(),
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({}),
+      loadState: () => state,
+      saveState: () => {},
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => {},
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: () => null,
+      getSessionForEngine: () => null,
+      createSession: () => ({ id: 'sid', cwd: '/tmp', started: false, engine: 'claude' }),
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      getCodexSessionPermissionMode: () => 'read-only',
+      gitCheckpoint: () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getEngineRuntime: () => ({
+        name: 'claude',
+        binary: 'claude',
+        buildArgs: () => ['-p'],
+        buildEnv: () => ({ ...process.env }),
+        parseStreamEvent: () => [],
+        classifyError: () => null,
+        killSignal: 'SIGTERM',
+        timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: 2000 },
+      }),
+    });
+
+    assert.equal(engine._private.getActualCodexPermissionMode({ id: 'thread-1' }), 'read-only');
   });
 });

@@ -41,6 +41,20 @@ describe('daemon-engine-runtime args builder', () => {
     assert.ok(!args.includes('--full-auto'));
   });
 
+  it('strips nested-session env vars from codex runtime', () => {
+    const env = _private.buildCodexEnv({
+      CODEX_THREAD_ID: 'tid',
+      METAME_ACTIVE_SESSION: 'true',
+      CLAUDE_CODE_SSE_PORT: '1234',
+      PATH: '/tmp/bin',
+    }, { metameProject: 'metame' });
+    assert.equal(env.CODEX_THREAD_ID, undefined);
+    assert.equal(env.METAME_ACTIVE_SESSION, undefined);
+    assert.equal(env.CLAUDE_CODE_SSE_PORT, undefined);
+    assert.equal(env.METAME_PROJECT, 'metame');
+    assert.equal(env.PATH, '/tmp/bin');
+  });
+
   it('builds claude args with read-only tools', () => {
     const args = _private.buildClaudeArgs({
       model: 'opus',

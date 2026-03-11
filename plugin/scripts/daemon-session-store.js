@@ -454,19 +454,29 @@ function createSessionStore(deps) {
     const safeEngine = String(engine || 'claude').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
     if (!raw.engines) return { cwd: raw.cwd, engine: safeEngine, id: raw.id || null, started: !!raw.started };
     const slot = raw.engines[safeEngine] || {};
-    return { cwd: raw.cwd, engine: safeEngine, id: slot.id || null, started: !!slot.started };
+    return {
+      cwd: raw.cwd,
+      engine: safeEngine,
+      ...slot,
+      id: slot.id || null,
+      started: !!slot.started,
+    };
   }
 
-  function createSession(chatId, cwd, name, engine = 'claude') {
+  function createSession(chatId, cwd, name, engine = 'claude', meta = {}) {
     const state = loadState();
     const safeEngine = String(engine || 'claude').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
     const safeCwd = sanitizeCwd(cwd);
     const sessionId = crypto.randomUUID();
     const existing = state.sessions[chatId] || {};
     const existingEngines = existing.engines || {};
+    const nextSlot = { id: sessionId, started: false };
+    if (safeEngine === 'codex' && meta && meta.permissionMode) {
+      nextSlot.permissionMode = String(meta.permissionMode);
+    }
     state.sessions[chatId] = {
       cwd: safeCwd,
-      engines: { ...existingEngines, [safeEngine]: { id: sessionId, started: false } },
+      engines: { ...existingEngines, [safeEngine]: nextSlot },
     };
     saveState(state);
     invalidateSessionCache();
@@ -581,6 +591,27 @@ function createSessionStore(deps) {
     return !!valid;
   }
 
+  function _readClaudeSessionMetadata(sessionFile) {
+    const content = fs.readFileSync(sessionFile, 'utf8');
+    const lines = content.split('\n').filter(l => l.trim());
+    const metadata = {
+      lines,
+      cwd: '',
+      model: '',
+    };
+    for (const line of lines.slice(0, 20)) {
+      try {
+        const entry = JSON.parse(line);
+        const fileCwd = entry.cwd || (entry.message && entry.message.cwd);
+        if (!metadata.cwd && fileCwd) metadata.cwd = fileCwd;
+        const sessionModel = entry && entry.message && entry.message.model;
+        if (!metadata.model && sessionModel && sessionModel !== '<synthetic>') metadata.model = sessionModel;
+        if (metadata.cwd && metadata.model) break;
+      } catch { /* skip non-JSON lines */ }
+    }
+    return metadata;
+  }
+
   // Claude backend: JSONL files under ~/.claude/projects/<hash>/
   // Best approach: read cwd directly from session file content (not from dir name)
   function _isClaudeSessionValid(sessionId, normCwd) {
@@ -588,10 +619,12 @@ function createSessionStore(deps) {
       const sessionFile = findSessionFile(sessionId);
       if (!sessionFile) return false;
 
-      // Try to read cwd from session JSONL file content (most reliable)
-      const content = fs.readFileSync(sessionFile, 'utf8');
-      const lines = content.split('\n').filter(l => l.trim());
-      for (const line of lines.slice(0, 20)) { // Check first 20 lines
+      // Try to read cwd/model from session JSONL file content (most reliable)
+      const metadata = _readClaudeSessionMetadata(sessionFile);
+      if (metadata.model && !metadata.model.startsWith('claude-')) return false;
+      if (metadata.cwd && path.resolve(metadata.cwd) === normCwd) return true;
+      if (metadata.cwd) return false;
+      for (const line of metadata.lines.slice(0, 20)) { // preserve tolerant parsing for malformed heads
         try {
           const entry = JSON.parse(line);
           const fileCwd = entry.cwd || (entry.message && entry.message.cwd);
@@ -645,6 +678,24 @@ function createSessionStore(deps) {
     }
   }
 
+  function getCodexSessionPermissionMode(sessionId) {
+    let db = null;
+    try {
+      if (!sessionId) return null;
+      const { DatabaseSync } = require('node:sqlite');
+      db = new DatabaseSync(CODEX_DB, { readonly: true });
+      const row = db.prepare('SELECT sandbox_policy FROM threads WHERE id = ?').get(sessionId);
+      db.close();
+      db = null;
+      if (!row || !row.sandbox_policy) return null;
+      const policy = JSON.parse(String(row.sandbox_policy));
+      return policy && policy.type === 'read-only' ? 'read-only' : 'writable';
+    } catch {
+      if (db) { try { db.close(); } catch { /* ignore */ } }
+      return null;
+    }
+  }
+
   function isEngineSessionValid(engine, sessionId, cwd) {
     if (!sessionId || !cwd || sessionId === '__continue__') return true;
     const normCwd = path.resolve(cwd);
@@ -678,6 +729,11 @@ function createSessionStore(deps) {
     markSessionStarted,
     getSessionRecentContext,
     isEngineSessionValid,
+    getCodexSessionPermissionMode,
+    _private: {
+      _readClaudeSessionMetadata,
+      _isClaudeSessionValid,
+    },
   };
 }
 

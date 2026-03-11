@@ -127,11 +127,13 @@ function tryRemoveExisting(filePath) {
  *   3. plain file copy (last resort; note: will not track future changes to target)
  */
 function createLinkOrMirror(targetPath, linkPath) {
-  const relativeTarget = path.relative(path.dirname(linkPath), targetPath) || path.basename(targetPath);
   tryRemoveExisting(linkPath);
 
   try {
-    fs.symlinkSync(relativeTarget, linkPath, 'file');
+    // Use absolute symlinks here: agent layer lives under ~/.metame while workspaces can
+    // sit on a different top-level tree (/var, /Volumes, etc). Relative links are brittle
+    // across those roots and have produced broken SOUL.md/MEMORY.md views.
+    fs.symlinkSync(targetPath, linkPath, 'file');
     return { mode: 'symlink', path: linkPath };
   } catch (symlinkErr) {
     const sameRoot = path.parse(targetPath).root.toLowerCase() === path.parse(linkPath).root.toLowerCase();

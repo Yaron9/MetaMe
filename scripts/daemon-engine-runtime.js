@@ -289,6 +289,18 @@ function buildCodexArgs(options = {}) {
   return args;
 }
 
+function buildCodexEnv(baseEnv = {}, { metameProject = '' } = {}) {
+  const env = { ...baseEnv, METAME_PROJECT: metameProject };
+  const strippedKeys = [
+    'CODEX_THREAD_ID',
+    'METAME_ACTIVE_SESSION',
+    'CLAUDE_CODE_SSE_PORT',
+  ];
+  for (const key of strippedKeys) delete env[key];
+  if (env.CODEX_HOME && !fs.existsSync(env.CODEX_HOME)) delete env.CODEX_HOME;
+  return env;
+}
+
 function createEngineRuntimeFactory(deps = {}) {
   const home = deps.HOME || os.homedir();
   const claudeBin = deps.CLAUDE_BIN || resolveBinary('claude', { ...deps, HOME: home });
@@ -308,12 +320,7 @@ function createEngineRuntimeFactory(deps = {}) {
         killSignal: 'SIGTERM',
         timeouts: { idleMs: 10 * 60 * 1000, toolMs: 25 * 60 * 1000, ceilingMs: 60 * 60 * 1000 },
         buildArgs: buildCodexArgs,
-        buildEnv: ({ metameProject = '' } = {}) => {
-          const env = { ...process.env, METAME_PROJECT: metameProject };
-          // Unset CODEX_HOME if it points to a non-existent path (corrupted env var)
-          if (env.CODEX_HOME && !fs.existsSync(env.CODEX_HOME)) delete env.CODEX_HOME;
-          return env;
-        },
+        buildEnv: ({ metameProject = '' } = {}) => buildCodexEnv(process.env, { metameProject }),
         parseStreamEvent: parseCodexStreamEvent,
         classifyError: classifyEngineError,
       };
@@ -354,6 +361,7 @@ module.exports = {
     parseCodexStreamEvent,
     buildClaudeArgs,
     buildCodexArgs,
+    buildCodexEnv,
     BUILTIN_CLAUDE_MODEL_VALUES,
   },
 };

@@ -1647,6 +1647,7 @@ const {
   markSessionStarted,
   watchSessionFiles,
   isEngineSessionValid,
+  getCodexSessionPermissionMode,
 } = createSessionStore({
   fs,
   path,
@@ -1934,6 +1935,7 @@ const { spawnClaudeAsync, askClaude } = createClaudeEngine({
   findSessionFile,
   listRecentSessions,
   isEngineSessionValid,
+  getCodexSessionPermissionMode,
   getSession,
   getSessionForEngine,
   createSession,
