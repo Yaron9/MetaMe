@@ -581,4 +581,63 @@ describe('daemon-admin-commands /mentor', () => {
     assert.equal(finalCfg.daemon.mentor.friction_level, 9);
     assert.equal(finalCfg.daemon.mentor.mode, 'intense');
   });
+
+  it('clears mentor runtime and hides historical status when turned off', async (t) => {
+    const sent = [];
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-mentor-off-'));
+    const runtimeFile = path.join(tmpDir, 'mentor_runtime.json');
+    const configFile = path.join(tmpDir, 'daemon.yaml');
+    const prevRuntimeEnv = process.env.METAME_MENTOR_RUNTIME;
+    const yaml = require('js-yaml');
+
+    t.after(() => {
+      if (prevRuntimeEnv === undefined) delete process.env.METAME_MENTOR_RUNTIME;
+      else process.env.METAME_MENTOR_RUNTIME = prevRuntimeEnv;
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    });
+
+    process.env.METAME_MENTOR_RUNTIME = runtimeFile;
+    fs.writeFileSync(runtimeFile, JSON.stringify({
+      emotion_breaker_until: Date.now() + 60000,
+      debts: [{ project_id: 'proj_x', topic: 'old', expires_at: Date.now() + 60000 }],
+      last_fatigue_alert: Date.now(),
+      last_pattern_check: Date.now(),
+    }, null, 2), 'utf8');
+    fs.writeFileSync(configFile, yaml.dump({
+      daemon: { model: 'opus', mentor: { enabled: true, friction_level: 5, mode: 'active' } },
+    }), 'utf8');
+
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        yaml,
+        CONFIG_FILE: configFile,
+        loadConfig: () => yaml.load(fs.readFileSync(configFile, 'utf8')) || {},
+        writeConfigSafe: (cfg) => fs.writeFileSync(configFile, yaml.dump(cfg), 'utf8'),
+      }
+    );
+    const bot = {
+      sendMessage: async (_chatId, text) => { sent.push(String(text)); },
+    };
+
+    let res = await handleAdminCommand({
+      bot, chatId: 'mobile-user-mentor-off', text: '/mentor off', config: {}, state: { tasks: {}, budget: { tokens_used: 0 } },
+    });
+    assert.equal(res.handled, true);
+    assert.match(sent[sent.length - 1], /disabled/i);
+
+    res = await handleAdminCommand({
+      bot, chatId: 'mobile-user-mentor-off', text: '/mentor status', config: {}, state: { tasks: {}, budget: { tokens_used: 0 } },
+    });
+    assert.equal(res.handled, true);
+    assert.match(sent[sent.length - 1], /Mentor: OFF/);
+    assert.match(sent[sent.length - 1], /Debts: 0/);
+    assert.match(sent[sent.length - 1], /Emotion cooldown: 0s/);
+
+    const runtime = JSON.parse(fs.readFileSync(runtimeFile, 'utf8'));
+    assert.deepEqual(runtime.debts, []);
+    assert.equal(runtime.emotion_breaker_until, null);
+    assert.equal(runtime.last_fatigue_alert, null);
+    assert.equal(runtime.last_pattern_check, null);
+  });
 });

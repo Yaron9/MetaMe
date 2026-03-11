@@ -963,7 +963,7 @@ function createAdminCommandHandler(deps) {
         const arg = text.slice('/mentor'.length).trim();
 
         if (!arg || arg === 'status') {
-          const status = mentorEngine && typeof mentorEngine.getRuntimeStatus === 'function'
+          const status = mentorCfg.enabled && mentorEngine && typeof mentorEngine.getRuntimeStatus === 'function'
             ? mentorEngine.getRuntimeStatus()
             : { debt_count: 0, cooldown_remaining_ms: 0 };
           const mode = String(mentorCfg.mode || modeFromLevel(mentorCfg.friction_level));
@@ -983,6 +983,9 @@ function createAdminCommandHandler(deps) {
 
         if (arg === 'on' || arg === 'off') {
           mentorCfg.enabled = arg === 'on';
+          if (!mentorCfg.enabled && mentorEngine && typeof mentorEngine.clearRuntime === 'function') {
+            mentorEngine.clearRuntime();
+          }
           writeConfigSafe(cfg);
           config = loadConfig();
           await bot.sendMessage(chatId, mentorCfg.enabled
