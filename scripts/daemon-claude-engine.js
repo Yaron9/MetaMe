@@ -1653,9 +1653,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
           : `Error: ${errMsg.slice(0, 200)}`;
         log('ERROR', `ask${runtime.name === 'codex' ? 'Codex' : 'Claude'} failed for ${chatId}: ${errMsg.slice(0, 300)} (${errorCode || 'NO_CODE'})`);
 
-        // If session not found (expired/deleted), create new and retry once (Claude path)
-        if (runtime.name === 'claude' && (errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use'))) {
-          log('WARN', `Session ${session.id} unusable (${errMsg.includes('already in use') ? 'locked' : 'not found'}), creating new`);
+        // If session not found / locked / thinking signature invalid — create new and retry once (Claude path)
+        const _isSessionResumeFail = errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use') || errMsg.includes('Invalid signature') || errMsg.includes('thinking block');
+        if (runtime.name === 'claude' && _isSessionResumeFail) {
+          const _reason = errMsg.includes('already in use') ? 'locked' : errMsg.includes('Invalid signature') || errMsg.includes('thinking block') ? 'thinking-signature-invalid' : 'not found';
+          log('WARN', `Session ${session.id} unusable (${_reason}), creating new`);
           session = createSession(sessionChatId, session.cwd, '', runtime.name);
 
           const retryArgs = runtime.buildArgs({
