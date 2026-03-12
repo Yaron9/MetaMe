@@ -82,4 +82,33 @@ describe('dispatch receiver task cards', () => {
     assert.match(card.body, /发起: 👤 用户/);
     assert.doesNotMatch(card.body, /claude_session/);
   });
+
+  it('builds daemon dispatch prompts with scoped now context for direct and team tasks', () => {
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-daemon-prompt-'));
+    const nowDir = path.join(baseDir, 'memory', 'now');
+    fs.mkdirSync(nowDir, { recursive: true });
+    fs.writeFileSync(path.join(nowDir, 'builder.md'), 'PRIVATE builder progress', 'utf8');
+    fs.writeFileSync(path.join(nowDir, 'shared.md'), 'SHARED team progress', 'utf8');
+    const directPrompt = __test.buildDispatchPrompt('builder', {
+      payload: { prompt: '修一下登录超时' },
+    }, null, baseDir);
+    assert.match(directPrompt, /PRIVATE builder progress/);
+    assert.doesNotMatch(directPrompt, /SHARED team progress/);
+
+    const teamPrompt = __test.buildDispatchPrompt('builder', {
+      payload: { prompt: '团队继续推进登录修复' },
+    }, {
+      task_id: 't_demo',
+      scope_id: 'epic_auth',
+      task_kind: 'team',
+      from_agent: 'user',
+      to_agent: 'builder',
+      goal: '团队继续推进登录修复',
+    }, baseDir);
+    assert.match(teamPrompt, /PRIVATE builder progress/);
+    assert.match(teamPrompt, /SHARED team progress/);
+  });
 });

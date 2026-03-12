@@ -148,7 +148,7 @@ const { createSessionCommandHandler } = require('./daemon-session-commands');
 const { createSessionStore } = require('./daemon-session-store');
 const { createCheckpointUtils } = require('./daemon-checkpoints');
 const { createBridgeStarter } = require('./daemon-bridges');
-const { buildTeamRosterHint, resolveDispatchActor, updateDispatchContextFiles } = require('./team-dispatch');
+const { buildTeamRosterHint, buildEnrichedPrompt, resolveDispatchActor, updateDispatchContextFiles } = require('./team-dispatch');
 const { createFileBrowser } = require('./daemon-file-browser');
 const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lifecycle');
 const { repairAgentLayer } = require('./agent-layer');
@@ -877,9 +877,7 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
     log('WARN', `Failed to update dispatch context files: ${e.message}`);
   }
 
-  const rawPrompt = envelope
-    ? buildPromptFromTaskEnvelope(envelope, fullMsg.payload.prompt || fullMsg.payload.title || '')
-    : (fullMsg.payload.prompt || fullMsg.payload.title || 'No prompt provided');
+  const rawPrompt = buildDispatchPrompt(targetProject, fullMsg, envelope);
 
   // Inject sender identity when dispatched by another agent (not directly from user)
   const userSources = new Set(['unknown', 'claude_session', '_claude_session', 'user']);
@@ -1201,6 +1199,18 @@ function appendTeamTaskResumeHint(text, taskId, scopeId) {
   const hint = buildTeamTaskResumeHint(taskId, scopeId);
   if (!hint) return base;
   return `${base}${hint}`;
+}
+
+function buildDispatchPrompt(targetProject, fullMsg, envelope, metameDir = METAME_DIR) {
+  const promptBody = buildEnrichedPrompt(
+    targetProject,
+    fullMsg && fullMsg.payload ? (fullMsg.payload.prompt || fullMsg.payload.title || 'No prompt provided') : 'No prompt provided',
+    metameDir,
+    { includeShared: !!(envelope && envelope.task_kind === 'team') }
+  );
+  return envelope
+    ? buildPromptFromTaskEnvelope(envelope, promptBody)
+    : promptBody;
 }
 
 function buildDispatchTaskCard(fullMsg, targetProject, config) {
@@ -2723,6 +2733,7 @@ module.exports = {
   handleRemoteDispatchMessage,
   sendRemoteDispatch,
   __test: {
+    buildDispatchPrompt,
     createStreamForwardBot,
     buildDispatchTaskCard,
   },
