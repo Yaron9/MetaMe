@@ -49,6 +49,31 @@ function normalizeEngineName(name) {
   return String(name || 'claude').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
 }
 
+function stripCodexInjectedHints(text) {
+  return String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n*System hints \(internal, do not mention to user\):[\s\S]*/i, '')
+    .replace(/\n*\[Respond in Simplified Chinese[\s\S]*/i, '')
+    .replace(/\n*\[Agent memory snapshot:[\s\S]*/i, '')
+    .replace(/\n*\[Relevant facts:[\s\S]*/i, '')
+    .trim();
+}
+
+function looksLikeInternalCodexPrompt(text) {
+  const clean = stripCodexInjectedHints(text).trim();
+  if (!clean) return true;
+  return (
+    /^you are a metame\b/i.test(clean)
+    || /^you are a meta ?me\b/i.test(clean)
+    || /^you are a session reflection assistant\b/i.test(clean)
+    || /^you are a metacognition pattern detector\b/i.test(clean)
+    || /^you are codex, based on gpt-5\b/i.test(clean)
+    || /^\[nightly-reflect]/i.test(clean)
+    || /^\[self-reflect]/i.test(clean)
+    || /^\[memory-/i.test(clean)
+  );
+}
+
 
 function createSessionStore(deps) {
   const {
@@ -63,7 +88,9 @@ function createSessionStore(deps) {
   } = deps;
 
   const CLAUDE_PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
+  const CODEX_DB = path.join(HOME, '.codex', 'state_5.sqlite');
   const _sessionFileCache = new Map(); // sessionId -> { path, ts }
+  const _codexRolloutCache = new Map(); // sessionId -> { path, ts }
   let _sessionCache = null;
   let _sessionCacheTime = 0;
   const SESSION_CACHE_TTL = 30000; // 30s — scan is expensive, 10s was too frequent
@@ -89,6 +116,7 @@ function createSessionStore(deps) {
   function clearSessionFileCache(sessionId) {
     if (!sessionId) return;
     _sessionFileCache.delete(sessionId);
+    _codexRolloutCache.delete(sessionId);
   }
 
   function truncateSessionLastTurn(sessionId) {
@@ -334,37 +362,143 @@ function createSessionStore(deps) {
           cwd,
           title,
           first_user_message,
+          source,
+          rollout_path,
           created_at,
           updated_at,
           tokens_used,
           archived
         FROM threads
-        WHERE COALESCE(has_user_event, 1) = 1
         ORDER BY updated_at DESC
         LIMIT 200
       `).all();
       db.close();
       db = null;
       return rows
-        .filter((row) => !row.archived && row.id && row.cwd)
+        .filter((row) => {
+          if (row.archived || !row.id || !row.cwd) return false;
+          const seedText = String(row.first_user_message || row.title || '').trim();
+          const safeSource = String(row.source || '').trim().toLowerCase();
+          if (!seedText) return safeSource === 'cli';
+          if (safeSource === 'cli') return true;
+          return !looksLikeInternalCodexPrompt(seedText);
+        })
         .map((row) => {
           const updatedMs = Number(row.updated_at || row.created_at || 0) * 1000;
+          const firstPrompt = stripCodexInjectedHints(row.first_user_message || row.title || '');
+          const customTitle = stripCodexInjectedHints(row.title || '');
+          if (row.rollout_path) {
+            _codexRolloutCache.set(String(row.id), { path: String(row.rollout_path), ts: Date.now() });
+          }
           return {
             sessionId: String(row.id),
             projectPath: String(row.cwd),
             fileMtime: updatedMs || 0,
             modified: new Date(updatedMs || Date.now()).toISOString(),
             messageCount: row.tokens_used ? '?' : 1,
-            customTitle: row.title || '',
-            firstPrompt: row.first_user_message || '',
-            lastUser: row.first_user_message || '',
-            _enriched: true,
+            customTitle,
+            firstPrompt,
+            lastUser: firstPrompt,
+            _enriched: false,
             engine: 'codex',
           };
-        });
+        })
+        .map((session) => enrichCodexSession(session));
     } catch {
       if (db) { try { db.close(); } catch { /* ignore */ } }
       return [];
+    }
+  }
+
+  function findCodexSessionFile(sessionId) {
+    if (!sessionId || !fs.existsSync(CODEX_DB)) return null;
+    const cached = _codexRolloutCache.get(sessionId);
+    if (cached && Date.now() - cached.ts < 30000) return cached.path;
+    let db = null;
+    try {
+      const { DatabaseSync } = require('node:sqlite');
+      db = new DatabaseSync(CODEX_DB, { readonly: true });
+      const row = db.prepare('SELECT rollout_path FROM threads WHERE id = ?').get(sessionId);
+      db.close();
+      db = null;
+      const rolloutPath = row && row.rollout_path ? String(row.rollout_path) : null;
+      _codexRolloutCache.set(sessionId, { path: rolloutPath, ts: Date.now() });
+      return rolloutPath;
+    } catch {
+      if (db) { try { db.close(); } catch { /* ignore */ } }
+      return null;
+    }
+  }
+
+  function extractCodexMessageText(payload) {
+    if (!payload) return '';
+    if (typeof payload === 'string') return payload;
+    if (Array.isArray(payload)) {
+      return payload.map(item => extractCodexMessageText(item)).filter(Boolean).join('\n').trim();
+    }
+    if (typeof payload !== 'object') return '';
+    if (typeof payload.text === 'string') return payload.text;
+    if (typeof payload.message === 'string') return payload.message;
+    if (payload.type === 'input_text' || payload.type === 'output_text') return String(payload.text || '');
+    if (payload.type === 'message' && Array.isArray(payload.content)) return extractCodexMessageText(payload.content);
+    if (Array.isArray(payload.content)) return extractCodexMessageText(payload.content);
+    if (payload.payload) return extractCodexMessageText(payload.payload);
+    return '';
+  }
+
+  function parseCodexSessionPreview(sessionFile) {
+    try {
+      if (!sessionFile || !fs.existsSync(sessionFile)) return null;
+      const lines = fs.readFileSync(sessionFile, 'utf8').split('\n').filter(Boolean);
+      let firstUser = '';
+      let lastUser = '';
+      let lastAssistant = '';
+      let fallbackAssistant = '';
+      for (const line of lines) {
+        let entry;
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (entry.type === 'response_item' && entry.payload && entry.payload.type === 'message') {
+          const role = String(entry.payload.role || '').toLowerCase();
+          const text = stripCodexInjectedHints(extractCodexMessageText(entry.payload.content || entry.payload));
+          if (!text) continue;
+          if (role === 'user') {
+            if (!firstUser) firstUser = text;
+            lastUser = text;
+          } else if (role === 'assistant') {
+            lastAssistant = text;
+          }
+        } else if (entry.type === 'event_msg' && entry.payload && entry.payload.type === 'agent_message') {
+          const text = stripCodexInjectedHints(extractCodexMessageText(entry.payload.message));
+          if (text) fallbackAssistant = text;
+        }
+      }
+      if (!lastAssistant) lastAssistant = fallbackAssistant;
+      return (firstUser || lastUser || lastAssistant)
+        ? { firstUser, lastUser, lastAssistant }
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function enrichCodexSession(session) {
+    if (!session || session._enriched) return session;
+    try {
+      const sessionFile = findCodexSessionFile(session.sessionId);
+      const preview = parseCodexSessionPreview(sessionFile);
+      if (preview) {
+        if (preview.firstUser) session.firstPrompt = preview.firstUser.slice(0, 120);
+        if (preview.lastUser) session.lastUser = preview.lastUser.slice(0, 120);
+      }
+      session._enriched = true;
+      return session;
+    } catch {
+      session._enriched = true;
+      return session;
     }
   }
 
@@ -689,39 +823,47 @@ function createSessionStore(deps) {
   function getSessionRecentContext(sessionId) {
     try {
       const sessionFile = findSessionFile(sessionId);
-      if (!sessionFile) return null;
-      const stat = fs.statSync(sessionFile);
-      const tailSize = Math.min(262144, stat.size); // 256KB for better coverage of tool-heavy sessions
-      const buf = Buffer.alloc(tailSize);
-      const fd = fs.openSync(sessionFile, 'r');
-      try {
-        fs.readSync(fd, buf, 0, tailSize, stat.size - tailSize);
-      } finally {
-        fs.closeSync(fd);
-      }
-      const lines = buf.toString('utf8').split('\n').reverse();
-      // [M3] 复用共享函数，统一截取逻辑
-      const lastUser = extractLastUserFromLines(lines);
-      let lastAssistant = '';
-      for (const line of lines) {
-        if (!line.trim()) continue;
+      if (sessionFile) {
+        const stat = fs.statSync(sessionFile);
+        const tailSize = Math.min(262144, stat.size); // 256KB for better coverage of tool-heavy sessions
+        const buf = Buffer.alloc(tailSize);
+        const fd = fs.openSync(sessionFile, 'r');
         try {
-          const d = JSON.parse(line);
-          if (!lastAssistant && d.type === 'assistant' && d.message) {
-            const content = d.message.content;
-            if (Array.isArray(content)) {
-              for (const c of content) {
-                if (c.type === 'text' && c.text && c.text.trim().length > 2) {
-                  lastAssistant = c.text.trim().slice(0, 80);
-                  break;
+          fs.readSync(fd, buf, 0, tailSize, stat.size - tailSize);
+        } finally {
+          fs.closeSync(fd);
+        }
+        const lines = buf.toString('utf8').split('\n').reverse();
+        // [M3] 复用共享函数，统一截取逻辑
+        const lastUser = extractLastUserFromLines(lines);
+        let lastAssistant = '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const d = JSON.parse(line);
+            if (!lastAssistant && d.type === 'assistant' && d.message) {
+              const content = d.message.content;
+              if (Array.isArray(content)) {
+                for (const c of content) {
+                  if (c.type === 'text' && c.text && c.text.trim().length > 2) {
+                    lastAssistant = c.text.trim().slice(0, 80);
+                    break;
+                  }
                 }
               }
             }
-          }
-          if (lastAssistant) break;
-        } catch { /* skip bad line */ }
+            if (lastAssistant) break;
+          } catch { /* skip bad line */ }
+        }
+        return (lastUser || lastAssistant) ? { lastUser, lastAssistant } : null;
       }
-      return (lastUser || lastAssistant) ? { lastUser, lastAssistant } : null;
+      const codexFile = findCodexSessionFile(sessionId);
+      const preview = parseCodexSessionPreview(codexFile);
+      if (!preview) return null;
+      return {
+        lastUser: (preview.lastUser || '').slice(0, 80),
+        lastAssistant: (preview.lastAssistant || '').slice(0, 80),
+      };
     } catch { return null; }
   }
 
@@ -827,8 +969,6 @@ function createSessionStore(deps) {
     }
   }
 
-  // Codex backend: SQLite index at ~/.codex/state_5.sqlite
-  const CODEX_DB = path.join(HOME, '.codex', 'state_5.sqlite');
   function _isCodexSessionValid(sessionId, normCwd) {
     let db = null;
     try {
@@ -898,6 +1038,7 @@ function createSessionStore(deps) {
 
   return {
     findSessionFile,
+    findCodexSessionFile,
     clearSessionFileCache,
     truncateSessionToCheckpoint,
     watchSessionFiles,
@@ -924,6 +1065,9 @@ function createSessionStore(deps) {
       _readClaudeSessionMetadata,
       _isClaudeSessionValid,
       upgradeSessionRecord,
+      stripCodexInjectedHints,
+      looksLikeInternalCodexPrompt,
+      parseCodexSessionPreview,
     },
   };
 }

@@ -83,7 +83,7 @@ function createBridgeStarter(deps) {
     return latest;
   }
 
-  function unauthorizedMsg(chatId, useSend) {
+  function unauthorizedMsg(chatId) {
     const pending = getPendingActivationForChat(chatId);
     if (pending) {
       return `⚠️ 此群未授权\n\n发送以下命令激活 Agent「${pending.agentName}」：\n\`/activate\``;

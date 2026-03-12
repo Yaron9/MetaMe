@@ -14,7 +14,6 @@ function createSessionCommandHandler(deps) {
     sendBrowse,
     sendDirPicker,
     createSession,
-    getSessionForEngine,
     getCachedFile,
     getSession,
     listRecentSessions,
@@ -26,7 +25,6 @@ function createSessionCommandHandler(deps) {
     loadSessionTags,
     sessionRichLabel,
     buildSessionCardElements,
-    sessionLabel,
     getDefaultEngine = () => 'claude',
   } = deps;
 

@@ -47,7 +47,7 @@ const LOG_FILE = path.join(METAME_DIR, 'daemon.log');
 const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const DISPATCH_DIR = path.join(METAME_DIR, 'dispatch');
 const DISPATCH_LOG = path.join(DISPATCH_DIR, 'dispatch-log.jsonl');
-const { socketPath, needsSocketCleanup } = require('./platform');
+const { sleepSync, socketPath, needsSocketCleanup } = require('./platform');
 const SOCK_PATH = socketPath(METAME_DIR);
 
 // Resolve claude binary path (daemon may not inherit user's full PATH)
@@ -154,7 +154,7 @@ const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lif
 const { repairAgentLayer } = require('./agent-layer');
 const { createNotifier } = require('./daemon-notify');
 const { createClaudeEngine } = require('./daemon-claude-engine');
-const { createEngineRuntimeFactory, detectDefaultEngine, resolveEngineModel, ENGINE_MODEL_CONFIG, ENGINE_DISTILL_MAP, ENGINE_DEFAULT_MODEL } = require('./daemon-engine-runtime');
+const { createEngineRuntimeFactory, detectDefaultEngine, resolveEngineModel, ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
 const { createCommandRouter } = require('./daemon-command-router');
 const { createTaskScheduler } = require('./daemon-task-scheduler');
 const { createAgentTools } = require('./daemon-agent-tools');
@@ -519,15 +519,6 @@ function recordTokens(state, tokens, meta = null) {
   saveState(liveState);
 }
 
-
-function getBudgetWarning(config, state) {
-  const limit = (config.budget && config.budget.daily_limit) || 50000;
-  const threshold = (config.budget && config.budget.warning_threshold) || 0.8;
-  const ratio = state.budget.tokens_used / limit;
-  if (ratio >= 1) return 'exceeded';
-  if (ratio >= threshold) return 'warning';
-  return 'ok';
-}
 
 const taskBoard = createTaskBoard({
   logger: (msg) => log('WARN', msg),
@@ -1165,7 +1156,7 @@ function handleDispatchItem(item, config) {
   const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
   const teamCtx = liveBot ? _findTeamBroadcastContext(item.from, item.target, config) : null;
   if (teamCtx && teamCtx.groupChatId) {
-    const { senderMember, targetMember, groupChatId, parentProject } = teamCtx;
+    const { senderMember, targetMember, groupChatId } = teamCtx;
     const sIcon = senderMember.icon || '🤖';
     const sName = senderMember.name || senderMember.key;
     const tIcon = targetMember.icon || '🤖';
@@ -1453,7 +1444,6 @@ function physiologicalHeartbeat(config) {
 const CLAUDE_COOLDOWN_MS = 10000; // 10s between Claude calls per chat
 const STATUS_THROTTLE_MS = 3000;  // Min 3s between streaming status updates
 const FALLBACK_THROTTLE_MS = 8000; // 8s between fallback status updates
-const DEDUP_TTL_MS = 60000; // Feishu message dedup window (60s)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Rate limiter for /ask and /run — prevents rapid-fire Claude calls
@@ -1638,7 +1628,6 @@ const {
   sessionRichLabel,
   getSessionRecentContext,
   buildSessionCardElements,
-  listProjectDirs,
   getSession,
   getSessionForEngine,
   createSession,

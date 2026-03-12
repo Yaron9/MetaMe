@@ -8,6 +8,11 @@ const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const { createSessionStore } = require('./daemon-session-store');
 
+function writeCodexRollout(filePath, events) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, events.map(event => JSON.stringify(event)).join('\n') + '\n', 'utf8');
+}
+
 describe('daemon-session-store codex metadata', () => {
   it('preserves codex sandbox profile in engine slot', () => {
     const state = { sessions: {} };
@@ -175,6 +180,21 @@ describe('daemon-session-store codex metadata', () => {
 
     const codexDir = path.join(tempHome, '.codex');
     fs.mkdirSync(codexDir, { recursive: true });
+    const rolloutPath = path.join(codexDir, 'sessions', '2026', '03', '10', 'codex-session.jsonl');
+    writeCodexRollout(rolloutPath, [
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Codex first prompt\n\nSystem hints (internal, do not mention to user):\nignore' }],
+        },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'Codex last reply' },
+      },
+    ]);
     const db = new DatabaseSync(path.join(codexDir, 'state_5.sqlite'));
     db.exec(`
       CREATE TABLE threads (
@@ -210,20 +230,20 @@ describe('daemon-session-store codex metadata', () => {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       'codex-session',
-      '',
+      rolloutPath,
       1773214000,
       1773216000,
-      'cli',
+      'exec',
       'openai',
       '/tmp/shared-proj',
       'Codex title',
       '{"type":"danger-full-access"}',
       'never',
       123,
-      1,
+      0,
       0,
       '1.0.0',
-      'Codex first prompt',
+      'Codex first prompt\n\nSystem hints (internal, do not mention to user):\nignore',
       'enabled'
     );
     db.close();
@@ -246,10 +266,91 @@ describe('daemon-session-store codex metadata', () => {
     assert.equal(codexSessions[0].sessionId, 'codex-session');
     assert.equal(codexSessions[0].engine, 'codex');
     assert.equal(codexSessions[0].customTitle, 'Codex title');
+    assert.equal(codexSessions[0].firstPrompt, 'Codex first prompt');
+    assert.equal(codexSessions[0].lastUser, 'Codex first prompt');
+    assert.deepEqual(store.getSessionRecentContext('codex-session'), {
+      lastUser: 'Codex first prompt',
+      lastAssistant: 'Codex last reply',
+    });
 
     const claudeSessions = store.listRecentSessions(10, '/tmp/shared-proj', 'claude');
     assert.equal(claudeSessions.length, 1);
     assert.equal(claudeSessions[0].sessionId, 'claude-session');
     assert.equal(claudeSessions[0].engine, 'claude');
+  });
+
+  it('skips internal codex exec threads when listing resumable sessions', () => {
+    const state = { sessions: {} };
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
+    const codexDir = path.join(tempHome, '.codex');
+    fs.mkdirSync(codexDir, { recursive: true });
+    const db = new DatabaseSync(path.join(codexDir, 'state_5.sqlite'));
+    db.exec(`
+      CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        rollout_path TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        model_provider TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        title TEXT NOT NULL,
+        sandbox_policy TEXT NOT NULL,
+        approval_mode TEXT NOT NULL,
+        tokens_used INTEGER NOT NULL DEFAULT 0,
+        has_user_event INTEGER NOT NULL DEFAULT 0,
+        archived INTEGER NOT NULL DEFAULT 0,
+        archived_at INTEGER,
+        git_sha TEXT,
+        git_branch TEXT,
+        git_origin_url TEXT,
+        cli_version TEXT NOT NULL DEFAULT '',
+        first_user_message TEXT NOT NULL DEFAULT '',
+        agent_nickname TEXT,
+        agent_role TEXT,
+        memory_mode TEXT NOT NULL DEFAULT 'enabled'
+      );
+    `);
+    db.prepare(`
+      INSERT INTO threads (
+        id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+        sandbox_policy, approval_mode, tokens_used, has_user_event, archived, cli_version,
+        first_user_message, memory_mode
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'codex-internal',
+      '',
+      1773214000,
+      1773216000,
+      'exec',
+      'openai',
+      '/tmp/shared-proj',
+      'You are a MetaMe cognitive profile distiller. Extract traits only.',
+      '{"type":"danger-full-access"}',
+      'never',
+      123,
+      0,
+      0,
+      '1.0.0',
+      'You are a MetaMe cognitive profile distiller. Extract traits only.',
+      'enabled'
+    );
+    db.close();
+
+    const store = createSessionStore({
+      fs,
+      path,
+      HOME: tempHome,
+      loadState: () => state,
+      saveState: (next) => {
+        state.sessions = next.sessions;
+      },
+      log: () => {},
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+
+    const codexSessions = store.listRecentSessions(10, '/tmp/shared-proj', 'codex');
+    assert.equal(codexSessions.length, 0);
   });
 });

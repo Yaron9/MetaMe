@@ -117,15 +117,6 @@ function createAgentCommandHandler(deps) {
   // Pending activations have no TTL — they persist until consumed.
   // The creating chatId is stored to prevent self-activation.
 
-  function storePendingActivation(agentKey, agentName, cwd, createdByChatId) {
-    if (!pendingActivations) return;
-    pendingActivations.set(agentKey, {
-      agentKey, agentName, cwd,
-      createdByChatId: String(createdByChatId),
-      createdAt: Date.now(),
-    });
-  }
-
   // Returns the latest pending activation, excluding the creating chat
   function getLatestActivationForChat(chatId) {
     if (!pendingActivations || pendingActivations.size === 0) return null;
@@ -248,25 +239,6 @@ function createAgentCommandHandler(deps) {
     const legacy = await mergeAgentRole(workspaceDir, deltaText);
     if (legacy.error) return { ok: false, error: legacy.error };
     return { ok: true, data: legacy };
-  }
-
-  async function createAgentViaUnifiedApi(chatId, name, dir, roleDesc, opts = {}) {
-    // Default: skip binding the creating chat — let the target group activate via /activate
-    const { skipChatBinding = true, engine = null } = opts;
-    if (agentTools && typeof agentTools.createNewWorkspaceAgent === 'function') {
-      const res = await agentTools.createNewWorkspaceAgent(name, dir, roleDesc, chatId, { skipChatBinding, engine });
-      if (res.ok && skipChatBinding && res.data && res.data.projectKey) {
-        storePendingActivation(res.data.projectKey, name, res.data.cwd, chatId);
-      }
-      return res;
-    }
-    const bound = await doBindAgent({ sendMessage: async () => {} }, chatId, name, dir);
-    if (!bound || bound.ok === false) {
-      return { ok: false, error: (bound && bound.error) || 'bind failed' };
-    }
-    const merged = await mergeAgentRole(dir, roleDesc);
-    if (merged.error) return { ok: false, error: merged.error };
-    return { ok: true, data: { cwd: dir, project: { name }, role: merged } };
   }
 
   async function listAgentsViaUnifiedApi(chatId) {

@@ -239,7 +239,7 @@ function parseCodexStreamEvent(line) {
 }
 
 function buildClaudeArgs(options = {}) {
-  const { model = ENGINE_MODEL_CONFIG.claude.main, readOnly = false, daemonCfg = {}, session = {} } = options;
+  const { model = ENGINE_MODEL_CONFIG.claude.main, readOnly = false, session = {} } = options;
   const args = ['-p', '--model', model];
   if (readOnly) {
     const readOnlyTools = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Task'];

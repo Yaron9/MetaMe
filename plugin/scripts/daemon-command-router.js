@@ -20,7 +20,6 @@ function createCommandRouter(deps) {
     getNoSleepProcess,
     activeProcesses,
     messageQueue,
-    sleep,
     log,
     agentTools,
     pendingAgentFlows,

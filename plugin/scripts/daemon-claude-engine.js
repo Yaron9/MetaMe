@@ -43,7 +43,6 @@ function createClaudeEngine(deps) {
     getActiveProviderEnv,
     activeProcesses,
     saveActivePids,
-    messageQueue,
     log,
     yaml,
     providerMod,
@@ -58,7 +57,6 @@ function createClaudeEngine(deps) {
     isContentFile,
     sendFileButtons,
     findSessionFile,
-    listRecentSessions,
     getSession,
     getSessionForEngine,
     createSession,
@@ -671,6 +669,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const writtenFiles = [];
       const toolUsageLog = [];
 
+      void timeoutMs;
       const engineTimeouts = rt.timeouts || {};
       const IDLE_TIMEOUT_MS = engineTimeouts.idleMs || (5 * 60 * 1000);
       const TOOL_EXEC_TIMEOUT_MS = engineTimeouts.toolMs || (25 * 60 * 1000);
@@ -1561,7 +1560,7 @@ ${mentorRadarHint}
         }
       };
 
-      let output, error, errorCode, files, toolUsageLog, timedOut, usage, sessionId;
+      let output, error, errorCode, files, toolUsageLog, timedOut, sessionId;
       try {
         ({
           output,
@@ -1570,7 +1569,6 @@ ${mentorRadarHint}
           timedOut,
           files,
           toolUsageLog,
-          usage,
           sessionId,
         } = await spawnClaudeStreaming(
           args,
@@ -1621,7 +1619,6 @@ ${mentorRadarHint}
             timedOut,
             files,
             toolUsageLog,
-            usage,
             sessionId,
           } = await spawnClaudeStreaming(
             retryArgs,

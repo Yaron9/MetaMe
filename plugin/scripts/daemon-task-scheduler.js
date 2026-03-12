@@ -2,7 +2,6 @@
 
 const crypto = require('crypto');
 const { classifyTaskUsage } = require('./usage-classifier');
-const { IS_WIN } = require('./platform');
 
 const WEEKDAY_INDEX = Object.freeze({
   sun: 0,
