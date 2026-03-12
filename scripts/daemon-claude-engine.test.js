@@ -139,6 +139,7 @@ describe('daemon-claude-engine private helpers', () => {
       output: '',
       error: 'resume failed',
       errorCode: 'EXEC_FAILURE',
+      failureKind: 'expired',
       canRetry: true,
     }), true);
 
@@ -148,8 +149,42 @@ describe('daemon-claude-engine private helpers', () => {
       output: '',
       error: 'resume failed',
       errorCode: 'EXEC_FAILURE',
+      failureKind: 'expired',
       canRetry: false,
     }), false);
+
+    assert.equal(engine._private.shouldRetryCodexResumeFallback({
+      runtimeName: 'codex',
+      wasResumeAttempt: true,
+      output: '',
+      error: 'Stopped by user',
+      errorCode: 'INTERRUPTED_USER',
+      failureKind: 'user-stop',
+      canRetry: true,
+    }), false);
+  });
+
+  it('classifies interrupted codex resume separately from expired sessions', () => {
+    const state = { sessions: {} };
+    const engine = createEngineWithState(state);
+
+    const interrupted = engine._private.classifyCodexResumeFailure('Stopped by user', 'EXEC_FAILURE');
+    assert.equal(interrupted.kind, 'interrupted');
+    assert.match(interrupted.userMessage, /后台刚刚重启|执行被中断/);
+    assert.match(interrupted.retryPromptPrefix, /interrupted by a daemon restart/i);
+
+    const userStop = engine._private.classifyCodexResumeFailure('Stopped by user', 'INTERRUPTED_USER');
+    assert.equal(userStop.kind, 'user-stop');
+    assert.match(userStop.userMessage, /停止动作中断/);
+
+    const shutdown = engine._private.classifyCodexResumeFailure('Stopped by user', 'INTERRUPTED_RESTART');
+    assert.equal(shutdown.kind, 'interrupted');
+    assert.match(shutdown.userMessage, /自动恢复到同一条会话/);
+
+    const expired = engine._private.classifyCodexResumeFailure('resume failed: thread not found', 'EXEC_FAILURE');
+    assert.equal(expired.kind, 'expired');
+    assert.match(expired.userMessage, /session 已过期/);
+    assert.match(expired.retryPromptPrefix, /session expired/i);
   });
 
   it('enforces codex resume retry window by chat id', () => {
@@ -161,10 +196,11 @@ describe('daemon-claude-engine private helpers', () => {
     Date.now = () => now;
     try {
       assert.equal(engine._private.canRetryCodexResume(key), true);
-      engine._private.markCodexResumeRetried(key);
-      assert.equal(engine._private.canRetryCodexResume(key), false);
+      engine._private.markCodexResumeRetried(key, 'expired');
+      assert.equal(engine._private.canRetryCodexResume(key, 'expired'), false);
+      assert.equal(engine._private.canRetryCodexResume(key, 'interrupted'), true);
       now += engine._private.CODEX_RESUME_RETRY_WINDOW_MS + 1;
-      assert.equal(engine._private.canRetryCodexResume(key), true);
+      assert.equal(engine._private.canRetryCodexResume(key, 'expired'), true);
     } finally {
       Date.now = originalNow;
     }
@@ -191,15 +227,15 @@ describe('daemon-claude-engine private helpers', () => {
     const state = { sessions: {} };
     const engine = createEngineWithState(state);
     assert.equal(
-      engine._private.shouldStartFreshCodexSessionForPermissions(
-        { started: true, id: 'sid-1', permissionMode: 'read-only', approvalPolicy: 'never' },
+      engine._private.codexPermissionNeedsMigration(
+        { sandboxMode: 'read-only', approvalPolicy: 'never', permissionMode: 'read-only' },
         { sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' }
       ),
-      false
+      true
     );
     assert.equal(
-      engine._private.shouldStartFreshCodexSessionForPermissions(
-        { started: true, id: 'sid-1', permissionMode: 'danger-full-access', sandboxMode: 'danger-full-access', approvalPolicy: 'never' },
+      engine._private.codexPermissionNeedsMigration(
+        { sandboxMode: 'danger-full-access', sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' },
         { sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' }
       ),
       false
@@ -237,10 +273,10 @@ describe('daemon-claude-engine private helpers', () => {
     );
   });
 
-  it('builds a migration bridge prompt that preserves conversation continuity for any virtual chat id', () => {
+  it('builds a fallback bridge prompt that preserves conversation continuity for any virtual chat id', () => {
     const state = { sessions: {} };
     const engine = createEngineWithState(state);
-    const prompt = engine._private.buildCodexMigrationPrompt({
+    const prompt = engine._private.buildCodexFallbackBridgePrompt({
       fullPrompt: '请继续修复权限问题',
       previousSessionId: '019ce0f7-dead-beef',
       previousProfile: { sandboxMode: 'read-only', approvalPolicy: 'never' },
@@ -257,7 +293,7 @@ describe('daemon-claude-engine private helpers', () => {
     assert.match(prompt, /Current user message follows/);
   });
 
-  it('does not force a fresh codex session when stored permission metadata is stale but actual runtime matches', () => {
+  it('does not treat stale stored codex permission metadata as a forced fresh-session signal when actual runtime matches', () => {
     const state = { sessions: {} };
     const engine = createClaudeEngine({
       fs,
@@ -311,15 +347,15 @@ describe('daemon-claude-engine private helpers', () => {
     });
 
     assert.equal(
-      engine._private.shouldStartFreshCodexSessionForPermissions(
-        { started: true, id: 'sid-1', permissionMode: 'read-only', approvalPolicy: null },
+      engine._private.sameCodexPermissionProfile(
+        engine._private.getActualCodexPermissionProfile({ id: 'sid-1' }),
         { sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' }
       ),
-      false
+      true
     );
   });
 
-  it('does not force a fresh codex session when actual runtime is lower privilege than requested', () => {
+  it('treats lower actual runtime codex privilege as a fallback need instead of a pre-spawn fresh-session signal', () => {
     const state = { sessions: {} };
     const engine = createClaudeEngine({
       fs,
@@ -373,11 +409,11 @@ describe('daemon-claude-engine private helpers', () => {
     });
 
     assert.equal(
-      engine._private.shouldStartFreshCodexSessionForPermissions(
-        { started: true, id: 'sid-1', permissionMode: 'danger-full-access', approvalPolicy: 'never' },
+      engine._private.codexPermissionNeedsMigration(
+        engine._private.getActualCodexPermissionProfile({ id: 'sid-1' }),
         { sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' }
       ),
-      false
+      true
     );
   });
 
@@ -756,6 +792,127 @@ describe('daemon-claude-engine private helpers', () => {
     assert.equal(state.sessions._bound_personal.engines.codex.permissionMode, 'danger-full-access');
   });
 
+  it('retries interrupted codex resume on the same logical thread before creating a fresh session', async () => {
+    const state = {
+      sessions: {
+        _bound_personal: {
+          cwd: '/tmp/personal',
+          engines: {
+            codex: {
+              id: 'resume-thread-1',
+              started: true,
+              runtimeSessionObserved: true,
+              sandboxMode: 'danger-full-access',
+              approvalPolicy: 'never',
+              permissionMode: 'danger-full-access',
+            },
+          },
+        },
+      },
+    };
+    const spawnCalls = [];
+    const activeProcesses = new Map();
+    let createCount = 0;
+    let spawnSeq = 0;
+
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: (_cmd, args) => {
+        spawnCalls.push(args.slice());
+        spawnSeq += 1;
+        if (spawnSeq === 1) {
+          const proc = createFakeCodexProcess([]);
+          setImmediate(() => {
+            const active = activeProcesses.get('oc_personal');
+            if (active) {
+              active.aborted = true;
+              active.abortReason = 'daemon-restart';
+            }
+          });
+          return proc;
+        }
+        return createFakeCodexProcess([
+          { type: 'thread.started', thread_id: 'resume-thread-1' },
+          { type: 'item.completed', item: { type: 'agent_message', text: 'reply-recovered' } },
+          { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } },
+        ]);
+      },
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses,
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({
+        feishu: { chat_agent_map: { oc_personal: 'personal' } },
+        projects: { personal: { cwd: '/tmp/personal', name: '小美', engine: 'codex' } },
+      }),
+      loadState: () => state,
+      saveState: (next) => {
+        Object.assign(state, next);
+        state.sessions = next.sessions;
+      },
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: (chatId) => state.sessions[chatId] || null,
+      getSessionForEngine: (chatId, engineName) => {
+        const raw = state.sessions[chatId];
+        if (!raw) return null;
+        const slot = raw.engines && raw.engines[engineName];
+        return slot ? { cwd: raw.cwd, engine: engineName, ...slot } : null;
+      },
+      createSession: () => {
+        createCount += 1;
+        return { id: `new-session-${createCount}`, cwd: '/tmp/personal', started: false, engine: 'codex' };
+      },
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: () => ({ sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' }),
+      getCodexSessionPermissionMode: () => 'danger-full-access',
+      getSessionRecentContext: () => null,
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getDefaultEngine: () => 'codex',
+    });
+
+    const bot = {
+      sendTyping: async () => {},
+      sendMessage: async () => ({ message_id: 'msg-send' }),
+      sendMarkdown: async () => ({ message_id: 'msg-md' }),
+      sendCard: async () => ({ message_id: 'msg-card' }),
+      editMessage: async () => true,
+      deleteMessage: async () => true,
+    };
+
+    const result = await engine.askClaude(bot, 'oc_personal', '继续处理', {
+      feishu: { chat_agent_map: { oc_personal: 'personal' } },
+      projects: { personal: { cwd: '/tmp/personal', name: '小美', engine: 'codex' } },
+    }, false, 'ou_admin');
+
+    assert.equal(result.ok, true);
+    assert.equal(spawnCalls.length, 2);
+    assert.deepEqual(spawnCalls[0].slice(0, 3), ['exec', 'resume', 'resume-thread-1']);
+    assert.deepEqual(spawnCalls[1].slice(0, 3), ['exec', 'resume', 'resume-thread-1']);
+    assert.equal(createCount, 0);
+  });
+
   it('stabilizes onto a fresh codex thread when observed codex permissions degrade mid-turn', async () => {
     const state = {
       sessions: {
@@ -908,5 +1065,305 @@ describe('daemon-claude-engine private helpers', () => {
     assert.ok(spawnCalls[1].includes('--dangerously-bypass-approvals-and-sandbox'));
     assert.equal(state.sessions._bound_personal.engines.codex.id, 'fresh-thread-2');
     assert.equal(state.sessions._bound_personal.engines.codex.permissionMode, 'danger-full-access');
+  });
+
+  it('keeps retrying codex stabilization until a fresh full-access thread is observed', async () => {
+    const state = {
+      sessions: {
+        _bound_personal: {
+          cwd: '/tmp/personal',
+          engines: {
+            codex: {
+              id: 'resume-thread-1',
+              started: true,
+              runtimeSessionObserved: true,
+              sandboxMode: 'danger-full-access',
+              approvalPolicy: 'never',
+              permissionMode: 'danger-full-access',
+            },
+          },
+        },
+      },
+    };
+    const spawnCalls = [];
+    const permissionByThread = {
+      'fresh-thread-3': { sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' },
+    };
+    let spawnSeq = 0;
+
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: (_cmd, args) => {
+        spawnCalls.push(args.slice());
+        spawnSeq += 1;
+        if (spawnSeq === 1) {
+          return createFakeCodexProcess([
+            { type: 'thread.started', thread_id: 'resume-thread-1' },
+            { type: 'item.completed', item: { type: 'agent_message', text: 'reply-1' } },
+            { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } },
+          ]);
+        }
+        if (spawnSeq === 2) {
+          return createFakeCodexProcess([
+            { type: 'thread.started', thread_id: 'fresh-thread-2' },
+            { type: 'item.completed', item: { type: 'agent_message', text: 'reply-2' } },
+            { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } },
+          ]);
+        }
+        return createFakeCodexProcess([
+          { type: 'thread.started', thread_id: 'fresh-thread-3' },
+          { type: 'item.completed', item: { type: 'agent_message', text: 'reply-3' } },
+          { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } },
+        ]);
+      },
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses: new Map(),
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({
+        feishu: {
+          chat_agent_map: {
+            oc_personal: 'personal',
+          },
+        },
+        projects: {
+          personal: {
+            cwd: '/tmp/personal',
+            name: '小美',
+            engine: 'codex',
+          },
+        },
+      }),
+      loadState: () => state,
+      saveState: (next) => {
+        Object.assign(state, next);
+        state.sessions = next.sessions;
+      },
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: (chatId) => state.sessions[chatId] || null,
+      getSessionForEngine: (chatId, engineName) => {
+        const raw = state.sessions[chatId];
+        if (!raw) return null;
+        const slot = raw.engines && raw.engines[engineName];
+        return slot ? { cwd: raw.cwd, engine: engineName, ...slot } : null;
+      },
+      createSession: (chatId, cwd, _name, engineName, meta) => {
+        const created = {
+          id: `fresh-session-${spawnSeq + 1}`,
+          cwd,
+          engine: engineName,
+          started: false,
+          runtimeSessionObserved: false,
+          ...(meta || {}),
+        };
+        state.sessions[chatId] = {
+          cwd,
+          engines: {
+            ...((state.sessions[chatId] && state.sessions[chatId].engines) || {}),
+            [engineName]: { ...created },
+          },
+        };
+        return created;
+      },
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: (chatId, engineName) => {
+        const slot = state.sessions[chatId] && state.sessions[chatId].engines && state.sessions[chatId].engines[engineName];
+        if (slot) slot.started = true;
+      },
+      isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: (id) => permissionByThread[id] || { sandboxMode: 'read-only', approvalPolicy: 'never', permissionMode: 'read-only' },
+      getCodexSessionPermissionMode: (id) => (permissionByThread[id] || {}).permissionMode || 'read-only',
+      getSessionRecentContext: () => null,
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getDefaultEngine: () => 'codex',
+    });
+
+    const bot = {
+      sendTyping: async () => {},
+      sendMessage: async () => ({ message_id: 'msg-send' }),
+      sendMarkdown: async () => ({ message_id: 'msg-md' }),
+      sendCard: async () => ({ message_id: 'msg-card' }),
+      editMessage: async () => true,
+      deleteMessage: async () => true,
+    };
+
+    const result = await engine.askClaude(bot, 'oc_personal', '继续处理', {
+      feishu: { chat_agent_map: { oc_personal: 'personal' } },
+      projects: { personal: { cwd: '/tmp/personal', name: '小美', engine: 'codex' } },
+    }, false, 'ou_admin');
+
+    assert.equal(result.ok, true);
+    assert.equal(spawnCalls.length, 3);
+    assert.ok(spawnCalls[1].includes('--dangerously-bypass-approvals-and-sandbox'));
+    assert.ok(spawnCalls[2].includes('--dangerously-bypass-approvals-and-sandbox'));
+    assert.equal(state.sessions._bound_personal.engines.codex.id, 'fresh-thread-3');
+    assert.equal(state.sessions._bound_personal.engines.codex.permissionMode, 'danger-full-access');
+  });
+
+  it('bridges recent conversation context into codex stabilization retries', async () => {
+    const state = {
+      sessions: {
+        _bound_personal: {
+          cwd: '/tmp/personal',
+          engines: {
+            codex: {
+              id: 'resume-thread-1',
+              started: true,
+              runtimeSessionObserved: true,
+              sandboxMode: 'danger-full-access',
+              approvalPolicy: 'never',
+              permissionMode: 'danger-full-access',
+            },
+          },
+        },
+      },
+    };
+    const stdinPayloads = [];
+    let spawnSeq = 0;
+
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: (_cmd, _args) => {
+        spawnSeq += 1;
+        const proc = createFakeCodexProcess([
+          { type: 'thread.started', thread_id: spawnSeq === 1 ? 'resume-thread-1' : 'fresh-thread-2' },
+          { type: 'item.completed', item: { type: 'agent_message', text: `reply-${spawnSeq}` } },
+          { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } },
+        ]);
+        let payload = '';
+        proc.stdin.on('data', (chunk) => {
+          payload += String(chunk);
+        });
+        proc.stdin.on('finish', () => {
+          stdinPayloads.push(payload);
+        });
+        return proc;
+      },
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses: new Map(),
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({
+        feishu: {
+          chat_agent_map: {
+            oc_personal: 'personal',
+          },
+        },
+        projects: {
+          personal: {
+            cwd: '/tmp/personal',
+            name: '小美',
+            engine: 'codex',
+          },
+        },
+      }),
+      loadState: () => state,
+      saveState: (next) => {
+        Object.assign(state, next);
+        state.sessions = next.sessions;
+      },
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: (chatId) => state.sessions[chatId] || null,
+      getSessionForEngine: (chatId, engineName) => {
+        const raw = state.sessions[chatId];
+        if (!raw) return null;
+        const slot = raw.engines && raw.engines[engineName];
+        return slot ? { cwd: raw.cwd, engine: engineName, ...slot } : null;
+      },
+      createSession: (chatId, cwd, _name, engineName, meta) => {
+        const created = {
+          id: 'fresh-session-retry',
+          cwd,
+          engine: engineName,
+          started: false,
+          runtimeSessionObserved: false,
+          ...(meta || {}),
+        };
+        state.sessions[chatId] = {
+          cwd,
+          engines: {
+            ...((state.sessions[chatId] && state.sessions[chatId].engines) || {}),
+            [engineName]: { ...created },
+          },
+        };
+        return created;
+      },
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: (chatId, engineName) => {
+        const slot = state.sessions[chatId] && state.sessions[chatId].engines && state.sessions[chatId].engines[engineName];
+        if (slot) slot.started = true;
+      },
+      isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: (id) => {
+        if (id === 'resume-thread-1') return { sandboxMode: 'read-only', approvalPolicy: 'never', permissionMode: 'read-only' };
+        return { sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' };
+      },
+      getCodexSessionPermissionMode: () => 'danger-full-access',
+      getSessionRecentContext: (id) => (id === 'resume-thread-1'
+        ? { lastUser: '十', lastAssistant: '收到，已记下“十”。继续讲，我先只记录，不开始执行。' }
+        : null),
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getDefaultEngine: () => 'codex',
+    });
+
+    const bot = {
+      sendTyping: async () => {},
+      sendMessage: async () => ({ message_id: 'msg-send' }),
+      sendMarkdown: async () => ({ message_id: 'msg-md' }),
+      sendCard: async () => ({ message_id: 'msg-card' }),
+      editMessage: async () => true,
+      deleteMessage: async () => true,
+    };
+
+    const result = await engine.askClaude(bot, 'oc_personal', '加\n十', {
+      feishu: { chat_agent_map: { oc_personal: 'personal' } },
+      projects: { personal: { cwd: '/tmp/personal', name: '小美', engine: 'codex' } },
+    }, false, 'ou_admin');
+
+    assert.equal(result.ok, true);
+    assert.equal(stdinPayloads.length, 2);
+    assert.match(stdinPayloads[1], /Recent conversation context:/);
+    assert.match(stdinPayloads[1], /Last user message: 十/);
+    assert.match(stdinPayloads[1], /Last assistant reply: 收到，已记下/);
   });
 });

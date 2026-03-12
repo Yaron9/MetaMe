@@ -80,7 +80,7 @@ function createFakeCodexProcess(events, exitCode = 0) {
 
 describe('Codex E2E Simulation — Mobile User Flow', () => {
   let state, spawnCalls, bot, config;
-  const sessionKey = '_agent_my_codex_project';
+  const sessionKey = '_bound_my_codex_project';
 
   beforeEach(() => {
     state = { sessions: {} };
@@ -160,12 +160,18 @@ describe('Codex E2E Simulation — Mobile User Flow', () => {
         if (!session) return null;
         if (!session.engines) return session.engine === engine ? session : null;
         const slot = session.engines[engine];
-        return slot ? { ...session, ...slot, engine } : null;
+        return slot ? { cwd: session.cwd, ...slot, engine } : null;
       },
       createSession: (chatId, cwd, name, eng) => {
-        const s = { id: `new-${Date.now()}`, cwd: cwd || '/tmp', started: false, engine: eng || 'claude' };
+        const engineName = eng || 'claude';
+        const s = {
+          cwd: cwd || '/tmp',
+          engines: {
+            [engineName]: { id: `new-${Date.now()}`, started: false },
+          },
+        };
         state.sessions[chatId] = s;
-        return s;
+        return { cwd: s.cwd, engine: engineName, ...s.engines[engineName] };
       },
       getSessionName: () => '',
       writeSessionName: () => {},
@@ -210,10 +216,11 @@ describe('Codex E2E Simulation — Mobile User Flow', () => {
     console.log('\n=== Session State ===');
     console.log(JSON.stringify(session, null, 2));
     assert.ok(session, 'session should exist');
-    assert.equal(session.engine, 'codex', 'session engine should be codex');
+    const codexSlot = session.engines && session.engines.codex;
+    assert.ok(codexSlot, 'codex engine slot should exist');
     // thread_id should be persisted (either via onSession or patchSessionSerialized)
-    if (session.id) {
-      console.log('Thread ID persisted:', session.id);
+    if (codexSlot && codexSlot.id) {
+      console.log('Thread ID persisted:', codexSlot.id);
     }
 
     console.log('\n✅ Codex mobile E2E simulation passed!');
@@ -222,13 +229,17 @@ describe('Codex E2E Simulation — Mobile User Flow', () => {
   it('uses resume with thread_id on second message', async () => {
     // Pre-set session state as if first message already happened
     state.sessions[sessionKey] = {
-      id: 'thread-abc-123',
       cwd: '/tmp/codex-workspace',
-      started: true,
-      engine: 'codex',
-      sandboxMode: 'danger-full-access',
-      approvalPolicy: 'never',
-      permissionMode: 'danger-full-access',
+      engines: {
+        codex: {
+          id: 'thread-abc-123',
+          started: true,
+          runtimeSessionObserved: true,
+          sandboxMode: 'danger-full-access',
+          approvalPolicy: 'never',
+          permissionMode: 'danger-full-access',
+        },
+      },
     };
 
     const codexStreamEvents = [
@@ -280,12 +291,18 @@ describe('Codex E2E Simulation — Mobile User Flow', () => {
         if (!session) return null;
         if (!session.engines) return session.engine === engine ? session : null;
         const slot = session.engines[engine];
-        return slot ? { ...session, ...slot, engine } : null;
+        return slot ? { cwd: session.cwd, ...slot, engine } : null;
       },
       createSession: (chatId, cwd, name, eng) => {
-        const s = { id: `new-${Date.now()}`, cwd: cwd || '/tmp', started: false, engine: eng || 'claude' };
+        const engineName = eng || 'claude';
+        const s = {
+          cwd: cwd || '/tmp',
+          engines: {
+            [engineName]: { id: `new-${Date.now()}`, started: false },
+          },
+        };
         state.sessions[chatId] = s;
-        return s;
+        return { cwd: s.cwd, engine: engineName, ...s.engines[engineName] };
       },
       getSessionName: () => '',
       writeSessionName: () => {},

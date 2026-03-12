@@ -2744,6 +2744,8 @@ async function main() {
     try { require('./qmd-client').stopDaemon(); } catch { /* ignore */ }
     // Kill all tracked engine process groups before exiting (covers sub-agents too)
     for (const [cid, proc] of activeProcesses) {
+      proc.aborted = true;
+      proc.abortReason = opts.restartReason ? 'daemon-restart' : 'shutdown';
       try { process.kill(-proc.child.pid, 'SIGKILL'); } catch { try { proc.child.kill('SIGKILL'); } catch { } }
       log('INFO', `Shutdown: killed engine process group for chatId ${cid}`);
     }

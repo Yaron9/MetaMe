@@ -28,6 +28,71 @@ function createCommandRouter(deps) {
     getDefaultEngine,
   } = deps;
 
+  function clearQueuedTimer(chatId) {
+    const q = messageQueue && messageQueue.get(chatId);
+    if (q && q.timer) {
+      clearTimeout(q.timer);
+      q.timer = null;
+    }
+  }
+
+  function interruptActiveProcess(chatId) {
+    const proc = activeProcesses.get(chatId);
+    if (proc && proc.child) {
+      proc.aborted = true;
+      const signal = proc.killSignal || 'SIGTERM';
+      try { process.kill(-proc.child.pid, signal); } catch { try { proc.child.kill(signal); } catch { /* */ } }
+      return true;
+    }
+    return false;
+  }
+
+  function shouldPauseAndMergeFollowUps(chatId) {
+    const proc = activeProcesses.get(chatId);
+    return !!(proc && proc.engine === 'codex');
+  }
+
+  function getFollowUpDebounceMs(config) {
+    const raw = Number(config && config.daemon && config.daemon.follow_up_debounce_ms);
+    if (Number.isFinite(raw) && raw >= 300) return raw;
+    return 2500;
+  }
+
+  function buildMergedFollowUpPrompt(messages) {
+    return [
+      '继续上面的工作，并结合我刚刚连续补充的消息统一处理：',
+      '',
+      messages.join('\n'),
+    ].join('\n');
+  }
+
+  function scheduleQueuedResume(bot, chatId, config, readOnly, senderId) {
+    const q = messageQueue.get(chatId);
+    if (!q || q.mode !== 'resume-after-pause') return;
+    clearQueuedTimer(chatId);
+    const delay = getFollowUpDebounceMs(config);
+    q.timer = setTimeout(async () => {
+      const pending = messageQueue.get(chatId);
+      if (!pending || pending.mode !== 'resume-after-pause') return;
+      if (activeProcesses.has(chatId)) {
+        scheduleQueuedResume(bot, chatId, config, readOnly, senderId);
+        return;
+      }
+      const msgs = pending.messages.splice(0);
+      messageQueue.delete(chatId);
+      if (msgs.length === 0) return;
+      log('INFO', `Follow-up: resuming with ${msgs.length} merged queued message(s) for ${chatId}`);
+      resetCooldown(chatId);
+      try {
+        await askClaude(bot, chatId, buildMergedFollowUpPrompt(msgs), config, readOnly, senderId);
+      } catch (err) {
+        log('WARN', `Follow-up resume failed for ${chatId}: ${err.message}`);
+        try { await bot.sendMessage(chatId, `⚠️ 继续处理补充消息失败：${err.message}`); } catch { /* */ }
+      }
+    }, delay);
+    if (typeof q.timer.unref === 'function') q.timer.unref();
+  }
+
   function resolveFlowTtlMs() {
     const raw = typeof agentFlowTtlMs === 'function' ? agentFlowTtlMs() : agentFlowTtlMs;
     const num = Number(raw);
@@ -680,16 +745,10 @@ function createCommandRouter(deps) {
     if (activeProcesses.has(chatId) && INTERRUPT_RE.test(text.trim())) {
       // Kill current process but preserve session for resume
       if (messageQueue.has(chatId)) {
-        const q = messageQueue.get(chatId);
-        if (q.timer) clearTimeout(q.timer);
+        clearQueuedTimer(chatId);
         messageQueue.delete(chatId);
       }
-      const proc = activeProcesses.get(chatId);
-      if (proc && proc.child) {
-        proc.aborted = true;
-        const signal = proc.killSignal || 'SIGTERM';
-        try { process.kill(-proc.child.pid, signal); } catch { try { proc.child.kill(signal); } catch { /* */ } }
-      }
+      interruptActiveProcess(chatId);
       await bot.sendMessage(chatId, '⏸ 好的，听你说');
       return;
     }
@@ -708,21 +767,45 @@ function createCommandRouter(deps) {
       // No session found — fall through to normal askClaude
     }
 
-    // If a task is running: queue message, DON'T kill — will be sent as follow-up after completion
-    if (activeProcesses.has(chatId)) {
-      const isFirst = !messageQueue.has(chatId);
-      if (isFirst) {
-        messageQueue.set(chatId, { messages: [] });
-      }
+    // While collecting follow-up messages after a pause, keep merging them until the debounce window closes.
+    if (messageQueue.has(chatId)) {
       const q = messageQueue.get(chatId);
-      if (q.messages.length >= 10) {
-        await bot.sendMessage(chatId, '⚠️ 排队已满（10条），请等当前任务完成');
+      if (q && q.mode === 'resume-after-pause') {
+        q.messages.push(text);
+        scheduleQueuedResume(bot, chatId, config, readOnly, senderId);
         return;
       }
+    }
+
+    // If a task is running: pause it, collect the user's burst of messages, then resume with a merged follow-up.
+    if (activeProcesses.has(chatId)) {
+      if (!shouldPauseAndMergeFollowUps(chatId)) {
+        const isFirst = !messageQueue.has(chatId);
+        if (isFirst) {
+          messageQueue.set(chatId, { messages: [] });
+        }
+        const q = messageQueue.get(chatId);
+        if (q.messages.length >= 10) {
+          await bot.sendMessage(chatId, '⚠️ 排队已满（10条），请等当前任务完成');
+          return;
+        }
+        q.messages.push(text);
+        if (isFirst) {
+          await bot.sendMessage(chatId, '📝 收到，完成后继续处理');
+        }
+        return;
+      }
+      const isFirst = !messageQueue.has(chatId);
+      if (isFirst) {
+        messageQueue.set(chatId, { messages: [], mode: 'resume-after-pause', timer: null });
+      }
+      const q = messageQueue.get(chatId);
       q.messages.push(text);
       if (isFirst) {
-        await bot.sendMessage(chatId, '📝 收到，完成后继续处理');
+        interruptActiveProcess(chatId);
+        await bot.sendMessage(chatId, '⏸ 已暂停当前任务，你可以继续连发，我会自动合并后续内容再继续');
       }
+      scheduleQueuedResume(bot, chatId, config, readOnly, senderId);
       return;
     }
     // Strict mode: chats with a fixed agent in chat_agent_map must not cross-dispatch
@@ -780,6 +863,7 @@ function createCommandRouter(deps) {
     // Use while-loop instead of recursion to avoid unbounded stack growth
     while (messageQueue.has(chatId)) {
       const q = messageQueue.get(chatId);
+      if (q && q.mode === 'resume-after-pause') break;
       const msgs = q.messages.splice(0);
       messageQueue.delete(chatId);
       if (msgs.length === 0) break;

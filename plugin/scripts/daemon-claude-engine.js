@@ -201,27 +201,35 @@ function createClaudeEngine(deps) {
   }
 
   const CODEX_RESUME_RETRY_WINDOW_MS = 10 * 60 * 1000;
-  const _codexResumeRetryTs = new Map(); // chatId -> last retry ts
+  const CODEX_PERMISSION_STABILIZE_MAX_RETRIES = 2;
+  const _codexResumeRetryTs = new Map(); // `${chatId}:${kind}` -> last retry ts
 
-  function canRetryCodexResume(chatId) {
-    const key = String(chatId || '');
+  function getCodexResumeRetryKey(chatId, kind = 'default') {
+    const base = String(chatId || '').trim();
+    const mode = String(kind || 'default').trim();
+    return base && mode ? `${base}:${mode}` : '';
+  }
+
+  function canRetryCodexResume(chatId, kind = 'default') {
+    const key = getCodexResumeRetryKey(chatId, kind);
     if (!key) return false;
     const last = Number(_codexResumeRetryTs.get(key) || 0);
     if (!last) return true;
     return (Date.now() - last) > CODEX_RESUME_RETRY_WINDOW_MS;
   }
 
-  function markCodexResumeRetried(chatId) {
-    const key = String(chatId || '');
+  function markCodexResumeRetried(chatId, kind = 'default') {
+    const key = getCodexResumeRetryKey(chatId, kind);
     if (!key) return;
     _codexResumeRetryTs.set(key, Date.now());
   }
 
-  function shouldRetryCodexResumeFallback({ runtimeName, wasResumeAttempt, output, error, errorCode, canRetry }) {
+  function shouldRetryCodexResumeFallback({ runtimeName, wasResumeAttempt, output, error, errorCode, canRetry, failureKind = '' }) {
     return runtimeName === 'codex'
       && !!wasResumeAttempt
       && !!error
       && (!output || !!errorCode)
+      && failureKind !== 'user-stop'
       && !!canRetry;
   }
 
@@ -345,7 +353,7 @@ function createClaudeEngine(deps) {
     );
   }
 
-  function buildCodexMigrationPrompt({ fullPrompt, previousSessionId, previousProfile, requestedProfile, recentContext }) {
+  function buildCodexFallbackBridgePrompt({ fullPrompt, previousSessionId, previousProfile, requestedProfile, recentContext }) {
     const bridge = [];
     bridge.push('[Note: continuing the same MetaMe persona conversation on a fresh Codex execution thread because the previous thread could not satisfy the newly requested permission profile.]');
     if (previousSessionId) {
@@ -367,15 +375,6 @@ function createClaudeEngine(deps) {
     }
     bridge.push('Continue as the same conversation. Do not mention any internal thread migration unless the user explicitly asks.');
     return `${bridge.join('\n')}\n\n[Current user message follows:]\n\n${fullPrompt}`;
-  }
-
-  function shouldStartFreshCodexSessionForPermissions(session, requestedProfile) {
-    void requestedProfile;
-    // Continuity-first policy: permission differences must not auto-create a new
-    // session. Only explicit /new or a truly invalid/expired backend session is
-    // allowed to break continuity. Capability differences are handled in-place.
-    if (!session || !session.started || !session.id || session.id === '__continue__') return false;
-    return false;
   }
 
   function getActualCodexPermissionProfile(session) {
@@ -434,6 +433,38 @@ function createClaudeEngine(deps) {
       return '⚠️ 旧 session 无法继续，已自动切换到新 session，但本次请求仍失败。';
     }
     return '';
+  }
+
+  function classifyCodexResumeFailure(error, errorCode) {
+    const message = String(error || '').trim();
+    const code = String(errorCode || '').trim();
+    const lowered = message.toLowerCase();
+    if (code === 'INTERRUPTED_USER') {
+      return {
+        kind: 'user-stop',
+        userMessage: '⚠️ 当前执行已按你的停止动作中断，本轮不会自动续跑。',
+        retryPromptPrefix: '',
+      };
+    }
+    const interrupted = (
+      lowered.includes('stopped by user')
+      || lowered.includes('interrupted')
+      || lowered.includes('signal')
+      || code === 'INTERRUPTED'
+      || code === 'INTERRUPTED_RESTART'
+    );
+    if (interrupted) {
+      return {
+        kind: 'interrupted',
+        userMessage: '⚠️ 后台刚刚重启或本轮执行被中断。系统正在自动恢复到同一条会话，请稍等。',
+        retryPromptPrefix: '[Note: the previous Codex execution was interrupted by a daemon restart or user stop signal. Continue the same conversation if possible. User message follows:]',
+      };
+    }
+    return {
+      kind: 'expired',
+      userMessage: '⚠️ Codex session 已过期，上下文可能丢失。正在以全新 session 重试，请在回复后补充必要背景。',
+      retryPromptPrefix: '[Note: previous Codex session expired and could not be resumed. Treating this as a new session. User message follows:]',
+    };
   }
 
 
@@ -756,6 +787,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         activeProcesses.set(chatId, {
           child,
           aborted: false,
+          abortReason: null,
           startedAt: _spawnAt,
           engine: rt.name,
           killSignal: rt.killSignal || 'SIGTERM',
@@ -1009,10 +1041,21 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
         const proc = chatId ? activeProcesses.get(chatId) : null;
         const wasAborted = proc && proc.aborted;
+        const abortReason = proc && proc.abortReason ? String(proc.abortReason) : '';
         if (chatId) { activeProcesses.delete(chatId); saveActivePids(); }
 
         if (wasAborted) {
-          finalize({ output: finalResult || null, error: 'Stopped by user', files: writtenFiles, toolUsageLog, usage: finalUsage, sessionId: observedSessionId || '' });
+          finalize({
+            output: finalResult || null,
+            error: 'Stopped by user',
+            errorCode: (abortReason === 'daemon-restart' || abortReason === 'shutdown')
+              ? 'INTERRUPTED_RESTART'
+              : 'INTERRUPTED_USER',
+            files: writtenFiles,
+            toolUsageLog,
+            usage: finalUsage,
+            sessionId: observedSessionId || '',
+          });
           return;
         }
         if (killed) {
@@ -1548,30 +1591,14 @@ ${mentorRadarHint}
         ? ''
         : '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
       const fullPrompt = routedPrompt + daemonHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
-      let codexMigrationPrompt = '';
-      let codexPrimaryPrompt = fullPrompt;
       if (runtime.name === 'codex' && session.started && session.id && requestedCodexPermissionProfile) {
         const actualPermissionProfile = getActualCodexPermissionProfile(session);
         if (codexPermissionNeedsMigration(actualPermissionProfile, requestedCodexPermissionProfile)) {
-          const previousSessionId = session.id;
-          const previousPermissionProfile = normalizeComparableCodexPermissionProfile(actualPermissionProfile || session);
-          const recentContext = typeof getSessionRecentContext === 'function' ? getSessionRecentContext(previousSessionId) : null;
-          log('INFO', `Codex session ${previousSessionId.slice(0, 8)} lacks requested permissions for ${sessionChatId}; migrating execution thread while preserving persona continuity`);
-          session = createSession(
-            sessionChatId,
-            session.cwd,
-            boundProject && boundProject.name ? boundProject.name : '',
-            'codex',
-            requestedCodexPermissionProfile
-          );
-          codexMigrationPrompt = buildCodexMigrationPrompt({
-            fullPrompt,
-            previousSessionId,
-            previousProfile: previousPermissionProfile,
-            requestedProfile: requestedCodexPermissionProfile,
-            recentContext,
-          });
-          codexPrimaryPrompt = codexMigrationPrompt;
+          const actualSummary = actualPermissionProfile
+            ? `${actualPermissionProfile.sandboxMode || actualPermissionProfile.permissionMode || 'unknown'}/${actualPermissionProfile.approvalPolicy || 'unknown'}`
+            : 'unknown/unknown';
+          const requestedSummary = `${requestedCodexPermissionProfile.sandboxMode}/${requestedCodexPermissionProfile.approvalPolicy}`;
+          log('INFO', `Codex session ${session.id.slice(0, 8)} is below requested permissions for ${sessionChatId}: ${actualSummary} vs ${requestedSummary}; trying native resume first`);
         }
       }
 
@@ -1585,8 +1612,8 @@ ${mentorRadarHint}
       });
 
       // Codex: write/refresh AGENTS.md = CLAUDE.md + SOUL.md on every fresh execution thread.
-      // This must happen after any permission-triggered migration so the spawned process uses
-      // the post-migration session object and fresh exec args rather than stale resume args.
+      // This must happen after any permission-triggered fallback decision so the spawned process uses
+      // the final session object and fresh exec args rather than stale resume args.
       if (engineName === 'codex' && session.cwd && !session.started) {
         try {
           const parts = [];
@@ -1716,7 +1743,7 @@ ${mentorRadarHint}
           sessionId,
         } = await spawnClaudeStreaming(
           args,
-          codexMigrationPrompt || fullPrompt,
+          fullPrompt,
           session.cwd,
           onStatus,
           600000,
@@ -1730,13 +1757,20 @@ ${mentorRadarHint}
         if (sessionId) await onSession(sessionId);
 
         if (runtime.name === 'codex' && requestedCodexPermissionProfile) {
-          const observedRuntimeProfile = getActualCodexPermissionProfile(sessionId ? { id: sessionId } : session);
-          if (codexPermissionNeedsMigration(observedRuntimeProfile, requestedCodexPermissionProfile)) {
+          let observedRuntimeProfile = getActualCodexPermissionProfile(sessionId ? { id: sessionId } : session);
+          let stabilizationRetryCount = 0;
+          while (codexPermissionNeedsMigration(observedRuntimeProfile, requestedCodexPermissionProfile)
+            && stabilizationRetryCount < CODEX_PERMISSION_STABILIZE_MAX_RETRIES) {
+            stabilizationRetryCount += 1;
+            const previousSessionId = String(sessionId || session.id || '').trim();
             const observedSummary = observedRuntimeProfile
               ? `${observedRuntimeProfile.sandboxMode || observedRuntimeProfile.permissionMode || 'unknown'}/${observedRuntimeProfile.approvalPolicy || 'unknown'}`
               : 'unknown/unknown';
             const requestedSummary = `${requestedCodexPermissionProfile.sandboxMode}/${requestedCodexPermissionProfile.approvalPolicy}`;
-            log('WARN', `Codex thread ${String(sessionId || session.id || '').slice(0, 8)} ended below requested permissions for ${sessionChatId}: ${observedSummary} vs ${requestedSummary}; retrying once with a new execution thread`);
+            log(
+              'WARN',
+              `Codex thread ${String(sessionId || session.id || '').slice(0, 8)} ended below requested permissions for ${sessionChatId}: ${observedSummary} vs ${requestedSummary}; retrying with a new execution thread (${stabilizationRetryCount}/${CODEX_PERMISSION_STABILIZE_MAX_RETRIES})`
+            );
             session = createSession(
               sessionChatId,
               session.cwd,
@@ -1744,6 +1778,16 @@ ${mentorRadarHint}
               'codex',
               requestedCodexPermissionProfile
             );
+            const retryRecentContext = previousSessionId && typeof getSessionRecentContext === 'function'
+              ? getSessionRecentContext(previousSessionId)
+              : null;
+            const freshRetryPrompt = buildCodexFallbackBridgePrompt({
+              fullPrompt,
+              previousSessionId,
+              previousProfile: normalizeComparableCodexPermissionProfile(observedRuntimeProfile),
+              requestedProfile: requestedCodexPermissionProfile,
+              recentContext: retryRecentContext,
+            });
             const freshRetryArgs = runtime.buildArgs({
               model,
               readOnly,
@@ -1762,7 +1806,7 @@ ${mentorRadarHint}
               sessionId,
             } = await spawnClaudeStreaming(
               freshRetryArgs,
-              codexPrimaryPrompt,
+              freshRetryPrompt,
               session.cwd,
               onStatus,
               600000,
@@ -1773,28 +1817,45 @@ ${mentorRadarHint}
               onSession,
             ));
             if (sessionId) await onSession(sessionId);
+            observedRuntimeProfile = getActualCodexPermissionProfile(sessionId ? { id: sessionId } : session);
+          }
+          if (codexPermissionNeedsMigration(observedRuntimeProfile, requestedCodexPermissionProfile)) {
+            const observedSummary = observedRuntimeProfile
+              ? `${observedRuntimeProfile.sandboxMode || observedRuntimeProfile.permissionMode || 'unknown'}/${observedRuntimeProfile.approvalPolicy || 'unknown'}`
+              : 'unknown/unknown';
+            const requestedSummary = `${requestedCodexPermissionProfile.sandboxMode}/${requestedCodexPermissionProfile.approvalPolicy}`;
+            log(
+              'WARN',
+              `Codex thread ${String(sessionId || session.id || '').slice(0, 8)} still below requested permissions for ${sessionChatId} after ${CODEX_PERMISSION_STABILIZE_MAX_RETRIES} stabilization retries: ${observedSummary} vs ${requestedSummary}`
+            );
           }
         }
 
+        const resumeFailure = classifyCodexResumeFailure(error, errorCode);
         if (shouldRetryCodexResumeFallback({
           runtimeName: runtime.name,
           wasResumeAttempt: wasCodexResumeAttempt,
           output,
           error,
           errorCode,
-          canRetry: canRetryCodexResume(chatId),
+          failureKind: resumeFailure.kind,
+          canRetry: canRetryCodexResume(chatId, resumeFailure.kind),
         })) {
-          markCodexResumeRetried(chatId);
-          log('WARN', `Codex resume failed for ${chatId}, retrying once with fresh exec: ${String(error).slice(0, 120)}`);
-          // Notify user explicitly — silent context loss is worse than a visible warning.
-          await bot.sendMessage(chatId, '⚠️ Codex session 已过期，上下文丢失。正在以全新 session 重试，请在回复后补充必要背景。').catch(() => { });
-          session = createSession(
-            sessionChatId,
-            session.cwd,
-            boundProject && boundProject.name ? boundProject.name : '',
-            'codex',
-            requestedCodexPermissionProfile
+          markCodexResumeRetried(chatId, resumeFailure.kind);
+          log(
+            'WARN',
+            `Codex resume failed for ${chatId}, retrying once with ${resumeFailure.kind === 'interrupted' ? 'native resume recovery' : 'fresh exec'}: ${String(error).slice(0, 120)}`
           );
+          await bot.sendMessage(chatId, resumeFailure.userMessage).catch(() => { });
+          if (resumeFailure.kind !== 'interrupted') {
+            session = createSession(
+              sessionChatId,
+              session.cwd,
+              boundProject && boundProject.name ? boundProject.name : '',
+              'codex',
+              requestedCodexPermissionProfile
+            );
+          }
           const retryArgs = runtime.buildArgs({
             model,
             readOnly,
@@ -1803,8 +1864,7 @@ ${mentorRadarHint}
             cwd: session.cwd,
             permissionProfile: requestedCodexPermissionProfile,
           });
-          // Prepend a context-loss marker so Codex knows this is a fresh session mid-conversation.
-          const retryPrompt = `[Note: previous Codex session expired and could not be resumed. Treating this as a new session. User message follows:]\n\n${fullPrompt}`;
+          const retryPrompt = `${resumeFailure.retryPromptPrefix}\n\n${fullPrompt}`;
           ({
             output,
             error,
@@ -1896,7 +1956,11 @@ ${mentorRadarHint}
       }
 
       if (output) {
-        if (runtime.name === 'codex') _codexResumeRetryTs.delete(String(chatId));
+        if (runtime.name === 'codex') {
+          _codexResumeRetryTs.delete(getCodexResumeRetryKey(chatId, 'interrupted'));
+          _codexResumeRetryTs.delete(getCodexResumeRetryKey(chatId, 'expired'));
+          _codexResumeRetryTs.delete(getCodexResumeRetryKey(chatId, 'default'));
+        }
         // Detect provider/model errors disguised as output (e.g., "model not found", API errors)
         if (runtime.name === 'claude') {
           const activeProvCheck = providerMod ? providerMod.getActiveName() : 'anthropic';
@@ -2146,18 +2210,19 @@ ${mentorRadarHint}
       getCodexPermissionProfile,
       getActualCodexPermissionProfile,
       sameCodexPermissionProfile,
-      shouldStartFreshCodexSessionForPermissions,
       inspectClaudeResumeSession,
       isClaudeThinkingSignatureError,
       formatClaudeResumeFallbackUserMessage,
+      classifyCodexResumeFailure,
       canRetryCodexResume,
       markCodexResumeRetried,
+      getCodexResumeRetryKey,
       CODEX_RESUME_RETRY_WINDOW_MS,
       shouldAutoRouteSkill,
       codexSandboxPrivilegeRank,
       codexApprovalPrivilegeRank,
       codexPermissionNeedsMigration,
-      buildCodexMigrationPrompt,
+      buildCodexFallbackBridgePrompt,
     },
   };
 }

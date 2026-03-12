@@ -340,17 +340,13 @@ function buildCodexArgs(options = {}) {
   // -C (cwd) is only supported on fresh exec, not resume
   if (cwd && !isResume) args.push('-C', cwd);
 
-  // Permission flags are only valid on fresh exec, not resume.
-  // `codex exec resume` does not accept -s or --dangerously-bypass-approvals-and-sandbox.
-  if (!isResume) {
-    const effectivePermissionProfile = permissionProfile || resolveCodexPermissionProfile({ readOnly, daemonCfg, session });
-    if (effectivePermissionProfile.sandboxMode === 'danger-full-access' && effectivePermissionProfile.approvalPolicy === 'never') {
-      // Keep the legacy shortcut for the fully-trusted mobile/default path.
-      args.push('--dangerously-bypass-approvals-and-sandbox');
-    } else {
-      args.push('-s', effectivePermissionProfile.sandboxMode);
-      args.push('--ask-for-approval', effectivePermissionProfile.approvalPolicy);
-    }
+  const effectivePermissionProfile = permissionProfile || resolveCodexPermissionProfile({ readOnly, daemonCfg, session });
+  if (effectivePermissionProfile.sandboxMode === 'danger-full-access' && effectivePermissionProfile.approvalPolicy === 'never') {
+    // Keep the legacy shortcut for the fully-trusted mobile/default path.
+    args.push('--dangerously-bypass-approvals-and-sandbox');
+  } else {
+    args.push('-s', effectivePermissionProfile.sandboxMode);
+    args.push('--ask-for-approval', effectivePermissionProfile.approvalPolicy);
   }
 
   // "-" means prompt is read from stdin.

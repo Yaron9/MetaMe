@@ -19,7 +19,7 @@ describe('daemon-engine-runtime normalize', () => {
 });
 
 describe('daemon-engine-runtime args builder', () => {
-  it('builds codex resume args with stdin prompt mode', () => {
+  it('builds codex native resume args with explicit permission flags', () => {
     const args = _private.buildCodexArgs({
       model: 'gpt-5-codex',
       session: { started: true, id: 'sid-1' },
@@ -28,7 +28,25 @@ describe('daemon-engine-runtime args builder', () => {
     assert.deepEqual(args.slice(0, 3), ['exec', 'resume', 'sid-1']);
     assert.ok(args.includes('--json'));
     assert.ok(args.includes('-'));
-    assert.ok(!args.includes('--dangerously-bypass-approvals-and-sandbox'));
+    assert.ok(args.includes('--dangerously-bypass-approvals-and-sandbox'));
+    assert.ok(!args.includes('-C'));
+  });
+
+  it('keeps explicit codex sandbox flags on native resume when not full access', () => {
+    const args = _private.buildCodexArgs({
+      model: 'gpt-5-codex',
+      session: { started: true, id: 'sid-1' },
+      permissionProfile: {
+        sandboxMode: 'workspace-write',
+        approvalPolicy: 'on-request',
+        permissionMode: 'workspace-write',
+      },
+    });
+    assert.deepEqual(args.slice(0, 3), ['exec', 'resume', 'sid-1']);
+    assert.ok(args.includes('-s'));
+    assert.ok(args.includes('workspace-write'));
+    assert.ok(args.includes('--ask-for-approval'));
+    assert.ok(args.includes('on-request'));
   });
 
   it('always uses --dangerously-bypass-approvals-and-sandbox for codex (no config needed)', () => {
