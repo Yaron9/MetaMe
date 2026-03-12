@@ -38,6 +38,8 @@ test_daemon.js
 scripts/test_daemon.js
 run_test.js
 x.md
+metame分享.md
+antigravity_architecture_lessons.md
 
 # Build artifacts
 *.tgz
