@@ -86,6 +86,86 @@ describe('daemon-session-store codex metadata', () => {
     assert.equal(state.sessions['chat-1'].id, undefined);
   });
 
+  it('prefers the current logical codex slot over stale historical reply thread metadata', () => {
+    const businessCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-business-'));
+    const state = {
+      sessions: {
+        '_bound_business': {
+          cwd: businessCwd,
+          engines: {
+            codex: {
+              id: 'codex-current',
+              started: true,
+              runtimeSessionObserved: true,
+              sandboxMode: 'danger-full-access',
+              approvalPolicy: 'never',
+              permissionMode: 'danger-full-access',
+            },
+          },
+        },
+      },
+    };
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
+    const store = createSessionStore({
+      fs,
+      path,
+      HOME: tempHome,
+      loadState: () => state,
+      saveState: (next) => {
+        state.sessions = next.sessions;
+      },
+      log: () => {},
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+
+    const restored = store.restoreSessionFromReply('oc_group_1', {
+      id: 'codex-stale-readonly',
+      cwd: '/tmp/readonly',
+      engine: 'codex',
+      logicalChatId: '_bound_business',
+      sandboxMode: 'read-only',
+      approvalPolicy: 'never',
+      permissionMode: 'read-only',
+    });
+
+    assert.equal(restored.id, 'codex-current');
+    assert.equal(restored.cwd, path.resolve(businessCwd));
+    assert.equal(restored.permissionMode, 'danger-full-access');
+    assert.equal(state.sessions['oc_group_1'].engines.codex.id, 'codex-current');
+  });
+
+  it('renders synthetic logical sessions without historical timestamps', () => {
+    const state = { sessions: {} };
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
+    const store = createSessionStore({
+      fs,
+      path,
+      HOME: tempHome,
+      loadState: () => state,
+      saveState: (next) => {
+        state.sessions = next.sessions;
+      },
+      log: () => {},
+      formatRelativeTime: () => 'just now',
+      cpExtractTimestamp: () => null,
+    });
+
+    const synthetic = {
+      sessionId: 'codex-current-thread',
+      projectPath: tempHome,
+      engine: 'codex',
+      customTitle: '当前会话',
+      summary: '优先续接当前智能体会话',
+    };
+
+    assert.match(store.sessionLabel(synthetic), /当前会话/);
+    assert.match(store.sessionRichLabel(synthetic, 1, {}), /当前会话/);
+    const elements = store.buildSessionCardElements([synthetic]);
+    assert.equal(Array.isArray(elements), true);
+    assert.equal(elements.length, 2);
+  });
+
   it('keeps fresh codex sessions non-resumable until runtime reports a real thread id', () => {
     const state = { sessions: {} };
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
@@ -277,6 +357,11 @@ describe('daemon-session-store codex metadata', () => {
     assert.equal(claudeSessions.length, 1);
     assert.equal(claudeSessions[0].sessionId, 'claude-session');
     assert.equal(claudeSessions[0].engine, 'claude');
+    assert.deepEqual(store.getCodexSessionSandboxProfile('codex-session'), {
+      sandboxMode: 'danger-full-access',
+      approvalPolicy: 'never',
+      permissionMode: 'danger-full-access',
+    });
   });
 
   it('skips internal codex exec threads when listing resumable sessions', () => {

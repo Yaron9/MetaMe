@@ -66,6 +66,7 @@ function createClaudeEngine(deps) {
     isEngineSessionValid,
     getCodexSessionSandboxProfile,
     getCodexSessionPermissionMode,
+    getSessionRecentContext,
     gitCheckpoint,
     gitCheckpointAsync,
     recordTokens,
@@ -105,6 +106,15 @@ function createClaudeEngine(deps) {
   try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
   let sessionAnalytics = null;
   try { sessionAnalytics = require('./session-analytics'); } catch { /* optional */ }
+
+  function shouldAutoRouteSkill({ agentMatch, hasActiveSession, boundProjectKey, skillName }) {
+    if (agentMatch || hasActiveSession) return false;
+    if (
+      String(boundProjectKey || '').trim() === 'personal'
+      && String(skillName || '').trim() === 'macos-local-orchestrator'
+    ) return false;
+    return true;
+  }
 
   const getEngineRuntime = typeof injectedGetEngineRuntime === 'function'
     ? injectedGetEngineRuntime
@@ -248,28 +258,124 @@ function createClaudeEngine(deps) {
     return rawChatId || chatId;
   }
 
+  function normalizeCodexSandboxMode(value, fallback = null) {
+    const text = String(value || '').trim().toLowerCase();
+    if (!text) return fallback;
+    if (text === 'read-only' || text === 'readonly') return 'read-only';
+    if (text === 'workspace-write' || text === 'workspace') return 'workspace-write';
+    if (
+      text === 'danger-full-access'
+      || text === 'dangerous'
+      || text === 'full-access'
+      || text === 'full'
+      || text === 'bypass'
+      || text === 'writable'
+    ) return 'danger-full-access';
+    return fallback;
+  }
+
+  function normalizeCodexApprovalPolicy(value, fallback = null) {
+    const text = String(value || '').trim().toLowerCase();
+    if (!text) return fallback;
+    if (text === 'never' || text === 'no' || text === 'none') return 'never';
+    if (text === 'on-failure' || text === 'on_failure' || text === 'failure') return 'on-failure';
+    if (text === 'on-request' || text === 'on_request' || text === 'request') return 'on-request';
+    if (text === 'untrusted') return 'untrusted';
+    return fallback;
+  }
+
+  function normalizeComparableCodexPermissionProfile(profile) {
+    if (!profile) return null;
+    const sandboxMode = normalizeCodexSandboxMode(
+      profile.sandboxMode || profile.permissionMode,
+      null
+    );
+    const approvalPolicy = normalizeCodexApprovalPolicy(
+      profile.approvalPolicy,
+      null
+    );
+    if (!sandboxMode && !approvalPolicy) return null;
+    return {
+      sandboxMode,
+      approvalPolicy,
+      permissionMode: sandboxMode,
+    };
+  }
+
   function normalizeSenderId(senderId) {
     const text = String(senderId || '').trim();
     return text || '';
   }
 
   function sameCodexPermissionProfile(left, right) {
-    if (!left || !right) return false;
-    const sameSandbox = String(left.sandboxMode || left.permissionMode || '').trim() === String(right.sandboxMode || right.permissionMode || '').trim();
-    const leftApproval = String(left.approvalPolicy || '').trim();
-    const rightApproval = String(right.approvalPolicy || '').trim();
+    const normalizedLeft = normalizeComparableCodexPermissionProfile(left);
+    const normalizedRight = normalizeComparableCodexPermissionProfile(right);
+    if (!normalizedLeft || !normalizedRight) return false;
+    const sameSandbox = normalizedLeft.sandboxMode === normalizedRight.sandboxMode;
+    const leftApproval = String(normalizedLeft.approvalPolicy || '').trim();
+    const rightApproval = String(normalizedRight.approvalPolicy || '').trim();
     if (!leftApproval || !rightApproval) return sameSandbox;
     return sameSandbox && leftApproval === rightApproval;
   }
 
+  function codexSandboxPrivilegeRank(value) {
+    const normalized = normalizeCodexSandboxMode(value, null);
+    if (normalized === 'read-only') return 0;
+    if (normalized === 'workspace-write') return 1;
+    if (normalized === 'danger-full-access') return 2;
+    return -1;
+  }
+
+  function codexApprovalPrivilegeRank(value) {
+    const normalized = normalizeCodexApprovalPolicy(value, null);
+    if (normalized === 'untrusted') return 0;
+    if (normalized === 'on-request') return 1;
+    if (normalized === 'on-failure') return 2;
+    if (normalized === 'never') return 3;
+    return -1;
+  }
+
+  function codexPermissionNeedsMigration(actualProfile, requestedProfile) {
+    const normalizedActual = normalizeComparableCodexPermissionProfile(actualProfile);
+    const normalizedRequested = normalizeComparableCodexPermissionProfile(requestedProfile);
+    if (!normalizedActual || !normalizedRequested) return false;
+    return (
+      codexSandboxPrivilegeRank(normalizedActual.sandboxMode) < codexSandboxPrivilegeRank(normalizedRequested.sandboxMode)
+      || codexApprovalPrivilegeRank(normalizedActual.approvalPolicy) < codexApprovalPrivilegeRank(normalizedRequested.approvalPolicy)
+    );
+  }
+
+  function buildCodexMigrationPrompt({ fullPrompt, previousSessionId, previousProfile, requestedProfile, recentContext }) {
+    const bridge = [];
+    bridge.push('[Note: continuing the same MetaMe persona conversation on a fresh Codex execution thread because the previous thread could not satisfy the newly requested permission profile.]');
+    if (previousSessionId) {
+      bridge.push(`Previous Codex thread: ${String(previousSessionId).slice(0, 8)}`);
+    }
+    if (previousProfile || requestedProfile) {
+      const previousSummary = previousProfile
+        ? `${previousProfile.sandboxMode || previousProfile.permissionMode || 'unknown'}/${previousProfile.approvalPolicy || 'unknown'}`
+        : 'unknown/unknown';
+      const requestedSummary = requestedProfile
+        ? `${requestedProfile.sandboxMode || requestedProfile.permissionMode || 'unknown'}/${requestedProfile.approvalPolicy || 'unknown'}`
+        : 'unknown/unknown';
+      bridge.push(`Permission migration: ${previousSummary} -> ${requestedSummary}`);
+    }
+    if (recentContext && (recentContext.lastUser || recentContext.lastAssistant)) {
+      bridge.push('Recent conversation context:');
+      if (recentContext.lastUser) bridge.push(`Last user message: ${String(recentContext.lastUser).trim()}`);
+      if (recentContext.lastAssistant) bridge.push(`Last assistant reply: ${String(recentContext.lastAssistant).trim()}`);
+    }
+    bridge.push('Continue as the same conversation. Do not mention any internal thread migration unless the user explicitly asks.');
+    return `${bridge.join('\n')}\n\n[Current user message follows:]\n\n${fullPrompt}`;
+  }
+
   function shouldStartFreshCodexSessionForPermissions(session, requestedProfile) {
+    void requestedProfile;
+    // Continuity-first policy: permission differences must not auto-create a new
+    // session. Only explicit /new or a truly invalid/expired backend session is
+    // allowed to break continuity. Capability differences are handled in-place.
     if (!session || !session.started || !session.id || session.id === '__continue__') return false;
-    const sessionProfile = {
-      sandboxMode: session.sandboxMode || session.permissionMode || null,
-      approvalPolicy: session.approvalPolicy || null,
-      permissionMode: session.permissionMode || session.sandboxMode || null,
-    };
-    return !sameCodexPermissionProfile(sessionProfile, requestedProfile);
+    return false;
   }
 
   function getActualCodexPermissionProfile(session) {
@@ -968,6 +1074,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       id: session.id,
       cwd: session.cwd,
       engine: session.engine || getDefaultEngine(),
+      logicalChatId: session.logicalChatId || null,
       agentKey: agentKey || null,
       ...(session.sandboxMode ? { sandboxMode: session.sandboxMode } : {}),
       ...(session.approvalPolicy ? { approvalPolicy: session.approvalPolicy } : {}),
@@ -1094,7 +1201,15 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const hasActiveSession = sessionRaw && (
         sessionRaw.engines ? !!(sessionRaw.engines[engineName]?.started) : !!sessionRaw.started
       );
-      const skill = (agentMatch || hasActiveSession) ? null : routeSkill(prompt);
+      const detectedSkill = routeSkill(prompt);
+      const skill = shouldAutoRouteSkill({
+        agentMatch,
+        hasActiveSession,
+        boundProjectKey,
+        skillName: detectedSkill,
+      })
+        ? detectedSkill
+        : null;
 
       if (!sessionRaw) {
         // No saved state for this chatId: start a fresh session.
@@ -1112,6 +1227,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       // Resolve flat view for current engine (id + started are engine-specific; cwd is shared)
       let session = resolveSessionForEngine(sessionChatId, engineName) || { cwd: boundCwd || HOME, engine: engineName, id: null, started: false };
       session.engine = engineName; // keep local copy for Codex resume detection below
+      session.logicalChatId = sessionChatId;
 
       // Pre-spawn session validation: unified for all engines.
       // Claude checks JSONL file existence; Codex checks SQLite. Same interface, different backend.
@@ -1134,38 +1250,26 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         }
       }
 
-      if (runtime.name === 'codex' && shouldStartFreshCodexSessionForPermissions(session, requestedCodexPermissionProfile)) {
-        const priorPermissionSummary = `${String(session.sandboxMode || session.permissionMode || 'unknown')}/${String(session.approvalPolicy || 'unknown')}`;
-        const requestedPermissionSummary = `${requestedCodexPermissionProfile.sandboxMode}/${requestedCodexPermissionProfile.approvalPolicy}`;
-        log('WARN', `Codex session ${session.id.slice(0, 8)} permission mismatch for ${sessionChatId}: ${priorPermissionSummary} -> ${requestedPermissionSummary}; starting fresh session`);
-        if (!isVirtualAgent) {
-          await bot.sendMessage(chatId, '⚠️ 当前 Codex session 的权限模式不匹配，已自动开启新 session。').catch(() => { });
-        }
-        session = createSession(
-          sessionChatId,
-          session.cwd,
-          boundProject && boundProject.name ? boundProject.name : '',
-          'codex',
-          requestedCodexPermissionProfile
-        );
-      }
-
       if (runtime.name === 'codex' && session.started && session.id) {
         const actualPermissionProfile = getActualCodexPermissionProfile(session);
-        if (actualPermissionProfile && !sameCodexPermissionProfile(actualPermissionProfile, requestedCodexPermissionProfile)) {
-          const actualSummary = `${actualPermissionProfile.sandboxMode || actualPermissionProfile.permissionMode || 'unknown'}/${actualPermissionProfile.approvalPolicy || 'unknown'}`;
-          const requestedSummary = `${requestedCodexPermissionProfile.sandboxMode}/${requestedCodexPermissionProfile.approvalPolicy}`;
-          log('WARN', `Codex session ${session.id.slice(0, 8)} actual sandbox mismatch for ${sessionChatId}: ${actualSummary} -> ${requestedSummary}; starting fresh session`);
-          if (!isVirtualAgent) {
-            await bot.sendMessage(chatId, '⚠️ 当前 Codex session 的真实沙箱权限不匹配，已自动开启新 session。').catch(() => { });
+        if (actualPermissionProfile) {
+          const storedPermissionProfile = normalizeComparableCodexPermissionProfile(session);
+          if (!sameCodexPermissionProfile(storedPermissionProfile, actualPermissionProfile)) {
+            session = { ...session, ...actualPermissionProfile };
+            await patchSessionSerialized(sessionChatId, (cur) => {
+              const engines = { ...(cur.engines || {}) };
+              engines.codex = {
+                ...(engines.codex || {}),
+                ...(actualPermissionProfile || {}),
+              };
+              return { ...cur, engines };
+            });
           }
-          session = createSession(
-            sessionChatId,
-            session.cwd,
-            boundProject && boundProject.name ? boundProject.name : '',
-            'codex',
-            requestedCodexPermissionProfile
-          );
+          if (!sameCodexPermissionProfile(actualPermissionProfile, requestedCodexPermissionProfile)) {
+            const actualSummary = `${actualPermissionProfile.sandboxMode || actualPermissionProfile.permissionMode || 'unknown'}/${actualPermissionProfile.approvalPolicy || 'unknown'}`;
+            const requestedSummary = `${requestedCodexPermissionProfile.sandboxMode}/${requestedCodexPermissionProfile.approvalPolicy}`;
+            log('INFO', `Codex session ${session.id.slice(0, 8)} permission differs for ${sessionChatId}: ${actualSummary} vs requested ${requestedSummary}; preserving existing session continuity`);
+          }
         }
       }
       const mentorCfg = (daemonCfg.mentor && typeof daemonCfg.mentor === 'object') ? daemonCfg.mentor : {};
@@ -1210,37 +1314,6 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
             log('INFO', `[ModelPin] resuming ${session.id.slice(0, 8)} with original model ${resumeInspection.modelPin} (configured: ${model})`);
           }
           model = resumeInspection.modelPin;
-        }
-      }
-
-      const args = runtime.buildArgs({
-        model,
-        readOnly,
-        daemonCfg,
-        session,
-        cwd: session.cwd,
-      });
-
-      // Codex: write/refresh AGENTS.md = CLAUDE.md + SOUL.md on every new session.
-      // Written as a real file (not a symlink) for Windows compatibility.
-      // Refreshed each session so edits to CLAUDE.md or SOUL.md are always picked up.
-      // Codex auto-loads AGENTS.md from cwd and all parent dirs up to ~.
-      if (engineName === 'codex' && session.cwd && !session.started) {
-        try {
-          const parts = [];
-          const claudeMd = path.join(session.cwd, 'CLAUDE.md');
-          const soulMd = path.join(session.cwd, 'SOUL.md');
-          if (fs.existsSync(claudeMd)) parts.push(fs.readFileSync(claudeMd, 'utf8').trim());
-          if (fs.existsSync(soulMd)) {
-            const soulContent = fs.readFileSync(soulMd, 'utf8').trim();
-            if (soulContent) parts.push(soulContent);
-          }
-          if (parts.length > 0) {
-            fs.writeFileSync(path.join(session.cwd, 'AGENTS.md'), parts.join('\n\n'), 'utf8');
-            log('INFO', `Refreshed AGENTS.md (${parts.length} section(s)) in ${session.cwd}`);
-          }
-        } catch (e) {
-          log('WARN', `AGENTS.md refresh failed: ${e.message}`);
         }
       }
 
@@ -1475,6 +1548,63 @@ ${mentorRadarHint}
         ? ''
         : '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
       const fullPrompt = routedPrompt + daemonHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
+      let codexMigrationPrompt = '';
+      let codexPrimaryPrompt = fullPrompt;
+      if (runtime.name === 'codex' && session.started && session.id && requestedCodexPermissionProfile) {
+        const actualPermissionProfile = getActualCodexPermissionProfile(session);
+        if (codexPermissionNeedsMigration(actualPermissionProfile, requestedCodexPermissionProfile)) {
+          const previousSessionId = session.id;
+          const previousPermissionProfile = normalizeComparableCodexPermissionProfile(actualPermissionProfile || session);
+          const recentContext = typeof getSessionRecentContext === 'function' ? getSessionRecentContext(previousSessionId) : null;
+          log('INFO', `Codex session ${previousSessionId.slice(0, 8)} lacks requested permissions for ${sessionChatId}; migrating execution thread while preserving persona continuity`);
+          session = createSession(
+            sessionChatId,
+            session.cwd,
+            boundProject && boundProject.name ? boundProject.name : '',
+            'codex',
+            requestedCodexPermissionProfile
+          );
+          codexMigrationPrompt = buildCodexMigrationPrompt({
+            fullPrompt,
+            previousSessionId,
+            previousProfile: previousPermissionProfile,
+            requestedProfile: requestedCodexPermissionProfile,
+            recentContext,
+          });
+          codexPrimaryPrompt = codexMigrationPrompt;
+        }
+      }
+
+      const args = runtime.buildArgs({
+        model,
+        readOnly,
+        daemonCfg,
+        session,
+        cwd: session.cwd,
+        permissionProfile: runtime.name === 'codex' ? requestedCodexPermissionProfile : null,
+      });
+
+      // Codex: write/refresh AGENTS.md = CLAUDE.md + SOUL.md on every fresh execution thread.
+      // This must happen after any permission-triggered migration so the spawned process uses
+      // the post-migration session object and fresh exec args rather than stale resume args.
+      if (engineName === 'codex' && session.cwd && !session.started) {
+        try {
+          const parts = [];
+          const claudeMd = path.join(session.cwd, 'CLAUDE.md');
+          const soulMd = path.join(session.cwd, 'SOUL.md');
+          if (fs.existsSync(claudeMd)) parts.push(fs.readFileSync(claudeMd, 'utf8').trim());
+          if (fs.existsSync(soulMd)) {
+            const soulContent = fs.readFileSync(soulMd, 'utf8').trim();
+            if (soulContent) parts.push(soulContent);
+          }
+          if (parts.length > 0) {
+            fs.writeFileSync(path.join(session.cwd, 'AGENTS.md'), parts.join('\n\n'), 'utf8');
+            log('INFO', `Refreshed AGENTS.md (${parts.length} section(s)) in ${session.cwd}`);
+          }
+        } catch (e) {
+          log('WARN', `AGENTS.md refresh failed: ${e.message}`);
+        }
+      }
 
       // Git checkpoint before Claude modifies files (for /undo).
       // Skip for virtual agents (team clones like _agent_yi) — each has its own worktree,
@@ -1552,6 +1682,7 @@ ${mentorRadarHint}
           ...session,
           id: safeNextId,
           engine: runtime.name,
+          logicalChatId: sessionChatId,
           started: true,
         };
         await patchSessionSerialized(sessionChatId, (cur) => {
@@ -1585,7 +1716,7 @@ ${mentorRadarHint}
           sessionId,
         } = await spawnClaudeStreaming(
           args,
-          fullPrompt,
+          codexMigrationPrompt || fullPrompt,
           session.cwd,
           onStatus,
           600000,
@@ -1597,6 +1728,53 @@ ${mentorRadarHint}
         ));
 
         if (sessionId) await onSession(sessionId);
+
+        if (runtime.name === 'codex' && requestedCodexPermissionProfile) {
+          const observedRuntimeProfile = getActualCodexPermissionProfile(sessionId ? { id: sessionId } : session);
+          if (codexPermissionNeedsMigration(observedRuntimeProfile, requestedCodexPermissionProfile)) {
+            const observedSummary = observedRuntimeProfile
+              ? `${observedRuntimeProfile.sandboxMode || observedRuntimeProfile.permissionMode || 'unknown'}/${observedRuntimeProfile.approvalPolicy || 'unknown'}`
+              : 'unknown/unknown';
+            const requestedSummary = `${requestedCodexPermissionProfile.sandboxMode}/${requestedCodexPermissionProfile.approvalPolicy}`;
+            log('WARN', `Codex thread ${String(sessionId || session.id || '').slice(0, 8)} ended below requested permissions for ${sessionChatId}: ${observedSummary} vs ${requestedSummary}; retrying once with a new execution thread`);
+            session = createSession(
+              sessionChatId,
+              session.cwd,
+              boundProject && boundProject.name ? boundProject.name : '',
+              'codex',
+              requestedCodexPermissionProfile
+            );
+            const freshRetryArgs = runtime.buildArgs({
+              model,
+              readOnly,
+              daemonCfg,
+              session,
+              cwd: session.cwd,
+              permissionProfile: requestedCodexPermissionProfile,
+            });
+            ({
+              output,
+              error,
+              errorCode,
+              timedOut,
+              files,
+              toolUsageLog,
+              sessionId,
+            } = await spawnClaudeStreaming(
+              freshRetryArgs,
+              codexPrimaryPrompt,
+              session.cwd,
+              onStatus,
+              600000,
+              chatId,
+              boundProjectKey || '',
+              normalizeSenderId(senderId),
+              runtime,
+              onSession,
+            ));
+            if (sessionId) await onSession(sessionId);
+          }
+        }
 
         if (shouldRetryCodexResumeFallback({
           runtimeName: runtime.name,
@@ -1623,6 +1801,7 @@ ${mentorRadarHint}
             daemonCfg,
             session,
             cwd: session.cwd,
+            permissionProfile: requestedCodexPermissionProfile,
           });
           // Prepend a context-loss marker so Codex knows this is a fresh session mid-conversation.
           const retryPrompt = `[Note: previous Codex session expired and could not be resumed. Treating this as a new session. User message follows:]\n\n${fullPrompt}`;
@@ -1974,6 +2153,11 @@ ${mentorRadarHint}
       canRetryCodexResume,
       markCodexResumeRetried,
       CODEX_RESUME_RETRY_WINDOW_MS,
+      shouldAutoRouteSkill,
+      codexSandboxPrivilegeRank,
+      codexApprovalPrivilegeRank,
+      codexPermissionNeedsMigration,
+      buildCodexMigrationPrompt,
     },
   };
 }

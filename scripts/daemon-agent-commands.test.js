@@ -40,6 +40,13 @@ function createHarness(options = {}) {
     sendBrowse: async () => {},
     sendDirPicker: async () => {},
     getSession: (id) => state.sessions[id] || null,
+    getSessionForEngine: (id, engine) => {
+      const raw = state.sessions[id] || null;
+      if (!raw) return null;
+      if (raw.engines && raw.engines[engine]) return { cwd: raw.cwd, engine, ...raw.engines[engine] };
+      if (raw.id) return { cwd: raw.cwd, engine, id: raw.id, started: !!raw.started };
+      return null;
+    },
     listRecentSessions: (limit, cwd, engine) => {
       let filtered = sessions.slice();
       if (cwd) filtered = filtered.filter(s => s.projectPath === cwd);
@@ -150,7 +157,7 @@ describe('daemon-agent-commands /resume engine resolution', () => {
     assert.match(h.sent[0], /codex task|sid-codex-1/);
   });
 
-  it('resumes into sticky team member virtual session when active', async () => {
+  it('keeps sticky team member chats on the current logical session when resuming old history', async () => {
     const h = createHarness({
       chatId: 'team-chat',
       currentEngine: 'claude',
@@ -193,8 +200,90 @@ describe('daemon-agent-commands /resume engine resolution', () => {
     });
 
     assert.equal(handled, true);
-    assert.equal(h.state.sessions._agent_jia.id, 'sid-jia-2');
+    assert.equal(h.state.sessions._agent_jia.id, 'sid-jia-current');
     assert.equal(h.state.sessions._agent_jia.engine, 'codex');
+    assert.match(h.sent[0], /优先恢复当前智能体会话/);
+  });
+
+  it('shows the current logical session first in /resume for bound chats', async () => {
+    const h = createHarness({
+      chatId: 'bound-chat',
+      currentEngine: 'claude',
+      currentCwd: '/repo/main',
+      config: {
+        projects: {
+          metame: { cwd: '/repo/main', engine: 'codex' },
+        },
+        feishu: {
+          chat_agent_map: {
+            'bound-chat': 'metame',
+          },
+        },
+      },
+      virtualSessions: {
+        _bound_metame: {
+          cwd: '/repo/main',
+          engines: {
+            codex: { id: 'sid-current-logical', started: true },
+          },
+        },
+      },
+      sessions: [
+        { sessionId: 'sid-old-history', projectPath: '/repo/main', customTitle: 'old history', engine: 'codex' },
+      ],
+    });
+
+    const handled = await h.handleAgentCommand({
+      bot: h.bot,
+      chatId: h.chatId,
+      text: '/resume',
+      config: { projects: {} },
+    });
+
+    assert.equal(handled, true);
+    assert.match(h.sent[0], /sid-current-logical/);
+    assert.ok(h.sent[0].indexOf('sid-current-logical') < h.sent[0].indexOf('sid-old-history'));
+    assert.equal(h.state.sessions._bound_metame.engines.codex.id, 'sid-current-logical');
+  });
+
+  it('prefers the current logical slot when a bound chat explicitly resumes an old thread from the same project', async () => {
+    const h = createHarness({
+      chatId: 'bound-chat',
+      currentEngine: 'claude',
+      currentCwd: '/repo/main',
+      config: {
+        projects: {
+          metame: { cwd: '/repo/main', engine: 'codex' },
+        },
+        feishu: {
+          chat_agent_map: {
+            'bound-chat': 'metame',
+          },
+        },
+      },
+      virtualSessions: {
+        _bound_metame: {
+          cwd: '/repo/main',
+          engines: {
+            codex: { id: 'sid-current-logical', started: true },
+          },
+        },
+      },
+      sessions: [
+        { sessionId: 'sid-old-history', projectPath: '/repo/main', customTitle: 'old history', engine: 'codex' },
+      ],
+    });
+
+    const handled = await h.handleAgentCommand({
+      bot: h.bot,
+      chatId: h.chatId,
+      text: '/resume sid-old-history',
+      config: { projects: {} },
+    });
+
+    assert.equal(handled, true);
+    assert.equal(h.state.sessions._bound_metame.engines.codex.id, 'sid-current-logical');
+    assert.match(h.sent[0], /优先恢复当前智能体会话/);
   });
 
   it('auto-creates a session when resume list is empty but cwd exists', async () => {

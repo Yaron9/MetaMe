@@ -86,18 +86,15 @@ function isMacLocalOrchestratorIntent(prompt) {
   const text = String(prompt || '').trim();
   if (!text) return false;
 
-  // Explicit macOS automation keywords.
-  if (/\b(?:mac|macos|applescript|osascript|jxa|hammerspoon|aerospace|yabai|skhd|raycast|launchctl|keyboard maestro)\b/i.test(text)) {
-    return true;
-  }
-  if (/(自动化|辅助功能|系统设置|隐私|权限|锁屏|锁定屏幕|睡眠|休眠|静音|取消静音|音量)/.test(text)) {
-    return true;
-  }
+  const hasAutomationVerb = /(?:自动化|脚本|控制|操作|执行|设置|调整|打开|关闭|启动|退出|切到|唤起|锁屏|锁定屏幕|睡眠|休眠|静音|取消静音|调(?:高|低|整)?音量|open|launch|quit|activate|lock\s*screen|sleep|mute|unmute|set\s+volume|run\s+(?:an?\s+)?script)/i.test(text);
+  const hasMacTool = /\b(?:mac|macos|applescript|osascript|jxa|hammerspoon|aerospace|yabai|skhd|raycast|launchctl|keyboard maestro|shortcuts)\b/i.test(text);
+  const hasMacTarget = /(?:微信|WeChat|飞书|Feishu|Finder|Safari|Terminal|iTerm|系统设置|System Settings|辅助功能|隐私|权限|屏幕录制|自动化|电脑|桌面|访达|System Events|LaunchAgent|快捷指令|锁屏|锁定屏幕|睡眠|休眠|静音|音量|mac)/i.test(text);
 
-  // General verbs must be paired with explicit macOS targets to avoid over-routing.
-  const hasAction = /(?:打开|关闭|启动|退出|切到|唤起|锁屏|锁定屏幕|睡眠|休眠|静音|取消静音|调(?:高|低|整)?音量|open|launch|quit|activate|lock\s*screen|sleep|mute|unmute)/i.test(text);
-  const hasTarget = /(?:微信|WeChat|飞书|Feishu|Finder|Safari|Terminal|iTerm|系统设置|System Settings|电脑|System Events|mac)/i.test(text);
-  return hasAction && hasTarget;
+  // Require an actual automation ask. Mentioning "macOS" or "权限" alone should not route.
+  if (hasMacTool && hasAutomationVerb) return true;
+
+  // Natural-language control only triggers when both the action and the macOS target are explicit.
+  return hasAutomationVerb && hasMacTarget;
 }
 
 const SKILL_ROUTES = [
@@ -2210,6 +2207,7 @@ const { spawnClaudeAsync, askClaude } = createClaudeEngine({
   sendFileButtons,
   findSessionFile,
   listRecentSessions,
+  getSessionRecentContext,
   isEngineSessionValid,
   getCodexSessionSandboxProfile,
   getCodexSessionPermissionMode,
@@ -2272,6 +2270,7 @@ const { handleAgentCommand } = createAgentCommandHandler({
   sendBrowse,
   sendDirPicker,
   getSession,
+  getSessionForEngine,
   listRecentSessions,
   buildSessionCardElements,
   sessionLabel,
@@ -2835,5 +2834,6 @@ module.exports = {
     createStreamForwardBot,
     buildDispatchTaskCard,
     resolveDispatchReadOnly,
+    isMacLocalOrchestratorIntent,
   },
 };

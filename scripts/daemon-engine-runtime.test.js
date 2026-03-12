@@ -54,6 +54,25 @@ describe('daemon-engine-runtime args builder', () => {
     assert.ok(!args.includes('--dangerously-bypass-approvals-and-sandbox'));
   });
 
+  it('prefers explicit codex permissionProfile over stale session metadata on fresh exec', () => {
+    const args = _private.buildCodexArgs({
+      model: 'gpt-5-codex',
+      session: {
+        started: false,
+        sandboxMode: 'read-only',
+        approvalPolicy: 'never',
+        permissionMode: 'read-only',
+      },
+      permissionProfile: {
+        sandboxMode: 'danger-full-access',
+        approvalPolicy: 'never',
+        permissionMode: 'danger-full-access',
+      },
+    });
+    assert.ok(args.includes('--dangerously-bypass-approvals-and-sandbox'));
+    assert.ok(!args.includes('read-only'));
+  });
+
   it('strips nested-session env vars from codex runtime', () => {
     const env = _private.buildCodexEnv({
       CODEX_THREAD_ID: 'tid',

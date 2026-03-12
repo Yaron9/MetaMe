@@ -546,12 +546,23 @@ function createSessionStore(deps) {
     return null;
   }
 
+  function getSessionDisplayTimeMs(session) {
+    const realMtime = getSessionFileMtime(session.sessionId, session.projectPath);
+    if (Number.isFinite(realMtime) && realMtime > 0) return realMtime;
+    if (Number.isFinite(session.fileMtime) && session.fileMtime > 0) return session.fileMtime;
+    const modifiedMs = session.modified ? new Date(session.modified).getTime() : NaN;
+    if (Number.isFinite(modifiedMs) && modifiedMs > 0) return modifiedMs;
+    return Date.now();
+  }
+
+  function getSessionRelativeTimeLabel(session) {
+    return formatRelativeTime(new Date(getSessionDisplayTimeMs(session)).toISOString());
+  }
+
   function sessionLabel(s) {
     const name = s.customTitle;
     const proj = s.projectPath ? path.basename(s.projectPath) : '';
-    const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
-    const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
-    const ago = formatRelativeTime(new Date(timeMs).toISOString());
+    const ago = getSessionRelativeTimeLabel(s);
     const shortId = s.sessionId.slice(0, 4);
     const engineTag = (s.engine || 'claude') === 'codex' ? '[codex] ' : '';
 
@@ -606,9 +617,7 @@ function createSessionStore(deps) {
     sessionTags = sessionTags || loadSessionTags();
     const title = sessionDisplayTitle(s, 50, sessionTags);
     const proj = s.projectPath ? path.basename(s.projectPath) : '~';
-    const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
-    const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
-    const ago = formatRelativeTime(new Date(timeMs).toISOString());
+    const ago = getSessionRelativeTimeLabel(s);
     const shortId = s.sessionId.slice(0, 8);
     const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 3);
     const engineLabel = (s.engine || 'claude') === 'codex' ? 'codex' : 'claude';
@@ -635,9 +644,7 @@ function createSessionStore(deps) {
       if (i > 0) elements.push({ tag: 'hr' });
       const title = sessionDisplayTitle(s, 60, sessionTags);
       const proj = s.projectPath ? path.basename(s.projectPath) : '~';
-      const realMtime = getSessionFileMtime(s.sessionId, s.projectPath);
-      const timeMs = realMtime || s.fileMtime || new Date(s.modified).getTime();
-      const ago = formatRelativeTime(new Date(timeMs).toISOString());
+      const ago = getSessionRelativeTimeLabel(s);
       const shortId = s.sessionId.slice(0, 6);
       const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 4);
       const engineLabel = (s.engine || 'claude') === 'codex' ? 'codex' : 'claude';
@@ -759,18 +766,35 @@ function createSessionStore(deps) {
     const state = loadState();
     if (!state.sessions) state.sessions = {};
     const base = upgradeSessionRecord(state.sessions[chatId] || {}, safeEngine);
+    const logicalChatId = String(mapped.logicalChatId || '').trim();
+    const logicalBase = logicalChatId
+      ? upgradeSessionRecord(state.sessions[logicalChatId] || {}, safeEngine)
+      : null;
+    const logicalSlot = logicalBase && logicalBase.engines
+      ? (logicalBase.engines[safeEngine] || null)
+      : null;
+    const effectiveMapped = (logicalSlot && logicalSlot.id)
+      ? {
+          ...mapped,
+          ...logicalSlot,
+          id: String(logicalSlot.id),
+          cwd: logicalBase.cwd || mapped.cwd,
+          engine: safeEngine,
+          logicalChatId,
+        }
+      : mapped;
     const restoredSlot = {
       ...(base.engines[safeEngine] || {}),
-      id: String(mapped.id),
+      id: String(effectiveMapped.id),
       started: true,
     };
     if (safeEngine === 'codex') {
       restoredSlot.runtimeSessionObserved = true;
-      const permissionMeta = normalizeCodexPermissionMeta(mapped) || normalizeCodexPermissionMeta(restoredSlot);
+      const permissionMeta = normalizeCodexPermissionMeta(effectiveMapped) || normalizeCodexPermissionMeta(restoredSlot);
       if (permissionMeta) Object.assign(restoredSlot, permissionMeta);
     }
     state.sessions[chatId] = {
-      cwd: sanitizeCwd(mapped.cwd || base.cwd),
+      cwd: sanitizeCwd(effectiveMapped.cwd || base.cwd),
       engines: {
         ...base.engines,
         [safeEngine]: restoredSlot,
@@ -994,7 +1018,7 @@ function createSessionStore(deps) {
       if (!sessionId) return null;
       const { DatabaseSync } = require('node:sqlite');
       db = new DatabaseSync(CODEX_DB, { readonly: true });
-      const row = db.prepare('SELECT sandbox_policy FROM threads WHERE id = ?').get(sessionId);
+      const row = db.prepare('SELECT sandbox_policy, approval_mode FROM threads WHERE id = ?').get(sessionId);
       db.close();
       db = null;
       if (!row || !row.sandbox_policy) return null;
@@ -1004,7 +1028,7 @@ function createSessionStore(deps) {
         null
       );
       const approvalPolicy = normalizeCodexApprovalPolicy(
-        policy && (policy.approval_policy || policy.approvalPolicy || policy.ask_for_approval),
+        (policy && (policy.approval_policy || policy.approvalPolicy || policy.ask_for_approval)) || row.approval_mode,
         null
       );
       if (!sandboxMode && !approvalPolicy) return null;

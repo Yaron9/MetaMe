@@ -13,6 +13,7 @@ function createAgentCommandHandler(deps) {
     sendBrowse,
     sendDirPicker,
     getSession,
+    getSessionForEngine,
     listRecentSessions,
     buildSessionCardElements,
     sessionLabel,
@@ -94,6 +95,47 @@ function createAgentCommandHandler(deps) {
 
   function getCurrentEngine(chatId) {
     return getSessionRoute(chatId).engine;
+  }
+
+  function getLogicalSessionForRoute(route) {
+    if (!route || !route.sessionChatId) return null;
+    if (typeof getSessionForEngine === 'function') {
+      const engineSession = getSessionForEngine(route.sessionChatId, route.engine);
+      if (engineSession && engineSession.id) return engineSession;
+    }
+    const raw = getSession(route.sessionChatId);
+    if (!raw) return null;
+    const slot = raw.engines && raw.engines[route.engine];
+    if (slot && slot.id) return { cwd: raw.cwd, engine: route.engine, ...slot };
+    if (raw.id) return { cwd: raw.cwd, engine: route.engine, id: raw.id, started: !!raw.started };
+    return null;
+  }
+
+  function buildResumeChoices({ recentSessions, currentLogical, curCwd, currentEngine, isLogicalRoute }) {
+    const items = [];
+    const seen = new Set();
+    if (
+      isLogicalRoute
+      && currentLogical
+      && currentLogical.id
+      && currentLogical.started
+    ) {
+      items.push({
+        sessionId: currentLogical.id,
+        projectPath: currentLogical.cwd || curCwd || HOME,
+        engine: currentEngine,
+        customTitle: '当前会话',
+        summary: '优先续接当前智能体会话',
+      });
+      seen.add(String(currentLogical.id));
+    }
+    for (const session of recentSessions || []) {
+      const key = String(session && session.sessionId || '');
+      if (!key || seen.has(key)) continue;
+      items.push(session);
+      seen.add(key);
+    }
+    return items;
   }
 
   function inferEngineByCwd(cfg, cwd) {
@@ -311,31 +353,50 @@ function createAgentCommandHandler(deps) {
 
       // Get current workdir to scope session list — prefer bound project cwd over session cwd
       const route = getSessionRoute(chatId);
+      const isLogicalRoute = route.sessionChatId !== String(chatId);
+      const currentLogical = getLogicalSessionForRoute(route);
       const curSession = getSession(route.sessionChatId) || getSession(chatId);
       const curCwd = route.cwd || (curSession ? curSession.cwd : null);
       const currentEngine = getCurrentEngine(chatId);
       const recentSessions = listRecentSessions(5, curCwd, currentEngine);
+      const resumeChoices = buildResumeChoices({
+        recentSessions,
+        currentLogical,
+        curCwd,
+        currentEngine,
+        isLogicalRoute,
+      });
 
       if (!arg) {
-        if (recentSessions.length === 0) {
+        if (resumeChoices.length === 0) {
           return autoCreateSessionOnEmptyResume(bot, chatId, curCwd, currentEngine);
         }
         const headerTitle = curCwd ? `📋 Sessions in ${path.basename(curCwd)}` : '📋 Recent Sessions';
-        if (bot.sendRawCard) {
-          await bot.sendRawCard(chatId, headerTitle, buildSessionCardElements(recentSessions));
-        } else if (bot.sendButtons) {
-          const buttons = recentSessions.map(s => {
-            return [{ text: sessionLabel(s), callback_data: `/resume ${s.sessionId}` }];
-          });
-          await bot.sendButtons(chatId, headerTitle, buttons);
-        } else {
-          const _tags2 = loadSessionTags();
-          let msg = `${headerTitle}\n`;
-          msg += '\n';
-          recentSessions.forEach((s, i) => {
-            msg += sessionRichLabel(s, i + 1, _tags2) + '\n';
-          });
-          await bot.sendMessage(chatId, msg);
+        try {
+          if (bot.sendRawCard) {
+            await bot.sendRawCard(chatId, headerTitle, buildSessionCardElements(resumeChoices));
+          } else {
+            throw new Error('raw-card-unavailable');
+          }
+        } catch {
+          try {
+            if (bot.sendButtons) {
+              const buttons = resumeChoices.map(s => {
+                return [{ text: sessionLabel(s), callback_data: `/resume ${s.sessionId}` }];
+              });
+              await bot.sendButtons(chatId, headerTitle, buttons);
+            } else {
+              throw new Error('buttons-unavailable');
+            }
+          } catch {
+            const _tags2 = loadSessionTags();
+            let msg = `${headerTitle}\n`;
+            msg += '\n';
+            resumeChoices.forEach((s, i) => {
+              msg += sessionRichLabel(s, i + 1, _tags2) + '\n';
+            });
+            await bot.sendMessage(chatId, msg);
+          }
         }
         return true;
       }
@@ -370,22 +431,33 @@ function createAgentCommandHandler(deps) {
       const engineByTargetCwd = normalizeEngineName(fullMatch.engine)
         || inferEngineByCwd(cfgForEngine, cwd)
         || existingEngine;
+      const preferLogicalCurrent = isLogicalRoute
+        && currentLogical
+        && currentLogical.id
+        && currentLogical.started
+        && engineByTargetCwd === currentEngine
+        && normalizeCwd(currentLogical.cwd || cwd || HOME) === normalizeCwd(cwd || HOME);
+      const targetSessionId = preferLogicalCurrent ? currentLogical.id : sessionId;
+      const targetCwd = preferLogicalCurrent ? (currentLogical.cwd || cwd) : cwd;
       const existingEngines = existing.engines || {};
       state2.sessions[sessionKey] = {
         ...existing,
-        cwd,
-        id: sessionId,
+        cwd: targetCwd,
+        id: targetSessionId,
         started: true,
         engine: engineByTargetCwd,
-        engines: { ...existingEngines, [engineByTargetCwd]: { id: sessionId, started: true } },
+        engines: { ...existingEngines, [engineByTargetCwd]: { id: targetSessionId, started: true } },
       };
       saveState(state2);
       const name = fullMatch.customTitle;
-      const label = name || (fullMatch.summary || fullMatch.firstPrompt || '').slice(0, 40) || sessionId.slice(0, 8);
+      const label = name || (fullMatch.summary || fullMatch.firstPrompt || '').slice(0, 40) || targetSessionId.slice(0, 8);
 
       // 读取最近对话片段，帮助确认是否切换到正确的 session
-      const recentCtx = getSessionRecentContext ? getSessionRecentContext(sessionId) : null;
+      const recentCtx = getSessionRecentContext ? getSessionRecentContext(targetSessionId) : null;
       let msg = `✅ 已切换: **${label}**\n📁 ${path.basename(cwd)}`;
+      if (preferLogicalCurrent) {
+        msg += '\n\n已优先恢复当前智能体会话，而不是切回旧历史 thread。';
+      }
       if (recentCtx) {
         if (recentCtx.lastUser) {
           const snippet = recentCtx.lastUser.replace(/\n/g, ' ').slice(0, 80);

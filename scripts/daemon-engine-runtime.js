@@ -322,7 +322,14 @@ function resolveCodexPermissionProfile(options = {}) {
 }
 
 function buildCodexArgs(options = {}) {
-  const { model = ENGINE_MODEL_CONFIG.codex.main, readOnly = false, daemonCfg = {}, session = {}, cwd } = options;
+  const {
+    model = ENGINE_MODEL_CONFIG.codex.main,
+    readOnly = false,
+    daemonCfg = {},
+    session = {},
+    cwd,
+    permissionProfile = null,
+  } = options;
   const isResume = (session && session.started && session.id && session.id !== '__continue__');
   const args = isResume
     ? ['exec', 'resume', session.id]
@@ -336,13 +343,13 @@ function buildCodexArgs(options = {}) {
   // Permission flags are only valid on fresh exec, not resume.
   // `codex exec resume` does not accept -s or --dangerously-bypass-approvals-and-sandbox.
   if (!isResume) {
-    const permissionProfile = resolveCodexPermissionProfile({ readOnly, daemonCfg, session });
-    if (permissionProfile.sandboxMode === 'danger-full-access' && permissionProfile.approvalPolicy === 'never') {
+    const effectivePermissionProfile = permissionProfile || resolveCodexPermissionProfile({ readOnly, daemonCfg, session });
+    if (effectivePermissionProfile.sandboxMode === 'danger-full-access' && effectivePermissionProfile.approvalPolicy === 'never') {
       // Keep the legacy shortcut for the fully-trusted mobile/default path.
       args.push('--dangerously-bypass-approvals-and-sandbox');
     } else {
-      args.push('-s', permissionProfile.sandboxMode);
-      args.push('--ask-for-approval', permissionProfile.approvalPolicy);
+      args.push('-s', effectivePermissionProfile.sandboxMode);
+      args.push('--ask-for-approval', effectivePermissionProfile.approvalPolicy);
     }
   }
 
