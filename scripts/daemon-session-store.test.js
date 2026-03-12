@@ -353,4 +353,107 @@ describe('daemon-session-store codex metadata', () => {
     const codexSessions = store.listRecentSessions(10, '/tmp/shared-proj', 'codex');
     assert.equal(codexSessions.length, 0);
   });
+
+  it('keeps real codex exec user sessions even when prompt starts with "You are"', () => {
+    const state = { sessions: {} };
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
+    const codexDir = path.join(tempHome, '.codex');
+    fs.mkdirSync(codexDir, { recursive: true });
+    const rolloutPath = path.join(codexDir, 'sessions', '2026', '03', '11', 'codex-user-like.jsonl');
+    writeCodexRollout(rolloutPath, [
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'You are wrong, check the resume logic again.' }],
+        },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: '中间状态，不该作为最终回复' },
+      },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: '最终回复：resume 逻辑已重新检查。' }],
+        },
+      },
+    ]);
+    const db = new DatabaseSync(path.join(codexDir, 'state_5.sqlite'));
+    db.exec(`
+      CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        rollout_path TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        model_provider TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        title TEXT NOT NULL,
+        sandbox_policy TEXT NOT NULL,
+        approval_mode TEXT NOT NULL,
+        tokens_used INTEGER NOT NULL DEFAULT 0,
+        has_user_event INTEGER NOT NULL DEFAULT 0,
+        archived INTEGER NOT NULL DEFAULT 0,
+        archived_at INTEGER,
+        git_sha TEXT,
+        git_branch TEXT,
+        git_origin_url TEXT,
+        cli_version TEXT NOT NULL DEFAULT '',
+        first_user_message TEXT NOT NULL DEFAULT '',
+        agent_nickname TEXT,
+        agent_role TEXT,
+        memory_mode TEXT NOT NULL DEFAULT 'enabled'
+      );
+    `);
+    db.prepare(`
+      INSERT INTO threads (
+        id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+        sandbox_policy, approval_mode, tokens_used, has_user_event, archived, cli_version,
+        first_user_message, memory_mode
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'codex-user-like',
+      rolloutPath,
+      1773214000,
+      1773216000,
+      'exec',
+      'openai',
+      '/tmp/shared-proj',
+      'You are wrong, check the resume logic again.',
+      '{"type":"danger-full-access"}',
+      'never',
+      123,
+      0,
+      0,
+      '1.0.0',
+      'You are wrong, check the resume logic again.',
+      'enabled'
+    );
+    db.close();
+
+    const store = createSessionStore({
+      fs,
+      path,
+      HOME: tempHome,
+      loadState: () => state,
+      saveState: (next) => {
+        state.sessions = next.sessions;
+      },
+      log: () => {},
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+
+    const codexSessions = store.listRecentSessions(10, '/tmp/shared-proj', 'codex');
+    assert.equal(codexSessions.length, 1);
+    assert.equal(codexSessions[0].sessionId, 'codex-user-like');
+    assert.deepEqual(store.getSessionRecentContext('codex-user-like'), {
+      lastUser: 'You are wrong, check the resume logic again.',
+      lastAssistant: '最终回复：resume 逻辑已重新检查。',
+    });
+  });
 });

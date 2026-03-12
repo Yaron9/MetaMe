@@ -440,11 +440,14 @@ function createAdminCommandHandler(deps) {
             task_envelope: envelope,
           },
           callback: false,
+          source_chat_id: String(chatId),
+          source_sender_key: senderKey,
         }, config);
         if (result.success) {
           await bot.sendMessage(chatId, [
-            `✅ 已创建 TeamTask 并派发: ${envelope.task_id}`,
+            `✅ 已创建 TeamTask 并提交派发: ${envelope.task_id}`,
             `Scope: ${envelope.scope_id || envelope.task_id}`,
+            '回执会在目标端真正接收后返回。',
             `查看: /TeamTask ${envelope.task_id}`,
           ].join('\n'));
         } else {
@@ -527,11 +530,13 @@ function createAdminCommandHandler(deps) {
           },
           callback: false,
           new_session: false,
+          source_chat_id: String(chatId),
+          source_sender_key: envelope.from_agent || resolveSenderKey(chatId, config),
         }, config);
 
         if (result.success) {
           taskBoard.appendTaskEvent(task.task_id, 'task_resume_requested', String(chatId), { by: String(chatId) });
-          await bot.sendMessage(chatId, `✅ 已续跑 TeamTask: ${task.task_id}`);
+          await bot.sendMessage(chatId, `✅ 已续跑 TeamTask: ${task.task_id}\n回执会在目标端真正接收后返回。`);
         } else {
           await bot.sendMessage(chatId, `❌ 续跑失败: ${result.error}`);
         }
@@ -727,10 +732,12 @@ function createAdminCommandHandler(deps) {
           priority: 'normal',
           payload: { title: prompt.slice(0, 60), prompt },
           callback: false,
+          source_chat_id: String(chatId),
+          source_sender_key: senderKey,
         }, config, replyFn, dispatchStreamOptions);
 
         if (result.success) {
-          await bot.sendMessage(chatId, `✅ 已派发给 ${projInfo.name || targetName}，执行中…`);
+          await bot.sendMessage(chatId, `✅ 已提交派发给 ${projInfo.name || targetName}，等待回执…`);
         } else {
           await bot.sendMessage(chatId, `❌ 派发失败: ${result.error}`);
         }
@@ -777,6 +784,8 @@ function createAdminCommandHandler(deps) {
         priority: 'normal',
         payload: { title: 'team message', prompt: `[来自团队的消息]\n\n${message}` },
         callback: false,
+        source_chat_id: String(chatId),
+        source_sender_key: senderKey,
       }, config, null, null);
 
       if (result.success) {
