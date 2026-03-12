@@ -55,16 +55,21 @@ function createFakeCodexProcess(events, exitCode = 0) {
   const child = new EventEmitter();
   const stdoutEmitter = new Readable({ read() {} });
   const stderrEmitter = new Readable({ read() {} });
+  const stdinChunks = [];
   child.stdout = stdoutEmitter;
   child.stderr = stderrEmitter;
   child.stdin = {
-    write: () => true,
+    write: (chunk) => {
+      stdinChunks.push(String(chunk));
+      return true;
+    },
     end: () => {},
     on: () => {},
     once: () => {},
   };
   child.pid = 12345;
   child.kill = () => {};
+  child._stdinText = () => stdinChunks.join('');
 
   // Emit events asynchronously
   setImmediate(() => {
@@ -116,8 +121,9 @@ describe('Codex E2E Simulation — Mobile User Flow', () => {
     ];
 
     const mockSpawn = (bin, args, opts) => {
-      spawnCalls.push({ bin, args, opts });
-      return createFakeCodexProcess(codexStreamEvents);
+      const proc = createFakeCodexProcess(codexStreamEvents);
+      spawnCalls.push({ bin, args, opts, proc });
+      return proc;
     };
 
     const getEngineRuntime = createEngineRuntimeFactory({
@@ -185,8 +191,8 @@ describe('Codex E2E Simulation — Mobile User Flow', () => {
       getEngineRuntime,
     });
 
-    // Simulate: mobile user in codex-bound chat sends "看看当前目录"
-    const result = await engine.askClaude(bot, 'chat-codex-user', '看看当前目录', config, false);
+    // Simulate: mobile user in codex-bound chat asks for a file to be sent.
+    const result = await engine.askClaude(bot, 'chat-codex-user', '把报告发给我', config, false);
 
     // --- Assertions ---
 
@@ -203,6 +209,7 @@ describe('Codex E2E Simulation — Mobile User Flow', () => {
     );
     assert.ok(call.args.includes('--json'), 'should have --json flag');
     assert.ok(call.args.includes('-'), 'should read prompt from stdin');
+    assert.match(call.proc._stdinText(), /\[\[FILE:\/absolute\/path\]\]/);
 
     // 2. Response was sent to user
     const textMessages = bot.messages.filter(m => m.text && m.text.includes('file'));
@@ -249,8 +256,9 @@ describe('Codex E2E Simulation — Mobile User Flow', () => {
     ];
 
     const mockSpawn = (bin, args, opts) => {
-      spawnCalls.push({ bin, args, opts });
-      return createFakeCodexProcess(codexStreamEvents);
+      const proc = createFakeCodexProcess(codexStreamEvents);
+      spawnCalls.push({ bin, args, opts, proc });
+      return proc;
     };
 
     const getEngineRuntime = createEngineRuntimeFactory({

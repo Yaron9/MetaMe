@@ -9,6 +9,7 @@ const {
   ENGINE_MODEL_CONFIG,
   _private: { resolveCodexPermissionProfile },
 } = require('./daemon-engine-runtime');
+const { buildIntentHintBlock } = require('./intent-registry');
 const { buildAgentContextForEngine, buildMemorySnapshotContent, refreshMemorySnapshot } = require('./agent-layer');
 
 /**
@@ -1590,7 +1591,16 @@ ${mentorRadarHint}
       const langGuard = session.started
         ? ''
         : '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
-      const fullPrompt = routedPrompt + daemonHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
+      let intentHint = '';
+      if (runtime.name === 'codex') {
+        try {
+          const block = buildIntentHintBlock(prompt, config, boundProjectKey || projectKey || '');
+          if (block) intentHint = `\n\n${block}`;
+        } catch (e) {
+          log('WARN', `Intent registry injection failed: ${e.message}`);
+        }
+      }
+      const fullPrompt = routedPrompt + daemonHint + intentHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
       if (runtime.name === 'codex' && session.started && session.id && requestedCodexPermissionProfile) {
         const actualPermissionProfile = getActualCodexPermissionProfile(session);
         if (codexNeedsFallbackForRequestedPermissions(actualPermissionProfile, requestedCodexPermissionProfile)) {

@@ -25,26 +25,7 @@ const os = require('os');
 
 const METAME_DIR = path.join(os.homedir(), '.metame');
 const { sanitizePrompt, isInternalPrompt } = require('./hook-utils');
-
-// Default: all intents enabled unless explicitly set to false in daemon.yaml
-const DEFAULTS = {
-  team_dispatch:  true,
-  ops_assist:     true,
-  task_create:    true,
-  file_transfer:  true,
-  memory_recall:  true,
-  doc_router:     true,
-};
-
-// Intent registry — loaded lazily so startup is fast even if a module has issues
-const INTENT_MODULES = {
-  team_dispatch:  './intent-team-dispatch',
-  ops_assist:     './intent-ops-assist',
-  task_create:    './intent-task-create',
-  file_transfer:  './intent-file-transfer',
-  memory_recall:  './intent-memory-recall',
-  doc_router:     './intent-doc-router',
-};
+const { buildIntentHintBlock } = require('../intent-registry');
 
 function exit() { process.exit(0); }
 
@@ -75,27 +56,17 @@ function run(data) {
     config = yaml.load(fs.readFileSync(path.join(METAME_DIR, 'daemon.yaml'), 'utf8')) || {};
   } catch { /* proceed with defaults */ }
 
-  // Merge daemon.yaml hooks section with defaults
-  const hooksCfg = (config.hooks && typeof config.hooks === 'object') ? config.hooks : {};
-  const enabled = { ...DEFAULTS, ...hooksCfg };
-
-  // Run each enabled intent module, collect non-null hints
-  const hints = [];
-  for (const [key, modulePath] of Object.entries(INTENT_MODULES)) {
-    if (enabled[key] === false) continue;
-    try {
-      const detect = require(modulePath);
-      const result = detect(prompt, config, projectKey);
-      if (result) hints.push(result);
-    } catch (e) {
-      process.stderr.write(`[intent-engine] ${key}: ${e.message}\n`);
-    }
+  let intentBlock = '';
+  try {
+    intentBlock = buildIntentHintBlock(prompt, config, projectKey);
+  } catch (e) {
+    process.stderr.write(`[intent-engine] registry: ${e.message}\n`);
+    return exit();
   }
-
-  if (hints.length === 0) return exit();
+  if (!intentBlock) return exit();
 
   process.stdout.write(JSON.stringify({
-    hookSpecificOutput: { additionalSystemPrompt: hints.join('\n\n') },
+    hookSpecificOutput: { additionalSystemPrompt: intentBlock },
   }));
   exit();
 }

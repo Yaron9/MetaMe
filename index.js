@@ -2314,7 +2314,8 @@ if (isSync) {
 if (process.env.METAME_ACTIVE_SESSION === 'true') {
   console.error(`\n${icon("stop")} ACTION BLOCKED: Nested Session Detected`);
   console.error("   You are actively running inside a MetaMe session.");
-  console.error("   To reload configuration, use: \x1b[36m!metame refresh\x1b[0m\n");
+  console.error("   To hot-reload daemon code from this session, run: \x1b[36mtouch ~/.metame/daemon.js\x1b[0m");
+  console.error("   In this dev workspace, \x1b[36mtouch scripts/daemon.js\x1b[0m works too because ~/.metame/daemon.js is symlinked.\n");
   process.exit(1);
 }
 

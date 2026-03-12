@@ -15,7 +15,8 @@ Stop (每轮结束)
   └── stop-session-capture.js → session 事件日志 + 工具失败捕获
 ```
 
-`intent-engine.js` 是统一入口，调用各意图模块，合并输出。
+`scripts/intent-registry.js` 是单一维护源，负责调用各意图模块并返回提示块。
+`intent-engine.js` 是 Claude hook adapter；daemon 里的 Codex 路径也复用同一 registry。
 零匹配 → 零输出（不浪费 token）。
 
 ---
@@ -125,7 +126,8 @@ for k, v in s.get('hooks', {}).items():
 
 | 文件 | 说明 |
 |------|------|
-| `scripts/hooks/intent-engine.js` | 引擎主入口（源文件） |
+| `scripts/intent-registry.js` | 共享意图注册表（Claude hook / Codex runtime 共用） |
+| `scripts/hooks/intent-engine.js` | Claude hook adapter（源文件） |
 | `~/.metame/hooks/intent-engine.js` | 部署副本（symlink） |
 | `scripts/hooks/intent-*.js` | 各意图模块（源文件） |
 | `~/.metame/daemon.yaml` | 用户配置（包含 `hooks:` 开关） |
