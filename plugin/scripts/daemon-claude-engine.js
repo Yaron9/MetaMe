@@ -343,7 +343,7 @@ function createClaudeEngine(deps) {
     return -1;
   }
 
-  function codexPermissionNeedsMigration(actualProfile, requestedProfile) {
+  function codexNeedsFallbackForRequestedPermissions(actualProfile, requestedProfile) {
     const normalizedActual = normalizeComparableCodexPermissionProfile(actualProfile);
     const normalizedRequested = normalizeComparableCodexPermissionProfile(requestedProfile);
     if (!normalizedActual || !normalizedRequested) return false;
@@ -1593,7 +1593,7 @@ ${mentorRadarHint}
       const fullPrompt = routedPrompt + daemonHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
       if (runtime.name === 'codex' && session.started && session.id && requestedCodexPermissionProfile) {
         const actualPermissionProfile = getActualCodexPermissionProfile(session);
-        if (codexPermissionNeedsMigration(actualPermissionProfile, requestedCodexPermissionProfile)) {
+        if (codexNeedsFallbackForRequestedPermissions(actualPermissionProfile, requestedCodexPermissionProfile)) {
           const actualSummary = actualPermissionProfile
             ? `${actualPermissionProfile.sandboxMode || actualPermissionProfile.permissionMode || 'unknown'}/${actualPermissionProfile.approvalPolicy || 'unknown'}`
             : 'unknown/unknown';
@@ -1759,7 +1759,7 @@ ${mentorRadarHint}
         if (runtime.name === 'codex' && requestedCodexPermissionProfile) {
           let observedRuntimeProfile = getActualCodexPermissionProfile(sessionId ? { id: sessionId } : session);
           let stabilizationRetryCount = 0;
-          while (codexPermissionNeedsMigration(observedRuntimeProfile, requestedCodexPermissionProfile)
+          while (codexNeedsFallbackForRequestedPermissions(observedRuntimeProfile, requestedCodexPermissionProfile)
             && stabilizationRetryCount < CODEX_PERMISSION_STABILIZE_MAX_RETRIES) {
             stabilizationRetryCount += 1;
             const previousSessionId = String(sessionId || session.id || '').trim();
@@ -1819,7 +1819,7 @@ ${mentorRadarHint}
             if (sessionId) await onSession(sessionId);
             observedRuntimeProfile = getActualCodexPermissionProfile(sessionId ? { id: sessionId } : session);
           }
-          if (codexPermissionNeedsMigration(observedRuntimeProfile, requestedCodexPermissionProfile)) {
+          if (codexNeedsFallbackForRequestedPermissions(observedRuntimeProfile, requestedCodexPermissionProfile)) {
             const observedSummary = observedRuntimeProfile
               ? `${observedRuntimeProfile.sandboxMode || observedRuntimeProfile.permissionMode || 'unknown'}/${observedRuntimeProfile.approvalPolicy || 'unknown'}`
               : 'unknown/unknown';
@@ -2221,7 +2221,7 @@ ${mentorRadarHint}
       shouldAutoRouteSkill,
       codexSandboxPrivilegeRank,
       codexApprovalPrivilegeRank,
-      codexPermissionNeedsMigration,
+      codexNeedsFallbackForRequestedPermissions,
       buildCodexFallbackBridgePrompt,
     },
   };

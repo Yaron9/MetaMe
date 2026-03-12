@@ -227,14 +227,14 @@ describe('daemon-claude-engine private helpers', () => {
     const state = { sessions: {} };
     const engine = createEngineWithState(state);
     assert.equal(
-      engine._private.codexPermissionNeedsMigration(
+      engine._private.codexNeedsFallbackForRequestedPermissions(
         { sandboxMode: 'read-only', approvalPolicy: 'never', permissionMode: 'read-only' },
         { sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' }
       ),
       true
     );
     assert.equal(
-      engine._private.codexPermissionNeedsMigration(
+      engine._private.codexNeedsFallbackForRequestedPermissions(
         { sandboxMode: 'danger-full-access', sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' },
         { sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' }
       ),
@@ -258,14 +258,14 @@ describe('daemon-claude-engine private helpers', () => {
     const state = { sessions: {} };
     const engine = createEngineWithState(state);
     assert.equal(
-      engine._private.codexPermissionNeedsMigration(
+      engine._private.codexNeedsFallbackForRequestedPermissions(
         { sandboxMode: 'read-only', approvalPolicy: 'never', permissionMode: 'read-only' },
         { sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' }
       ),
       true
     );
     assert.equal(
-      engine._private.codexPermissionNeedsMigration(
+      engine._private.codexNeedsFallbackForRequestedPermissions(
         { sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' },
         { sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' }
       ),
@@ -409,7 +409,7 @@ describe('daemon-claude-engine private helpers', () => {
     });
 
     assert.equal(
-      engine._private.codexPermissionNeedsMigration(
+      engine._private.codexNeedsFallbackForRequestedPermissions(
         engine._private.getActualCodexPermissionProfile({ id: 'sid-1' }),
         { sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' }
       ),
