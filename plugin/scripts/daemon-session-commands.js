@@ -44,6 +44,11 @@ function createSessionCommandHandler(deps) {
     return available.length === 1 ? normalizeEngineName(available[0]) : getDefaultEngine();
   }
 
+  function buildBoundSessionChatId(projectKey) {
+    const key = String(projectKey || '').trim();
+    return key ? `_bound_${key}` : '';
+  }
+
   function getSessionRoute(chatId) {
     const cfg = loadConfig();
     const state = loadState();
@@ -66,7 +71,7 @@ function createSessionCommandHandler(deps) {
 
     if (boundProj) {
       return {
-        sessionChatId: `_agent_${boundKey}`,
+        sessionChatId: buildBoundSessionChatId(boundKey),
         cwd: boundProj.cwd ? normalizeCwd(boundProj.cwd) : null,
         engine: normalizeEngineName(boundProj.engine),
       };
@@ -185,7 +190,7 @@ function createSessionCommandHandler(deps) {
       const mappedProjForEngine = mappedKeyForEngine && cfgForEngine.projects ? cfgForEngine.projects[mappedKeyForEngine] : null;
       const currentEngine = getDefaultEngine();
       const sessionEngine = normalizeEngineName((mappedProjForEngine && mappedProjForEngine.engine) || currentEngine);
-      const session = createSession(chatId, dirPath, sessionName || '', sessionEngine);
+      const session = createSession(getSessionRoute(chatId).sessionChatId, dirPath, sessionName || '', sessionEngine);
       const label = sessionName ? `[${sessionName}]` : '';
       await bot.sendMessage(chatId, `New session ${label}\nWorkdir: ${session.cwd}`);
       return true;

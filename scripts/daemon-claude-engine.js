@@ -241,6 +241,18 @@ function createClaudeEngine(deps) {
     return resolveCodexPermissionProfile({ readOnly, daemonCfg, session });
   }
 
+  function getSessionChatId(chatId, boundProjectKey) {
+    const rawChatId = String(chatId || '');
+    if (rawChatId.startsWith('_agent_') || rawChatId.startsWith('_scope_')) return rawChatId;
+    if (boundProjectKey) return `_bound_${boundProjectKey}`;
+    return rawChatId || chatId;
+  }
+
+  function normalizeSenderId(senderId) {
+    const text = String(senderId || '').trim();
+    return text || '';
+  }
+
   function sameCodexPermissionProfile(left, right) {
     if (!left || !right) return false;
     const sameSandbox = String(left.sandboxMode || left.permissionMode || '').trim() === String(right.sandboxMode || right.permissionMode || '').trim();
@@ -610,6 +622,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     timeoutMs = 600000,
     chatId = null,
     metameProject = '',
+    metameSenderId = '',
     runtime = null,
     onSession = null,
   ) {
@@ -629,7 +642,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
-        env: rt.buildEnv({ metameProject }),
+        env: rt.buildEnv({ metameProject, metameSenderId }),
       });
       log('INFO', `[TIMING:${chatId}] spawned ${rt.name} pid=${child.pid}`);
 
@@ -988,7 +1001,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     return loadConfig();
   }
 
-  async function askClaude(bot, chatId, prompt, config, readOnly = false) {
+  async function askClaude(bot, chatId, prompt, config, readOnly = false, senderId = null) {
     const _t0 = Date.now();
     log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
     // Track interaction time for idle/sleep detection
@@ -1061,9 +1074,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
       const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
       const daemonCfg = (config && config.daemon) || {};
-      // Each virtual chatId (including clones) keeps its own isolated session.
-      // Parallel tasks must not share JSONL files — concurrent writes cause corruption.
-      const sessionChatId = boundProjectKey ? `_agent_${boundProjectKey}` : chatId;
+      // Keep real group chats on their own session key.
+      // Only true virtual agents (_agent_*) should use the virtual namespace.
+      const sessionChatId = getSessionChatId(chatId, boundProjectKey);
       const sessionRaw = getSession(sessionChatId);
       const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
       const boundEngineName = (boundProject && boundProject.engine) ? normalizeEngineName(boundProject.engine) : getDefaultEngine();
@@ -1578,6 +1591,7 @@ ${mentorRadarHint}
           600000,
           chatId,
           boundProjectKey || '',
+          normalizeSenderId(senderId),
           runtime,
           onSession,
         ));
@@ -1628,6 +1642,7 @@ ${mentorRadarHint}
             600000,
             chatId,
             boundProjectKey || '',
+            normalizeSenderId(senderId),
             runtime,
             onSession,
           ));
@@ -1885,6 +1900,7 @@ ${mentorRadarHint}
             600000,
             chatId,
             boundProjectKey || '',
+            normalizeSenderId(senderId),
             runtime,
             onSession,
           );
@@ -1947,6 +1963,7 @@ ${mentorRadarHint}
       shouldRetryCodexResumeFallback,
       formatEngineSpawnError,
       adaptDaemonHintForEngine,
+      getSessionChatId,
       getCodexPermissionProfile,
       getActualCodexPermissionProfile,
       sameCodexPermissionProfile,

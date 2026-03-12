@@ -243,8 +243,14 @@ function createClaudeEngine(deps) {
 
   function getSessionChatId(chatId, boundProjectKey) {
     const rawChatId = String(chatId || '');
-    if (rawChatId.startsWith('_agent_')) return rawChatId;
-    return rawChatId || (boundProjectKey ? `_agent_${boundProjectKey}` : chatId);
+    if (rawChatId.startsWith('_agent_') || rawChatId.startsWith('_scope_')) return rawChatId;
+    if (boundProjectKey) return `_bound_${boundProjectKey}`;
+    return rawChatId || chatId;
+  }
+
+  function normalizeSenderId(senderId) {
+    const text = String(senderId || '').trim();
+    return text || '';
   }
 
   function sameCodexPermissionProfile(left, right) {
@@ -616,6 +622,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     timeoutMs = 600000,
     chatId = null,
     metameProject = '',
+    metameSenderId = '',
     runtime = null,
     onSession = null,
   ) {
@@ -635,7 +642,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
-        env: rt.buildEnv({ metameProject }),
+        env: rt.buildEnv({ metameProject, metameSenderId }),
       });
       log('INFO', `[TIMING:${chatId}] spawned ${rt.name} pid=${child.pid}`);
 
@@ -994,7 +1001,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     return loadConfig();
   }
 
-  async function askClaude(bot, chatId, prompt, config, readOnly = false) {
+  async function askClaude(bot, chatId, prompt, config, readOnly = false, senderId = null) {
     const _t0 = Date.now();
     log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
     // Track interaction time for idle/sleep detection
@@ -1584,6 +1591,7 @@ ${mentorRadarHint}
           600000,
           chatId,
           boundProjectKey || '',
+          normalizeSenderId(senderId),
           runtime,
           onSession,
         ));
@@ -1634,6 +1642,7 @@ ${mentorRadarHint}
             600000,
             chatId,
             boundProjectKey || '',
+            normalizeSenderId(senderId),
             runtime,
             onSession,
           ));
@@ -1891,6 +1900,7 @@ ${mentorRadarHint}
             600000,
             chatId,
             boundProjectKey || '',
+            normalizeSenderId(senderId),
             runtime,
             onSession,
           );

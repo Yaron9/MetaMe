@@ -34,6 +34,7 @@ const args = process.argv.slice(2);
 const newSession = args[0] === '--new' ? (args.shift(), true) : false;
 
 let fromKey = process.env.METAME_PROJECT || '_claude_session';
+const sourceSenderId = String(process.env.METAME_SENDER_ID || '').trim();
 const fromIdx = args.indexOf('--from');
 if (fromIdx !== -1 && args[fromIdx + 1]) {
   fromKey = args.splice(fromIdx, 2)[1];
@@ -79,6 +80,7 @@ function sendOne(memberTarget, memberPrompt, opts = {}) {
       target: memberTarget,
       prompt: enriched,
       from: fromKey,
+      source_sender_id: sourceSenderId,
       new_session: newSession,
       created_at: ts,
       ts,
@@ -161,6 +163,7 @@ function sendRemoteViaRelay(peer, project, memberPrompt) {
     target_project: project,
     prompt: memberPrompt,
     source_sender_key: fromKey,
+    source_sender_id: sourceSenderId,
   }, rd.secret);
 
   // Write to dispatch/remote-pending.jsonl for daemon to pick up and send via bot

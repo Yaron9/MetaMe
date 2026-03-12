@@ -170,7 +170,7 @@ function createAdminCommandHandler(deps) {
       };
   }
 
-  function dispatchTeamTaskResume(task, chatId, config) {
+  function dispatchTeamTaskResume(task, chatId, config, senderId = null) {
     const targetKey = task.to_agent;
     if (!config.projects || !config.projects[targetKey]) {
       return { success: false, error: `target_missing:${targetKey}` };
@@ -189,6 +189,7 @@ function createAdminCommandHandler(deps) {
       new_session: false,
       source_chat_id: String(chatId),
       source_sender_key: envelope.from_agent || resolveSenderKey(chatId, config),
+      source_sender_id: String(senderId || '').trim() || '',
     }, config);
     return { success: !!(result && result.success), result, envelope, targetKey };
   }
@@ -284,7 +285,7 @@ function createAdminCommandHandler(deps) {
   }
 
   async function handleAdminCommand(ctx) {
-    const { bot, chatId, text } = ctx;
+    const { bot, chatId, text, senderId = null } = ctx;
     const state = ctx.state || {};
     let config = ctx.config || {};
 
@@ -489,7 +490,7 @@ function createAdminCommandHandler(deps) {
       const candidates = listAutoResumeCandidates(chatId, senderKey, config);
       if (candidates.length === 1) {
         const task = candidates[0];
-        const resumed = dispatchTeamTaskResume(task, chatId, config);
+        const resumed = dispatchTeamTaskResume(task, chatId, config, senderId);
         if (resumed.success) {
           if (taskBoard && typeof taskBoard.appendTaskEvent === 'function') {
             taskBoard.appendTaskEvent(task.task_id, 'task_resume_requested', String(chatId), { by: String(chatId), source: 'nl_auto_resume' });
@@ -583,6 +584,7 @@ function createAdminCommandHandler(deps) {
           callback: false,
           source_chat_id: String(chatId),
           source_sender_key: senderKey,
+          source_sender_id: String(senderId || '').trim() || '',
         }, config);
         if (result.success) {
           await bot.sendMessage(chatId, [
@@ -631,7 +633,7 @@ function createAdminCommandHandler(deps) {
           await bot.sendMessage(chatId, `❌ 目标 agent 不存在: ${targetKey}`);
           return { handled: true, config };
         }
-        const resumed = dispatchTeamTaskResume(task, chatId, config);
+        const resumed = dispatchTeamTaskResume(task, chatId, config, senderId);
         const { result, envelope } = resumed;
 
         if (result.success) {
@@ -821,6 +823,7 @@ function createAdminCommandHandler(deps) {
             prompt,
             source_chat_id: String(chatId),
             source_sender_key: senderKey,
+            source_sender_id: String(senderId || '').trim() || '',
           }, config);
           if (res.success) {
             await bot.sendMessage(chatId, `📡 已发送给 ${remoteTarget.peer}:${remoteTarget.project}`);
@@ -847,6 +850,7 @@ function createAdminCommandHandler(deps) {
             prompt,
             source_chat_id: String(chatId),
             source_sender_key: senderKey,
+            source_sender_id: String(senderId || '').trim() || '',
           }, config);
           if (res.success) {
             await bot.sendMessage(chatId, `📡 已发送给 ${projInfo.icon || '🤖'} ${projInfo.name || targetKey} (${projInfo.peer})`);
@@ -878,6 +882,7 @@ function createAdminCommandHandler(deps) {
           callback: false,
           source_chat_id: String(chatId),
           source_sender_key: senderKey,
+          source_sender_id: String(senderId || '').trim() || '',
         }, config, replyFn, dispatchStreamOptions);
 
         if (result.success) {
@@ -933,6 +938,7 @@ function createAdminCommandHandler(deps) {
         callback: false,
         source_chat_id: String(chatId),
         source_sender_key: senderKey,
+        source_sender_id: String(senderId || '').trim() || '',
       }, config, null, null);
 
       if (result.success) {

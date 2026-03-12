@@ -213,6 +213,13 @@ function createCommandRouter(deps) {
     return null;
   }
 
+  function buildSessionChatId(chatId, projectKey = null) {
+    const rawChatId = String(chatId || '');
+    const inferredKey = projectKey || projectKeyFromVirtualChatId(rawChatId);
+    if (rawChatId.startsWith('_agent_') || rawChatId.startsWith('_scope_')) return rawChatId;
+    return inferredKey ? `_bound_${inferredKey}` : rawChatId;
+  }
+
   function getBoundProjectForChat(chatId, cfg) {
     const map = {
       ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}),
@@ -591,11 +598,12 @@ function createCommandRouter(deps) {
     if (mappedKey && config.projects && config.projects[mappedKey]) {
       const proj = config.projects[mappedKey];
       const projCwd = normalizeCwd(proj.cwd);
-      const cur = loadState().sessions?.[chatId];
+      const sessionChatId = buildSessionChatId(chatId, mappedKey);
+      const cur = loadState().sessions?.[sessionChatId];
       const curEngine = String((cur && cur.engine) || getDefaultEngine()).toLowerCase();
       const projEngine = String((proj && proj.engine) || getDefaultEngine()).toLowerCase();
       if (!cur || cur.cwd !== projCwd || curEngine !== projEngine) {
-        attachOrCreateSession(chatId, projCwd, proj.name || mappedKey, proj.engine || getDefaultEngine());
+        attachOrCreateSession(sessionChatId, projCwd, proj.name || mappedKey, proj.engine || getDefaultEngine());
       }
     }
 
@@ -608,7 +616,7 @@ function createCommandRouter(deps) {
       return;
     }
 
-    const adminResult = await handleAdminCommand({ bot, chatId, text, config, state });
+    const adminResult = await handleAdminCommand({ bot, chatId, text, config, state, senderId });
     if (adminResult.handled) {
       config = adminResult.config || config;
       return;
@@ -694,7 +702,7 @@ function createCommandRouter(deps) {
       if (handled) {
         // /last attached the session — now send "继续" to actually resume the conversation
         resetCooldown(chatId);
-        await askClaude(bot, chatId, '继续上面的工作', config, readOnly);
+        await askClaude(bot, chatId, '继续上面的工作', config, readOnly, senderId);
         return;
       }
       // No session found — fall through to normal askClaude
@@ -728,7 +736,7 @@ function createCommandRouter(deps) {
       if (quickAgent && !quickAgent.rest) {
         const { key, proj } = quickAgent;
         const projCwd = normalizeCwd(proj.cwd);
-        attachOrCreateSession(chatId, projCwd, proj.name || key, proj.engine || getDefaultEngine());
+        attachOrCreateSession(buildSessionChatId(chatId, key), projCwd, proj.name || key, proj.engine || getDefaultEngine());
         log('INFO', `Agent switch via nickname: ${key} (${projCwd})`);
         await bot.sendMessage(chatId, `${proj.icon || '🤖'} ${proj.name || key} 在线`);
         return;
@@ -754,7 +762,7 @@ function createCommandRouter(deps) {
       await bot.sendMessage(chatId, 'Daily token budget exceeded.');
       return;
     }
-    const claudeResult = await askClaude(bot, chatId, text, config, readOnly);
+    const claudeResult = await askClaude(bot, chatId, text, config, readOnly, senderId);
     const claudeFailed = !!(claudeResult && claudeResult.ok === false);
     const claudeAborted = !!(claudeResult && claudeResult.error === 'Stopped by user');
     if (claudeFailed && !claudeAborted && !macLocalFirst && macFallbackEnabled && allowLocalMacControl) {
@@ -778,7 +786,7 @@ function createCommandRouter(deps) {
       const combined = msgs.join('\n');
       log('INFO', `Follow-up: processing ${msgs.length} queued message(s) for ${chatId}`);
       resetCooldown(chatId);
-      const followUp = await askClaude(bot, chatId, combined, config, readOnly);
+      const followUp = await askClaude(bot, chatId, combined, config, readOnly, senderId);
       if (followUp && followUp.error === 'Stopped by user') break;
     }
 

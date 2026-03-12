@@ -202,6 +202,7 @@ function createBridgeStarter(deps) {
         prompt: text,
         source_chat_id: String(realChatId),
         source_sender_key: acl.senderId || 'user',
+        source_sender_id: acl.senderId || '',
       }, cfg).then(res => {
         if (res.success) {
           bot.sendMessage(realChatId, `📡 已发送给 ${member.icon || '🤖'} ${member.name} (${member.peer})`).catch(() => {});

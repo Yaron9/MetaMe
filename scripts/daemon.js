@@ -69,6 +69,8 @@ const CLAUDE_BIN = (() => {
 // Skill evolution module (hot path + cold path)
 let skillEvolution = null;
 try { skillEvolution = require('./skill-evolution'); } catch { /* graceful fallback */ }
+let userAcl = null;
+try { userAcl = require('./daemon-user-acl'); } catch { /* optional */ }
 const {
   normalizeRemoteDispatchConfig,
   encodePacket: encodeRemoteDispatchPacket,
@@ -804,6 +806,7 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
   const fullMsg = {
     id: `d_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     from: message.from || 'unknown',
+    source_sender_id: String(message.source_sender_id || '').trim() || '',
     to: targetProject,
     type: message.type || 'task',
     priority: message.priority || 'normal',
@@ -963,6 +966,7 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
       }
       dispatchTask(fullMsg.from, {
         from: targetProject,
+        source_sender_id: fullMsg.source_sender_id || '',
         type: 'callback',
         priority: 'normal',
         payload: {
@@ -1240,23 +1244,17 @@ function buildDispatchTaskCard(fullMsg, targetProject, config) {
   };
 }
 
-function isKnownTeamMember(targetKey, config) {
-  if (!targetKey || !config || !config.projects) return false;
-  for (const proj of Object.values(config.projects)) {
-    if (!proj || !Array.isArray(proj.team)) continue;
-    if (proj.team.some(member => member && member.key === targetKey)) return true;
-  }
-  return false;
-}
-
 function resolveDispatchReadOnly(message, config, targetProject) {
   if (message && typeof message.readOnly === 'boolean') return message.readOnly;
-  const knownProjects = new Set(Object.keys((config && config.projects) || {}));
-  const userSources = new Set(['', 'unknown', 'claude_session', '_claude_session', 'user']);
-  const senderKey = String((message && (message.source_sender_key || message.from)) || '').trim();
-  const trustedSender = userSources.has(senderKey) || knownProjects.has(senderKey);
-  const trustedTarget = knownProjects.has(String(targetProject || '').trim()) || isKnownTeamMember(targetProject, config);
-  return !(trustedSender && trustedTarget);
+  const senderId = String((message && message.source_sender_id) || '').trim();
+  if (senderId && userAcl && typeof userAcl.resolveUserCtx === 'function') {
+    try {
+      const userCtx = userAcl.resolveUserCtx(senderId, config || {});
+      return !!userCtx.readOnly;
+    } catch { /* fall through to safe default */ }
+  }
+  void targetProject;
+  return true;
 }
 
 async function sendDispatchTaskCard(bot, chatId, card) {
@@ -1345,12 +1343,14 @@ function handleDispatchItem(item, config) {
     };
     const result = dispatchTask(item.target, {
       from: item.from || 'claude_session',
+      source_sender_id: item.source_sender_id || '',
       type: 'task', priority: 'normal',
       payload: { title: item.prompt.slice(0, 60), prompt: item.prompt },
       callback: false,
       new_session: !!item.new_session,
       source_chat_id: item.source_chat_id || '',
       source_sender_key: item.source_sender_key || item.from || '',
+      source_sender_id: item.source_sender_id || '',
     }, config, null, streamOptions);
     sendDispatchReceipt(item, config, buildDispatchReceipt(item, config, result));
     return result;
@@ -1384,12 +1384,14 @@ function handleDispatchItem(item, config) {
   }
   const result = dispatchTask(item.target, {
     from: item.from || 'claude_session',
+    source_sender_id: item.source_sender_id || '',
     type: 'task', priority: 'normal',
     payload: { title: item.prompt.slice(0, 60), prompt: item.prompt },
     callback: false,
     new_session: !!item.new_session,
     source_chat_id: item.source_chat_id || '',
     source_sender_key: item.source_sender_key || item.from || '',
+    source_sender_id: item.source_sender_id || '',
   }, config, pendingReplyFn, streamOptions);
   sendDispatchReceipt(item, config, buildDispatchReceipt(item, config, result));
   return result;
@@ -1421,6 +1423,7 @@ async function handleRemoteDispatchMessage({ chatId, text, config }) {
         target_project: packet.target_project,
         source_chat_id: packet.source_chat_id,
         source_sender_key: packet.source_sender_key || 'user',
+        source_sender_id: packet.source_sender_id || '',
         request_id: packet.id,
         result: String(output || '').slice(0, 4000),
       }, config);
@@ -1434,6 +1437,7 @@ async function handleRemoteDispatchMessage({ chatId, text, config }) {
       new_session: !!packet.new_session,
       source_chat_id: packet.source_chat_id || '',
       source_sender_key: packet.source_sender_key || '',
+      source_sender_id: packet.source_sender_id || '',
       _replyFn: replyFn,
       _suppressDefaultReplyRouting: true,
     }, config);
@@ -1443,6 +1447,7 @@ async function handleRemoteDispatchMessage({ chatId, text, config }) {
       target_project: packet.target_project,
       source_chat_id: packet.source_chat_id,
       source_sender_key: packet.source_sender_key || 'user',
+      source_sender_id: packet.source_sender_id || '',
       request_id: packet.id,
       dispatch_id: dispatchRes && dispatchRes.id ? dispatchRes.id : '',
       task_id: dispatchRes && dispatchRes.task_id ? dispatchRes.task_id : '',

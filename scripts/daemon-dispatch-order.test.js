@@ -111,4 +111,25 @@ describe('dispatch receiver task cards', () => {
     assert.match(teamPrompt, /PRIVATE builder progress/);
     assert.match(teamPrompt, /SHARED team progress/);
   });
+
+  it('derives dispatch write access from source sender open_id', () => {
+    const cfg = {
+      feishu: {
+        operator_ids: ['ou_admin_sender_12345'],
+      },
+      projects: {
+        planner: { name: 'Planner', icon: '🧭' },
+        coder: { name: 'Coder', icon: '🛠', color: 'green' },
+        metame: {
+          name: 'Jarvis',
+          team: [{ key: 'jia', name: '甲' }],
+        },
+      },
+    };
+
+    assert.equal(__test.resolveDispatchReadOnly({ from: 'planner', source_sender_id: 'ou_admin_sender_12345' }, cfg, 'coder'), false);
+    assert.equal(__test.resolveDispatchReadOnly({ from: 'user', source_sender_id: 'ou_admin_sender_12345' }, cfg, 'jia'), false);
+    assert.equal(__test.resolveDispatchReadOnly({ from: 'external_peer', source_sender_id: 'ou_guest_sender_67890' }, cfg, 'coder'), true);
+    assert.equal(__test.resolveDispatchReadOnly({ from: 'external_peer' }, cfg, 'coder'), true);
+  });
 });

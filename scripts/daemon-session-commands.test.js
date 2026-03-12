@@ -85,7 +85,7 @@ describe('daemon-session-commands empty session bootstrap', () => {
 
     assert.equal(handled, true);
     assert.equal(h.created.length, 1);
-    assert.deepEqual(h.created[0], { cid: '_agent_metame', cwd, name: '', engine: 'codex' });
+    assert.deepEqual(h.created[0], { cid: '_bound_metame', cwd, name: '', engine: 'codex' });
     assert.match(h.sent[0], /已自动创建新会话/);
   });
 

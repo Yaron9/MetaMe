@@ -180,6 +180,20 @@ describe('daemon-claude-engine private helpers', () => {
     );
   });
 
+  it('keeps bound group chats off the virtual agent session namespace', () => {
+    const state = { sessions: {} };
+    const engine = createEngineWithState(state);
+
+    assert.equal(
+      engine._private.getSessionChatId('oc_5d76f02c21203c5ae1c19fd83c790ba4', 'munger'),
+      '_bound_munger'
+    );
+    assert.equal(
+      engine._private.getSessionChatId('_agent_munger', 'munger'),
+      '_agent_munger'
+    );
+  });
+
   it('skips claude resume when session JSONL was created by non-claude model', () => {
     const state = { sessions: {} };
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-engine-'));

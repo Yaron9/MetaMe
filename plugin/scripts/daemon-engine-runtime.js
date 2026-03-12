@@ -351,8 +351,8 @@ function buildCodexArgs(options = {}) {
   return args;
 }
 
-function buildCodexEnv(baseEnv = {}, { metameProject = '' } = {}) {
-  const env = { ...baseEnv, METAME_PROJECT: metameProject };
+function buildCodexEnv(baseEnv = {}, { metameProject = '', metameSenderId = '' } = {}) {
+  const env = { ...baseEnv, METAME_PROJECT: metameProject, METAME_SENDER_ID: String(metameSenderId || '') };
   const strippedKeys = [
     'CODEX_THREAD_ID',
     'METAME_ACTIVE_SESSION',
@@ -382,7 +382,7 @@ function createEngineRuntimeFactory(deps = {}) {
         killSignal: 'SIGTERM',
         timeouts: { idleMs: 10 * 60 * 1000, toolMs: 25 * 60 * 1000, ceilingMs: 60 * 60 * 1000 },
         buildArgs: buildCodexArgs,
-        buildEnv: ({ metameProject = '' } = {}) => buildCodexEnv(process.env, { metameProject }),
+        buildEnv: ({ metameProject = '', metameSenderId = '' } = {}) => buildCodexEnv(process.env, { metameProject, metameSenderId }),
         parseStreamEvent: parseCodexStreamEvent,
         classifyError: classifyEngineError,
       };
@@ -395,9 +395,9 @@ function createEngineRuntimeFactory(deps = {}) {
       killSignal: 'SIGTERM',
       timeouts: { idleMs: 5 * 60 * 1000, toolMs: 25 * 60 * 1000, ceilingMs: 60 * 60 * 1000 },
       buildArgs: buildClaudeArgs,
-      buildEnv: ({ metameProject = '' } = {}) => ({
+      buildEnv: ({ metameProject = '', metameSenderId = '' } = {}) => ({
         ...(() => {
-          const env = { ...process.env, ...getActiveProviderEnv(), METAME_PROJECT: metameProject };
+          const env = { ...process.env, ...getActiveProviderEnv(), METAME_PROJECT: metameProject, METAME_SENDER_ID: String(metameSenderId || '') };
           delete env.CLAUDECODE;
           return env;
         })(),
