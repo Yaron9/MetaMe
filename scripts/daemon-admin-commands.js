@@ -186,6 +186,14 @@ function createAdminCommandHandler(deps) {
     ];
     if (result.id) lines.push(`编号: ${result.id}`);
     if (preview) lines.push(`摘要: ${String(preview).slice(0, 120)}`);
+    if (result.task_id) {
+      lines.push('');
+      lines.push(`TeamTask: ${result.task_id}`);
+      if (result.scope_id && result.scope_id !== result.task_id) {
+        lines.push(`Scope: ${result.scope_id}`);
+      }
+      lines.push(`如需复工，请使用: /TeamTask resume ${result.task_id}`);
+    }
     await bot.sendMessage(chatId, lines.join('\n'));
   }
 

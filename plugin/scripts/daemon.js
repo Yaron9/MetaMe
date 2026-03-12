@@ -952,6 +952,7 @@ ${fullMsg.chain ? fullMsg.chain.join(' → ') : fullMsg.from} → ${targetProjec
   let _taskFinalized = false;
   const outputHandler = (output) => {
     const outStr = typeof output === 'object' ? (output.body || JSON.stringify(output)) : String(output);
+    const displayOut = envelope ? appendTeamTaskResumeHint(outStr, envelope.task_id, envelope.scope_id) : outStr;
     log('INFO', `Dispatch output from ${targetProject}: ${outStr.slice(0, 200)}`);
     if (envelope && taskBoard && !_taskFinalized && outStr.trim().length > 2) {
       const status = inferTaskStatusFromOutput(outStr);
@@ -970,7 +971,7 @@ ${fullMsg.chain ? fullMsg.chain.join(' → ') : fullMsg.from} → ${targetProjec
       _taskFinalized = true;
     }
     if (replyFn && outStr.trim().length > 2) {
-      replyFn(outStr);
+      replyFn(displayOut);
     } else if (!replyFn && fullMsg.callback && fullMsg.from && config) {
       // Write result to sender's inbox before dispatching callback
       try {
@@ -985,7 +986,7 @@ ${fullMsg.chain ? fullMsg.chain.join(' → ') : fullMsg.from} → ${targetProjec
           `TS: ${new Date().toISOString()}`,
           `SUBJECT: ${subject}`,
           '',
-          outStr.trim().slice(0, 2000),
+          displayOut.slice(0, 2000),
         ].join('\n');
         fs.writeFileSync(inboxFile, body, 'utf8');
       } catch (e) {
@@ -998,7 +999,7 @@ ${fullMsg.chain ? fullMsg.chain.join(' → ') : fullMsg.from} → ${targetProjec
         payload: {
           title: `任务完成: ${fullMsg.payload.title || fullMsg.id}`,
           original_id: fullMsg.id,
-          output: outStr.slice(0, 500),
+          output: displayOut.slice(0, 500),
         },
         chain: [], // reset chain for callbacks
       }, config);
@@ -1034,7 +1035,12 @@ ${fullMsg.chain ? fullMsg.chain.join(' → ') : fullMsg.from} → ${targetProjec
     }
   });
 
-  return { success: true, id: fullMsg.id, task_id: envelope ? envelope.task_id : null };
+  return {
+    success: true,
+    id: fullMsg.id,
+    task_id: envelope ? envelope.task_id : null,
+    scope_id: envelope ? envelope.scope_id : null,
+  };
 }
 
 /**
@@ -1206,6 +1212,26 @@ function sendDispatchReceipt(item, config, receipt) {
   writeDispatchReceiptInbox(item, receipt);
 }
 
+function buildTeamTaskResumeHint(taskId, scopeId) {
+  const safeTaskId = String(taskId || '').trim();
+  if (!safeTaskId) return '';
+  const safeScopeId = String(scopeId || '').trim();
+  const lines = [
+    '',
+    `TeamTask: ${safeTaskId}`,
+  ];
+  if (safeScopeId && safeScopeId !== safeTaskId) lines.push(`Scope: ${safeScopeId}`);
+  lines.push(`如需复工，请使用: /TeamTask resume ${safeTaskId}`);
+  return lines.join('\n');
+}
+
+function appendTeamTaskResumeHint(text, taskId, scopeId) {
+  const base = String(text || '').trim();
+  const hint = buildTeamTaskResumeHint(taskId, scopeId);
+  if (!hint) return base;
+  return `${base}${hint}`;
+}
+
 function buildDispatchReceipt(item, config, result, opts = {}) {
   const targetKey = String(opts.targetKey || item.target || '').trim() || 'unknown';
   const targetProj = ((config && config.projects) || {})[targetKey] || {};
@@ -1231,6 +1257,7 @@ function buildDispatchReceipt(item, config, result, opts = {}) {
   ];
   if (result && result.id) lines.push(`编号: ${result.id}`);
   lines.push(`摘要: ${preview}`);
+  if (result && result.task_id) lines.push(buildTeamTaskResumeHint(result.task_id, result.scope_id));
   return {
     status: isFailed ? 'failed' : 'accepted',
     dispatchId: result && result.id ? result.id : '',
@@ -1385,6 +1412,8 @@ async function handleRemoteDispatchMessage({ chatId, text, config }) {
       source_sender_key: packet.source_sender_key || 'user',
       request_id: packet.id,
       dispatch_id: dispatchRes && dispatchRes.id ? dispatchRes.id : '',
+      task_id: dispatchRes && dispatchRes.task_id ? dispatchRes.task_id : '',
+      scope_id: dispatchRes && dispatchRes.scope_id ? dispatchRes.scope_id : '',
       status: dispatchRes && dispatchRes.success ? 'accepted' : 'failed',
       error: dispatchRes && dispatchRes.success ? '' : String(dispatchRes && dispatchRes.error || 'dispatch_failed'),
     }, config);
@@ -1399,6 +1428,7 @@ async function handleRemoteDispatchMessage({ chatId, text, config }) {
         '',
         `状态: ${packet.from_peer}:${packet.target_project || 'unknown'} 已接收并入队`,
         packet.dispatch_id ? `编号: ${packet.dispatch_id}` : '',
+        packet.task_id ? buildTeamTaskResumeHint(packet.task_id, packet.scope_id) : '',
       ].filter(Boolean).join('\n')
       : [
         '❌ 远端 Dispatch 回执',
