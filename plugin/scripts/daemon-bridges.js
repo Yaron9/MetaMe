@@ -538,7 +538,7 @@ function createBridgeStarter(deps) {
 
         // ── Remote dispatch interception (before ACL) ──
         if (handleRemoteDispatchMessage && text) {
-          const handled = await handleRemoteDispatchMessage({ chatId, text, config: liveCfg });
+          const handled = await handleRemoteDispatchMessage({ chatId, text, config: liveCfg, senderId });
           if (handled) return;
         }
 

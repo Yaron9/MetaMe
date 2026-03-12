@@ -8,7 +8,7 @@ const {
 const { IS_WIN } = require('./platform');
 const { ENGINE_MODEL_CONFIG, resolveEngineModel } = require('./daemon-engine-runtime');
 const { resolveProjectKey: _resolveProjectKey } = require('./team-dispatch');
-const { parseRemoteTargetRef, normalizeRemoteDispatchConfig } = require('./daemon-remote-dispatch');
+const { parseRemoteTargetRef, getRemoteDispatchStatus } = require('./daemon-remote-dispatch');
 let mentorEngine = null;
 try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
 
@@ -734,23 +734,31 @@ function createAdminCommandHandler(deps) {
 
       // /dispatch peers — show remote dispatch config
       if (args === 'peers') {
-        const rd = normalizeRemoteDispatchConfig(config);
+        const rd = getRemoteDispatchStatus(config);
         if (!rd) {
           await bot.sendMessage(chatId, '📡 远端 Dispatch 未配置\n\n在 daemon.yaml 中设置 feishu.remote_dispatch 启用。');
           return { handled: true, config };
         }
-        let msg = `📡 远端 Dispatch 配置\n─────────────\nself: ${rd.selfPeer}\nrelay chat: ${rd.chatId}\n\n远端成员:\n`;
+        const modeLabel = rd.mode === 'hybrid' ? 'auto pair + static fallback' : 'auto pair';
+        let msg = `📡 远端 Dispatch 配置\n─────────────\nself: ${rd.selfPeer}\nrelay chat: ${rd.chatId}\nmode: ${modeLabel}\npaired peers: ${rd.pairedPeers.length}\n\n远端成员:\n`;
         let hasRemote = false;
         for (const [key, proj] of Object.entries(config.projects || {})) {
           if (!Array.isArray(proj.team)) continue;
           for (const m of proj.team) {
             if (m.peer) {
               hasRemote = true;
-              msg += `- ${m.icon || '🤖'} ${m.name || m.key} → peer:${m.peer} (${key}/${m.key})\n`;
+              const paired = rd.pairedPeers.some((p) => p.peer === m.peer);
+              msg += `- ${m.icon || '🤖'} ${m.name || m.key} → peer:${m.peer} (${key}/${m.key})${paired ? ' [paired]' : ' [pairing]'}\n`;
             }
           }
         }
         if (!hasRemote) msg += '(无远端成员)\n';
+        if (rd.pairedPeers.length > 0 && rd.mode !== 'static') {
+          msg += `\n已配对 peers:\n`;
+          for (const peer of rd.pairedPeers) {
+            msg += `- ${peer.peer}${peer.pairedAt ? ` @ ${String(peer.pairedAt).replace('T', ' ').replace('Z', '')}` : ''}\n`;
+          }
+        }
         await bot.sendMessage(chatId, msg.trim());
         return { handled: true, config };
       }

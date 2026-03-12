@@ -74,6 +74,11 @@ const {
   encodePacket: encodeRemoteDispatchPacket,
   decodePacket: decodeRemoteDispatchPacket,
   verifyPacket: verifyRemoteDispatchPacket,
+  decodePairPacket: decodeRemoteDispatchPairPacket,
+  learnPairHello: learnRemoteDispatchPairHello,
+  resolvePeerSecret: resolveRemoteDispatchPeerSecret,
+  resolvePairedPeerSecret: resolveRemoteDispatchPairedPeerSecret,
+  buildPairHello: buildRemoteDispatchPairHello,
   isDuplicate: isRemoteDispatchDuplicate,
 } = require('./daemon-remote-dispatch');
 
@@ -537,11 +542,42 @@ function getRemoteDispatchConfig(config) {
   return normalizeRemoteDispatchConfig(config || {});
 }
 
+async function sendRemotePairHello(config, opts = {}) {
+  const rd = getRemoteDispatchConfig(config);
+  const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
+  if (!rd) return { success: false, error: 'pairing not configured' };
+  if (!liveBot || typeof liveBot.sendMessage !== 'function') return { success: false, error: 'feishu bot not connected' };
+  const targetPeers = new Set();
+  for (const proj of Object.values((config && config.projects) || {})) {
+    for (const member of Array.isArray(proj && proj.team) ? proj.team : []) {
+      if (member && member.peer) targetPeers.add(String(member.peer));
+    }
+  }
+  if (targetPeers.size === 0) return { success: false, error: 'no remote peers configured' };
+  if (!opts.force) {
+    const allPaired = Array.from(targetPeers).every((peer) => !!resolveRemoteDispatchPeerSecret(config, peer));
+    if (allPaired) return { success: false, error: 'all peers already paired' };
+  }
+  const body = buildRemoteDispatchPairHello(config, { force: !!opts.force });
+  if (!body) return { success: false, error: 'pair hello throttled' };
+  try {
+    await liveBot.sendMessage(rd.chatId, body);
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
 async function sendRemoteDispatch(packet, config) {
   const rd = getRemoteDispatchConfig(config);
   const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
   if (!rd) return { success: false, error: 'feishu.remote_dispatch not configured' };
   if (!liveBot || typeof liveBot.sendMessage !== 'function') return { success: false, error: 'feishu bot not connected' };
+  const peerSecret = resolveRemoteDispatchPairedPeerSecret(config, packet && packet.to_peer);
+  if (!peerSecret) {
+    await sendRemotePairHello(config, { force: true }).catch(() => {});
+    return { success: false, error: `remote peer ${packet && packet.to_peer ? packet.to_peer : 'unknown'} not paired yet` };
+  }
   const ts = new Date().toISOString();
   const id = `${rd.selfPeer}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   try {
@@ -551,7 +587,7 @@ async function sendRemoteDispatch(packet, config) {
       ts,
       ...packet,
       from_peer: rd.selfPeer,
-    }, rd.secret);
+    }, peerSecret);
     await liveBot.sendMessage(rd.chatId, body);
     return { success: true, id };
   } catch (e) {
@@ -1377,14 +1413,31 @@ function handleDispatchItem(item, config) {
   return result;
 }
 
-async function handleRemoteDispatchMessage({ chatId, text, config }) {
+async function handleRemoteDispatchMessage({ chatId, text, config, senderId }) {
   const rd = getRemoteDispatchConfig(config);
   if (!rd || String(chatId) !== rd.chatId) return false;
 
+  const pairPacket = decodeRemoteDispatchPairPacket(text);
+  if (pairPacket) {
+    if (pairPacket.from_peer !== rd.selfPeer) {
+      const learned = learnRemoteDispatchPairHello(config, pairPacket);
+      if (learned && learned.changed) {
+        log('INFO', `Remote dispatch paired with ${learned.peer}${senderId ? ` (${senderId})` : ''}`);
+        await sendRemotePairHello(config, { force: true }).catch(() => {});
+      }
+    }
+    return true;
+  }
+
   const packet = decodeRemoteDispatchPacket(text);
   if (!packet) return true;
-  if (!verifyRemoteDispatchPacket(packet, rd.secret)) {
+  const pairedPeerSecret = resolveRemoteDispatchPairedPeerSecret(config, packet.from_peer);
+  const fallbackSecret = resolveRemoteDispatchPeerSecret(config, '');
+  const signatureOk = verifyRemoteDispatchPacket(packet, pairedPeerSecret)
+    || verifyRemoteDispatchPacket(packet, fallbackSecret);
+  if (!signatureOk) {
     log('WARN', 'Remote dispatch ignored: invalid signature');
+    await sendRemotePairHello(config, { force: true }).catch(() => {});
     return true;
   }
   if (packet.from_peer === rd.selfPeer) return true;
@@ -1605,6 +1658,10 @@ function physiologicalHeartbeat(config) {
   } catch (e) {
     log('WARN', `Remote pending dispatch drain failed: ${e.message}`);
   }
+
+  try {
+    sendRemotePairHello(config).catch(() => {});
+  } catch { /* non-fatal */ }
 
   // 2. Rotate dispatch-log if > 512KB (keep 7 days)
   try {
@@ -2602,6 +2659,7 @@ async function main() {
   telegramBridge = await startTelegramBridge(config, executeTaskByName);
   feishuBridge = await startFeishuBridge(config, executeTaskByName);
   if (feishuBridge) _dispatchBridgeRef = feishuBridge; // store bridge, not bot, so .bot stays live after reconnects
+  await sendRemotePairHello(config, { force: true }).catch(() => {});
 
   // Notify once on startup (single message, no duplicates)
   await sleep(1500); // Let polling settle
