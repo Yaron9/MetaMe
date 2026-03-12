@@ -1349,9 +1349,12 @@ function createAdminCommandHandler(deps) {
           : ''
       );
 
-      // Auto-switch provider if the preferred one exists in providers.yaml
+      // Auto-switch provider only for Claude-compatible routing.
+      // Codex auth is handled by `codex login` / `OPENAI_API_KEY`, not providers.yaml.
       let providerNote = '';
-      if (providerMod && preferredProvider) {
+      if (arg === 'codex') {
+        providerNote = '\n🔌 Codex 认证: 使用 `codex login` 或 OPENAI_API_KEY（/provider 不参与 Codex 路由）';
+      } else if (providerMod && preferredProvider) {
         try {
           providerMod.setActive(preferredProvider);
           providerNote = `\n🔌 Provider 已同步: ${preferredProvider}`;

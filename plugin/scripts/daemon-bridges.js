@@ -261,12 +261,16 @@ function createBridgeStarter(deps) {
 
     let offset = 0;
     let running = true;
-    const abortController = new AbortController();
+    let abortController = new AbortController();
+    let pollLoopActive = false;
+    let reconnectTimer = null;
 
-    const pollLoop = async () => {
-      while (running) {
-        try {
-          const updates = await bot.getUpdates(offset, 30, abortController.signal);
+    const pollLoop = async (signal) => {
+      pollLoopActive = true;
+      try {
+        while (running && signal === abortController.signal) {
+          try {
+            const updates = await bot.getUpdates(offset, 30, signal);
           for (const update of updates) {
             offset = update.update_id + 1;
 
@@ -473,16 +477,21 @@ function createBridgeStarter(deps) {
               });
             }
           }
-        } catch (e) {
-          if (e.message === 'aborted') break;
-          log('ERROR', `Telegram poll error: ${e.message}`);
-          await sleep(5000);
+          } catch (e) {
+            if (e.message === 'aborted') break;
+            log('ERROR', `Telegram poll error: ${e.message}`);
+            await sleep(5000);
+          }
         }
+      } finally {
+        pollLoopActive = false;
       }
     };
 
     const startPoll = () => {
-      pollLoop().catch(e => {
+      if (!running || pollLoopActive) return;
+      const signal = abortController.signal;
+      pollLoop(signal).catch(e => {
         if (e.message === 'aborted') return;
         log('ERROR', `pollLoop crashed: ${e.message} — restarting in 5s`);
         if (running) setTimeout(startPoll, 5000);
@@ -491,7 +500,24 @@ function createBridgeStarter(deps) {
     startPoll();
 
     return {
-      stop() { running = false; abortController.abort(); },
+      stop() {
+        running = false;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        abortController.abort();
+      },
+      reconnect() {
+        if (!running) return;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        try { abortController.abort(); } catch { /* ignore */ }
+        abortController = new AbortController();
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          startPoll();
+        }, 150);
+      },
+      isAlive() {
+        return running && (pollLoopActive || !abortController.signal.aborted);
+      },
       bot,
     };
   }

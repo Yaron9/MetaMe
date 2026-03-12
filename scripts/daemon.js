@@ -1802,6 +1802,8 @@ const getEngineRuntime = createEngineRuntimeFactory({
   getActiveProviderEnv,
 });
 
+let wakeRecoveryHook = null;
+
 const {
   checkPrecondition,
   executeTask,
@@ -1830,6 +1832,7 @@ const {
   isInSleepMode: () => _inSleepMode,
   setSleepMode: (next) => { _inSleepMode = !!next; },
   spawnSessionSummaries,
+  getWakeRecoveryHook: () => wakeRecoveryHook,
   skillEvolution,
 });
 
@@ -2328,6 +2331,7 @@ async function main() {
   // Bridges
   let telegramBridge = null;
   let feishuBridge = null;
+  let lastWakeBridgeRecoveryAt = 0;
 
   const notifier = createNotifier({
     log,
@@ -2340,6 +2344,25 @@ async function main() {
 
   // Start dispatch socket server (low-latency IPC, fallback: file polling still works)
   const dispatchSocket = startDispatchSocket(() => config);
+
+  wakeRecoveryHook = async ({ sleepSeconds }) => {
+    const now = Date.now();
+    if (now - lastWakeBridgeRecoveryAt < 60 * 1000) {
+      log('INFO', `[WAKE-DETECT] bridge recovery skipped — cooldown active (${Math.round((now - lastWakeBridgeRecoveryAt) / 1000)}s since last)`);
+      return;
+    }
+    lastWakeBridgeRecoveryAt = now;
+    const tasks = [];
+    if (telegramBridge && typeof telegramBridge.reconnect === 'function') {
+      log('INFO', `[WAKE-DETECT] reconnecting Telegram bridge after ${sleepSeconds}s sleep`);
+      tasks.push(Promise.resolve().then(() => telegramBridge.reconnect()));
+    }
+    if (feishuBridge && typeof feishuBridge.reconnect === 'function') {
+      log('INFO', `[WAKE-DETECT] reconnecting Feishu bridge after ${sleepSeconds}s sleep`);
+      tasks.push(Promise.resolve().then(() => feishuBridge.reconnect()));
+    }
+    await Promise.allSettled(tasks);
+  };
 
   // Start heartbeat scheduler
   let heartbeatTimer = startHeartbeat(config, notifyFn, notifyPersonalFn);

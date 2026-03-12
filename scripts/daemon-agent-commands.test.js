@@ -71,7 +71,7 @@ function createHarness(options = {}) {
 }
 
 describe('daemon-agent-commands /resume engine resolution', () => {
-  it('resolves engine from target session cwd project config', async () => {
+  it('does not resolve into a claude session from a codex chat even when cwd is mapped', async () => {
     const h = createHarness({
       currentEngine: 'codex',
       currentCwd: '/repo/codex',
@@ -93,12 +93,12 @@ describe('daemon-agent-commands /resume engine resolution', () => {
       config: { projects: {} },
     });
 
-    assert.equal(handled, true);
-    assert.equal(h.state.sessions[h.chatId].id, 'sid-claude-1');
-    assert.equal(h.state.sessions[h.chatId].engine, 'claude');
+    assert.equal(handled, null);
+    assert.equal(h.state.sessions[h.chatId].id, 'sid-current');
+    assert.equal(h.state.sessions[h.chatId].engine, 'codex');
   });
 
-  it('prefers matched session engine when target cwd is not mapped', async () => {
+  it('does not prefer a matched claude session when target cwd is not mapped', async () => {
     const h = createHarness({
       currentEngine: 'codex',
       currentCwd: '/repo/codex',
@@ -119,8 +119,9 @@ describe('daemon-agent-commands /resume engine resolution', () => {
       config: { projects: {} },
     });
 
-    assert.equal(handled, true);
-    assert.equal(h.state.sessions[h.chatId].engine, 'claude');
+    assert.equal(handled, null);
+    assert.equal(h.state.sessions[h.chatId].id, 'sid-current');
+    assert.equal(h.state.sessions[h.chatId].engine, 'codex');
   });
 
   it('uses started codex engine slot when top-level engine is absent', async () => {
@@ -258,7 +259,7 @@ describe('daemon-agent-commands /resume engine resolution', () => {
     assert.deepEqual(h.attached[0], ['_agent_jia', os.tmpdir(), '', 'codex']);
   });
 
-  it('falls back to same cwd sessions across engines before auto-create', async () => {
+  it('does not show cross-engine sessions when current engine has none', async () => {
     const cwd = os.tmpdir();
     const h = createHarness({
       currentEngine: 'codex',
@@ -281,13 +282,12 @@ describe('daemon-agent-commands /resume engine resolution', () => {
     });
 
     assert.equal(handled, true);
-    assert.equal(h.attached.length, 0);
-    assert.match(h.sent[0], /cross-engine/);
-    assert.match(h.sent[0], /已回退显示同目录其他引擎/);
-    assert.match(h.sent[0], /sid-claude-legacy/);
+    assert.equal(h.attached.length, 1);
+    assert.deepEqual(h.attached[0], ['oc_test_chat', cwd, '', 'codex']);
+    assert.match(h.sent[0], /已自动创建新会话/);
   });
 
-  it('matches explicit resume args across engines', async () => {
+  it('does not match explicit resume args from another engine', async () => {
     const h = createHarness({
       currentEngine: 'codex',
       currentCwd: '/repo/codex',
@@ -309,8 +309,8 @@ describe('daemon-agent-commands /resume engine resolution', () => {
       config: { projects: {} },
     });
 
-    assert.equal(handled, true);
-    assert.equal(h.state.sessions[h.chatId].id, 'sid-claude-2');
-    assert.equal(h.state.sessions[h.chatId].engine, 'claude');
+    assert.equal(handled, null);
+    assert.equal(h.state.sessions[h.chatId].id, 'sid-current');
+    assert.equal(h.state.sessions[h.chatId].engine, 'codex');
   });
 });

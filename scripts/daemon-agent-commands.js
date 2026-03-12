@@ -338,30 +338,24 @@ function createAgentCommandHandler(deps) {
       const curCwd = route.cwd || (curSession ? curSession.cwd : null);
       const currentEngine = getCurrentEngine(chatId);
       const recentSessions = listRecentSessions(5, curCwd, currentEngine);
-      const usedCrossEngineFallback = recentSessions.length === 0;
-      const fallbackRecentSessions = usedCrossEngineFallback
-        ? listRecentSessions(5, curCwd)
-        : recentSessions;
 
       if (!arg) {
-        if (fallbackRecentSessions.length === 0) {
+        if (recentSessions.length === 0) {
           return autoCreateSessionOnEmptyResume(bot, chatId, curCwd, currentEngine);
         }
-        const headerBase = curCwd ? `📋 Sessions in ${path.basename(curCwd)}` : '📋 Recent Sessions';
-        const headerTitle = usedCrossEngineFallback ? `${headerBase} · cross-engine` : headerBase;
+        const headerTitle = curCwd ? `📋 Sessions in ${path.basename(curCwd)}` : '📋 Recent Sessions';
         if (bot.sendRawCard) {
-          await bot.sendRawCard(chatId, headerTitle, buildSessionCardElements(fallbackRecentSessions));
+          await bot.sendRawCard(chatId, headerTitle, buildSessionCardElements(recentSessions));
         } else if (bot.sendButtons) {
-          const buttons = fallbackRecentSessions.map(s => {
+          const buttons = recentSessions.map(s => {
             return [{ text: sessionLabel(s), callback_data: `/resume ${s.sessionId}` }];
           });
           await bot.sendButtons(chatId, headerTitle, buttons);
         } else {
           const _tags2 = loadSessionTags();
           let msg = `${headerTitle}\n`;
-          if (usedCrossEngineFallback) msg += `当前 ${currentEngine} 没有可恢复会话，已回退显示同目录其他引擎。\n`;
           msg += '\n';
-          fallbackRecentSessions.forEach((s, i) => {
+          recentSessions.forEach((s, i) => {
             msg += sessionRichLabel(s, i + 1, _tags2) + '\n';
           });
           await bot.sendMessage(chatId, msg);
@@ -370,14 +364,14 @@ function createAgentCommandHandler(deps) {
       }
 
       // Argument given -> match by name, then by session ID prefix
-      const allSessions = listRecentSessions(50);
+      const allSessions = listRecentSessions(50, null, currentEngine);
       const argLower = arg.toLowerCase();
       let fullMatch = allSessions.find(s => s.customTitle && s.customTitle.toLowerCase() === argLower);
       if (!fullMatch) {
         fullMatch = allSessions.find(s => s.customTitle && s.customTitle.toLowerCase().includes(argLower));
       }
       if (!fullMatch) {
-        fullMatch = fallbackRecentSessions.find(s => s.sessionId.startsWith(arg))
+        fullMatch = recentSessions.find(s => s.sessionId.startsWith(arg))
           || allSessions.find(s => s.sessionId.startsWith(arg));
       }
       if (!fullMatch) {

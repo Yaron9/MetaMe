@@ -196,6 +196,7 @@ function createTaskScheduler(deps) {
     isInSleepMode,
     setSleepMode,
     spawnSessionSummaries,
+    getWakeRecoveryHook,
     skillEvolution,
   } = deps;
 
@@ -746,7 +747,15 @@ function createTaskScheduler(deps) {
         st.wake_restart = new Date().toISOString();
         st.wake_sleep_seconds = Math.round(tickElapsed / 1000);
         saveState(st);
-        // Don't exit — Feishu and Telegram have built-in auto-reconnect
+        const onWakeDetected = typeof getWakeRecoveryHook === 'function' ? getWakeRecoveryHook() : null;
+        if (typeof onWakeDetected === 'function') {
+          Promise.resolve(onWakeDetected({
+            sleepSeconds: Math.round(tickElapsed / 1000),
+            resumedAt: new Date(tickNow).toISOString(),
+          })).catch((e) => {
+            log('WARN', `[WAKE-DETECT] bridge recovery failed: ${e.message}`);
+          });
+        }
       }
 
       // ① Physiological heartbeat (zero token, pure awareness)
