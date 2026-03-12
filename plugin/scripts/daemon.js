@@ -582,34 +582,45 @@ function createNullBot(onOutput) {
  * Forward bot: routes all calls to a real bot with a fixed chatId.
  * Used for dispatch tasks so Claude's streaming output appears in the target's Feishu channel.
  */
-function createStreamForwardBot(realBot, chatId, onOutput = null) {
+function createStreamForwardBot(realBot, chatId, onOutput = null, opts = {}) {
   // Track edit-broken state independently so dispatch failures don't poison realBot's flag
   let _editBroken = false;
+  const ready = opts && opts.ready && typeof opts.ready.then === 'function'
+    ? opts.ready.catch(() => {})
+    : Promise.resolve();
+  async function waitUntilReady() {
+    await ready;
+  }
   return {
     sendMessage: async (_, text) => {
+      await waitUntilReady();
       log('INFO', `[StreamBot→${chatId.slice(-8)}] msg: ${String(text).slice(0, 80)}`);
       if (onOutput) onOutput(text);
       return realBot.sendMessage(chatId, text);
     },
     sendMarkdown: async (_, text) => {
+      await waitUntilReady();
       log('INFO', `[StreamBot→${chatId.slice(-8)}] md: ${String(text).slice(0, 80)}`);
       if (onOutput) onOutput(text);
       return realBot.sendMarkdown(chatId, text);
     },
     sendCard: async (_, card) => {
+      await waitUntilReady();
       const title = typeof card === 'object' ? (card.title || card.body || '').slice(0, 60) : String(card).slice(0, 60);
       log('INFO', `[StreamBot→${chatId.slice(-8)}] card: ${title}`);
       if (onOutput) onOutput(typeof card === 'object' ? (card.body || card.title || JSON.stringify(card)) : card);
       return realBot.sendCard(chatId, card);
     },
     sendRawCard: async (_, header, elements) => {
+      await waitUntilReady();
       log('INFO', `[StreamBot→${chatId.slice(-8)}] rawcard: ${String(header).slice(0, 60)}`);
       if (onOutput) onOutput(header);
       return realBot.sendRawCard(chatId, header, elements);
     },
-    sendButtons: async (_, text, buttons) => realBot.sendButtons(chatId, text, buttons),
-    sendTyping: async () => realBot.sendTyping(chatId),
+    sendButtons: async (_, text, buttons) => { await waitUntilReady(); return realBot.sendButtons(chatId, text, buttons); },
+    sendTyping: async () => { await waitUntilReady(); return realBot.sendTyping(chatId); },
     editMessage: async (_, msgId, text) => {
+      await waitUntilReady();
       if (_editBroken) return false;
       log('INFO', `[StreamBot→${chatId.slice(-8)}] edit ${String(msgId).slice(-8)}: ${String(text).slice(0, 60)}`);
       try {
@@ -622,8 +633,8 @@ function createStreamForwardBot(realBot, chatId, onOutput = null) {
         return false;
       }
     },
-    deleteMessage: async (_, msgId) => realBot.deleteMessage(chatId, msgId),
-    sendFile: async (_, filePath, caption) => realBot.sendFile(chatId, filePath, caption),
+    deleteMessage: async (_, msgId) => { await waitUntilReady(); return realBot.deleteMessage(chatId, msgId); },
+    sendFile: async (_, filePath, caption) => { await waitUntilReady(); return realBot.sendFile(chatId, filePath, caption); },
     downloadFile: async (...args) => realBot.downloadFile(...args),
   };
 }
@@ -948,6 +959,20 @@ ${fullMsg.chain ? fullMsg.chain.join(' → ') : fullMsg.from} → ${targetProjec
   const dispatchChatId = buildDispatchChatId(targetProject, envelope && envelope.scope_id);
   const sessionMode = forceNew ? 'fresh session (forced)' : 'existing virtual session';
   log('INFO', `Dispatching ${fullMsg.type} to ${targetProject} via ${sessionMode}: ${rawPrompt.slice(0, 80)}`);
+  const streamReady = streamOptions?.bot && streamOptions?.chatId
+    ? (() => {
+      if (typeof streamOptions.preDispatch === 'function') {
+        return Promise.resolve()
+          .then(() => streamOptions.preDispatch())
+          .catch(e => log('WARN', `Dispatch prelude failed: ${e.message}`));
+      }
+      if (streamOptions.sendTaskCard === false) return Promise.resolve();
+      const card = buildDispatchTaskCard(fullMsg, targetProject, config);
+      return Promise.resolve()
+        .then(() => sendDispatchTaskCard(streamOptions.bot, streamOptions.chatId, card))
+        .catch(e => log('WARN', `Dispatch task card failed: ${e.message}`));
+    })()
+    : Promise.resolve();
 
   let _taskFinalized = false;
   const outputHandler = (output) => {
@@ -1008,7 +1033,7 @@ ${fullMsg.chain ? fullMsg.chain.join(' → ') : fullMsg.from} → ${targetProjec
   // If streamOptions provided, use real bot so output appears in target's Feishu channel.
   // Otherwise fall back to nullBot which captures output for replyFn.
   const nullBot = streamOptions?.bot && streamOptions?.chatId
-    ? createStreamForwardBot(streamOptions.bot, streamOptions.chatId, outputHandler)
+    ? createStreamForwardBot(streamOptions.bot, streamOptions.chatId, outputHandler, { ready: streamReady })
     : createNullBot(outputHandler);
   // Permission inheritance: if daemon runs with dangerously_skip_permissions, dispatched agents
   // inherit the same level — they need Write access for implementation tasks.
@@ -1232,6 +1257,40 @@ function appendTeamTaskResumeHint(text, taskId, scopeId) {
   return `${base}${hint}`;
 }
 
+function buildDispatchTaskCard(fullMsg, targetProject, config) {
+  const projects = (config && config.projects) || {};
+  const fromProj = projects[fullMsg && fullMsg.from] || {};
+  const toProj = projects[targetProject] || {};
+  const senderIcon = fromProj.icon || '🤖';
+  const senderName = fromProj.name || (fullMsg && fullMsg.from) || 'unknown';
+  const targetIcon = toProj.icon || '🤖';
+  const targetName = toProj.name || targetProject;
+  const prompt = String(fullMsg && fullMsg.payload && (fullMsg.payload.prompt || fullMsg.payload.title) || '').trim();
+  const preview = prompt ? `${prompt.slice(0, 300)}${prompt.length > 300 ? '…' : ''}` : '(empty)';
+  const lines = [
+    `发起: ${senderIcon} ${senderName}`,
+    `目标: ${targetIcon} ${targetName}`,
+    `编号: ${fullMsg.id}`,
+  ];
+  if (fullMsg.task_id) lines.push(`TeamTask: ${fullMsg.task_id}`);
+  if (fullMsg.scope_id && fullMsg.scope_id !== fullMsg.task_id) lines.push(`Scope: ${fullMsg.scope_id}`);
+  lines.push('', preview);
+  return {
+    title: '📬 新任务',
+    body: lines.join('\n'),
+    color: toProj.color || fromProj.color || 'blue',
+    markdown: `## 📬 新任务\n\n${lines.join('\n')}\n\n---\n${preview}`,
+    text: `📬 新任务\n\n${lines.join('\n')}\n\n${preview}`,
+  };
+}
+
+async function sendDispatchTaskCard(bot, chatId, card) {
+  if (!bot || !chatId || !card) return null;
+  if (bot.sendCard) return bot.sendCard(chatId, { title: card.title, body: card.body, color: card.color || 'blue' });
+  if (bot.sendMarkdown) return bot.sendMarkdown(chatId, card.markdown);
+  return bot.sendMessage(chatId, card.text);
+}
+
 function buildDispatchReceipt(item, config, result, opts = {}) {
   const targetKey = String(opts.targetKey || item.target || '').trim() || 'unknown';
   const targetProj = ((config && config.projects) || {})[targetKey] || {};
@@ -1298,12 +1357,17 @@ function handleDispatchItem(item, config) {
     const cardTitle = `${sIcon} ${sName} → ${tIcon} ${tName}`;
     const cardBody = item.prompt.slice(0, 300) + (item.prompt.length > 300 ? '…' : '');
     const cardColor = senderMember.color || 'blue';
-    const sendFn = liveBot.sendCard
+    const sendTaskNotice = liveBot.sendCard
       ? () => liveBot.sendCard(groupChatId, { title: cardTitle, body: cardBody, color: cardColor })
       : () => liveBot.sendMarkdown(groupChatId, `**${cardTitle}**\n\n> ${cardBody}`);
-    sendFn().catch(e => log('WARN', `Team broadcast failed: ${e.message}`));
-    // Use streamForwardBot so target's reply also shows in group
-    const streamOptions = { bot: liveBot, chatId: groupChatId };
+    // Use streamForwardBot so target's reply also shows in group.
+    // Gate the worker output behind the task notice so the group always sees the task card first.
+    const streamOptions = {
+      bot: liveBot,
+      chatId: groupChatId,
+      preDispatch: () => sendTaskNotice().catch(e => log('WARN', `Team broadcast failed: ${e.message}`)),
+      sendTaskCard: false,
+    };
     const result = dispatchTask(item.target, {
       from: item.from || 'claude_session',
       type: 'task', priority: 'normal',
@@ -1325,12 +1389,6 @@ function handleDispatchItem(item, config) {
     const targetChatId = Object.entries(feishuMap).find(([, v]) => v === item.target)?.[0] || null;
     if (targetChatId) {
       streamOptions = { bot: liveBot, chatId: targetChatId };
-      const ackText = `📬 **新任务**\n\n> ${item.prompt.slice(0, 120)}${item.prompt.length > 120 ? '...' : ''}`;
-      liveBot.sendMarkdown(targetChatId, ackText).catch(() =>
-        liveBot.sendMessage(targetChatId, ackText.replace(/\*\*/g, '')).catch(e =>
-          log('WARN', `Dispatch ack failed: ${e.message}`)
-        )
-      );
     } else if (!item._suppressDefaultReplyRouting) {
       const senderChatId = resolveDispatchSenderChatId(item, config);
       if (senderChatId) {
@@ -2709,4 +2767,16 @@ if (process.argv.includes('--run')) {
 }
 
 // Export for testing & cross-bot dispatch
-module.exports = { executeTask, loadConfig, loadState, buildProfilePreamble, parseInterval, handleRemoteDispatchMessage, sendRemoteDispatch };
+module.exports = {
+  executeTask,
+  loadConfig,
+  loadState,
+  buildProfilePreamble,
+  parseInterval,
+  handleRemoteDispatchMessage,
+  sendRemoteDispatch,
+  __test: {
+    createStreamForwardBot,
+    buildDispatchTaskCard,
+  },
+};
