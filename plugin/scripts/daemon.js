@@ -1450,15 +1450,25 @@ function handleDispatchItem(item, config) {
 async function handleRemoteDispatchMessage({ chatId, text, config }) {
   const rd = getRemoteDispatchConfig(config);
   if (!rd || String(chatId) !== rd.chatId) return false;
+  log('INFO', `Remote dispatch intercept chat=${chatId} preview=${String(text || '').slice(0, 48).replace(/\s+/g, ' ')}`);
 
   const packet = decodeRemoteDispatchPacket(text);
-  if (!packet) return true;
+  if (!packet) {
+    log('INFO', 'Remote dispatch decode miss');
+    return true;
+  }
   if (!verifyRemoteDispatchPacket(packet, rd.secret)) {
     log('WARN', 'Remote dispatch ignored: invalid signature');
     return true;
   }
-  if (packet.from_peer === rd.selfPeer) return true;
-  if (packet.to_peer !== rd.selfPeer) return true;
+  if (packet.from_peer === rd.selfPeer) {
+    log('INFO', `Remote dispatch ignored: self echo id=${packet.id || ''}`);
+    return true;
+  }
+  if (packet.to_peer !== rd.selfPeer) {
+    log('INFO', `Remote dispatch ignored: peer mismatch id=${packet.id || ''} to=${packet.to_peer || ''} self=${rd.selfPeer}`);
+    return true;
+  }
   if (isRemoteDispatchDuplicate(packet.id)) {
     log('DEBUG', `Remote dispatch ignored: duplicate id=${packet.id}`);
     return true;

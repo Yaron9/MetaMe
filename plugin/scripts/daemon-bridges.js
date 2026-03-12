@@ -536,6 +536,12 @@ function createBridgeStarter(deps) {
     try {
       const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo, senderId) => {
         const liveCfg = loadConfig();
+        const relayCfg = liveCfg && liveCfg.feishu && liveCfg.feishu.remote_dispatch;
+        const relayChatId = relayCfg && relayCfg.chat_id ? String(relayCfg.chat_id) : '';
+        if (relayChatId && String(chatId) === relayChatId) {
+          const preview = String(text || '').slice(0, 80).replace(/\s+/g, ' ');
+          log('INFO', `Feishu relay event chat=${chatId} sender=${senderId || 'unknown'} preview=${preview}`);
+        }
 
         // ── Remote dispatch interception (before ACL) ──
         if (handleRemoteDispatchMessage && text) {
