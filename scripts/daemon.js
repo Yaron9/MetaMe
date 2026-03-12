@@ -533,10 +533,56 @@ const taskBoard = createTaskBoard({
 // Late-bound reference to handleCommand (defined later in file)
 let _handleCommand = null;
 let _dispatchBridgeRef = null; // Store bridge (not bot) so .bot is always the live object after reconnects
+const _pendingRemoteDispatches = new Map();
 function setDispatchHandler(fn) { _handleCommand = fn; }
 
 function getRemoteDispatchConfig(config) {
   return normalizeRemoteDispatchConfig(config || {});
+}
+
+function trackRemoteDispatch(packet) {
+  if (!packet || packet.type !== 'task') return;
+  const requestId = String(packet.id || '').trim();
+  const targetChatId = String(packet.source_chat_id || '').trim();
+  if (!requestId || !targetChatId) return;
+  const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
+  const timeoutMs = 15000;
+  const existing = _pendingRemoteDispatches.get(requestId);
+  if (existing && existing.timer) clearTimeout(existing.timer);
+  const timer = setTimeout(async () => {
+    _pendingRemoteDispatches.delete(requestId);
+    const text = [
+      '⏱️ 远端 Dispatch 超时',
+      '',
+      `目标: ${packet.to_peer}:${packet.target_project || 'unknown'}`,
+      `请求: ${requestId}`,
+      `状态: 15s 内未收到回执`,
+    ].join('\n');
+    log('WARN', `Remote dispatch timeout id=${requestId} target=${packet.to_peer}:${packet.target_project || 'unknown'}`);
+    if (!liveBot) return;
+    try {
+      if (liveBot.sendMarkdown) await liveBot.sendMarkdown(targetChatId, text);
+      else await liveBot.sendMessage(targetChatId, text);
+    } catch (e) {
+      log('WARN', `Remote dispatch timeout delivery failed: ${e.message}`);
+    }
+  }, timeoutMs);
+  _pendingRemoteDispatches.set(requestId, {
+    id: requestId,
+    targetChatId,
+    targetPeer: String(packet.to_peer || '').trim(),
+    targetProject: String(packet.target_project || '').trim(),
+    timer,
+  });
+}
+
+function resolveTrackedRemoteDispatch(requestId) {
+  const key = String(requestId || '').trim();
+  if (!key) return null;
+  const tracked = _pendingRemoteDispatches.get(key) || null;
+  if (tracked && tracked.timer) clearTimeout(tracked.timer);
+  if (tracked) _pendingRemoteDispatches.delete(key);
+  return tracked;
 }
 
 async function sendRemoteDispatch(packet, config) {
@@ -555,6 +601,10 @@ async function sendRemoteDispatch(packet, config) {
       from_peer: rd.selfPeer,
     }, rd.secret);
     await liveBot.sendMessage(rd.chatId, body);
+    log('INFO', `Remote dispatch sent type=${packet.type} id=${id} to=${packet.to_peer}:${packet.target_project || 'unknown'} via=${rd.chatId}`);
+    if (packet.type === 'task') {
+      trackRemoteDispatch({ ...packet, id }, config);
+    }
     return { success: true, id };
   } catch (e) {
     return { success: false, error: e.message };
@@ -1413,6 +1463,7 @@ async function handleRemoteDispatchMessage({ chatId, text, config }) {
     log('DEBUG', `Remote dispatch ignored: duplicate id=${packet.id}`);
     return true;
   }
+  log('INFO', `Remote dispatch received type=${packet.type} id=${packet.id || ''} from=${packet.from_peer}:${packet.target_project || 'unknown'}`);
 
   if (packet.type === 'task') {
     const replyFn = async (output) => {
@@ -1460,6 +1511,8 @@ async function handleRemoteDispatchMessage({ chatId, text, config }) {
   }
 
   if (packet.type === 'ack') {
+    resolveTrackedRemoteDispatch(packet.request_id);
+    log('INFO', `Remote dispatch ack id=${packet.request_id || ''} status=${packet.status} from=${packet.from_peer}:${packet.target_project || 'unknown'}`);
     const text = String(packet.status) === 'accepted'
       ? [
         '📮 远端 Dispatch 回执',
@@ -1502,6 +1555,8 @@ async function handleRemoteDispatchMessage({ chatId, text, config }) {
   }
 
   if (packet.type === 'result') {
+    resolveTrackedRemoteDispatch(packet.request_id);
+    log('INFO', `Remote dispatch result id=${packet.request_id || ''} from=${packet.from_peer}:${packet.target_project || 'unknown'}`);
     const targetChatId = String(packet.source_chat_id || '').trim();
     if (!targetChatId) {
       const inboxTarget = String(packet.source_sender_key || '').trim();
@@ -1618,9 +1673,19 @@ function physiologicalHeartbeat(config) {
         const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
         for (const item of items) {
           if (item.relay_chat_id && item.body && liveBot && typeof liveBot.sendMessage === 'function') {
-            liveBot.sendMessage(item.relay_chat_id, item.body).catch(e2 =>
-              log('WARN', `Remote dispatch relay send failed: ${e2.message}`)
-            );
+            const packet = decodeRemoteDispatchPacket(item.body);
+            liveBot.sendMessage(item.relay_chat_id, item.body)
+              .then(() => {
+                if (packet) {
+                  log('INFO', `Remote dispatch queue sent type=${packet.type} id=${packet.id || ''} to=${packet.to_peer}:${packet.target_project || 'unknown'} via=${item.relay_chat_id}`);
+                  if (packet.type === 'task') trackRemoteDispatch(packet, config);
+                } else {
+                  log('INFO', `Remote dispatch queue sent raw via=${item.relay_chat_id}`);
+                }
+              })
+              .catch(e2 =>
+                log('WARN', `Remote dispatch relay send failed: ${e2.message}`)
+              );
           }
         }
       }
