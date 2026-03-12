@@ -6,7 +6,8 @@
  * Single source of truth for:
  *   - Project/team member resolution by name or nickname
  *   - Team roster hint generation (injected into member sessions)
- *   - Prompt enrichment with shared context (inbox / now.md / _latest.md)
+ *   - Prompt enrichment with scoped context (private now / shared now / inbox / _latest.md)
+ *   - Dispatch context file writes for target-only and team-shared tasks
  *
  * Used by: dispatch_to binary, daemon-admin-commands, daemon-bridges, daemon.js
  */
@@ -112,13 +113,132 @@ function buildTeamRosterHint(parentKey, memberKey, projects) {
   ].join('\n');
 }
 
+function resolveDispatchActor(sourceKey, projects) {
+  const rawKey = String(sourceKey || '').trim();
+  const userSources = new Set(['', 'unknown', 'claude_session', '_claude_session', 'user']);
+  if (userSources.has(rawKey)) return { key: 'user', name: '用户', icon: '👤', isUser: true };
+  const proj = projects && projects[rawKey];
+  if (proj) return { key: rawKey, name: proj.name || rawKey, icon: proj.icon || '🤖', isUser: false };
+  return { key: rawKey || 'unknown', name: rawKey || 'unknown', icon: '🤖', isUser: false };
+}
+
+function buildPrivateNowContent({ actor, target, title, prompt, timeStr, dispatchId, taskId, scopeId, chain }) {
+  const lines = [
+    '# 当前任务',
+    `**最后更新**: ${timeStr} **更新者**: ${actor.icon} ${actor.name}`,
+    '',
+    '## 当前派发',
+    `- **目标**: ${target.icon} ${target.name} (${target.key})`,
+    `- **任务**: ${title || prompt.slice(0, 120) || '(empty)'}`,
+    dispatchId ? `- **编号**: ${dispatchId}` : '',
+    taskId ? `- **TeamTask**: ${taskId}` : '',
+    scopeId && scopeId !== taskId ? `- **Scope**: ${scopeId}` : '',
+    '',
+    '## 任务链',
+    chain && chain.length > 0 ? chain.join(' → ') : `${actor.key} → ${target.key}`,
+  ].filter(Boolean);
+  return `${lines.join('\n')}\n`;
+}
+
+function buildSharedNowContent({ actor, target, title, prompt, timeStr, dispatchId, taskId, scopeId, chain }) {
+  const lines = [
+    '# 共享当前状态',
+    `**最后更新**: ${timeStr} **更新者**: ${actor.icon} ${actor.name}`,
+    '',
+    '## 当前任务',
+    `- **派发给**: ${target.icon} ${target.name} (${target.key})`,
+    `- **任务**: ${title || prompt.slice(0, 120) || '(empty)'}`,
+    dispatchId ? `- **编号**: ${dispatchId}` : '',
+    taskId ? `- **TeamTask**: ${taskId}` : '',
+    scopeId && scopeId !== taskId ? `- **Scope**: ${scopeId}` : '',
+    `- **时间**: ${timeStr}`,
+    '',
+    '## 任务链',
+    chain && chain.length > 0 ? chain.join(' → ') : `${actor.key} → ${target.key}`,
+  ].filter(Boolean);
+  return `${lines.join('\n')}\n`;
+}
+
+function updateDispatchContextFiles({ fs: fsMod = fs, path: pathMod = path, baseDir = METAME_DIR, fullMsg, targetProject, config, envelope, logger = null }) {
+  if (!fullMsg || !targetProject) return { targetNowPath: null, sharedNowPath: null, tasksFilePath: null };
+
+  const logWarn = (msg) => {
+    if (typeof logger === 'function') logger(msg);
+  };
+  const nowDir = pathMod.join(baseDir, 'memory', 'now');
+  const sharedDir = pathMod.join(baseDir, 'memory', 'shared');
+  const targetNowPath = pathMod.join(nowDir, `${targetProject}.md`);
+  const sharedNowPath = pathMod.join(nowDir, 'shared.md');
+  const tasksFilePath = pathMod.join(sharedDir, 'tasks.md');
+  fsMod.mkdirSync(nowDir, { recursive: true });
+
+  const projects = (config && config.projects) || {};
+  const actor = resolveDispatchActor((fullMsg && fullMsg.source_sender_key) || (fullMsg && fullMsg.from), projects);
+  const targetProj = projects[targetProject] || {};
+  const target = { key: targetProject, name: targetProj.name || targetProject, icon: targetProj.icon || '🤖' };
+  const prompt = String(fullMsg && fullMsg.payload && fullMsg.payload.prompt || '').trim();
+  const title = String(fullMsg && fullMsg.payload && fullMsg.payload.title || '').trim();
+  const now = new Date();
+  const timeStr = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+  const dateStr = now.toISOString().slice(0, 10);
+  const taskId = String(envelope && envelope.task_id || '').trim();
+  const scopeId = String(envelope && envelope.scope_id || '').trim();
+  const isSharedTeamTask = !!(envelope && envelope.task_kind === 'team');
+
+  fsMod.writeFileSync(targetNowPath, buildPrivateNowContent({
+    actor, target, title, prompt, timeStr,
+    dispatchId: fullMsg.id, taskId, scopeId, chain: fullMsg.chain,
+  }), 'utf8');
+
+  if (!isSharedTeamTask) return { targetNowPath, sharedNowPath: null, tasksFilePath: null };
+
+  fsMod.writeFileSync(sharedNowPath, buildSharedNowContent({
+    actor, target, title, prompt, timeStr,
+    dispatchId: fullMsg.id, taskId, scopeId, chain: fullMsg.chain,
+  }), 'utf8');
+
+  try {
+    if (!fsMod.existsSync(sharedDir)) fsMod.mkdirSync(sharedDir, { recursive: true });
+    const taskLine = `- [${dateStr}] ${actor.icon} ${actor.name} → ${target.icon} ${target.name}: ${title || prompt.slice(0, 40)}`;
+    let tasksContent = fsMod.existsSync(tasksFilePath)
+      ? fsMod.readFileSync(tasksFilePath, 'utf8')
+      : '# 任务看板\n\n## 🔄 进行中\n\n## ✅ 已完成\n\n## 📅 待开始\n';
+    if (!tasksContent.includes(taskLine)) {
+      const lines = tasksContent.split('\n');
+      const nextLines = [];
+      let inserted = false;
+      let inProgress = false;
+      for (const line of lines) {
+        nextLines.push(line);
+        if (line.includes('## 🔄 进行中')) {
+          inProgress = true;
+          continue;
+        }
+        if (inProgress && line.startsWith('## ')) {
+          nextLines.splice(nextLines.length - 1, 0, taskLine);
+          inserted = true;
+          inProgress = false;
+        }
+      }
+      if (!inserted) nextLines.push(taskLine);
+      tasksContent = nextLines.join('\n');
+      fsMod.writeFileSync(tasksFilePath, tasksContent, 'utf8');
+    }
+  } catch (e) {
+    logWarn(`Failed to update shared task board: ${e.message}`);
+  }
+
+  return { targetNowPath, sharedNowPath, tasksFilePath };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Prompt enrichment (shared context injection)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Enrich a dispatch prompt with shared context read at send time:
- *   1. now/shared.md   — global progress whiteboard
+ *   1. now/<target>.md — target private progress handoff
+ *   2. now/shared.md   — global team progress whiteboard (only when includeShared=true)
  *   2. agents/<target>_latest.md — target's last output
  *   3. inbox/<target>/ — unread messages (archived to read/ after reading)
  *
@@ -129,20 +249,32 @@ function buildTeamRosterHint(parentKey, memberKey, projects) {
  * @param {string} [metameDir] - override METAME_DIR (for testing)
  * @returns {string}
  */
-function buildEnrichedPrompt(target, rawPrompt, metameDir) {
+function buildEnrichedPrompt(target, rawPrompt, metameDir, opts = {}) {
   const base = metameDir || METAME_DIR;
+  const includeShared = !!(opts && opts.includeShared);
   let ctx = '';
 
-  // 1. Shared progress whiteboard
+  // 1. Target private now file
   try {
-    const nowFile = path.join(base, 'memory', 'now', 'shared.md');
-    if (fs.existsSync(nowFile)) {
-      const content = fs.readFileSync(nowFile, 'utf8').trim();
-      if (content) ctx += `[共享进度 now.md]\n${content}\n\n`;
+    const targetNowFile = path.join(base, 'memory', 'now', `${target}.md`);
+    if (fs.existsSync(targetNowFile)) {
+      const content = fs.readFileSync(targetNowFile, 'utf8').trim();
+      if (content) ctx += `[当前进度 now/${target}.md]\n${content}\n\n`;
     }
   } catch { /* non-critical */ }
 
-  // 2. Target's last output
+  // 2. Shared progress whiteboard for real team tasks only
+  if (includeShared) {
+    try {
+      const nowFile = path.join(base, 'memory', 'now', 'shared.md');
+      if (fs.existsSync(nowFile)) {
+        const content = fs.readFileSync(nowFile, 'utf8').trim();
+        if (content) ctx += `[共享进度 now/shared.md]\n${content}\n\n`;
+      }
+    } catch { /* non-critical */ }
+  }
+
+  // 3. Target's last output
   try {
     const latestFile = path.join(base, 'memory', 'agents', `${target}_latest.md`);
     if (fs.existsSync(latestFile)) {
@@ -151,7 +283,7 @@ function buildEnrichedPrompt(target, rawPrompt, metameDir) {
     }
   } catch { /* non-critical */ }
 
-  // 3. Inbox unread messages (archive after reading)
+  // 4. Inbox unread messages (archive after reading)
   try {
     const inboxDir = path.join(base, 'memory', 'inbox', target);
     const readDir = path.join(inboxDir, 'read');
@@ -173,4 +305,11 @@ function buildEnrichedPrompt(target, rawPrompt, metameDir) {
   return ctx ? `${ctx}---\n${rawPrompt}` : rawPrompt;
 }
 
-module.exports = { resolveProjectKey, findTeamMember, buildTeamRosterHint, buildEnrichedPrompt };
+module.exports = {
+  resolveProjectKey,
+  findTeamMember,
+  buildTeamRosterHint,
+  buildEnrichedPrompt,
+  resolveDispatchActor,
+  updateDispatchContextFiles,
+};

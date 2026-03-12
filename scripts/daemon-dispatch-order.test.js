@@ -65,4 +65,21 @@ describe('dispatch receiver task cards', () => {
     assert.match(card.body, /Scope: epic_auth/);
     assert.match(card.body, /继续修复登录超时/);
   });
+
+  it('renders placeholder user dispatchers as user-facing sender names', () => {
+    const card = __test.buildDispatchTaskCard({
+      id: 'd_demo_002',
+      from: '_claude_session',
+      payload: {
+        prompt: '帮我看一下这个问题。',
+      },
+    }, 'coder', {
+      projects: {
+        coder: { name: 'Coder', icon: '🛠', color: 'green' },
+      },
+    });
+
+    assert.match(card.body, /发起: 👤 用户/);
+    assert.doesNotMatch(card.body, /claude_session/);
+  });
 });

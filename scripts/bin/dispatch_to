@@ -64,7 +64,9 @@ function sendOne(memberTarget, memberPrompt, opts = {}) {
   return new Promise((resolve) => {
     const ts = new Date().toISOString();
     const secret = getDispatchSecret();
-    const enriched = opts.skipEnrich ? memberPrompt : buildEnrichedPrompt(memberTarget, memberPrompt, METAME_DIR);
+    const enriched = opts.skipEnrich
+      ? memberPrompt
+      : buildEnrichedPrompt(memberTarget, memberPrompt, METAME_DIR, { includeShared: !!opts.includeShared });
     const sigPayload = JSON.stringify({ target: memberTarget, prompt: enriched, ts });
     const sig = crypto.createHmac('sha256', secret).update(sigPayload).digest('hex');
 
@@ -187,7 +189,7 @@ if (teamMode) {
   // Await all dispatches before exiting so async socket/file ops complete
   Promise.all(team.map((member) => {
     const roster = buildTeamRosterHint(target, member.key, config.projects);
-    const enriched = buildEnrichedPrompt(member.key, prompt, METAME_DIR);
+    const enriched = buildEnrichedPrompt(member.key, prompt, METAME_DIR, { includeShared: true });
     const memberPrompt = roster ? `${roster}\n\n---\n${enriched}` : enriched;
     // Remote member → relay dispatch
     if (member.peer) {
@@ -201,7 +203,7 @@ if (teamMode) {
 // ── Normal single-target dispatch ─────────────────────────────────────────────
 const remoteTarget = parseRemoteTargetRef(target);
 if (remoteTarget) {
-  const enriched = buildEnrichedPrompt(remoteTarget.project, prompt, METAME_DIR);
+  const enriched = buildEnrichedPrompt(remoteTarget.project, prompt, METAME_DIR, { includeShared: false });
   sendRemoteViaRelay(remoteTarget.peer, remoteTarget.project, enriched);
   process.exit(0);
 } else {

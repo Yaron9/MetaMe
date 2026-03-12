@@ -148,7 +148,7 @@ const { createSessionCommandHandler } = require('./daemon-session-commands');
 const { createSessionStore } = require('./daemon-session-store');
 const { createCheckpointUtils } = require('./daemon-checkpoints');
 const { createBridgeStarter } = require('./daemon-bridges');
-const { buildTeamRosterHint } = require('./team-dispatch');
+const { buildTeamRosterHint, resolveDispatchActor, updateDispatchContextFiles } = require('./team-dispatch');
 const { createFileBrowser } = require('./daemon-file-browser');
 const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lifecycle');
 const { repairAgentLayer } = require('./agent-layer');
@@ -861,74 +861,20 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
   if (!fs.existsSync(DISPATCH_DIR)) fs.mkdirSync(DISPATCH_DIR, { recursive: true });
   fs.appendFileSync(DISPATCH_LOG, JSON.stringify({ ...fullMsg, dispatched_at: new Date().toISOString() }) + '\n', 'utf8');
 
-  // Auto-update now/shared.md and team shared files for cross-agent visibility
+  // Auto-update scoped dispatch context files; only TeamTask writes shared state.
   try {
-    const NOW_DIR = path.join(HOME, '.metame', 'memory', 'now');
-    const SHARED_FILE = path.join(NOW_DIR, 'shared.md');
-    const SHARED_DIR = path.join(HOME, '.metame', 'memory', 'shared');
-    if (!fs.existsSync(NOW_DIR)) fs.mkdirSync(NOW_DIR, { recursive: true });
-
-    const now = new Date();
-    const timeStr = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
-    const dateStr = now.toISOString().slice(0, 10);
-
-    // Get sender display name
-    const fromProj = config && config.projects ? config.projects[fullMsg.from] : null;
-    const fromName = fromProj ? (fromProj.name || fullMsg.from) : (fullMsg.from || 'unknown');
-    const fromIcon = fromProj ? (fromProj.icon || '🤖') : '🤖';
-
-    // Get target display name
-    const toProj = config && config.projects ? config.projects[targetProject] : null;
-    const toName = toProj ? (toProj.name || targetProject) : targetProject;
-    const toIcon = toProj ? (toProj.icon || '🤖') : '🤖';
-
-    const taskTitle = payload.title || '';
-    const taskPrompt = payload.prompt || '';
-
-    // Update shared.md
-    const content = `# 共享当前状态
-**最后更新**: ${timeStr} **更新者**: ${fromName} (${fullMsg.from})
-
-## 当前任务
-- **派发给**: ${toIcon} ${toName} (${targetProject})
-- **任务**: ${taskTitle || taskPrompt.slice(0, 60)}
-- **时间**: ${timeStr}
-
-## 任务链
-${fullMsg.chain ? fullMsg.chain.join(' → ') : fullMsg.from} → ${targetProject}
-`;
-    fs.writeFileSync(SHARED_FILE, content, 'utf8');
-
-    // Update tasks.md if shared directory exists
-    const tasksFile = path.join(SHARED_DIR, 'tasks.md');
-    if (fs.existsSync(SHARED_DIR)) {
-      const taskLine = `- [${dateStr}] ${fromIcon} ${fromName} → ${toIcon} ${toName}: ${taskTitle || taskPrompt.slice(0, 40)}`;
-      let tasksContent = '';
-      if (fs.existsSync(tasksFile)) {
-        tasksContent = fs.readFileSync(tasksFile, 'utf8');
-      } else {
-        tasksContent = '# 任务看板\n\n## 🔄 进行中\n\n## ✅ 已完成\n\n## 📅 待开始\n';
-      }
-      // Insert task under "进行中" section
-      if (!tasksContent.includes(taskLine)) {
-        const lines = tasksContent.split('\n');
-        const newLines = [];
-        let inProgress = false;
-        for (const line of lines) {
-          newLines.push(line);
-          if (line.includes('## 🔄 进行中')) {
-            inProgress = true;
-          } else if (inProgress && line.startsWith('## ')) {
-            newLines.push(taskLine);
-            inProgress = false;
-          }
-        }
-        if (inProgress) newLines.push(taskLine);
-        fs.writeFileSync(tasksFile, newLines.join('\n'), 'utf8');
-      }
-    }
+    updateDispatchContextFiles({
+      fs,
+      path,
+      baseDir: METAME_DIR,
+      fullMsg,
+      targetProject,
+      config,
+      envelope,
+      logger: (msg) => log('WARN', msg),
+    });
   } catch (e) {
-    log('WARN', `Failed to update shared files: ${e.message}`);
+    log('WARN', `Failed to update dispatch context files: ${e.message}`);
   }
 
   const rawPrompt = envelope
@@ -1259,16 +1205,17 @@ function appendTeamTaskResumeHint(text, taskId, scopeId) {
 
 function buildDispatchTaskCard(fullMsg, targetProject, config) {
   const projects = (config && config.projects) || {};
-  const fromProj = projects[fullMsg && fullMsg.from] || {};
+  const actor = resolveDispatchActor(
+    (fullMsg && fullMsg.source_sender_key) || (fullMsg && fullMsg.from),
+    projects
+  );
   const toProj = projects[targetProject] || {};
-  const senderIcon = fromProj.icon || '🤖';
-  const senderName = fromProj.name || (fullMsg && fullMsg.from) || 'unknown';
   const targetIcon = toProj.icon || '🤖';
   const targetName = toProj.name || targetProject;
   const prompt = String(fullMsg && fullMsg.payload && (fullMsg.payload.prompt || fullMsg.payload.title) || '').trim();
   const preview = prompt ? `${prompt.slice(0, 300)}${prompt.length > 300 ? '…' : ''}` : '(empty)';
   const lines = [
-    `发起: ${senderIcon} ${senderName}`,
+    `发起: ${actor.icon} ${actor.name}`,
     `目标: ${targetIcon} ${targetName}`,
     `编号: ${fullMsg.id}`,
   ];
@@ -1278,7 +1225,7 @@ function buildDispatchTaskCard(fullMsg, targetProject, config) {
   return {
     title: '📬 新任务',
     body: lines.join('\n'),
-    color: toProj.color || fromProj.color || 'blue',
+    color: toProj.color || 'blue',
     markdown: `## 📬 新任务\n\n${lines.join('\n')}\n\n---\n${preview}`,
     text: `📬 新任务\n\n${lines.join('\n')}\n\n${preview}`,
   };
@@ -1296,10 +1243,10 @@ function buildDispatchReceipt(item, config, result, opts = {}) {
   const targetProj = ((config && config.projects) || {})[targetKey] || {};
   const targetName = targetProj.name || targetKey;
   const targetIcon = targetProj.icon || '🤖';
-  const senderKey = String(item && (item.source_sender_key || item.from) || 'user').trim() || 'user';
-  const senderProj = ((config && config.projects) || {})[senderKey] || {};
-  const senderName = senderProj.name || senderKey;
-  const senderIcon = senderProj.icon || '👤';
+  const actor = resolveDispatchActor(
+    String(item && (item.source_sender_key || item.from) || 'user').trim() || 'user',
+    (config && config.projects) || {}
+  );
   const prompt = String(item && item.prompt || '').trim();
   const preview = prompt ? `${prompt.slice(0, 120)}${prompt.length > 120 ? '...' : ''}` : '(empty)';
   const isFailed = !result || !result.success;
@@ -1311,7 +1258,7 @@ function buildDispatchReceipt(item, config, result, opts = {}) {
     title,
     '',
     statusLine,
-    `发起: ${senderIcon} ${senderName}`,
+    `发起: ${actor.icon} ${actor.name}`,
     `目标: ${targetIcon} ${targetName}`,
   ];
   if (result && result.id) lines.push(`编号: ${result.id}`);
