@@ -464,7 +464,7 @@ Each team member runs on a virtual chatId (`_agent_{key}`) and appears with its 
 
 ### Cross-Device Dispatch
 
-Team members with `peer` field run on a different machine. Configure `feishu.remote_dispatch` on both machines with the same relay chat and shared secret:
+Team members with `peer` field run on a different machine. Configure `feishu.remote_dispatch` on both machines with the same relay chat and shared secret, but do not share the same Feishu bot between machines. Each machine must use its own Feishu app/bot credentials.
 
 ```yaml
 feishu:
@@ -474,6 +474,11 @@ feishu:
     chat_id: oc_relay_xxx      # shared relay group
     secret: shared-secret-key  # HMAC signing key
 ```
+
+Why separate bots are required:
+- Feishu may deliver relay-chat events to either online client for the same bot.
+- Current remote-dispatch handling drops packets addressed to a different `self` peer.
+- If Windows and Mac share one bot, the wrong machine can consume and discard the packet.
 
 Use from mobile: `/dispatch to windows:hunter research competitors` or just mention by nickname — routing is automatic. Use `/dispatch peers` to check remote config status.
 

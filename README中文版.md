@@ -312,7 +312,7 @@ systemctl --user start metame
 | **技能进化** | 队列化技能进化：采集任务信号、生成工作流提案，并通过 `/skill-evo` 显式审批/结案。 |
 | **心跳系统** | 三层可编程神经系统。Layer 0 内核永远在线（零配置）。Layer 1 系统自进化内置（蒸馏+记忆+技能+nightly+index）。Layer 2 自定义定时任务，支持 `require_idle`、`precondition`、`notify`、工作流。 |
 | **多 Agent** | 多项目独立群聊，`/agent bind` 一键配置，真正并行执行。 |
-| **跨设备 Dispatch** | 团队成员可运行在不同机器上。`member.peer` 标记远端 Agent——消息通过飞书 relay 群中转，HMAC-SHA256 签名 + 5 分钟 TTL 去重。`/dispatch peers` 查看配置，`dispatch_to peer:project` 显式路由。 |
+| **跨设备 Dispatch** | 团队成员可运行在不同机器上。`member.peer` 标记远端 Agent——消息通过飞书 relay 群中转，HMAC-SHA256 签名 + 5 分钟 TTL 去重。两台机器必须各自使用独立飞书 bot，只共享 relay 群与 `secret`。`/dispatch peers` 查看配置，`dispatch_to peer:project` 显式路由。 |
 | **浏览器自动化** | 内置 Playwright MCP，开箱即用。配合 Skill 实现发布、填表、抓取等自动化。 |
 | **跨平台** | 原生支持 macOS 和 Windows。平台抽象层自动处理进程管理、IPC、终端编码差异，一套代码两平台。 |
 | **模型中继** | 兼容任何 Anthropic API 中继。GPT-4、DeepSeek、Gemini 随意切换，零文件污染。 |
