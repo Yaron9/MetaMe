@@ -547,17 +547,6 @@ async function sendRemotePairHello(config, opts = {}) {
   const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
   if (!rd) return { success: false, error: 'pairing not configured' };
   if (!liveBot || typeof liveBot.sendMessage !== 'function') return { success: false, error: 'feishu bot not connected' };
-  const targetPeers = new Set();
-  for (const proj of Object.values((config && config.projects) || {})) {
-    for (const member of Array.isArray(proj && proj.team) ? proj.team : []) {
-      if (member && member.peer) targetPeers.add(String(member.peer));
-    }
-  }
-  if (targetPeers.size === 0 && !opts.force) return { success: false, error: 'no remote peers configured' };
-  if (!opts.force) {
-    const allPaired = Array.from(targetPeers).every((peer) => !!resolveRemoteDispatchPeerSecret(config, peer));
-    if (allPaired) return { success: false, error: 'all peers already paired' };
-  }
   const body = buildRemoteDispatchPairHello(config, { force: !!opts.force });
   if (!body) return { success: false, error: 'pair hello throttled' };
   try {
