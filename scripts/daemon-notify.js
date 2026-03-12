@@ -1,5 +1,12 @@
 'use strict';
 
+function resolveAdminChatId(adapterConfig = {}) {
+  const explicitId = String(adapterConfig.admin_chat_id || '').trim();
+  if (explicitId) return explicitId;
+  const ids = Array.isArray(adapterConfig.allowed_chat_ids) ? adapterConfig.allowed_chat_ids : [];
+  return ids[0] || null;
+}
+
 function createNotifier(deps) {
   const { log, getConfig, getBridges } = deps;
 
@@ -46,13 +53,20 @@ function createNotifier(deps) {
 
   async function notifyAdmin(message) {
     const config = getConfig();
-    const { feishuBridge } = getBridges();
+    const { feishuBridge, telegramBridge } = getBridges();
     if (feishuBridge && feishuBridge.bot) {
-      const fsIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
-      const adminId = fsIds[0];
+      const adminId = resolveAdminChatId(config.feishu || {});
       if (adminId) {
         try { await feishuBridge.bot.sendMessage(adminId, message); } catch (e) {
           log('ERROR', `Feishu admin notify failed ${adminId}: ${e.message}`);
+        }
+      }
+    }
+    if (telegramBridge && telegramBridge.bot) {
+      const adminId = resolveAdminChatId(config.telegram || {});
+      if (adminId) {
+        try { await telegramBridge.bot.sendMarkdown(adminId, message); } catch (e) {
+          log('ERROR', `Telegram admin notify failed ${adminId}: ${e.message}`);
         }
       }
     }
@@ -97,4 +111,4 @@ function createNotifier(deps) {
   return { notify, notifyAdmin, notifyPersonal };
 }
 
-module.exports = { createNotifier };
+module.exports = { createNotifier, resolveAdminChatId };

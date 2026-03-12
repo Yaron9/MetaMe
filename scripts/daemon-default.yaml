@@ -4,12 +4,14 @@
 telegram:
   enabled: false
   bot_token: null
+  admin_chat_id: null
   allowed_chat_ids: []
 
 feishu:
   enabled: false
   app_id: null
   app_secret: null
+  admin_chat_id: null
   allowed_chat_ids: []
   remote_dispatch:
     enabled: false
