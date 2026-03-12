@@ -113,7 +113,10 @@ describe('daemon-admin-commands /TeamTask', () => {
     assert.equal(dispatchCalls.length, 1);
     assert.equal(dispatchCalls[0].target, 'coder');
     assert.equal(dispatchCalls[0].packet.payload.task_envelope.scope_id, 'epic_auth');
-    assert.match(sent[0], /已创建 TeamTask 并派发/);
+    assert.equal(dispatchCalls[0].packet.source_chat_id, 'mobile-user-2');
+    assert.equal(dispatchCalls[0].packet.source_sender_key, 'user');
+    assert.match(sent[0], /已创建 TeamTask 并提交派发/);
+    assert.match(sent[0], /回执会在目标端真正接收后返回/);
     assert.match(sent[0], /查看: \/TeamTask t_/);
   });
 
@@ -268,7 +271,10 @@ describe('daemon-admin-commands /TeamTask', () => {
     assert.equal(res.handled, true);
     assert.equal(dispatchCalls.length, 1);
     assert.equal(dispatchCalls[0].target, 'coder');
+    assert.equal(dispatchCalls[0].packet.source_chat_id, 'mobile-user-3c');
+    assert.equal(dispatchCalls[0].packet.source_sender_key, 'planner');
     assert.match(sent[0], /已续跑 TeamTask: t_20260225_resume1/);
+    assert.match(sent[0], /回执会在目标端真正接收后返回/);
   });
 
   it('shows usage when /TeamTask resume is missing task id', async () => {
@@ -527,7 +533,8 @@ describe('daemon-admin-commands /engine', () => {
     assert.equal(nextCfg.projects.personal.engine, 'codex');
     assert.equal(nextCfg.projects.personal.model, 'gpt-5.4');
     assert.match(sent[0], /已同步当前 Agent: personal/);
-    assert.match(sent[0], /Provider: anthropic（如需切换请 \/provider openai）/);
+    assert.match(sent[0], /Codex 认证: 使用 `codex login` 或 OPENAI_API_KEY/);
+    assert.doesNotMatch(sent[0], /Provider: anthropic/);
   });
 
   it('shows effective bound agent engine in /engine status', async () => {

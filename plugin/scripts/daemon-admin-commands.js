@@ -175,6 +175,20 @@ function createAdminCommandHandler(deps) {
     }
   }
 
+  async function sendLocalDispatchReceipt(bot, chatId, targetKey, projInfo, result, preview) {
+    if (!result || !result.success) return;
+    const icon = projInfo && projInfo.icon ? projInfo.icon : '🤖';
+    const name = projInfo && projInfo.name ? projInfo.name : targetKey;
+    const lines = [
+      '📮 Dispatch 回执',
+      '',
+      `状态: ${icon} ${name} 已接收并入队`,
+    ];
+    if (result.id) lines.push(`编号: ${result.id}`);
+    if (preview) lines.push(`摘要: ${String(preview).slice(0, 120)}`);
+    await bot.sendMessage(chatId, lines.join('\n'));
+  }
+
   async function handleAdminCommand(ctx) {
     const { bot, chatId, text } = ctx;
     const state = ctx.state || {};
@@ -450,6 +464,7 @@ function createAdminCommandHandler(deps) {
             '回执会在目标端真正接收后返回。',
             `查看: /TeamTask ${envelope.task_id}`,
           ].join('\n'));
+          await sendLocalDispatchReceipt(bot, chatId, targetKey, config.projects[targetKey], result, goal);
         } else {
           await bot.sendMessage(chatId, `❌ 创建 TeamTask 失败: ${result.error}`);
         }
@@ -537,6 +552,7 @@ function createAdminCommandHandler(deps) {
         if (result.success) {
           taskBoard.appendTaskEvent(task.task_id, 'task_resume_requested', String(chatId), { by: String(chatId) });
           await bot.sendMessage(chatId, `✅ 已续跑 TeamTask: ${task.task_id}\n回执会在目标端真正接收后返回。`);
+          await sendLocalDispatchReceipt(bot, chatId, targetKey, config.projects[targetKey], result, envelope.goal);
         } else {
           await bot.sendMessage(chatId, `❌ 续跑失败: ${result.error}`);
         }
@@ -738,6 +754,7 @@ function createAdminCommandHandler(deps) {
 
         if (result.success) {
           await bot.sendMessage(chatId, `✅ 已提交派发给 ${projInfo.name || targetName}，等待回执…`);
+          await sendLocalDispatchReceipt(bot, chatId, targetKey, projInfo, result, prompt);
         } else {
           await bot.sendMessage(chatId, `❌ 派发失败: ${result.error}`);
         }
@@ -790,6 +807,7 @@ function createAdminCommandHandler(deps) {
 
       if (result.success) {
         await bot.sendMessage(chatId, `📬 已发送消息给 ${toProj.icon || '🤖'} ${toProj.name || targetKey}`);
+        await sendLocalDispatchReceipt(bot, chatId, targetKey, toProj, result, message);
       } else {
         await bot.sendMessage(chatId, `❌ 发送失败: ${result.error}`);
       }

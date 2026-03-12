@@ -1135,11 +1135,116 @@ function _findTeamBroadcastContext(fromKey, targetKey, config) {
   return null;
 }
 
+function resolveDispatchSenderChatId(item, config) {
+  const requestedChatId = String(item && item.source_chat_id || '').trim();
+  if (requestedChatId) return requestedChatId;
+
+  const feishuMap = (config && config.feishu && config.feishu.chat_agent_map) || {};
+  const allowedFeishuIds = ((config && config.feishu && config.feishu.allowed_chat_ids) || []).map(String);
+  const agentChatIds = new Set(Object.keys(feishuMap).map(String));
+  const senderKey = String(item && (item.source_sender_key || item.from) || '').trim();
+  const userSources = new Set(['', 'unknown', 'claude_session', '_claude_session', 'user']);
+
+  if (!userSources.has(senderKey)) {
+    const directChatId = Object.entries(feishuMap).find(([, v]) => v === senderKey)?.[0] || null;
+    if (directChatId) return String(directChatId);
+
+    const projects = (config && config.projects) || {};
+    for (const [projKey, proj] of Object.entries(projects)) {
+      if (!Array.isArray(proj && proj.team)) continue;
+      const member = proj.team.find(m => m && m.key === senderKey);
+      if (!member) continue;
+      const groupChatId = Object.entries(feishuMap).find(([, v]) => v === projKey)?.[0] || null;
+      if (groupChatId) return String(groupChatId);
+    }
+  }
+
+  return allowedFeishuIds.find(id => !agentChatIds.has(id)) || null;
+}
+
+function writeDispatchReceiptInbox(item, receipt) {
+  const senderKey = String(item && (item.source_sender_key || item.from) || '').trim();
+  if (!senderKey || ['user', 'unknown', 'claude_session', '_claude_session'].includes(senderKey)) return;
+  try {
+    const inboxDir = path.join(os.homedir(), '.metame', 'memory', 'inbox', senderKey);
+    fs.mkdirSync(inboxDir, { recursive: true });
+    const tsStr = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+    const targetKey = String(receipt && receipt.targetKey || item.target || 'unknown').trim() || 'unknown';
+    const inboxFile = path.join(inboxDir, `${tsStr}_${targetKey}_dispatch_receipt.md`);
+    const body = [
+      `TYPE: dispatch_receipt`,
+      `STATUS: ${receipt && receipt.status ? receipt.status : 'accepted'}`,
+      `TARGET: ${targetKey}`,
+      `DISPATCH_ID: ${receipt && receipt.dispatchId ? receipt.dispatchId : ''}`,
+      `TS: ${new Date().toISOString()}`,
+      '',
+      String(receipt && receipt.text || '').trim() || '(empty receipt)',
+    ].join('\n');
+    fs.writeFileSync(inboxFile, body, 'utf8');
+  } catch (e) {
+    log('WARN', `Dispatch receipt inbox write failed: ${e.message}`);
+  }
+}
+
+function sendDispatchReceipt(item, config, receipt) {
+  const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
+  const senderChatId = resolveDispatchSenderChatId(item, config);
+  const text = String(receipt && receipt.text || '').trim();
+  if (!text) return;
+
+  if (liveBot && senderChatId) {
+    const send = liveBot.sendMarkdown
+      ? liveBot.sendMarkdown(senderChatId, text)
+      : liveBot.sendMessage(senderChatId, text);
+    send.catch((e) => {
+      log('WARN', `Dispatch receipt delivery failed: ${e.message}`);
+      writeDispatchReceiptInbox(item, receipt);
+    });
+    return;
+  }
+
+  writeDispatchReceiptInbox(item, receipt);
+}
+
+function buildDispatchReceipt(item, config, result, opts = {}) {
+  const targetKey = String(opts.targetKey || item.target || '').trim() || 'unknown';
+  const targetProj = ((config && config.projects) || {})[targetKey] || {};
+  const targetName = targetProj.name || targetKey;
+  const targetIcon = targetProj.icon || '🤖';
+  const senderKey = String(item && (item.source_sender_key || item.from) || 'user').trim() || 'user';
+  const senderProj = ((config && config.projects) || {})[senderKey] || {};
+  const senderName = senderProj.name || senderKey;
+  const senderIcon = senderProj.icon || '👤';
+  const prompt = String(item && item.prompt || '').trim();
+  const preview = prompt ? `${prompt.slice(0, 120)}${prompt.length > 120 ? '...' : ''}` : '(empty)';
+  const isFailed = !result || !result.success;
+  const title = isFailed ? '❌ Dispatch 回执' : '📮 Dispatch 回执';
+  const statusLine = isFailed
+    ? `状态: 入队失败 (${String(result && result.error || 'unknown_error').slice(0, 120)})`
+    : '状态: 目标端已接收并入队';
+  const lines = [
+    title,
+    '',
+    statusLine,
+    `发起: ${senderIcon} ${senderName}`,
+    `目标: ${targetIcon} ${targetName}`,
+  ];
+  if (result && result.id) lines.push(`编号: ${result.id}`);
+  lines.push(`摘要: ${preview}`);
+  return {
+    status: isFailed ? 'failed' : 'accepted',
+    dispatchId: result && result.id ? result.id : '',
+    targetKey,
+    text: lines.join('\n'),
+  };
+}
+
 function handleDispatchItem(item, config) {
   if (!item.target || !item.prompt) return;
   if (!(config && config.projects && config.projects[item.target])) {
     log('WARN', `dispatch: unknown target "${item.target}"`);
-    return;
+    sendDispatchReceipt(item, config, buildDispatchReceipt(item, config, { success: false, error: 'unknown_target' }));
+    return { success: false, error: 'unknown_target' };
   }
   // 安全护栏：禁止 agent 主动 dispatch 到 personal（防止 LLM 幻觉乱发消息给小美）
   // personal 只允许用户本人触发，或来源为 user/unknown 的系统任务
@@ -1148,7 +1253,8 @@ function handleDispatchItem(item, config) {
   const targetProject = config.projects?.[item.target] || {};
   if (isFromAgent && targetProject.guard === 'user-only') {
     log('WARN', `dispatch: blocked agent "${item.from}" → "${item.target}" (user-only guard)`);
-    return;
+    sendDispatchReceipt(item, config, buildDispatchReceipt(item, config, { success: false, error: 'target_guard_user_only' }));
+    return { success: false, error: 'target_guard_user_only' };
   }
   log('INFO', `Dispatch: ${item.from || '?'} → ${item.target}: ${item.prompt.slice(0, 60)}`);
 
@@ -1171,23 +1277,24 @@ function handleDispatchItem(item, config) {
     sendFn().catch(e => log('WARN', `Team broadcast failed: ${e.message}`));
     // Use streamForwardBot so target's reply also shows in group
     const streamOptions = { bot: liveBot, chatId: groupChatId };
-    dispatchTask(item.target, {
+    const result = dispatchTask(item.target, {
       from: item.from || 'claude_session',
       type: 'task', priority: 'normal',
       payload: { title: item.prompt.slice(0, 60), prompt: item.prompt },
       callback: false,
       new_session: !!item.new_session,
+      source_chat_id: item.source_chat_id || '',
+      source_sender_key: item.source_sender_key || item.from || '',
     }, config, null, streamOptions);
-    return;
+    sendDispatchReceipt(item, config, buildDispatchReceipt(item, config, result));
+    return result;
   }
 
   // ── Normal dispatch (non-team or broadcast off) ──
-  let pendingReplyFn = null;
+  let pendingReplyFn = typeof item._replyFn === 'function' ? item._replyFn : null;
   let streamOptions = null;
   if (liveBot) {
     const feishuMap = (config.feishu && config.feishu.chat_agent_map) || {};
-    const allowedFeishuIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
-    const agentChatIds = new Set(Object.keys(feishuMap));
     const targetChatId = Object.entries(feishuMap).find(([, v]) => v === item.target)?.[0] || null;
     if (targetChatId) {
       streamOptions = { bot: liveBot, chatId: targetChatId };
@@ -1197,37 +1304,10 @@ function handleDispatchItem(item, config) {
           log('WARN', `Dispatch ack failed: ${e.message}`)
         )
       );
-    } else {
-      const _userSources = new Set(['unknown', 'claude_session', '_claude_session', 'user']);
-      let senderChatId = null;
-      if (!_userSources.has(item.from)) {
-        // Direct match: sender is a bound agent
-        senderChatId = Object.entries(feishuMap).find(([, v]) => v === item.from)?.[0] || null;
-        // Team member fallback: if sender is a team member (e.g., jarvis_c), find parent project's chatId
-        if (!senderChatId) {
-          const projects = config.projects || {};
-          for (const [projKey, proj] of Object.entries(projects)) {
-            if (proj.team && Array.isArray(proj.team)) {
-              const member = proj.team.find(m => m.key === item.from);
-              if (member && feishuMap[projKey]) {
-                senderChatId = feishuMap[projKey];
-                break;
-              }
-            }
-          }
-        }
-      }
-      if (!senderChatId) {
-        senderChatId = allowedFeishuIds.map(String).find(id => !agentChatIds.has(id)) || null;
-      }
+    } else if (!item._suppressDefaultReplyRouting) {
+      const senderChatId = resolveDispatchSenderChatId(item, config);
       if (senderChatId) {
         const targetProj = (config.projects || {})[item.target] || {};
-        const ackText = `📬 已接收，转发给 ${targetProj.icon || '🤖'} **${targetProj.name || item.target}**...\n\n> ${item.prompt.slice(0, 100)}${item.prompt.length > 100 ? '...' : ''}`;
-        liveBot.sendMarkdown(senderChatId, ackText).catch(() =>
-          liveBot.sendMessage(senderChatId, ackText.replace(/\*\*/g, '')).catch(e =>
-            log('WARN', `Dispatch ack to sender failed: ${e.message}`)
-          )
-        );
         pendingReplyFn = (output) => {
           const text = `${targetProj.icon || '📬'} **${targetProj.name || item.target}** 回复：\n\n${output.slice(0, 2000)}`;
           liveBot.sendMarkdown(senderChatId, text).catch(e => {
@@ -1242,13 +1322,17 @@ function handleDispatchItem(item, config) {
       }
     }
   }
-  dispatchTask(item.target, {
+  const result = dispatchTask(item.target, {
     from: item.from || 'claude_session',
     type: 'task', priority: 'normal',
     payload: { title: item.prompt.slice(0, 60), prompt: item.prompt },
     callback: false,
     new_session: !!item.new_session,
+    source_chat_id: item.source_chat_id || '',
+    source_sender_key: item.source_sender_key || item.from || '',
   }, config, pendingReplyFn, streamOptions);
+  sendDispatchReceipt(item, config, buildDispatchReceipt(item, config, result));
+  return result;
 }
 
 async function handleRemoteDispatchMessage({ chatId, text, config }) {
@@ -1283,14 +1367,69 @@ async function handleRemoteDispatchMessage({ chatId, text, config }) {
       if (!res.success) log('WARN', `Remote dispatch result send failed: ${res.error}`);
     };
 
-    handleDispatchItem({
+    const dispatchRes = handleDispatchItem({
       target: packet.target_project,
       prompt: packet.prompt,
       from: packet.source_sender_key || `${packet.from_peer}:remote`,
       new_session: !!packet.new_session,
+      source_chat_id: packet.source_chat_id || '',
+      source_sender_key: packet.source_sender_key || '',
       _replyFn: replyFn,
       _suppressDefaultReplyRouting: true,
     }, config);
+    const ackRes = await sendRemoteDispatch({
+      type: 'ack',
+      to_peer: packet.from_peer,
+      target_project: packet.target_project,
+      source_chat_id: packet.source_chat_id,
+      source_sender_key: packet.source_sender_key || 'user',
+      request_id: packet.id,
+      dispatch_id: dispatchRes && dispatchRes.id ? dispatchRes.id : '',
+      status: dispatchRes && dispatchRes.success ? 'accepted' : 'failed',
+      error: dispatchRes && dispatchRes.success ? '' : String(dispatchRes && dispatchRes.error || 'dispatch_failed'),
+    }, config);
+    if (!ackRes.success) log('WARN', `Remote dispatch ack send failed: ${ackRes.error}`);
+    return true;
+  }
+
+  if (packet.type === 'ack') {
+    const text = String(packet.status) === 'accepted'
+      ? [
+        '📮 远端 Dispatch 回执',
+        '',
+        `状态: ${packet.from_peer}:${packet.target_project || 'unknown'} 已接收并入队`,
+        packet.dispatch_id ? `编号: ${packet.dispatch_id}` : '',
+      ].filter(Boolean).join('\n')
+      : [
+        '❌ 远端 Dispatch 回执',
+        '',
+        `状态: ${packet.from_peer}:${packet.target_project || 'unknown'} 入队失败`,
+        packet.error ? `错误: ${String(packet.error).slice(0, 200)}` : '',
+      ].filter(Boolean).join('\n');
+
+    const targetChatId = String(packet.source_chat_id || '').trim();
+    if (targetChatId) {
+      const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
+      if (!liveBot) {
+        writeDispatchReceiptInbox({ from: packet.source_sender_key || 'user' }, { status: packet.status, targetKey: packet.target_project, dispatchId: packet.dispatch_id, text });
+        return true;
+      }
+      try {
+        if (liveBot.sendMarkdown) await liveBot.sendMarkdown(targetChatId, text);
+        else await liveBot.sendMessage(targetChatId, text);
+      } catch (e) {
+        log('WARN', `Remote dispatch ack delivery failed: ${e.message}`);
+        writeDispatchReceiptInbox({ from: packet.source_sender_key || 'user' }, { status: packet.status, targetKey: packet.target_project, dispatchId: packet.dispatch_id, text });
+      }
+      return true;
+    }
+
+    writeDispatchReceiptInbox({ from: packet.source_sender_key || 'user' }, {
+      status: packet.status,
+      targetKey: packet.target_project,
+      dispatchId: packet.dispatch_id,
+      text,
+    });
     return true;
   }
 
@@ -1352,8 +1491,8 @@ function startDispatchSocket(getConfig) {
       try {
         const item = JSON.parse(buf);
         const liveCfg = typeof getConfig === 'function' ? getConfig() : getConfig;
-        handleDispatchItem(item, liveCfg || {});
-        conn.write(JSON.stringify({ ok: true }) + '\n');
+        const result = handleDispatchItem(item, liveCfg || {});
+        conn.write(JSON.stringify({ ok: !!(result && result.success), id: result && result.id ? result.id : null, error: result && result.error ? result.error : null }) + '\n');
       } catch (e) {
         try { conn.write(JSON.stringify({ ok: false, error: e.message }) + '\n'); } catch { /* ignore */ }
       }
