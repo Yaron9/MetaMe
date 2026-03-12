@@ -107,6 +107,86 @@ function createAdminCommandHandler(deps) {
     };
   }
 
+  function isLikelyTeamTaskResumeIntent(text) {
+    const src = String(text || '').trim();
+    if (!src || src.startsWith('/')) return false;
+    if (src.length < 4 || src.length > 120) return false;
+    if (/(?:新建|创建|查看|列出|列表|详情|状态|有哪些|teamtask\s*$|\/teamtask)/i.test(src)) return false;
+    return /(?:继续(?:做|改|修)?|接着(?:做|改|修)?|续上|接续|返工|复工|再修(?:一下)?|再改(?:一下)?).*(?:上次|那个|这单|这个任务|任务|TeamTask|team task|工单)?|(?:上次|那个|这单|这个任务).*(?:继续|接着|返工|复工|再修|再改)/i.test(src);
+  }
+
+  function listAutoResumeCandidates(chatId, senderKey, config) {
+    if (!taskBoard || typeof taskBoard.listRecentTasks !== 'function') return [];
+    const now = Date.now();
+    const chatKey = String(chatId);
+    const recent = taskBoard.listRecentTasks(12, null, 'team');
+    return recent.filter((task) => {
+      if (!task || task.task_kind !== 'team') return false;
+      if (!config.projects || !config.projects[task.to_agent]) return false;
+      const sourceChatId = String(task.inputs && task.inputs.source_chat_id || '').trim();
+      if (!sourceChatId || sourceChatId !== chatKey) return false;
+      const updatedAt = Date.parse(task.updated_at || task.created_at || '');
+      if (!Number.isFinite(updatedAt) || (now - updatedAt) > 12 * 3600_000) return false;
+      const participants = Array.isArray(task.participants) ? task.participants : [];
+      return task.from_agent === senderKey || participants.includes(senderKey);
+    });
+  }
+
+  function buildTeamTaskResumeEnvelope(task, targetKey, chatId, config) {
+    return taskEnvelope && taskEnvelope.normalizeTaskEnvelope
+      ? taskEnvelope.normalizeTaskEnvelope({
+        ...task,
+        status: 'queued',
+        updated_at: new Date().toISOString(),
+        task_kind: 'team',
+        participants: taskBoard.listScopeParticipants(task.scope_id || task.task_id),
+      }, {
+        from_agent: task.from_agent || resolveSenderKey(chatId, config),
+        to_agent: targetKey,
+        scope_id: task.scope_id || task.task_id,
+      })
+      : {
+        task_id: task.task_id,
+        scope_id: task.scope_id || task.task_id,
+        from_agent: task.from_agent || resolveSenderKey(chatId, config),
+        to_agent: targetKey,
+        participants: taskBoard.listScopeParticipants(task.scope_id || task.task_id),
+        goal: task.goal,
+        definition_of_done: task.definition_of_done || [],
+        inputs: task.inputs || {},
+        artifacts: task.artifacts || [],
+        owned_paths: task.owned_paths || [],
+        priority: task.priority || 'normal',
+        status: 'queued',
+        task_kind: 'team',
+        created_at: task.created_at,
+        updated_at: new Date().toISOString(),
+      };
+  }
+
+  function dispatchTeamTaskResume(task, chatId, config) {
+    const targetKey = task.to_agent;
+    if (!config.projects || !config.projects[targetKey]) {
+      return { success: false, error: `target_missing:${targetKey}` };
+    }
+    const envelope = buildTeamTaskResumeEnvelope(task, targetKey, chatId, config);
+    const result = dispatchTask(targetKey, {
+      from: envelope.from_agent || 'user',
+      type: 'task',
+      priority: envelope.priority || 'normal',
+      payload: {
+        title: envelope.goal.slice(0, 60),
+        prompt: envelope.goal,
+        task_envelope: envelope,
+      },
+      callback: false,
+      new_session: false,
+      source_chat_id: String(chatId),
+      source_sender_key: envelope.from_agent || resolveSenderKey(chatId, config),
+    }, config);
+    return { success: !!(result && result.success), result, envelope, targetKey };
+  }
+
   function formatTaskSchedule(task) {
     const at = typeof task.at === 'string' ? task.at.trim() : '';
     if (at) {
@@ -398,6 +478,39 @@ function createAdminCommandHandler(deps) {
       return { handled: true, config };
     }
 
+    if (isLikelyTeamTaskResumeIntent(text)) {
+      const senderKey = resolveSenderKey(chatId, config);
+      const candidates = listAutoResumeCandidates(chatId, senderKey, config);
+      if (candidates.length === 1) {
+        const task = candidates[0];
+        const resumed = dispatchTeamTaskResume(task, chatId, config);
+        if (resumed.success) {
+          if (taskBoard && typeof taskBoard.appendTaskEvent === 'function') {
+            taskBoard.appendTaskEvent(task.task_id, 'task_resume_requested', String(chatId), { by: String(chatId), source: 'nl_auto_resume' });
+          }
+          await bot.sendMessage(chatId, [
+            `🔄 已自动续跑最近的 TeamTask: ${task.task_id}`,
+            `目标: ${task.to_agent}`,
+            `意图: ${text.trim().slice(0, 80)}`,
+            '回执会在目标端真正接收后返回。',
+          ].join('\n'));
+          await sendLocalDispatchReceipt(bot, chatId, resumed.targetKey, config.projects[resumed.targetKey], resumed.result, resumed.envelope.goal);
+          return { handled: true, config };
+        }
+        await bot.sendMessage(chatId, `❌ 自动续跑失败: ${resumed.result && resumed.result.error ? resumed.result.error : 'unknown_error'}`);
+        return { handled: true, config };
+      }
+      if (candidates.length > 1) {
+        const lines = ['⚠️ 检测到你可能想复工 TeamTask，但最近有多条候选任务：'];
+        for (const task of candidates.slice(0, 3)) {
+          lines.push(`- ${task.task_id} [${task.status}] ${task.goal.slice(0, 50)}`);
+        }
+        lines.push('请直接回复更明确一点，或使用 /TeamTask 查看后再选择。');
+        await bot.sendMessage(chatId, lines.join('\n'));
+        return { handled: true, config };
+      }
+    }
+
     // /TeamTask — create/list/detail/resume team collaboration tasks
     const teamTaskCmdMatch = text.match(/^\/teamtask(?:\s+([\s\S]+))?$/i);
     if (teamTaskCmdMatch) {
@@ -512,50 +625,8 @@ function createAdminCommandHandler(deps) {
           await bot.sendMessage(chatId, `❌ 目标 agent 不存在: ${targetKey}`);
           return { handled: true, config };
         }
-        const envelope = taskEnvelope && taskEnvelope.normalizeTaskEnvelope
-          ? taskEnvelope.normalizeTaskEnvelope({
-            ...task,
-            status: 'queued',
-            updated_at: new Date().toISOString(),
-            task_kind: 'team',
-            participants: taskBoard.listScopeParticipants(task.scope_id || task.task_id),
-          }, {
-            from_agent: task.from_agent || resolveSenderKey(chatId, config),
-            to_agent: targetKey,
-            scope_id: task.scope_id || task.task_id,
-          })
-          : {
-            task_id: task.task_id,
-            scope_id: task.scope_id || task.task_id,
-            from_agent: task.from_agent || resolveSenderKey(chatId, config),
-            to_agent: targetKey,
-            participants: taskBoard.listScopeParticipants(task.scope_id || task.task_id),
-            goal: task.goal,
-            definition_of_done: task.definition_of_done || [],
-            inputs: task.inputs || {},
-            artifacts: task.artifacts || [],
-            owned_paths: task.owned_paths || [],
-            priority: task.priority || 'normal',
-            status: 'queued',
-            task_kind: 'team',
-            created_at: task.created_at,
-            updated_at: new Date().toISOString(),
-          };
-
-        const result = dispatchTask(targetKey, {
-          from: envelope.from_agent || 'user',
-          type: 'task',
-          priority: envelope.priority || 'normal',
-          payload: {
-            title: envelope.goal.slice(0, 60),
-            prompt: envelope.goal,
-            task_envelope: envelope,
-          },
-          callback: false,
-          new_session: false,
-          source_chat_id: String(chatId),
-          source_sender_key: envelope.from_agent || resolveSenderKey(chatId, config),
-        }, config);
+        const resumed = dispatchTeamTaskResume(task, chatId, config);
+        const { result, envelope } = resumed;
 
         if (result.success) {
           taskBoard.appendTaskEvent(task.task_id, 'task_resume_requested', String(chatId), { by: String(chatId) });

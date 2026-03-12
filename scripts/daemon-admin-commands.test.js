@@ -277,6 +277,130 @@ describe('daemon-admin-commands /TeamTask', () => {
     assert.match(sent[0], /回执会在目标端真正接收后返回/);
   });
 
+  it('auto-resumes the unique recent TeamTask on strong natural-language rework intent', async () => {
+    const sent = [];
+    const dispatchCalls = [];
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        taskEnvelope,
+        taskBoard: {
+          listRecentTasks: () => [
+            {
+              task_id: 't_20260312_auto1',
+              scope_id: 'epic_auth',
+              status: 'done',
+              priority: 'normal',
+              from_agent: 'user',
+              to_agent: 'coder',
+              task_kind: 'team',
+              goal: '修复登录流程',
+              inputs: { source_chat_id: 'mobile-user-auto' },
+              participants: ['user', 'coder'],
+              updated_at: new Date().toISOString(),
+            },
+          ],
+          listScopeParticipants: () => ['user', 'coder'],
+          appendTaskEvent: () => {},
+        },
+        dispatchTask: (target, packet) => {
+          dispatchCalls.push({ target, packet });
+          return {
+            success: true,
+            id: 'd_auto_001',
+            task_id: packet.payload.task_envelope.task_id,
+            scope_id: packet.payload.task_envelope.scope_id,
+          };
+        },
+      }
+    );
+    const bot = {
+      sendMessage: async (_chatId, text) => { sent.push(String(text)); },
+    };
+
+    const res = await handleAdminCommand({
+      bot,
+      chatId: 'mobile-user-auto',
+      text: '继续上次那个任务，接着改',
+      config: {
+        projects: {
+          coder: { name: 'Coder', icon: '🛠' },
+        },
+      },
+      state: { tasks: {} },
+    });
+
+    assert.equal(res.handled, true);
+    assert.equal(dispatchCalls.length, 1);
+    assert.equal(dispatchCalls[0].target, 'coder');
+    assert.equal(dispatchCalls[0].packet.payload.task_envelope.task_id, 't_20260312_auto1');
+    assert.match(sent[0], /已自动续跑最近的 TeamTask: t_20260312_auto1/);
+    assert.match(sent[1], /📮 Dispatch 回执/);
+  });
+
+  it('does not auto-resume when multiple recent TeamTasks match the same chat', async () => {
+    const sent = [];
+    const dispatchCalls = [];
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        taskBoard: {
+          listRecentTasks: () => [
+            {
+              task_id: 't_20260312_multi1',
+              scope_id: 'epic_auth',
+              status: 'done',
+              from_agent: 'user',
+              to_agent: 'coder',
+              task_kind: 'team',
+              goal: '修复登录流程',
+              inputs: { source_chat_id: 'mobile-user-multi' },
+              participants: ['user', 'coder'],
+              updated_at: new Date().toISOString(),
+            },
+            {
+              task_id: 't_20260312_multi2',
+              scope_id: 'epic_payment',
+              status: 'done',
+              from_agent: 'user',
+              to_agent: 'coder',
+              task_kind: 'team',
+              goal: '修复支付流程',
+              inputs: { source_chat_id: 'mobile-user-multi' },
+              participants: ['user', 'coder'],
+              updated_at: new Date().toISOString(),
+            },
+          ],
+        },
+        dispatchTask: (target, packet) => {
+          dispatchCalls.push({ target, packet });
+          return { success: true };
+        },
+      }
+    );
+    const bot = {
+      sendMessage: async (_chatId, text) => { sent.push(String(text)); },
+    };
+
+    const res = await handleAdminCommand({
+      bot,
+      chatId: 'mobile-user-multi',
+      text: '继续上次那个任务',
+      config: {
+        projects: {
+          coder: { name: 'Coder', icon: '🛠' },
+        },
+      },
+      state: { tasks: {} },
+    });
+
+    assert.equal(res.handled, true);
+    assert.equal(dispatchCalls.length, 0);
+    assert.match(sent[0], /最近有多条候选任务/);
+    assert.match(sent[0], /t_20260312_multi1/);
+    assert.match(sent[0], /t_20260312_multi2/);
+  });
+
   it('shows usage when /TeamTask resume is missing task id', async () => {
     const sent = [];
     const { handleAdminCommand } = createHandler(
