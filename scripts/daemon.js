@@ -553,7 +553,7 @@ async function sendRemotePairHello(config, opts = {}) {
       if (member && member.peer) targetPeers.add(String(member.peer));
     }
   }
-  if (targetPeers.size === 0) return { success: false, error: 'no remote peers configured' };
+  if (targetPeers.size === 0 && !opts.force) return { success: false, error: 'no remote peers configured' };
   if (!opts.force) {
     const allPaired = Array.from(targetPeers).every((peer) => !!resolveRemoteDispatchPeerSecret(config, peer));
     if (allPaired) return { success: false, error: 'all peers already paired' };
