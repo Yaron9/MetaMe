@@ -21,8 +21,6 @@ const {
   parseRemoteTargetRef,
   normalizeRemoteDispatchConfig,
   encodePacket,
-  resolvePairedPeerSecret,
-  buildPairHello,
 } = require('../daemon-remote-dispatch');
 
 const METAME_DIR = path.join(os.homedir(), '.metame');
@@ -149,17 +147,8 @@ function sendRemoteViaRelay(peer, project, memberPrompt) {
     console.error('dispatch_to: feishu.remote_dispatch not configured or disabled');
     process.exit(1);
   }
-  const secret = resolvePairedPeerSecret(config, peer, path.join(METAME_DIR, '..'));
-  const remotePending = path.join(DISPATCH_DIR, 'remote-pending.jsonl');
-  fs.mkdirSync(DISPATCH_DIR, { recursive: true });
-  if (!secret) {
-    const pairHello = buildPairHello(config, { force: true, homeDir: path.join(METAME_DIR, '..') });
-    if (pairHello) {
-      fs.appendFileSync(remotePending, JSON.stringify({ relay_chat_id: rd.chatId, body: pairHello }) + '\n');
-      console.log(`DISPATCH_PAIRING(remote): ${peer} → waiting for auto-pair, retry shortly`);
-      return;
-    }
-    console.error(`dispatch_to: remote peer ${peer} not paired yet`);
+  if (!rd.secret) {
+    console.error('dispatch_to: remote dispatch secret missing; run /dispatch code then /dispatch pair <code>');
     process.exit(1);
   }
   const ts = new Date().toISOString();
@@ -172,9 +161,10 @@ function sendRemoteViaRelay(peer, project, memberPrompt) {
     target_project: project,
     prompt: memberPrompt,
     source_sender_key: fromKey,
-  }, secret);
+  }, rd.secret);
 
   // Write to dispatch/remote-pending.jsonl for daemon to pick up and send via bot
+  const remotePending = path.join(DISPATCH_DIR, 'remote-pending.jsonl');
   fs.appendFileSync(remotePending, JSON.stringify({ relay_chat_id: rd.chatId, body }) + '\n');
   console.log(`DISPATCH_OK(remote): ${peer}:${project} → ${memberPrompt.slice(0, 60)}`);
 }

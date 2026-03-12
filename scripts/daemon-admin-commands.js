@@ -8,7 +8,13 @@ const {
 const { IS_WIN } = require('./platform');
 const { ENGINE_MODEL_CONFIG, resolveEngineModel } = require('./daemon-engine-runtime');
 const { resolveProjectKey: _resolveProjectKey } = require('./team-dispatch');
-const { parseRemoteTargetRef, getRemoteDispatchStatus } = require('./daemon-remote-dispatch');
+const {
+  parseRemoteTargetRef,
+  getRemoteDispatchStatus,
+  generatePairCode,
+  isValidPairCode,
+  deriveSecretFromPairCode,
+} = require('./daemon-remote-dispatch');
 let mentorEngine = null;
 try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
 
@@ -739,27 +745,62 @@ function createAdminCommandHandler(deps) {
           await bot.sendMessage(chatId, '📡 远端 Dispatch 未配置\n\n在 daemon.yaml 中设置 feishu.remote_dispatch 启用。');
           return { handled: true, config };
         }
-        const modeLabel = rd.mode === 'hybrid' ? 'auto pair + static fallback' : 'auto pair';
-        let msg = `📡 远端 Dispatch 配置\n─────────────\nself: ${rd.selfPeer}\nrelay chat: ${rd.chatId}\nmode: ${modeLabel}\npaired peers: ${rd.pairedPeers.length}\n\n远端成员:\n`;
+        let msg = `📡 远端 Dispatch 配置\n─────────────\nself: ${rd.selfPeer}\nrelay chat: ${rd.chatId}\nmode: pair code\nsecret: ${rd.hasSecret ? 'configured' : 'missing'}\n\n远端成员:\n`;
         let hasRemote = false;
         for (const [key, proj] of Object.entries(config.projects || {})) {
           if (!Array.isArray(proj.team)) continue;
           for (const m of proj.team) {
             if (m.peer) {
               hasRemote = true;
-              const paired = rd.pairedPeers.some((p) => p.peer === m.peer);
-              msg += `- ${m.icon || '🤖'} ${m.name || m.key} → peer:${m.peer} (${key}/${m.key})${paired ? ' [paired]' : ' [pairing]'}\n`;
+              msg += `- ${m.icon || '🤖'} ${m.name || m.key} → peer:${m.peer} (${key}/${m.key})\n`;
             }
           }
         }
         if (!hasRemote) msg += '(无远端成员)\n';
-        if (rd.pairedPeers.length > 0 && rd.mode !== 'static') {
-          msg += `\n已配对 peers:\n`;
-          for (const peer of rd.pairedPeers) {
-            msg += `- ${peer.peer}${peer.pairedAt ? ` @ ${String(peer.pairedAt).replace('T', ' ').replace('Z', '')}` : ''}\n`;
-          }
-        }
         await bot.sendMessage(chatId, msg.trim());
+        return { handled: true, config };
+      }
+
+      if (args === 'code') {
+        const rd = getRemoteDispatchStatus(config);
+        if (!rd) {
+          await bot.sendMessage(chatId, '📡 远端 Dispatch 未配置\n\n在 daemon.yaml 中设置 feishu.remote_dispatch 启用。');
+          return { handled: true, config };
+        }
+        const code = generatePairCode();
+        const secret = deriveSecretFromPairCode(code, rd.chatId);
+        backupConfig();
+        const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
+        if (!cfg.feishu) cfg.feishu = {};
+        if (!cfg.feishu.remote_dispatch) cfg.feishu.remote_dispatch = {};
+        cfg.feishu.remote_dispatch.secret = secret;
+        writeConfigSafe(cfg);
+        config = loadConfig();
+        await bot.sendMessage(chatId, `🔐 配对码已生成\n\n配对码: ${code}\n\n把这 6 位码发到另一台设备执行:\n/dispatch pair ${code}`);
+        return { handled: true, config };
+      }
+
+      const pairMatch = args.match(/^pair\s+(\d{6})$/);
+      if (pairMatch) {
+        const rd = getRemoteDispatchStatus(config);
+        if (!rd) {
+          await bot.sendMessage(chatId, '📡 远端 Dispatch 未配置\n\n在 daemon.yaml 中设置 feishu.remote_dispatch 启用。');
+          return { handled: true, config };
+        }
+        const code = pairMatch[1];
+        if (!isValidPairCode(code)) {
+          await bot.sendMessage(chatId, '❌ 配对码必须是 6 位数字');
+          return { handled: true, config };
+        }
+        const secret = deriveSecretFromPairCode(code, rd.chatId);
+        backupConfig();
+        const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
+        if (!cfg.feishu) cfg.feishu = {};
+        if (!cfg.feishu.remote_dispatch) cfg.feishu.remote_dispatch = {};
+        cfg.feishu.remote_dispatch.secret = secret;
+        writeConfigSafe(cfg);
+        config = loadConfig();
+        await bot.sendMessage(chatId, `✅ 配对码已写入\n\n当前设备: ${rd.selfPeer}\nrelay chat: ${rd.chatId}\n现在可以测试 /dispatch to <peer:project> ...`);
         return { handled: true, config };
       }
 
@@ -853,6 +894,8 @@ function createAdminCommandHandler(deps) {
         '/dispatch status — 查看状态',
         '/dispatch log — 查看记录',
         '/dispatch peers — 查看远端配置',
+        '/dispatch code — 生成 6 位配对码并写入本机',
+        '/dispatch pair <123456> — 输入 6 位配对码写入本机',
         '/dispatch to <agent> <任务内容> — 直接跨 agent 派发',
         '/dispatch to <peer:project> <任务内容> — 跨设备派发',
         '/TeamTask create <agent> <目标> [--scope <id>] [--parent <id>] — 创建/续接 TeamTask',

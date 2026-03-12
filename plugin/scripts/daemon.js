@@ -74,11 +74,6 @@ const {
   encodePacket: encodeRemoteDispatchPacket,
   decodePacket: decodeRemoteDispatchPacket,
   verifyPacket: verifyRemoteDispatchPacket,
-  decodePairPacket: decodeRemoteDispatchPairPacket,
-  learnPairHello: learnRemoteDispatchPairHello,
-  resolvePeerSecret: resolveRemoteDispatchPeerSecret,
-  resolvePairedPeerSecret: resolveRemoteDispatchPairedPeerSecret,
-  buildPairHello: buildRemoteDispatchPairHello,
   isDuplicate: isRemoteDispatchDuplicate,
 } = require('./daemon-remote-dispatch');
 
@@ -542,31 +537,11 @@ function getRemoteDispatchConfig(config) {
   return normalizeRemoteDispatchConfig(config || {});
 }
 
-async function sendRemotePairHello(config, opts = {}) {
-  const rd = getRemoteDispatchConfig(config);
-  const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
-  if (!rd) return { success: false, error: 'pairing not configured' };
-  if (!liveBot || typeof liveBot.sendMessage !== 'function') return { success: false, error: 'feishu bot not connected' };
-  const body = buildRemoteDispatchPairHello(config, { force: !!opts.force });
-  if (!body) return { success: false, error: 'pair hello throttled' };
-  try {
-    await liveBot.sendMessage(rd.chatId, body);
-    return { success: true };
-  } catch (e) {
-    return { success: false, error: e.message };
-  }
-}
-
 async function sendRemoteDispatch(packet, config) {
   const rd = getRemoteDispatchConfig(config);
   const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
   if (!rd) return { success: false, error: 'feishu.remote_dispatch not configured' };
   if (!liveBot || typeof liveBot.sendMessage !== 'function') return { success: false, error: 'feishu bot not connected' };
-  const peerSecret = resolveRemoteDispatchPairedPeerSecret(config, packet && packet.to_peer);
-  if (!peerSecret) {
-    await sendRemotePairHello(config, { force: true }).catch(() => {});
-    return { success: false, error: `remote peer ${packet && packet.to_peer ? packet.to_peer : 'unknown'} not paired yet` };
-  }
   const ts = new Date().toISOString();
   const id = `${rd.selfPeer}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   try {
@@ -576,7 +551,7 @@ async function sendRemoteDispatch(packet, config) {
       ts,
       ...packet,
       from_peer: rd.selfPeer,
-    }, peerSecret);
+    }, rd.secret);
     await liveBot.sendMessage(rd.chatId, body);
     return { success: true, id };
   } catch (e) {
@@ -1004,9 +979,8 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
   const nullBot = streamOptions?.bot && streamOptions?.chatId
     ? createStreamForwardBot(streamOptions.bot, streamOptions.chatId, outputHandler, { ready: streamReady })
     : createNullBot(outputHandler);
-  // Permission inheritance: if daemon runs with dangerously_skip_permissions, dispatched agents
-  // inherit the same level — they need Write access for implementation tasks.
-  // Otherwise fall back to readOnly (safe default for untrusted daemon configs).
+  // Trusted dispatches (user / bound agent / team member) keep write access.
+  // Only unknown senders are downgraded to read-only.
   // When forceNew=true, clear any cached session for this virtual chatId so
   // attachOrCreateSession in handleCommand actually creates a fresh Claude session.
   if (forceNew) {
@@ -1016,7 +990,7 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
       saveState(st);
     }
   }
-  const dispatchReadOnly = !(config.daemon && config.daemon.dangerously_skip_permissions);
+  const dispatchReadOnly = resolveDispatchReadOnly(message, config, targetProject);
   if (envelope && taskBoard) {
     taskBoard.markTaskStatus(envelope.task_id, 'running', { summary: `dispatched via ${sessionMode}` });
     taskBoard.appendTaskEvent(envelope.task_id, 'task_started', targetProject, { session_mode: sessionMode });
@@ -1266,6 +1240,25 @@ function buildDispatchTaskCard(fullMsg, targetProject, config) {
   };
 }
 
+function isKnownTeamMember(targetKey, config) {
+  if (!targetKey || !config || !config.projects) return false;
+  for (const proj of Object.values(config.projects)) {
+    if (!proj || !Array.isArray(proj.team)) continue;
+    if (proj.team.some(member => member && member.key === targetKey)) return true;
+  }
+  return false;
+}
+
+function resolveDispatchReadOnly(message, config, targetProject) {
+  if (message && typeof message.readOnly === 'boolean') return message.readOnly;
+  const knownProjects = new Set(Object.keys((config && config.projects) || {}));
+  const userSources = new Set(['', 'unknown', 'claude_session', '_claude_session', 'user']);
+  const senderKey = String((message && (message.source_sender_key || message.from)) || '').trim();
+  const trustedSender = userSources.has(senderKey) || knownProjects.has(senderKey);
+  const trustedTarget = knownProjects.has(String(targetProject || '').trim()) || isKnownTeamMember(targetProject, config);
+  return !(trustedSender && trustedTarget);
+}
+
 async function sendDispatchTaskCard(bot, chatId, card) {
   if (!bot || !chatId || !card) return null;
   if (bot.sendCard) return bot.sendCard(chatId, { title: card.title, body: card.body, color: card.color || 'blue' });
@@ -1402,31 +1395,14 @@ function handleDispatchItem(item, config) {
   return result;
 }
 
-async function handleRemoteDispatchMessage({ chatId, text, config, senderId }) {
+async function handleRemoteDispatchMessage({ chatId, text, config }) {
   const rd = getRemoteDispatchConfig(config);
   if (!rd || String(chatId) !== rd.chatId) return false;
 
-  const pairPacket = decodeRemoteDispatchPairPacket(text);
-  if (pairPacket) {
-    if (pairPacket.from_peer !== rd.selfPeer) {
-      const learned = learnRemoteDispatchPairHello(config, pairPacket);
-      if (learned && learned.changed) {
-        log('INFO', `Remote dispatch paired with ${learned.peer}${senderId ? ` (${senderId})` : ''}`);
-        await sendRemotePairHello(config, { force: true }).catch(() => {});
-      }
-    }
-    return true;
-  }
-
   const packet = decodeRemoteDispatchPacket(text);
   if (!packet) return true;
-  const pairedPeerSecret = resolveRemoteDispatchPairedPeerSecret(config, packet.from_peer);
-  const fallbackSecret = resolveRemoteDispatchPeerSecret(config, '');
-  const signatureOk = verifyRemoteDispatchPacket(packet, pairedPeerSecret)
-    || verifyRemoteDispatchPacket(packet, fallbackSecret);
-  if (!signatureOk) {
+  if (!verifyRemoteDispatchPacket(packet, rd.secret)) {
     log('WARN', 'Remote dispatch ignored: invalid signature');
-    await sendRemotePairHello(config, { force: true }).catch(() => {});
     return true;
   }
   if (packet.from_peer === rd.selfPeer) return true;
@@ -1647,10 +1623,6 @@ function physiologicalHeartbeat(config) {
   } catch (e) {
     log('WARN', `Remote pending dispatch drain failed: ${e.message}`);
   }
-
-  try {
-    sendRemotePairHello(config).catch(() => {});
-  } catch { /* non-fatal */ }
 
   // 2. Rotate dispatch-log if > 512KB (keep 7 days)
   try {
@@ -2648,7 +2620,6 @@ async function main() {
   telegramBridge = await startTelegramBridge(config, executeTaskByName);
   feishuBridge = await startFeishuBridge(config, executeTaskByName);
   if (feishuBridge) _dispatchBridgeRef = feishuBridge; // store bridge, not bot, so .bot stays live after reconnects
-  await sendRemotePairHello(config, { force: true }).catch(() => {});
 
   // Notify once on startup (single message, no duplicates)
   await sleep(1500); // Let polling settle
@@ -2783,5 +2754,6 @@ module.exports = {
     buildDispatchPrompt,
     createStreamForwardBot,
     buildDispatchTaskCard,
+    resolveDispatchReadOnly,
   },
 };

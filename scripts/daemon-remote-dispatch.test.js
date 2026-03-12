@@ -1,77 +1,42 @@
 'use strict';
 
-const { afterEach, describe, it } = require('node:test');
+const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
 
 const {
   normalizeRemoteDispatchConfig,
-  buildPairHello,
-  decodePairPacket,
-  learnPairHello,
-  resolvePeerSecret,
+  deriveSecretFromPairCode,
+  generatePairCode,
+  isValidPairCode,
   encodePacket,
   decodePacket,
   verifyPacket,
   getRemoteDispatchStatus,
 } = require('./daemon-remote-dispatch');
 
-const tmpDirs = [];
-
-function mkHome() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-rd-'));
-  tmpDirs.push(dir);
-  return dir;
-}
-
-function makeConfig(self) {
-  return {
-    feishu: {
-      remote_dispatch: {
-        enabled: true,
-        self,
-        chat_id: 'oc_relay_test',
-        secret: '',
-      },
-    },
-  };
-}
-
-afterEach(() => {
-  while (tmpDirs.length > 0) {
-    const dir = tmpDirs.pop();
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-describe('daemon-remote-dispatch auto pairing', () => {
-  it('accepts remote dispatch config without explicit secret', () => {
-    const rd = normalizeRemoteDispatchConfig(makeConfig('mac'));
-    assert.deepEqual(rd, { selfPeer: 'mac', chatId: 'oc_relay_test', secret: null });
+describe('daemon-remote-dispatch pair code', () => {
+  it('requires explicit secret in runtime config', () => {
+    assert.equal(normalizeRemoteDispatchConfig({
+      feishu: { remote_dispatch: { enabled: true, self: 'mac', chat_id: 'oc_test', secret: '' } },
+    }), null);
   });
 
-  it('derives matching peer secrets after hello exchange', () => {
-    const macHome = mkHome();
-    const winHome = mkHome();
-    const macConfig = makeConfig('mac');
-    const winConfig = makeConfig('windows');
+  it('generates 6-digit numeric codes', () => {
+    const code = generatePairCode();
+    assert.equal(isValidPairCode(code), true);
+    assert.equal(code.length, 6);
+  });
 
-    const macHello = decodePairPacket(buildPairHello(macConfig, { force: true, homeDir: macHome }));
-    const winHello = decodePairPacket(buildPairHello(winConfig, { force: true, homeDir: winHome }));
+  it('derives the same secret from the same pair code and relay chat', () => {
+    const a = deriveSecretFromPairCode('123456', 'oc_relay_xxx');
+    const b = deriveSecretFromPairCode('123456', 'oc_relay_xxx');
+    const c = deriveSecretFromPairCode('123456', 'oc_other');
+    assert.equal(a, b);
+    assert.notEqual(a, c);
+  });
 
-    const learnedOnWin = learnPairHello(winConfig, macHello, winHome);
-    const learnedOnMac = learnPairHello(macConfig, winHello, macHome);
-
-    assert.equal(learnedOnWin.peer, 'mac');
-    assert.equal(learnedOnMac.peer, 'windows');
-
-    const macSecret = resolvePeerSecret(macConfig, 'windows', macHome);
-    const winSecret = resolvePeerSecret(winConfig, 'mac', winHome);
-    assert.ok(macSecret);
-    assert.equal(macSecret, winSecret);
-
+  it('signs and verifies packets with the derived secret', () => {
+    const secret = deriveSecretFromPairCode('654321', 'oc_relay_xxx');
     const encoded = encodePacket({
       v: 1,
       id: 'pkt_1',
@@ -81,23 +46,20 @@ describe('daemon-remote-dispatch auto pairing', () => {
       to_peer: 'windows',
       target_project: 'metame',
       prompt: 'hello',
-    }, macSecret);
+    }, secret);
     const decoded = decodePacket(encoded);
-    assert.equal(verifyPacket(decoded, winSecret), true);
+    assert.equal(verifyPacket(decoded, secret), true);
   });
 
-  it('reports auto-paired peers in status output', () => {
-    const macHome = mkHome();
-    const winHome = mkHome();
-    const macConfig = makeConfig('mac');
-    const winConfig = makeConfig('windows');
-
-    learnPairHello(winConfig, decodePairPacket(buildPairHello(macConfig, { force: true, homeDir: macHome })), winHome);
-    learnPairHello(macConfig, decodePairPacket(buildPairHello(winConfig, { force: true, homeDir: winHome })), macHome);
-
-    const status = getRemoteDispatchStatus(macConfig, macHome);
-    assert.equal(status.mode, 'auto');
-    assert.equal(status.pairedPeers.length, 1);
-    assert.equal(status.pairedPeers[0].peer, 'windows');
+  it('reports pair-code status when configured', () => {
+    const status = getRemoteDispatchStatus({
+      feishu: { remote_dispatch: { enabled: true, self: 'mac', chat_id: 'oc_test', secret: 'abc' } },
+    });
+    assert.deepEqual(status, {
+      selfPeer: 'mac',
+      chatId: 'oc_test',
+      mode: 'pair-code',
+      hasSecret: true,
+    });
   });
 });
