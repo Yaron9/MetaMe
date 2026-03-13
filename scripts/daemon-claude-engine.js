@@ -1380,6 +1380,22 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       // Memory & Knowledge Injection (RAG)
       let memoryHint = '';
+
+      // Compact context injection: injected once on first message after /compact, then cleared
+      if (!session.started && session.compactContext) {
+        const _compactCtx = String(session.compactContext).trim();
+        if (_compactCtx) {
+          memoryHint += `\n\n[Context from previous session (compacted):\n${_compactCtx}]`;
+          try {
+            const _stC = loadState();
+            const _engSlot = _stC.sessions && _stC.sessions[sessionChatId] && _stC.sessions[sessionChatId].engines
+              ? _stC.sessions[sessionChatId].engines[engineName]
+              : null;
+            if (_engSlot) { delete _engSlot.compactContext; saveState(_stC); }
+          } catch { /* non-critical */ }
+        }
+      }
+
       // projectKey must be declared outside the try block so the daemonHint template below can reference it.
       const _cid0 = String(chatId);
       const _agentMap0 = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
