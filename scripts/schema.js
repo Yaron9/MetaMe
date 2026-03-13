@@ -103,6 +103,7 @@ const SCHEMA = {
 
   // === T5: Growth (metacognition, system-managed) ===
   'growth.patterns': { tier: 'T5', type: 'array', maxItems: 3 },
+  'growth.self_reflection_patterns': { tier: 'T5', type: 'array', maxItems: 3 },
   'growth.zone_history': { tier: 'T5', type: 'array', maxItems: 10 },
   'growth.reflections_answered': { tier: 'T5', type: 'number' },
   'growth.reflections_skipped': { tier: 'T5', type: 'number' },

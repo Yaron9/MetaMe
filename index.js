@@ -978,6 +978,7 @@ try {
 
       // Find a pattern that hasn't been surfaced in 14 days
       const candidate = brainDoc.growth.patterns.find(p => {
+        if (!p || typeof p.summary !== 'string') return false;
         if (!p.surfaced) return true;
         return (now - new Date(p.surfaced).getTime()) > COOLDOWN_MS;
       });
@@ -1451,17 +1452,37 @@ if (isInsights) {
   try {
     const doc = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
     const patterns = (doc.growth && doc.growth.patterns) || [];
+    const reflectionPatterns = (doc.growth && doc.growth.self_reflection_patterns) || [];
     const zoneHistory = (doc.growth && doc.growth.zone_history) || [];
+    const userPatterns = patterns.filter(p => p && typeof p.summary === 'string');
+    const legacyReflectionPatterns = patterns
+      .filter(p => typeof p === 'string')
+      .map(p => ({ summary: p, detected: null }));
+    const aiReflections = [...legacyReflectionPatterns, ...reflectionPatterns]
+      .map(p => typeof p === 'string' ? { summary: p, detected: null } : p)
+      .filter(p => p && typeof p.summary === 'string')
+      .filter((p, i, arr) => arr.findIndex(x => x.summary === p.summary) === i);
 
-    if (patterns.length === 0) {
+    if (userPatterns.length === 0 && aiReflections.length === 0) {
       console.log(`${icon("search")} MetaMe: No patterns detected yet. Keep using MetaMe and patterns will emerge after ~5 sessions.`);
     } else {
       console.log(`${icon("mirror")} MetaMe Insights:\n`);
-      patterns.forEach((p, i) => {
+      if (userPatterns.length > 0) {
+        console.log('User observation:');
+      }
+      userPatterns.forEach((p, i) => {
         const sym = p.type === 'avoidance' ? icon("warn") : p.type === 'growth' ? '+' : p.type === 'energy' ? '*' : icon("reload");
         console.log(`   ${sym} [${p.type}] ${p.summary} (confidence: ${(p.confidence * 100).toFixed(0)}%)`);
         console.log(`      Detected: ${p.detected}${p.surfaced ? `, Last shown: ${p.surfaced}` : ''}`);
       });
+      if (aiReflections.length > 0) {
+        if (userPatterns.length > 0) console.log('');
+        console.log('AI self-reflection:');
+        aiReflections.forEach((p) => {
+          console.log(`   ${icon("thought")} ${p.summary}`);
+          if (p.detected) console.log(`      Detected: ${p.detected}`);
+        });
+      }
       if (zoneHistory.length > 0) {
         console.log(`\n   ${icon("chart")} Recent zone history: ${zoneHistory.join(' → ')}`);
         console.log(`      (C=Comfort, S=Stretch, P=Panic)`);
