@@ -91,6 +91,65 @@ function createBridgeStarter(deps) {
     return '⚠️ 此群未授权\n\n如已创建 Agent，发送 `/activate` 完成绑定。\n否则请先在主群创建 Agent。';
   }
 
+  function extractFeishuReplyMessageId(event) {
+    const candidates = [
+      event && event.message && event.message.parent_id,
+      event && event.message && event.message.parent_message_id,
+      event && event.message && event.message.root_id,
+      event && event.message && event.message.reply_in_thread_id,
+      event && event.event && event.event.message && event.event.message.parent_id,
+      event && event.event && event.event.message && event.event.message.parent_message_id,
+      event && event.event && event.event.message && event.event.message.root_id,
+      event && event.event && event.event.message && event.event.message.reply_in_thread_id,
+    ];
+    for (const value of candidates) {
+      const text = String(value || '').trim();
+      if (text) return text;
+    }
+    return null;
+  }
+
+  function trackBridgeReplyMapping(messageId, payload = {}) {
+    const safeMessageId = String(messageId || '').trim();
+    if (!safeMessageId) return;
+    const state = loadState();
+    if (!state.msg_sessions) state.msg_sessions = {};
+    state.msg_sessions[safeMessageId] = {
+      ...(state.msg_sessions[safeMessageId] || {}),
+      ...payload,
+    };
+    saveState(state);
+  }
+
+  function inferSessionMapping(logicalChatId, fallback = {}) {
+    const chatKey = String(logicalChatId || '').trim();
+    if (!chatKey) return { ...fallback };
+    const state = loadState();
+    const raw = state.sessions && state.sessions[chatKey];
+    if (!raw || typeof raw !== 'object') {
+      return {
+        logicalChatId: chatKey,
+        ...fallback,
+      };
+    }
+    const engines = raw.engines && typeof raw.engines === 'object' ? raw.engines : {};
+    const preferredEngine = String(fallback.engine || '').trim().toLowerCase();
+    const slot = (preferredEngine && engines[preferredEngine])
+      || engines.codex
+      || engines.claude
+      || null;
+    return {
+      ...(slot && slot.id ? { id: String(slot.id) } : {}),
+      cwd: raw.cwd || fallback.cwd,
+      engine: preferredEngine || (engines.codex ? 'codex' : 'claude'),
+      logicalChatId: chatKey,
+      ...((slot && slot.sandboxMode) ? { sandboxMode: slot.sandboxMode } : {}),
+      ...((slot && slot.approvalPolicy) ? { approvalPolicy: slot.approvalPolicy } : {}),
+      ...((slot && slot.permissionMode) ? { permissionMode: slot.permissionMode } : {}),
+      ...fallback,
+    };
+  }
+
   // ── Team group helpers ─────────────────────────────────────────────────
   function _getBoundProject(chatId, cfg) {
     const map = {
@@ -383,11 +442,29 @@ function createBridgeStarter(deps) {
 
               // Team group routing for Telegram (same logic as Feishu)
               const trimmedText = text.trim();
+              const parentId = msg.reply_to_message && msg.reply_to_message.message_id
+                ? String(msg.reply_to_message.message_id)
+                : null;
+              let _replyAgentKey = null;
               const { key: _boundKey, project: _boundProj } = _getBoundProject(chatId, liveCfg);
               const _isTeamSlashCmd = trimmedText.startsWith('/') && !/^\/stop(\s|$)/i.test(trimmedText);
 
               // Load sticky state
               const _st = loadState();
+              if (parentId) {
+                const mapped = _st.msg_sessions && _st.msg_sessions[parentId];
+                if (mapped) {
+                  if (typeof restoreSessionFromReply === 'function') {
+                    restoreSessionFromReply(chatId, mapped);
+                  } else {
+                    if (!_st.sessions) _st.sessions = {};
+                    _st.sessions[chatId] = { id: mapped.id, cwd: mapped.cwd, started: true };
+                    saveState(_st);
+                  }
+                  log('INFO', `Telegram session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
+                  _replyAgentKey = mapped.agentKey || null;
+                }
+              }
               const _chatKey = String(chatId);
               const _setSticky = (key) => {
                 if (!_st.team_sticky) _st.team_sticky = {};
@@ -405,24 +482,55 @@ function createBridgeStarter(deps) {
                 const _stopMatch = trimmedText && trimmedText.match(/^\/stop(?:\s+(.+))?$/i);
                 if (_stopMatch) {
                   const _stopArg = (_stopMatch[1] || '').trim();
-                  if (_stopArg) {
+                  let _targetKey = null;
+                  if (_replyAgentKey) {
+                    const m = _boundProj.team.find(t => t.key === _replyAgentKey);
+                    if (m) _targetKey = m.key;
+                  }
+                  if (!_targetKey && _stopArg) {
                     const _sa = _stopArg.toLowerCase();
                     const m = _boundProj.team.find(t =>
                       (t.nicknames || []).some(n => n.toLowerCase() === _sa) || (t.name && t.name.toLowerCase() === _sa) || t.key === _sa
                     );
-                    if (m) {
-                      _clearSticky();
-                      log('INFO', `Team /stop: ${_chatKey.slice(-8)} → cleared sticky`);
-                      await bot.sendMessage(chatId, `⏹ 已切换回主 Agent`).catch(() => {});
+                    if (m) _targetKey = m.key;
+                  }
+                  if (!_targetKey && !_stopArg) _targetKey = _stickyKey;
+                  if (_targetKey) {
+                    const vid = `_agent_${_targetKey}`;
+                    const member = _boundProj.team.find(t => t.key === _targetKey);
+                    const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
+                    if (messageQueue.has(vid)) {
+                      const vq = messageQueue.get(vid);
+                      if (vq && vq.timer) clearTimeout(vq.timer);
+                      messageQueue.delete(vid);
+                    }
+                    const vproc = activeProcesses && activeProcesses.get(vid);
+                    if (vproc && vproc.child) {
+                      vproc.aborted = true;
+                      const sig = vproc.killSignal || 'SIGTERM';
+                      try { process.kill(-vproc.child.pid, sig); } catch { try { vproc.child.kill(sig); } catch { /* */ } }
+                      await bot.sendMessage(chatId, `⏹ Stopping ${label}...`);
                     } else {
-                      await bot.sendMessage(chatId, `❌ 未找到团队成员: ${_stopArg}`).catch(() => {});
+                      await bot.sendMessage(chatId, `${label} 当前没有活跃任务`);
                     }
                     continue;
                   }
-                  // Bare /stop, clear sticky
-                  _clearSticky();
-                  await bot.sendMessage(chatId, `⏹ 已切换回主 Agent`).catch(() => {});
-                  continue;
+                  if (_stopArg) {
+                    await bot.sendMessage(chatId, `❌ 未找到团队成员: ${_stopArg}`).catch(() => {});
+                    continue;
+                  }
+                }
+
+                // 0. Quoted reply → force route + set sticky
+                if (_replyAgentKey) {
+                  const member = _boundProj.team.find(m => m.key === _replyAgentKey);
+                  if (member) {
+                    _setSticky(member.key);
+                    log('INFO', `Telegram quoted reply → force route to ${_replyAgentKey} (sticky set)`);
+                    _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+                    continue;
+                  }
+                  log('INFO', `Telegram quoted reply agentKey=${_replyAgentKey} not in team, falling through`);
                 }
 
                 // 1. Explicit nickname → route + set sticky
@@ -609,22 +717,31 @@ function createBridgeStarter(deps) {
           });
           if (acl.blocked) return;
           log('INFO', `Feishu message from ${chatId}: ${text.slice(0, 50)}`);
-          const parentId = event?.message?.parent_id;
+          const parentId = extractFeishuReplyMessageId(event);
           let _replyAgentKey = null;
           // Load state once for the entire routing block
           const _st = loadState();
+          if (parentId) {
+            log('INFO', `Feishu reply metadata detected chat=${chatId} parentId=${parentId}`);
+          }
           if (parentId) {
             const mapped = _st.msg_sessions && _st.msg_sessions[parentId];
             if (mapped) {
               if (typeof restoreSessionFromReply === 'function') {
                 restoreSessionFromReply(chatId, mapped);
               } else {
-                if (!_st.sessions) _st.sessions = {};
-                _st.sessions[chatId] = { id: mapped.id, cwd: mapped.cwd, started: true };
-                saveState(_st);
+                if (mapped.id) {
+                  if (!_st.sessions) _st.sessions = {};
+                  _st.sessions[chatId] = { id: mapped.id, cwd: mapped.cwd, started: true };
+                  saveState(_st);
+                }
               }
-              log('INFO', `Session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
+              if (mapped.id) {
+                log('INFO', `Session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
+              }
               _replyAgentKey = mapped.agentKey || null;
+            } else {
+              log('INFO', `Feishu reply parentId=${parentId} had no msg_sessions mapping`);
             }
           }
 
@@ -708,18 +825,28 @@ function createBridgeStarter(deps) {
             }
             // 1. Explicit nickname → route + set sticky
             const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
-            if (teamMatch) {
-              const { member, rest } = teamMatch;
-              _setSticky(member.key);
-              if (!rest) {
-                // Pure nickname, no task — confirm member is online
-                log('INFO', `Sticky set (pure nickname): ${_chatKey.slice(-8)} → ${member.key}`);
-                bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`).catch(() => {});
-                return;
-              }
-              log('INFO', `Sticky set: ${_chatKey.slice(-8)} → ${member.key}`);
-              _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, chatId, executeTaskByName, acl);
-              return;
+              if (teamMatch) {
+                  const { member, rest } = teamMatch;
+                  _setSticky(member.key);
+                  if (!rest) {
+                    // Pure nickname, no task — confirm member is online
+                    log('INFO', `Sticky set (pure nickname): ${_chatKey.slice(-8)} → ${member.key}`);
+                    bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`)
+                      .then((msg) => {
+                        if (msg && msg.message_id) {
+                          trackBridgeReplyMapping(msg.message_id, inferSessionMapping(`_agent_${member.key}`, {
+                            agentKey: member.key,
+                            cwd: member.cwd || _boundProj.cwd,
+                            engine: member.engine || _boundProj.engine || 'claude',
+                          }));
+                        }
+                      })
+                      .catch(() => {});
+                    return;
+                  }
+                  log('INFO', `Sticky set: ${_chatKey.slice(-8)} → ${member.key}`);
+                  _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, chatId, executeTaskByName, acl);
+                  return;
             }
 
             // 1.5. Main project nickname → clear sticky, route to main
@@ -729,11 +856,22 @@ function createBridgeStarter(deps) {
             if (_mainMatch) {
               _clearSticky();
               const rest = trimmedText.slice(_mainMatch.length).replace(/^[\s,，:：]+/, '');
-              log('INFO', `Main nickname → cleared sticky, routing to main${rest ? ` (task: ${rest.slice(0, 30)})` : ''}`);
-              if (!rest) {
-                bot.sendMarkdown(chatId, `${_boundProj.icon || '🤖'} **${_boundProj.name}** 在线`).catch(() => {});
-                return;
-              }
+                  log('INFO', `Main nickname → cleared sticky, routing to main${rest ? ` (task: ${rest.slice(0, 30)})` : ''}`);
+                  if (!rest) {
+                    bot.sendMarkdown(chatId, `${_boundProj.icon || '🤖'} **${_boundProj.name}** 在线`)
+                      .then((msg) => {
+                        if (msg && msg.message_id) {
+                          trackBridgeReplyMapping(msg.message_id, inferSessionMapping(String(chatId), {
+                            agentKey: _boundKey || null,
+                            cwd: _boundProj.cwd,
+                            engine: _boundProj.engine || 'claude',
+                            logicalChatId: _boundKey ? `_bound_${_boundKey}` : String(chatId),
+                          }));
+                        }
+                      })
+                      .catch(() => {});
+                    return;
+                  }
               try {
                 await handleCommand(bot, chatId, rest, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
               } catch (e) {

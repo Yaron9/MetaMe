@@ -1110,13 +1110,15 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
   // Track outbound message_id → session for reply-based session restoration.
   // Keeps last 200 entries to avoid unbounded growth.
-  function trackMsgSession(messageId, session, agentKey) {
-    if (!messageId || !session || !session.id) return;
+  function trackMsgSession(messageId, session, agentKey, options = {}) {
+    if (!messageId || !session) return;
+    const forceRouteOnly = !!(options && options.routeOnly);
+    if (!forceRouteOnly && !session.id) return;
     const st = loadState();
     if (!st.msg_sessions) st.msg_sessions = {};
     st.msg_sessions[messageId] = {
-      id: session.id,
-      cwd: session.cwd,
+      ...(session.id && !forceRouteOnly ? { id: session.id } : {}),
+      ...(session.cwd ? { cwd: session.cwd } : {}),
       engine: session.engine || getDefaultEngine(),
       logicalChatId: session.logicalChatId || null,
       agentKey: agentKey || null,
@@ -2082,14 +2084,23 @@ ${mentorRadarHint}
           }
         }
         const trackedAgentKey = String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null;
-        if (replyMsg && replyMsg.message_id && session && !(runtime.name === 'codex' && session.runtimeSessionObserved === false)) {
-          trackMsgSession(replyMsg.message_id, session, trackedAgentKey);
+        if (replyMsg && replyMsg.message_id && session) {
+          if (runtime.name === 'codex' && session.runtimeSessionObserved === false) {
+            trackMsgSession(replyMsg.message_id, session, trackedAgentKey, { routeOnly: true });
+          } else {
+            trackMsgSession(replyMsg.message_id, session, trackedAgentKey);
+          }
         }
 
         const fileMsgs = await sendFileButtons(bot, chatId, mergeFileCollections(markedFiles, files));
-        if (session && Array.isArray(fileMsgs) && !(runtime.name === 'codex' && session.runtimeSessionObserved === false)) {
+        if (session && Array.isArray(fileMsgs)) {
           for (const msg of fileMsgs) {
-            if (msg && msg.message_id) trackMsgSession(msg.message_id, session, trackedAgentKey);
+            if (!msg || !msg.message_id) continue;
+            if (runtime.name === 'codex' && session.runtimeSessionObserved === false) {
+              trackMsgSession(msg.message_id, session, trackedAgentKey, { routeOnly: true });
+            } else {
+              trackMsgSession(msg.message_id, session, trackedAgentKey);
+            }
           }
         }
 

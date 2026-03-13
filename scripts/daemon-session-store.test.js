@@ -132,7 +132,108 @@ describe('daemon-session-store codex metadata', () => {
     assert.equal(restored.id, 'codex-current');
     assert.equal(restored.cwd, path.resolve(businessCwd));
     assert.equal(restored.permissionMode, 'danger-full-access');
+    assert.equal(state.sessions['_bound_business'].engines.codex.id, 'codex-current');
     assert.equal(state.sessions['oc_group_1'].engines.codex.id, 'codex-current');
+  });
+
+  it('restores reply-bound team member sessions onto the logical virtual chat id', () => {
+    const memberCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-member-'));
+    const state = {
+      sessions: {
+        '_agent_bing': {
+          cwd: memberCwd,
+          engines: {
+            codex: {
+              id: 'bing-current',
+              started: true,
+              runtimeSessionObserved: true,
+              sandboxMode: 'danger-full-access',
+              approvalPolicy: 'never',
+              permissionMode: 'danger-full-access',
+            },
+          },
+        },
+      },
+    };
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
+    const store = createSessionStore({
+      fs,
+      path,
+      HOME: tempHome,
+      loadState: () => state,
+      saveState: (next) => {
+        state.sessions = next.sessions;
+      },
+      log: () => {},
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+
+    const restored = store.restoreSessionFromReply('oc_team_group', {
+      id: 'bing-stale',
+      cwd: '/tmp/stale-bing',
+      engine: 'codex',
+      logicalChatId: '_agent_bing',
+      agentKey: 'bing',
+      sandboxMode: 'read-only',
+      approvalPolicy: 'never',
+      permissionMode: 'read-only',
+    });
+
+    assert.equal(restored.id, 'bing-current');
+    assert.equal(restored.cwd, path.resolve(memberCwd));
+    assert.equal(state.sessions['_agent_bing'].engines.codex.id, 'bing-current');
+    assert.equal(state.sessions['oc_team_group'].engines.codex.id, 'bing-current');
+  });
+
+  it('restores weak reply mappings onto the current logical team session even without a historical thread id', () => {
+    const memberCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-member-'));
+    const state = {
+      sessions: {
+        '_agent_jia': {
+          cwd: memberCwd,
+          engines: {
+            codex: {
+              id: 'jia-current',
+              started: true,
+              runtimeSessionObserved: true,
+              sandboxMode: 'danger-full-access',
+              approvalPolicy: 'never',
+              permissionMode: 'danger-full-access',
+            },
+          },
+        },
+      },
+    };
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
+    const store = createSessionStore({
+      fs,
+      path,
+      HOME: tempHome,
+      loadState: () => state,
+      saveState: (next) => {
+        state.sessions = next.sessions;
+      },
+      log: () => {},
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+
+    const restored = store.restoreSessionFromReply('oc_team_group', {
+      cwd: memberCwd,
+      engine: 'codex',
+      logicalChatId: '_agent_jia',
+      agentKey: 'jia',
+      sandboxMode: 'danger-full-access',
+      approvalPolicy: 'never',
+      permissionMode: 'danger-full-access',
+    });
+
+    assert.equal(restored.id, 'jia-current');
+    assert.equal(restored.cwd, path.resolve(memberCwd));
+    assert.equal(state.sessions['_agent_jia'].engines.codex.id, 'jia-current');
+    assert.equal(state.sessions['oc_team_group'].engines.codex.id, 'jia-current');
+    assert.equal(state.sessions['oc_team_group'].engines.codex.runtimeSessionObserved, true);
   });
 
   it('renders synthetic logical sessions without historical timestamps', () => {

@@ -129,6 +129,114 @@ describe('daemon-claude-engine private helpers', () => {
     assert.equal(state.msg_sessions['msg-file-1'].approvalPolicy, 'never');
   });
 
+  it('stores route-only reply mapping for fresh codex virtual-agent replies before thread observation stabilizes', async () => {
+    const state = {
+      sessions: {
+        _agent_jia: {
+          cwd: '/tmp/agent-jia',
+          engines: {
+            codex: {
+              id: 'fresh-local-placeholder',
+              started: false,
+              runtimeSessionObserved: false,
+              sandboxMode: 'danger-full-access',
+              approvalPolicy: 'never',
+              permissionMode: 'danger-full-access',
+            },
+          },
+        },
+      },
+    };
+
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: () => createFakeCodexProcess([
+        { type: 'item.completed', item: { type: 'agent_message', text: '甲的首轮回复' } },
+        { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } },
+      ]),
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses: new Map(),
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({
+        projects: {
+          jia: { cwd: '/tmp/agent-jia', name: 'Jarvis · 甲', engine: 'codex' },
+        },
+      }),
+      loadState: () => state,
+      saveState: (next) => {
+        Object.assign(state, next);
+        state.sessions = next.sessions;
+      },
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: (chatId) => state.sessions[chatId] || null,
+      getSessionForEngine: (chatId, engineName) => {
+        const raw = state.sessions[chatId];
+        if (!raw) return null;
+        const slot = raw.engines && raw.engines[engineName];
+        return slot ? { cwd: raw.cwd, engine: engineName, logicalChatId: chatId, ...slot } : null;
+      },
+      createSession: () => ({ id: 'fresh-local-placeholder', cwd: '/tmp/agent-jia', engine: 'codex', logicalChatId: '_agent_jia', started: false, runtimeSessionObserved: false }),
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: () => null,
+      getCodexSessionPermissionMode: () => null,
+      getSessionRecentContext: () => null,
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getDefaultEngine: () => 'codex',
+    });
+
+    const bot = {
+      sendTyping: async () => {},
+      sendMessage: async () => ({ message_id: 'msg-send' }),
+      sendMarkdown: async () => ({ message_id: 'msg-md' }),
+      sendCard: async () => ({ message_id: 'msg-card' }),
+      editMessage: async () => true,
+      deleteMessage: async () => true,
+    };
+
+    const result = await engine.askClaude(bot, '_agent_jia', '你吃西瓜？', {
+      projects: {
+        jia: { cwd: '/tmp/agent-jia', name: 'Jarvis · 甲', engine: 'codex' },
+      },
+    }, false, 'ou_admin');
+
+    assert.equal(result.ok, true);
+    const tracked = Object.values(state.msg_sessions || {}).find(entry =>
+      entry && entry.logicalChatId === '_agent_jia' && entry.agentKey === 'jia'
+    );
+    assert.deepEqual(tracked, {
+      cwd: '/tmp/agent-jia',
+      engine: 'codex',
+      logicalChatId: '_agent_jia',
+      agentKey: 'jia',
+      sandboxMode: 'danger-full-access',
+      approvalPolicy: 'never',
+      permissionMode: 'danger-full-access',
+    });
+  });
+
   it('decides codex resume fallback retry correctly', () => {
     const state = { sessions: {} };
     const engine = createEngineWithState(state);
