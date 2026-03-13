@@ -5,7 +5,8 @@
  *
  * Scans correction/metacognitive signals from the past 7 days,
  * aggregates "where did the AI get it wrong", and writes a brief
- * self-critique pattern into growth.patterns in ~/.claude_profile.yaml.
+ * self-critique pattern into growth.self_reflection_patterns
+ * in ~/.claude_profile.yaml.
  *
  * Also distills correction signals into lessons/ SOP markdown files.
  *
@@ -26,6 +27,61 @@ const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const LOCK_FILE = path.join(HOME, '.metame', 'self-reflect.lock');
 const LESSONS_DIR = path.join(HOME, '.metame', 'memory', 'lessons');
 const WINDOW_DAYS = 7;
+
+function normalizeReflectionEntry(entry) {
+  if (!entry) return null;
+  if (typeof entry === 'string') {
+    const summary = entry.trim();
+    if (!summary) return null;
+    return {
+      summary,
+      detected: new Date().toISOString().slice(0, 10),
+    };
+  }
+  if (typeof entry === 'object' && typeof entry.summary === 'string' && entry.summary.trim()) {
+    return {
+      summary: entry.summary.trim(),
+      detected: entry.detected || new Date().toISOString().slice(0, 10),
+    };
+  }
+  return null;
+}
+
+function normalizeSelfReflectionPatterns(profile) {
+  if (!profile.growth) profile.growth = {};
+
+  const current = Array.isArray(profile.growth.self_reflection_patterns)
+    ? profile.growth.self_reflection_patterns
+    : [];
+  const legacy = Array.isArray(profile.growth.patterns)
+    ? profile.growth.patterns.filter(p => typeof p === 'string')
+    : [];
+
+  const normalized = [...legacy, ...current]
+    .map(normalizeReflectionEntry)
+    .filter(Boolean)
+    .filter((p, i, arr) => arr.findIndex(x => x.summary === p.summary) === i)
+    .slice(-3);
+
+  profile.growth.self_reflection_patterns = normalized;
+  if (Array.isArray(profile.growth.patterns)) {
+    profile.growth.patterns = profile.growth.patterns.filter(p => typeof p === 'object' && p && typeof p.summary === 'string');
+  }
+
+  return normalized;
+}
+
+function migrateLegacySelfReflectionPatterns(profile) {
+  const beforePatterns = JSON.stringify((profile.growth && profile.growth.patterns) || null);
+  const beforeReflections = JSON.stringify((profile.growth && profile.growth.self_reflection_patterns) || null);
+  const normalized = normalizeSelfReflectionPatterns(profile);
+  const afterPatterns = JSON.stringify((profile.growth && profile.growth.patterns) || null);
+  const afterReflections = JSON.stringify((profile.growth && profile.growth.self_reflection_patterns) || null);
+  return {
+    changed: beforePatterns !== afterPatterns || beforeReflections !== afterReflections,
+    normalized,
+  };
+}
 
 /**
  * Distill correction signals into reusable SOP markdown files.
@@ -148,6 +204,22 @@ async function run() {
   }
 
   try {
+    // Persist legacy string-pattern migration even when this run produces no new reflections.
+    if (fs.existsSync(BRAIN_FILE)) {
+      try {
+        const yaml = require('js-yaml');
+        const profile = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
+        const migrated = migrateLegacySelfReflectionPatterns(profile);
+        if (migrated.changed) {
+          const dumped = yaml.dump(profile, { lineWidth: -1 });
+          await writeBrainFileSafe(dumped);
+          console.log('[self-reflect] Migrated legacy growth.patterns strings into growth.self_reflection_patterns.');
+        }
+      } catch (e) {
+        console.log(`[self-reflect] Legacy pattern migration failed (non-fatal): ${e.message}`);
+      }
+    }
+
     // Read signals from last WINDOW_DAYS days
     if (!fs.existsSync(SIGNAL_FILE)) {
       console.log('[self-reflect] No signal file, skipping.');
@@ -175,9 +247,9 @@ async function run() {
     try {
       const yaml = require('js-yaml');
       const profile = yaml.load(fs.readFileSync(BRAIN_FILE, 'utf8')) || {};
-      const existing = (profile.growth && profile.growth.patterns) || [];
+      const existing = migrateLegacySelfReflectionPatterns(profile).normalized;
       if (existing.length > 0) {
-        currentPatterns = `Current growth.patterns (avoid repeating):\n${existing.map(p => `- ${p}`).join('\n')}\n\n`;
+        currentPatterns = `Current growth.self_reflection_patterns (avoid repeating):\n${existing.map(p => `- ${p.summary}`).join('\n')}\n\n`;
       }
     } catch { /* non-fatal */ }
 
@@ -247,24 +319,22 @@ ${signalText}
       return;
     }
 
-    // Merge into growth.patterns (cap at 3, keep newest)
+    // Merge into growth.self_reflection_patterns (cap at 3, keep newest)
     try {
       const yaml = require('js-yaml');
       const raw = fs.readFileSync(BRAIN_FILE, 'utf8');
       const profile = yaml.load(raw) || {};
       if (!profile.growth) profile.growth = {};
-      const existing = Array.isArray(profile.growth.patterns) ? profile.growth.patterns : [];
-      // Add new patterns, deduplicate, cap at 3 newest
-      const merged = [...existing, ...patterns]
-        .filter((p, i, arr) => arr.indexOf(p) === i)
+      const existing = migrateLegacySelfReflectionPatterns(profile).normalized;
+      const merged = [...existing, ...patterns.map(summary => ({ summary, detected: new Date().toISOString().slice(0, 10) }))]
+        .filter((p, i, arr) => arr.findIndex(x => x.summary === p.summary) === i)
         .slice(-3);
-      profile.growth.patterns = merged;
+      profile.growth.self_reflection_patterns = merged;
       profile.growth.last_reflection = new Date().toISOString().slice(0, 10);
 
-      // Preserve locked lines (simple approach: only update growth section)
       const dumped = yaml.dump(profile, { lineWidth: -1 });
       await writeBrainFileSafe(dumped);
-      console.log(`[self-reflect] ${patterns.length} pattern(s) written to growth.patterns: ${patterns.join(' | ')}`);
+      console.log(`[self-reflect] ${patterns.length} pattern(s) written to growth.self_reflection_patterns: ${patterns.join(' | ')}`);
     } catch (e) {
       console.log(`[self-reflect] Failed to write profile: ${e.message}`);
     }
@@ -283,4 +353,9 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run };
+module.exports = {
+  run,
+  normalizeReflectionEntry,
+  normalizeSelfReflectionPatterns,
+  migrateLegacySelfReflectionPatterns,
+};

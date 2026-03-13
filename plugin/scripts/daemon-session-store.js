@@ -761,12 +761,13 @@ function createSessionStore(deps) {
   }
 
   function restoreSessionFromReply(chatId, mapped = {}) {
-    if (!chatId || !mapped || !mapped.id) return null;
+    if (!chatId || !mapped) return null;
     const safeEngine = normalizeEngineName(mapped.engine);
     const state = loadState();
     if (!state.sessions) state.sessions = {};
-    const base = upgradeSessionRecord(state.sessions[chatId] || {}, safeEngine);
     const logicalChatId = String(mapped.logicalChatId || '').trim();
+    const targetChatId = logicalChatId || String(chatId);
+    const base = upgradeSessionRecord(state.sessions[targetChatId] || {}, safeEngine);
     const logicalBase = logicalChatId
       ? upgradeSessionRecord(state.sessions[logicalChatId] || {}, safeEngine)
       : null;
@@ -783,26 +784,41 @@ function createSessionStore(deps) {
           logicalChatId,
         }
       : mapped;
+    const resolvedId = String(effectiveMapped.id || '').trim();
+    const resolvedCwd = sanitizeCwd(effectiveMapped.cwd || base.cwd);
+    if (!resolvedId && !resolvedCwd) return null;
     const restoredSlot = {
       ...(base.engines[safeEngine] || {}),
-      id: String(effectiveMapped.id),
+      ...(resolvedId ? { id: resolvedId } : {}),
       started: true,
     };
     if (safeEngine === 'codex') {
-      restoredSlot.runtimeSessionObserved = true;
+      restoredSlot.runtimeSessionObserved = !!resolvedId;
       const permissionMeta = normalizeCodexPermissionMeta(effectiveMapped) || normalizeCodexPermissionMeta(restoredSlot);
       if (permissionMeta) Object.assign(restoredSlot, permissionMeta);
     }
-    state.sessions[chatId] = {
-      cwd: sanitizeCwd(effectiveMapped.cwd || base.cwd),
+    const restoredRecord = {
+      cwd: resolvedCwd,
       engines: {
         ...base.engines,
         [safeEngine]: restoredSlot,
       },
       last_active: Date.now(),
     };
+    state.sessions[targetChatId] = restoredRecord;
+    if (String(chatId) !== targetChatId) {
+      const aliasBase = upgradeSessionRecord(state.sessions[chatId] || {}, safeEngine);
+      state.sessions[chatId] = {
+        cwd: restoredRecord.cwd,
+        engines: {
+          ...aliasBase.engines,
+          [safeEngine]: { ...(aliasBase.engines[safeEngine] || {}), ...restoredSlot },
+        },
+        last_active: restoredRecord.last_active,
+      };
+    }
     saveState(state);
-    return getSessionForEngine(chatId, safeEngine);
+    return getSessionForEngine(targetChatId, safeEngine);
   }
 
   function getSessionName(sessionId) {

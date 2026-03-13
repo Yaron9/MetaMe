@@ -627,6 +627,21 @@ function createNullBot(onOutput) {
   };
 }
 
+function stripLeadingPlanSection(text) {
+  const src = String(text || '');
+  if (!src.trim()) return '';
+  const normalized = src.replace(/\r\n/g, '\n');
+  const paragraphs = normalized.split(/\n\s*\n/);
+  if (paragraphs.length === 0) return normalized.trim();
+  const first = String(paragraphs[0] || '').trim();
+  if (!/^计划[:：]/.test(first)) return normalized.trim();
+  const rest = paragraphs.slice(1).join('\n\n').trim();
+  if (rest) return rest;
+  const lines = normalized.split('\n');
+  const remaining = lines.slice(1).join('\n').trim();
+  return remaining || first.replace(/^计划[:：]\s*/, '').trim();
+}
+
 /**
  * Forward bot: routes all calls to a real bot with a fixed chatId.
  * Used for dispatch tasks so Claude's streaming output appears in the target's Feishu channel.
@@ -640,18 +655,45 @@ function createStreamForwardBot(realBot, chatId, onOutput = null, opts = {}) {
   async function waitUntilReady() {
     await ready;
   }
+  function normalizeOutput(payload) {
+    const text = typeof payload === 'object'
+      ? (payload.body || payload.title || JSON.stringify(payload))
+      : String(payload);
+    return opts.stripPlan !== false ? stripLeadingPlanSection(text) : text;
+  }
+  async function deliver(text, rawText = text) {
+    const displayText = normalizeOutput(text);
+    if (onOutput) onOutput(rawText);
+    if (opts.responseCard && realBot.sendCard) {
+      return realBot.sendCard(chatId, {
+        title: opts.responseCard.title,
+        body: displayText,
+        color: opts.responseCard.color || 'blue',
+      });
+    }
+    return realBot.sendMessage(chatId, displayText);
+  }
   return {
     sendMessage: async (_, text) => {
       await waitUntilReady();
       log('INFO', `[StreamBot→${chatId.slice(-8)}] msg: ${String(text).slice(0, 80)}`);
-      if (onOutput) onOutput(text);
-      return realBot.sendMessage(chatId, text);
+      return deliver(text, text);
     },
     sendMarkdown: async (_, text) => {
       await waitUntilReady();
       log('INFO', `[StreamBot→${chatId.slice(-8)}] md: ${String(text).slice(0, 80)}`);
+      if (opts.responseCard && realBot.sendCard) {
+        const displayText = normalizeOutput(text);
+        if (onOutput) onOutput(text);
+        return realBot.sendCard(chatId, {
+          title: opts.responseCard.title,
+          body: displayText,
+          color: opts.responseCard.color || 'blue',
+        });
+      }
+      const displayText = normalizeOutput(text);
       if (onOutput) onOutput(text);
-      return realBot.sendMarkdown(chatId, text);
+      return realBot.sendMarkdown(chatId, displayText);
     },
     sendCard: async (_, card) => {
       await waitUntilReady();
@@ -1028,7 +1070,11 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
   // If streamOptions provided, use real bot so output appears in target's Feishu channel.
   // Otherwise fall back to nullBot which captures output for replyFn.
   const nullBot = streamOptions?.bot && streamOptions?.chatId
-    ? createStreamForwardBot(streamOptions.bot, streamOptions.chatId, outputHandler, { ready: streamReady })
+    ? createStreamForwardBot(streamOptions.bot, streamOptions.chatId, outputHandler, {
+      ready: streamReady,
+      stripPlan: streamOptions.stripPlan !== false,
+      responseCard: streamOptions.responseCard || null,
+    })
     : createNullBot(outputHandler);
   // Trusted dispatches (user / bound agent / team member) keep write access.
   // Only unknown senders are downgraded to read-only.
@@ -1263,20 +1309,66 @@ function buildDispatchPrompt(targetProject, fullMsg, envelope, metameDir = METAM
     : promptBody;
 }
 
+function resolveDispatchTarget(targetKey, config) {
+  const rawKey = String(targetKey || '').trim();
+  const projects = (config && config.projects) || {};
+  if (!rawKey) return null;
+  if (projects[rawKey]) {
+    const proj = projects[rawKey];
+    return {
+      key: rawKey,
+      name: proj.name || rawKey,
+      icon: proj.icon || '🤖',
+      color: proj.color || 'blue',
+      parentKey: rawKey,
+      parentProject: proj,
+      member: null,
+      isTeamMember: false,
+    };
+  }
+  for (const [parentKey, parent] of Object.entries(projects)) {
+    if (!Array.isArray(parent && parent.team)) continue;
+    const member = parent.team.find(m => m && m.key === rawKey);
+    if (!member) continue;
+    return {
+      key: rawKey,
+      name: member.name || rawKey,
+      icon: member.icon || parent.icon || '🤖',
+      color: member.color || parent.color || 'blue',
+      parentKey,
+      parentProject: parent,
+      member,
+      isTeamMember: true,
+    };
+  }
+  return null;
+}
+
+function buildDispatchResponseCard(targetKey, config) {
+  const target = resolveDispatchTarget(targetKey, config);
+  if (!target) return null;
+  return {
+    title: `${target.icon} ${target.name}`,
+    color: target.color || 'blue',
+  };
+}
+
 function buildDispatchTaskCard(fullMsg, targetProject, config) {
   const projects = (config && config.projects) || {};
   const actor = resolveDispatchActor(
     (fullMsg && fullMsg.source_sender_key) || (fullMsg && fullMsg.from),
     projects
   );
-  const toProj = projects[targetProject] || {};
-  const targetIcon = toProj.icon || '🤖';
-  const targetName = toProj.name || targetProject;
+  const target = resolveDispatchTarget(targetProject, config) || {
+    icon: '🤖',
+    name: targetProject,
+    color: 'blue',
+  };
   const prompt = String(fullMsg && fullMsg.payload && (fullMsg.payload.prompt || fullMsg.payload.title) || '').trim();
   const preview = prompt ? `${prompt.slice(0, 300)}${prompt.length > 300 ? '…' : ''}` : '(empty)';
   const lines = [
     `发起: ${actor.icon} ${actor.name}`,
-    `目标: ${targetIcon} ${targetName}`,
+    `目标: ${target.icon} ${target.name}`,
     `编号: ${fullMsg.id}`,
   ];
   if (fullMsg.task_id) lines.push(`TeamTask: ${fullMsg.task_id}`);
@@ -1285,7 +1377,7 @@ function buildDispatchTaskCard(fullMsg, targetProject, config) {
   return {
     title: '📬 新任务',
     body: lines.join('\n'),
-    color: toProj.color || 'blue',
+    color: target.color || 'blue',
     markdown: `## 📬 新任务\n\n${lines.join('\n')}\n\n---\n${preview}`,
     text: `📬 新任务\n\n${lines.join('\n')}\n\n${preview}`,
   };
@@ -1313,9 +1405,10 @@ async function sendDispatchTaskCard(bot, chatId, card) {
 
 function buildDispatchReceipt(item, config, result, opts = {}) {
   const targetKey = String(opts.targetKey || item.target || '').trim() || 'unknown';
-  const targetProj = ((config && config.projects) || {})[targetKey] || {};
-  const targetName = targetProj.name || targetKey;
-  const targetIcon = targetProj.icon || '🤖';
+  const target = resolveDispatchTarget(targetKey, config) || {
+    icon: '🤖',
+    name: targetKey,
+  };
   const actor = resolveDispatchActor(
     String(item && (item.source_sender_key || item.from) || 'user').trim() || 'user',
     (config && config.projects) || {}
@@ -1332,7 +1425,7 @@ function buildDispatchReceipt(item, config, result, opts = {}) {
     '',
     statusLine,
     `发起: ${actor.icon} ${actor.name}`,
-    `目标: ${targetIcon} ${targetName}`,
+    `目标: ${target.icon} ${target.name}`,
   ];
   if (result && result.id) lines.push(`编号: ${result.id}`);
   lines.push(`摘要: ${preview}`);
@@ -1347,26 +1440,29 @@ function buildDispatchReceipt(item, config, result, opts = {}) {
 
 function handleDispatchItem(item, config) {
   if (!item.target || !item.prompt) return;
-  if (!(config && config.projects && config.projects[item.target])) {
+  const resolvedTarget = resolveDispatchTarget(item.target, config);
+  if (!resolvedTarget) {
     log('WARN', `dispatch: unknown target "${item.target}"`);
     sendDispatchReceipt(item, config, buildDispatchReceipt(item, config, { success: false, error: 'unknown_target' }));
     return { success: false, error: 'unknown_target' };
   }
+  const targetKey = resolvedTarget.key;
   // 安全护栏：禁止 agent 主动 dispatch 到 personal（防止 LLM 幻觉乱发消息给小美）
   // personal 只允许用户本人触发，或来源为 user/unknown 的系统任务
   const _agentSources = new Set(Object.keys((config.projects) || {}));
   const isFromAgent = _agentSources.has(item.from) || item.from === '_claude_session';
-  const targetProject = config.projects?.[item.target] || {};
+  const targetProject = config.projects?.[targetKey] || {};
   if (isFromAgent && targetProject.guard === 'user-only') {
-    log('WARN', `dispatch: blocked agent "${item.from}" → "${item.target}" (user-only guard)`);
+    log('WARN', `dispatch: blocked agent "${item.from}" → "${targetKey}" (user-only guard)`);
     sendDispatchReceipt(item, config, buildDispatchReceipt(item, config, { success: false, error: 'target_guard_user_only' }));
     return { success: false, error: 'target_guard_user_only' };
   }
-  log('INFO', `Dispatch: ${item.from || '?'} → ${item.target}: ${item.prompt.slice(0, 60)}`);
+  log('INFO', `Dispatch: ${item.from || '?'} → ${targetKey}: ${item.prompt.slice(0, 60)}`);
 
   // ── Team broadcast: intra-team dispatch → show in group chat ──
   const liveBot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
-  const teamCtx = liveBot ? _findTeamBroadcastContext(item.from, item.target, config) : null;
+  const teamCtx = liveBot ? _findTeamBroadcastContext(item.from, targetKey, config) : null;
+  const responseCard = buildDispatchResponseCard(targetKey, config);
   if (teamCtx && teamCtx.groupChatId) {
     const { senderMember, targetMember, groupChatId } = teamCtx;
     const sIcon = senderMember.icon || '🤖';
@@ -1387,8 +1483,10 @@ function handleDispatchItem(item, config) {
       chatId: groupChatId,
       preDispatch: () => sendTaskNotice().catch(e => log('WARN', `Team broadcast failed: ${e.message}`)),
       sendTaskCard: false,
+      stripPlan: true,
+      responseCard,
     };
-    const result = dispatchTask(item.target, {
+    const result = dispatchTask(targetKey, {
       from: item.from || 'claude_session',
       source_sender_id: item.source_sender_id || '',
       type: 'task', priority: 'normal',
@@ -1408,15 +1506,15 @@ function handleDispatchItem(item, config) {
   let streamOptions = null;
   if (liveBot) {
     const feishuMap = (config.feishu && config.feishu.chat_agent_map) || {};
-    const targetChatId = Object.entries(feishuMap).find(([, v]) => v === item.target)?.[0] || null;
+    const targetChatId = Object.entries(feishuMap).find(([, v]) => v === targetKey)?.[0] || null;
     if (targetChatId) {
-      streamOptions = { bot: liveBot, chatId: targetChatId };
+      streamOptions = { bot: liveBot, chatId: targetChatId, stripPlan: true, responseCard };
     } else if (!item._suppressDefaultReplyRouting) {
       const senderChatId = resolveDispatchSenderChatId(item, config);
       if (senderChatId) {
-        const targetProj = (config.projects || {})[item.target] || {};
+        const targetProj = resolveDispatchTarget(targetKey, config) || {};
         pendingReplyFn = (output) => {
-          const text = `${targetProj.icon || '📬'} **${targetProj.name || item.target}** 回复：\n\n${output.slice(0, 2000)}`;
+          const text = `${targetProj.icon || '📬'} **${targetProj.name || targetKey}** 回复：\n\n${output.slice(0, 2000)}`;
           liveBot.sendMarkdown(senderChatId, text).catch(e => {
             log('WARN', `Dispatch reply (markdown) failed: ${e.message}`);
             liveBot.sendMessage(senderChatId, text.replace(/\*\*/g, '')).catch(e2 =>
@@ -1425,11 +1523,11 @@ function handleDispatchItem(item, config) {
           });
         };
         // Also set streamOptions so target agent's streaming replies go to the sender's group
-        streamOptions = { bot: liveBot, chatId: senderChatId };
+        streamOptions = { bot: liveBot, chatId: senderChatId, stripPlan: true, responseCard };
       }
     }
   }
-  const result = dispatchTask(item.target, {
+  const result = dispatchTask(targetKey, {
     from: item.from || 'claude_session',
     source_sender_id: item.source_sender_id || '',
     type: 'task', priority: 'normal',
@@ -2835,6 +2933,8 @@ module.exports = {
     buildDispatchPrompt,
     createStreamForwardBot,
     buildDispatchTaskCard,
+    stripLeadingPlanSection,
+    resolveDispatchTarget,
     resolveDispatchReadOnly,
     isMacLocalOrchestratorIntent,
   },
