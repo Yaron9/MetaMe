@@ -1996,6 +1996,7 @@ async function doBindAgent(bot, chatId, agentName, agentCwd) {
 // ---------------------------------------------------------
 const {
   findSessionFile,
+  findCodexSessionFile,
   clearSessionFileCache,
   truncateSessionToCheckpoint,
   listRecentSessions,
@@ -2414,8 +2415,10 @@ const { handleExecCommand } = createExecCommandHandler({
   getSessionName,
   createSession,
   findSessionFile,
+  findCodexSessionFile,
   loadConfig,
   getDistillModel,
+  getDefaultEngine,
 });
 
 const { handleOpsCommand } = createOpsCommandHandler({
@@ -2424,9 +2427,12 @@ const { handleOpsCommand } = createOpsCommandHandler({
   spawn,
   execSync,
   log,
+  loadConfig,
+  loadState,
   messageQueue,
   activeProcesses,
   getSession,
+  getSessionForEngine,
   listCheckpoints,
   cpDisplayLabel,
   truncateSessionToCheckpoint,
@@ -2437,6 +2443,7 @@ const { handleOpsCommand } = createOpsCommandHandler({
   cleanupCheckpoints,
   getNoSleepProcess: () => caffeinateProcess,
   setNoSleepProcess: (p) => { caffeinateProcess = p || null; },
+  getDefaultEngine,
 });
 
 const { handleCommand } = createCommandRouter({

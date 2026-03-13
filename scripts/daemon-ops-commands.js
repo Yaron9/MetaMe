@@ -1,5 +1,7 @@
 'use strict';
 
+const { createCommandSessionResolver } = require('./daemon-command-session-route');
+
 function createOpsCommandHandler(deps) {
   const {
     fs,
@@ -7,9 +9,12 @@ function createOpsCommandHandler(deps) {
     spawn,
     execSync,
     log,
+    loadConfig,
+    loadState,
     messageQueue,
     activeProcesses,
     getSession,
+    getSessionForEngine,
     listCheckpoints,
     cpDisplayLabel,
     truncateSessionToCheckpoint,
@@ -20,7 +25,16 @@ function createOpsCommandHandler(deps) {
     cleanupCheckpoints,
     getNoSleepProcess,
     setNoSleepProcess,
+    getDefaultEngine = () => 'claude',
   } = deps;
+  const { getActiveSession } = createCommandSessionResolver({
+    path,
+    loadConfig,
+    loadState,
+    getSession,
+    getSessionForEngine,
+    getDefaultEngine,
+  });
 
   function clearMessageQueue(chatId) {
     if (messageQueue.has(chatId)) {
@@ -45,7 +59,7 @@ function createOpsCommandHandler(deps) {
       clearMessageQueue(chatId);
       interruptActiveProcess(chatId);
 
-      const session = getSession(chatId);
+      const { session } = getActiveSession(chatId);
       if (!session || !session.id) {
         await bot.sendMessage(chatId, 'No active session to undo.');
         return true;
@@ -168,7 +182,7 @@ function createOpsCommandHandler(deps) {
       clearMessageQueue(chatId);
       interruptActiveProcess(chatId);
 
-      const session2 = getSession(chatId);
+      const { session: session2 } = getActiveSession(chatId);
       if (!session2 || !session2.id) {
         await bot.sendMessage(chatId, 'No active session.');
         return true;

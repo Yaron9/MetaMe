@@ -2,6 +2,7 @@
 
 const { classifyTaskUsage } = require('./usage-classifier');
 const { normalizeModel } = require('./daemon-task-scheduler');
+const { createCommandSessionResolver } = require('./daemon-command-session-route');
 
 function createExecCommandHandler(deps) {
   const {
@@ -24,9 +25,19 @@ function createExecCommandHandler(deps) {
     getSessionName,
     createSession,
     findSessionFile,
+    findCodexSessionFile = null,
     loadConfig,
     getDistillModel,
+    getDefaultEngine = () => 'claude',
   } = deps;
+  const { getActiveSession } = createCommandSessionResolver({
+    path,
+    loadConfig,
+    loadState,
+    getSession,
+    getSessionForEngine,
+    getDefaultEngine,
+  });
 
   function truncateOutput(output, maxLen = 4000) {
     const text = (output || '').trim() || '(no output)';
@@ -235,7 +246,7 @@ function createExecCommandHandler(deps) {
         const signal = proc.killSignal || 'SIGTERM';
         try { process.kill(-proc.child.pid, signal); } catch { try { proc.child.kill(signal); } catch { /* */ } }
       }
-      const session = getSession(chatId);
+      const { session } = getActiveSession(chatId);
       const name = session ? getSessionName(session.id) : null;
       const label = name || (session ? session.id.slice(0, 8) : 'none');
       await bot.sendMessage(chatId, `🔄 Session restarted. MCP/config reloaded.\n📁 ${session ? path.basename(session.cwd) : '~'} [${label}]`);
@@ -244,52 +255,84 @@ function createExecCommandHandler(deps) {
 
     // /compact — compress current session context to save tokens
     if (text === '/compact') {
-      const rawSession = getSession(chatId);
-      const engine = rawSession?.engine || 'claude';
-      const session = getSessionForEngine(chatId, engine);
+      const { sessionKey, engine, session } = getActiveSession(chatId);
       if (!session || !session.id || !session.started) {
         await bot.sendMessage(chatId, '❌ No active session to compact.');
         return true;
       }
-      if (String(engine).toLowerCase() === 'codex') {
-        await bot.sendMessage(chatId, '⚠️ Codex 会话暂不支持 /compact，请继续在同一会话里对话。');
-        return true;
-      }
       await bot.sendMessage(chatId, '🗜 Compacting session...');
 
-      // Step 1: Read conversation from JSONL (fast, no Claude needed)
-      const jsonlPath = findSessionFile(session.id);
-      if (!jsonlPath) {
-        await bot.sendMessage(chatId, '❌ Session file not found.');
-        return true;
-      }
+      // Step 1: Read conversation (JSONL for Claude, rollout JSONL for Codex)
+      const isCodex = String(engine).toLowerCase() === 'codex';
       const messages = [];
-      try {
-        const lines = fs.readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean);
-        for (const line of lines) {
-          try {
-            const obj = JSON.parse(line);
-            if (obj.type === 'user' || obj.type === 'assistant') {
-              const msg = obj.message || {};
-              const content = msg.content;
+      if (isCodex) {
+        const codexFile = findCodexSessionFile && findCodexSessionFile(session.id);
+        if (!codexFile) {
+          await bot.sendMessage(chatId, '❌ Codex session file not found.');
+          return true;
+        }
+        try {
+          const lines = fs.readFileSync(codexFile, 'utf8').split('\n').filter(Boolean);
+          for (const line of lines) {
+            try {
+              const obj = JSON.parse(line);
+              if (obj.type !== 'response_item') continue;
+              const p = obj.payload;
+              if (!p || p.type !== 'message') continue;
+              const role = String(p.role || '').toLowerCase();
+              if (role !== 'user' && role !== 'assistant') continue;
+              const content = p.content || p;
               let textContent = '';
               if (typeof content === 'string') {
                 textContent = content;
               } else if (Array.isArray(content)) {
-                textContent = content
-                  .filter(c => c.type === 'text')
-                  .map(c => c.text || '')
-                  .join(' ');
+                textContent = content.map(c => {
+                  if (typeof c === 'string') return c;
+                  if (c && typeof c.text === 'string') return c.text;
+                  return '';
+                }).filter(Boolean).join(' ');
               }
-              if (textContent.trim()) {
-                messages.push({ role: obj.type, text: textContent.trim() });
-              }
-            }
-          } catch { /* skip malformed lines */ }
+              textContent = textContent.trim();
+              if (textContent) messages.push({ role, text: textContent });
+            } catch { /* skip malformed lines */ }
+          }
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ Cannot read Codex session: ${e.message}`);
+          return true;
         }
-      } catch (e) {
-        await bot.sendMessage(chatId, `❌ Cannot read session: ${e.message}`);
-        return true;
+      } else {
+        const jsonlPath = findSessionFile(session.id);
+        if (!jsonlPath) {
+          await bot.sendMessage(chatId, '❌ Session file not found.');
+          return true;
+        }
+        try {
+          const lines = fs.readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean);
+          for (const line of lines) {
+            try {
+              const obj = JSON.parse(line);
+              if (obj.type === 'user' || obj.type === 'assistant') {
+                const msg = obj.message || {};
+                const content = msg.content;
+                let textContent = '';
+                if (typeof content === 'string') {
+                  textContent = content;
+                } else if (Array.isArray(content)) {
+                  textContent = content
+                    .filter(c => c.type === 'text')
+                    .map(c => c.text || '')
+                    .join(' ');
+                }
+                if (textContent.trim()) {
+                  messages.push({ role: obj.type, text: textContent.trim() });
+                }
+              }
+            } catch { /* skip malformed lines */ }
+          }
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ Cannot read session: ${e.message}`);
+          return true;
+        }
       }
 
       if (messages.length === 0) {
@@ -325,23 +368,36 @@ function createExecCommandHandler(deps) {
       }
 
       // Step 4: Create new session with the summary
-      const model = daemonCfg.model || 'opus';
       const oldName = getSessionName(session.id);
-      const newSession = createSession(chatId, session.cwd, oldName ? oldName + ' (compacted)' : '', session.engine || 'claude');
-      const initArgs = ['-p', '--session-id', newSession.id, '--model', model];
-      if (daemonCfg.dangerously_skip_permissions) initArgs.push('--dangerously-skip-permissions');
-      const preamble = buildProfilePreamble();
-      const initPrompt = preamble + `Here is the context from our previous session (compacted):\n\n${output}\n\nContext loaded. Ready to continue.`;
-      const { error: initErr } = await spawnClaudeAsync(initArgs, initPrompt, session.cwd, 60000);
-      if (initErr) {
-        await bot.sendMessage(chatId, `⚠️ Summary saved but new session init failed: ${initErr}`);
-        return true;
-      }
-      // Mark as started
-      const state2 = loadState();
-      if (state2.sessions[chatId]) {
-        state2.sessions[chatId].started = true;
+      const newSession = createSession(sessionKey, session.cwd, oldName ? oldName + ' (compacted)' : '', engine);
+      if (isCodex) {
+        // Codex doesn't support --session-id init; store context for first-message injection in engine
+        const state2 = loadState();
+        if (!state2.sessions[sessionKey]) state2.sessions[sessionKey] = {};
+        if (!state2.sessions[sessionKey].engines) state2.sessions[sessionKey].engines = {};
+        if (!state2.sessions[sessionKey].engines[engine]) state2.sessions[sessionKey].engines[engine] = {};
+        state2.sessions[sessionKey].engines[engine].compactContext = output;
         saveState(state2);
+      } else {
+        // Claude: warm up the new session immediately via --session-id
+        const model = daemonCfg.model || 'opus';
+        const initArgs = ['-p', '--session-id', newSession.id, '--model', model];
+        if (daemonCfg.dangerously_skip_permissions) initArgs.push('--dangerously-skip-permissions');
+        const preamble = buildProfilePreamble();
+        const initPrompt = preamble + `Here is the context from our previous session (compacted):\n\n${output}\n\nContext loaded. Ready to continue.`;
+        const { error: initErr } = await spawnClaudeAsync(initArgs, initPrompt, session.cwd, 60000);
+        if (initErr) {
+          await bot.sendMessage(chatId, `⚠️ Summary saved but new session init failed: ${initErr}`);
+          return true;
+        }
+        const state2 = loadState();
+        if (state2.sessions[sessionKey]) {
+          state2.sessions[sessionKey].started = true;
+          if (state2.sessions[sessionKey].engines && state2.sessions[sessionKey].engines[engine]) {
+            state2.sessions[sessionKey].engines[engine].started = true;
+          }
+          saveState(state2);
+        }
       }
       const tokenEst = Math.round(output.length / 3.5);
       await bot.sendMessage(chatId, `✅ Compacted! ~${tokenEst} tokens of context carried over.\nNew session: ${newSession.id.slice(0, 8)}`);
@@ -355,8 +411,8 @@ function createExecCommandHandler(deps) {
         await bot.sendMessage(chatId, '用法: /publish 123456');
         return true;
       }
-      const session = getSession(chatId);
-      const cwd = session?.cwd || HOME;
+      const { route, session } = getActiveSession(chatId);
+      const cwd = session?.cwd || route.cwd || HOME;
       await bot.sendMessage(chatId, `📦 npm publish --otp=${otp} ...`);
       try {
         const result = await runCommand('npm', ['publish', `--otp=${otp}`], { cwd, timeout: 60000 });
