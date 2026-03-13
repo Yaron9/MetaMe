@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  mergeReflectionEntries,
   migrateLegacySelfReflectionPatterns,
   normalizeSelfReflectionPatterns,
 } = require('./self-reflect');
@@ -25,10 +26,12 @@ test('migrateLegacySelfReflectionPatterns moves legacy strings and preserves use
   assert.deepEqual(profile.growth.patterns, [
     { type: 'growth', summary: '开始先确认范围', confidence: 0.9, surfaced: null },
   ]);
-  assert.deepEqual(profile.growth.self_reflection_patterns, [
-    { summary: '倾向先行动再讨论', detected: profile.growth.self_reflection_patterns[0].detected },
-    { summary: '代码审查不够全面', detected: '2026-03-10' },
-  ]);
+  assert.deepEqual(
+    profile.growth.self_reflection_patterns.map(p => p.summary),
+    ['代码审查不够全面', '倾向先行动再讨论'],
+  );
+  assert.equal(profile.growth.self_reflection_patterns[0].detected, '2026-03-10');
+  assert.match(profile.growth.self_reflection_patterns[1].detected, /^\d{4}-\d{2}-\d{2}$/);
 });
 
 test('normalizeSelfReflectionPatterns deduplicates mixed legacy and new reflection entries', () => {
@@ -50,4 +53,35 @@ test('normalizeSelfReflectionPatterns deduplicates mixed legacy and new reflecti
     ['倾向先行动再讨论', '代码审查不够全面'],
   );
   assert.deepEqual(profile.growth.patterns, []);
+});
+
+test('normalizeSelfReflectionPatterns prefers structured metadata over legacy duplicate strings', () => {
+  const profile = {
+    growth: {
+      patterns: ['倾向先行动再讨论'],
+      self_reflection_patterns: [
+        { summary: '倾向先行动再讨论', detected: '2026-03-10' },
+      ],
+    },
+  };
+
+  const normalized = normalizeSelfReflectionPatterns(profile);
+
+  assert.deepEqual(normalized, [
+    { summary: '倾向先行动再讨论', detected: '2026-03-10' },
+  ]);
+});
+
+test('mergeReflectionEntries keeps structured detected metadata for duplicate summaries', () => {
+  const merged = mergeReflectionEntries([
+    { summary: '代码审查不够全面', detected: '2026-03-10' },
+    '代码审查不够全面',
+    { summary: '倾向先行动再讨论', detected: null },
+    { summary: '倾向先行动再讨论', detected: '2026-03-11' },
+  ]);
+
+  assert.deepEqual(merged, [
+    { summary: '代码审查不够全面', detected: '2026-03-10' },
+    { summary: '倾向先行动再讨论', detected: '2026-03-11' },
+  ]);
 });

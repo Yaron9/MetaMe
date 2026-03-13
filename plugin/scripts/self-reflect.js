@@ -47,6 +47,29 @@ function normalizeReflectionEntry(entry) {
   return null;
 }
 
+function mergeReflectionEntries(entries) {
+  const merged = new Map();
+  for (const entry of entries) {
+    const normalized = normalizeReflectionEntry(entry);
+    if (!normalized) continue;
+    const existing = merged.get(normalized.summary);
+    if (!existing) {
+      merged.set(normalized.summary, normalized);
+      continue;
+    }
+
+    const existingDetected = existing.detected ? new Date(existing.detected).getTime() : 0;
+    const normalizedDetected = normalized.detected ? new Date(normalized.detected).getTime() : 0;
+    const shouldReplace =
+      normalizedDetected > 0 && (
+        existingDetected === 0
+        || normalizedDetected < existingDetected
+      );
+    if (shouldReplace) merged.set(normalized.summary, { ...existing, ...normalized });
+  }
+  return [...merged.values()];
+}
+
 function normalizeSelfReflectionPatterns(profile) {
   if (!profile.growth) profile.growth = {};
 
@@ -57,10 +80,7 @@ function normalizeSelfReflectionPatterns(profile) {
     ? profile.growth.patterns.filter(p => typeof p === 'string')
     : [];
 
-  const normalized = [...legacy, ...current]
-    .map(normalizeReflectionEntry)
-    .filter(Boolean)
-    .filter((p, i, arr) => arr.findIndex(x => x.summary === p.summary) === i)
+  const normalized = mergeReflectionEntries([...current, ...legacy])
     .slice(-3);
 
   profile.growth.self_reflection_patterns = normalized;
@@ -326,8 +346,10 @@ ${signalText}
       const profile = yaml.load(raw) || {};
       if (!profile.growth) profile.growth = {};
       const existing = migrateLegacySelfReflectionPatterns(profile).normalized;
-      const merged = [...existing, ...patterns.map(summary => ({ summary, detected: new Date().toISOString().slice(0, 10) }))]
-        .filter((p, i, arr) => arr.findIndex(x => x.summary === p.summary) === i)
+      const merged = mergeReflectionEntries([
+        ...existing,
+        ...patterns.map(summary => ({ summary, detected: new Date().toISOString().slice(0, 10) })),
+      ])
         .slice(-3);
       profile.growth.self_reflection_patterns = merged;
       profile.growth.last_reflection = new Date().toISOString().slice(0, 10);
@@ -355,6 +377,7 @@ if (require.main === module) {
 
 module.exports = {
   run,
+  mergeReflectionEntries,
   normalizeReflectionEntry,
   normalizeSelfReflectionPatterns,
   migrateLegacySelfReflectionPatterns,

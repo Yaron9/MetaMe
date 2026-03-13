@@ -50,6 +50,32 @@ function spawnCodex(args, options) {
   return spawnViaNode('codex', args, { ...options, env });
 }
 
+function mergeReflectionDisplayEntries(entries) {
+  const merged = new Map();
+  for (const entry of entries) {
+    const normalized = typeof entry === 'string'
+      ? { summary: entry, detected: null }
+      : (entry && typeof entry.summary === 'string' ? { summary: entry.summary, detected: entry.detected || null } : null);
+    if (!normalized) continue;
+
+    const existing = merged.get(normalized.summary);
+    if (!existing) {
+      merged.set(normalized.summary, normalized);
+      continue;
+    }
+
+    const existingDetected = existing.detected ? new Date(existing.detected).getTime() : 0;
+    const normalizedDetected = normalized.detected ? new Date(normalized.detected).getTime() : 0;
+    const shouldReplace =
+      normalizedDetected > 0 && (
+        existingDetected === 0
+        || normalizedDetected < existingDetected
+      );
+    if (shouldReplace) merged.set(normalized.summary, { ...existing, ...normalized });
+  }
+  return [...merged.values()];
+}
+
 function readLatestClaudeSession(projectsRoot, cwd) {
   let bestSession = null;
   const findLatest = (dir) => {
@@ -1458,10 +1484,7 @@ if (isInsights) {
     const legacyReflectionPatterns = patterns
       .filter(p => typeof p === 'string')
       .map(p => ({ summary: p, detected: null }));
-    const aiReflections = [...legacyReflectionPatterns, ...reflectionPatterns]
-      .map(p => typeof p === 'string' ? { summary: p, detected: null } : p)
-      .filter(p => p && typeof p.summary === 'string')
-      .filter((p, i, arr) => arr.findIndex(x => x.summary === p.summary) === i);
+    const aiReflections = mergeReflectionDisplayEntries([...reflectionPatterns, ...legacyReflectionPatterns]);
 
     if (userPatterns.length === 0 && aiReflections.length === 0) {
       console.log(`${icon("search")} MetaMe: No patterns detected yet. Keep using MetaMe and patterns will emerge after ~5 sessions.`);
