@@ -2048,6 +2048,11 @@ ${mentorRadarHint}
         try {
           log('DEBUG', `[REPLY:${chatId}] statusMsgId=${statusMsgId} editFailed=${editFailed} activeProject=${activeProject && activeProject.name} lastCard=${_lastStatusCardContent ? _lastStatusCardContent.slice(0, 40) : 'null'}`);
 
+          // siri_ask: write full response to temp file for any dispatch-triggered reply
+          if (chatId && chatId.startsWith('_agent_') && cleanOutput) {
+            try { require('fs').writeFileSync('/tmp/siri_response.txt', cleanOutput); } catch {}
+          }
+
           // Strategy: always try to update the status card first (avoids sending a new card
           // while the old 🤔 card lingers, which would produce two messages).
           // If edit fails: try to delete the status card (awaited, not fire-and-forget).

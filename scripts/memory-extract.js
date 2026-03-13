@@ -346,6 +346,65 @@ async function run() {
       }
     }
 
+    // ── Codex sessions ──────────────────────────────────────────────────────
+    // Same pipeline, different source: reads ~/.codex/sessions rollout files
+    // (first 2KB only) + history.jsonl for user messages.
+    const codexSessions = sessionAnalytics.findAllUnextractedCodexSessions(3);
+    if (codexSessions.length > 0) {
+      // Pass session IDs so loadCodexHistory only parses relevant entries
+      // (history.jsonl grows unbounded; no need to load the full file)
+      const historyMap = sessionAnalytics.loadCodexHistory(codexSessions.map(cs => cs.session_id));
+      for (const cs of codexSessions) {
+        try {
+          const { skeleton, evidence } = sessionAnalytics.buildCodexInput(cs.path, historyMap);
+
+          // Skip trivial sessions with no user messages
+          if (skeleton.message_count < 1) {
+            sessionAnalytics.markCodexFactsExtracted(cs.session_id);
+            continue;
+          }
+
+          const { ok, facts, session_name } = await extractFacts(skeleton, evidence, distillEnv);
+          if (!ok) {
+            console.log(`[memory-extract] Codex ${cs.session_id.slice(0, 8)}: extraction failed, will retry later`);
+            continue;
+          }
+
+          if (facts.length > 0) {
+            const fallbackScope = `codex_${String(cs.session_id).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24)}`;
+            const { saved, skipped, superseded, savedFacts } = memory.saveFacts(
+              cs.session_id,
+              skeleton.project || 'unknown',
+              facts,
+              { scope: skeleton.project_id || fallbackScope, source_type: 'codex' }
+            );
+            let labelsSaved = 0;
+            if (typeof memory.saveFactLabels === 'function' && Array.isArray(savedFacts) && savedFacts.length > 0) {
+              const labelRows = buildFactLabelRows(facts, savedFacts);
+              if (labelRows.length > 0) {
+                const lr = memory.saveFactLabels(labelRows);
+                labelsSaved = Number(lr && lr.saved) || 0;
+              }
+            }
+            totalSaved += saved;
+            totalSkipped += skipped;
+            const superMsg = superseded > 0 ? `, ${superseded} superseded` : '';
+            const labelMsg = labelsSaved > 0 ? `, ${labelsSaved} labels` : '';
+            console.log(`[memory-extract] Codex ${cs.session_id.slice(0, 8)} (${session_name}): ${saved} facts saved${superMsg}${labelMsg}`);
+          } else {
+            console.log(`[memory-extract] Codex ${cs.session_id.slice(0, 8)} (${session_name}): no facts extracted`);
+          }
+
+          sessionAnalytics.markCodexFactsExtracted(cs.session_id);
+          saveSessionTag(cs.session_id, session_name, facts);
+          processed++;
+        } catch (e) {
+          console.log(`[memory-extract] Codex session error: ${e.message}`);
+        }
+      }
+    }
+    // ── end Codex ────────────────────────────────────────────────────────────
+
     memory.close();
     return { sessionsProcessed: processed, factsSaved: totalSaved, factsSkipped: totalSkipped };
   } finally {

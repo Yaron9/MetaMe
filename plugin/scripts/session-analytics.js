@@ -895,6 +895,161 @@ function detectSignificantSession(skeleton) {
   return { significant: reasons.length > 0, reasons };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Codex session adapter
+// Reads ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl (first line only, ~1KB)
+// and ~/.codex/history.jsonl (user messages).  Reuses the same state DB with
+// a 'codex_facts' key to avoid collisions with Claude session IDs.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CODEX_SESSIONS_ROOT  = path.join(HOME, '.codex', 'sessions');
+const CODEX_HISTORY_FILE   = path.join(HOME, '.codex', 'history.jsonl');
+// Matches: rollout-YYYY-MM-DDTHH-MM-SS-<uuid>.jsonl  (colons replaced with dashes)
+const CODEX_ROLLOUT_PATTERN = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)\.jsonl$/;
+
+/**
+ * Load ~/.codex/history.jsonl into a Map<session_id, [{ts, text}]>.
+ * Pass sessionIds to load only the sessions you need — avoids reading the
+ * whole file (which grows unbounded) when only a few sessions are relevant.
+ *
+ * @param {string[]|null} sessionIds - allowlist; null/empty loads everything
+ */
+function loadCodexHistory(sessionIds = null) {
+  const map = new Map();
+  const allow = sessionIds && sessionIds.length > 0 ? new Set(sessionIds) : null;
+  try {
+    if (!fs.existsSync(CODEX_HISTORY_FILE)) return map;
+    const lines = fs.readFileSync(CODEX_HISTORY_FILE, 'utf8').split('\n');
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let entry;
+      try { entry = JSON.parse(line); } catch { continue; }
+      if (!entry.session_id || !entry.text) continue;
+      if (allow && !allow.has(entry.session_id)) continue;
+      if (!map.has(entry.session_id)) map.set(entry.session_id, []);
+      map.get(entry.session_id).push({ ts: entry.ts, text: entry.text });
+    }
+  } catch { /* non-fatal */ }
+  return map;
+}
+
+/**
+ * Find all Codex rollout files not yet processed by memory-extract.
+ * Filename pattern: rollout-YYYY-MM-DDTHH-MM-SS-<uuid>.jsonl
+ */
+function findAllUnextractedCodexSessions(limit = 30) {
+  if (!fs.existsSync(CODEX_SESSIONS_ROOT)) return [];
+  const results = [];
+  try {
+    const years = fs.readdirSync(CODEX_SESSIONS_ROOT).filter(d => /^\d{4}$/.test(d));
+    for (const year of years) {
+      const yearDir = path.join(CODEX_SESSIONS_ROOT, year);
+      const months = fs.readdirSync(yearDir).filter(d => /^\d{2}$/.test(d));
+      for (const month of months) {
+        const monthDir = path.join(yearDir, month);
+        const days = fs.readdirSync(monthDir).filter(d => /^\d{2}$/.test(d));
+        for (const day of days) {
+          const dayDir = path.join(monthDir, day);
+          let files;
+          try { files = fs.readdirSync(dayDir); } catch { continue; }
+          for (const file of files) {
+            if (!file.startsWith('rollout-') || !file.endsWith('.jsonl')) continue;
+            // Extract UUID from: rollout-YYYY-MM-DDTHH-MM-SS-<uuid>.jsonl
+            const m = file.match(CODEX_ROLLOUT_PATTERN);
+            if (!m) continue;
+            const sessionId = m[1];
+            if (isProcessed('codex_facts', sessionId)) continue;
+            const fullPath = path.join(dayDir, file);
+            let fstat;
+            try { fstat = fs.statSync(fullPath); } catch { continue; }
+            if (fstat.size < MIN_FILE_SIZE) continue;
+            results.push({ path: fullPath, session_id: sessionId, mtime: fstat.mtimeMs });
+          }
+        }
+      }
+    }
+  } catch { return []; }
+  results.sort((a, b) => b.mtime - a.mtime);
+  return results.slice(0, limit);
+}
+
+/**
+ * Build { skeleton, evidence } for a Codex session.
+ * Reads only the first 2KB of the rollout file (session_meta line) — never
+ * loads the full transcript.  Enriches with user messages from historyMap.
+ *
+ * @param {string} rolloutPath - absolute path to rollout-*.jsonl
+ * @param {Map}    historyMap  - returned by loadCodexHistory()
+ */
+function buildCodexInput(rolloutPath, historyMap) {
+  let sessionMeta = null;
+  let fileSessionId = null;
+  try {
+    const m = path.basename(rolloutPath).match(CODEX_ROLLOUT_PATTERN);
+    if (m) fileSessionId = m[1];
+
+    // Read only first 2KB to get session_meta without loading the full transcript
+    let fd;
+    try {
+      fd = fs.openSync(rolloutPath, 'r');
+      const buf = Buffer.alloc(2048);
+      const bytesRead = fs.readSync(fd, buf, 0, 2048, 0);
+      const firstLine = buf.slice(0, bytesRead).toString('utf8').split('\n')[0];
+      const parsed = JSON.parse(firstLine);
+      if (parsed.type === 'session_meta') sessionMeta = parsed.payload;
+    } finally {
+      if (fd !== undefined) try { fs.closeSync(fd); } catch { /* ignore */ }
+    }
+  } catch { /* non-fatal */ }
+
+  const sessionId = (sessionMeta && sessionMeta.id) || fileSessionId;
+  const cwd = (sessionMeta && sessionMeta.cwd) || null;
+  const { project, project_id: projectId } = deriveProjectInfo(cwd || '');
+
+  // User messages from history index (sorted chronologically)
+  const userMsgs = (sessionId && historyMap.get(sessionId)) || [];
+  userMsgs.sort((a, b) => a.ts - b.ts);
+
+  const firstTs = userMsgs.length > 0 ? new Date(userMsgs[0].ts * 1000).toISOString() : null;
+  const lastTs  = userMsgs.length > 1 ? new Date(userMsgs[userMsgs.length - 1].ts * 1000).toISOString() : firstTs;
+  const durationMin = userMsgs.length > 1
+    ? Math.round((userMsgs[userMsgs.length - 1].ts - userMsgs[0].ts) / 6) / 10
+    : 0;
+
+  const skeleton = {
+    session_id:    sessionId || path.basename(rolloutPath, '.jsonl'),
+    user_snippets: userMsgs.map(m => m.text.slice(0, 200)),
+    tool_counts:   {},
+    total_tool_calls: 0,
+    message_count: userMsgs.length,
+    duration_min:  durationMin,
+    project:       project || 'unknown',
+    project_id:    projectId || null,
+    project_path:  cwd,
+    branch:        null,
+    engine:        'codex',
+    model_provider: sessionMeta && sessionMeta.model_provider,
+    first_ts:      firstTs,
+    last_ts:       lastTs,
+  };
+
+  const evidence = {
+    user_messages: userMsgs.map(m => m.text).filter(Boolean).slice(0, 15),
+    tool_traces:   [],
+    key_results:   [],
+    file_anchors:  cwd ? [cwd] : [],
+  };
+
+  return { skeleton, evidence };
+}
+
+/**
+ * Mark a Codex session as facts-extracted.
+ */
+function markCodexFactsExtracted(sessionId) {
+  markProcessed('codex_facts', sessionId);
+}
+
 module.exports = {
   findLatestUnanalyzedSession,
   findSessionById,
@@ -908,6 +1063,11 @@ module.exports = {
   detectSignificantSession,
   markAnalyzed,
   markFactsExtracted,
+  // Codex adapter
+  loadCodexHistory,
+  findAllUnextractedCodexSessions,
+  buildCodexInput,
+  markCodexFactsExtracted,
 };
 
 // Direct execution for testing
