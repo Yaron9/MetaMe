@@ -401,16 +401,26 @@ function createAgentCommandHandler(deps) {
         return true;
       }
 
-      // Argument given -> match by name, then by session ID prefix
+      // Argument given -> match current resume choices first (includes synthetic
+      // "当前会话" entry for logical routes), then fall back to global history.
       const allSessions = listRecentSessions(50, null, currentEngine);
       const argLower = arg.toLowerCase();
-      let fullMatch = allSessions.find(s => s.customTitle && s.customTitle.toLowerCase() === argLower);
+      let fullMatch = resumeChoices.find(s => s.customTitle && s.customTitle.toLowerCase() === argLower);
+      if (!fullMatch) {
+        fullMatch = allSessions.find(s => s.customTitle && s.customTitle.toLowerCase() === argLower);
+      }
+      if (!fullMatch) {
+        fullMatch = resumeChoices.find(s => s.customTitle && s.customTitle.toLowerCase().includes(argLower));
+      }
       if (!fullMatch) {
         fullMatch = allSessions.find(s => s.customTitle && s.customTitle.toLowerCase().includes(argLower));
       }
       if (!fullMatch) {
         fullMatch = recentSessions.find(s => s.sessionId.startsWith(arg))
           || allSessions.find(s => s.sessionId.startsWith(arg));
+      }
+      if (!fullMatch) {
+        fullMatch = resumeChoices.find(s => s.sessionId.startsWith(arg));
       }
       if (!fullMatch) {
         // keep historical behavior:
@@ -431,14 +441,12 @@ function createAgentCommandHandler(deps) {
       const engineByTargetCwd = normalizeEngineName(fullMatch.engine)
         || inferEngineByCwd(cfgForEngine, cwd)
         || existingEngine;
-      const preferLogicalCurrent = isLogicalRoute
+      const selectedLogicalCurrent = isLogicalRoute
         && currentLogical
         && currentLogical.id
-        && currentLogical.started
-        && engineByTargetCwd === currentEngine
-        && normalizeCwd(currentLogical.cwd || cwd || HOME) === normalizeCwd(cwd || HOME);
-      const targetSessionId = preferLogicalCurrent ? currentLogical.id : sessionId;
-      const targetCwd = preferLogicalCurrent ? (currentLogical.cwd || cwd) : cwd;
+        && sessionId === currentLogical.id;
+      const targetSessionId = sessionId;
+      const targetCwd = cwd;
       const existingEngines = existing.engines || {};
       state2.sessions[sessionKey] = {
         ...existing,
@@ -455,8 +463,8 @@ function createAgentCommandHandler(deps) {
       // 读取最近对话片段，帮助确认是否切换到正确的 session
       const recentCtx = getSessionRecentContext ? getSessionRecentContext(targetSessionId) : null;
       let msg = `✅ 已切换: **${label}**\n📁 ${path.basename(cwd)}`;
-      if (preferLogicalCurrent) {
-        msg += '\n\n已优先恢复当前智能体会话，而不是切回旧历史 thread。';
+      if (selectedLogicalCurrent) {
+        msg += '\n\n已恢复当前智能体会话。';
       }
       if (recentCtx) {
         if (recentCtx.lastUser) {
