@@ -665,9 +665,13 @@ function createCommandRouter(deps) {
       const projCwd = normalizeCwd(proj.cwd);
       const sessionChatId = buildSessionChatId(chatId, mappedKey);
       const cur = loadState().sessions?.[sessionChatId];
-      const curEngine = String((cur && cur.engine) || getDefaultEngine()).toLowerCase();
       const projEngine = String((proj && proj.engine) || getDefaultEngine()).toLowerCase();
-      if (!cur || cur.cwd !== projCwd || curEngine !== projEngine) {
+      // Multi-engine format stores engines in cur.engines object; legacy format uses cur.engine string.
+      // Check whether the session already has a slot for the project's configured engine.
+      const curHasEngine = cur && (
+        cur.engines ? !!cur.engines[projEngine] : String(cur.engine || '').toLowerCase() === projEngine
+      );
+      if (!cur || cur.cwd !== projCwd || !curHasEngine) {
         attachOrCreateSession(sessionChatId, projCwd, proj.name || mappedKey, proj.engine || getDefaultEngine());
       }
     }

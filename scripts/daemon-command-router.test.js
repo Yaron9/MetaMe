@@ -200,3 +200,110 @@ describe('daemon-command-router follow-up merge', () => {
     assert.equal(deps.messageQueue.get('chat-4').messages.length, 10);
   });
 });
+
+describe('chat_agent_map session reuse (multi-engine format)', () => {
+  it('should NOT recreate session when multi-engine session already has the correct engine slot', async () => {
+    let attachCalls = 0;
+    const deps = createDeps({
+      loadState: () => ({
+        sessions: {
+          '_bound_personal': {
+            cwd: '/Users/test/Agent_yaron',
+            engines: { codex: { id: 'existing-session-id', started: true, runtimeSessionObserved: true } },
+            last_active: Date.now(),
+          },
+        },
+      }),
+      attachOrCreateSession: () => { attachCalls++; },
+      getDefaultEngine: () => 'claude',
+    });
+    const { handleCommand } = createCommandRouter(deps);
+    const sent = [];
+    const config = createConfig({
+      feishu: { chat_agent_map: { 'oc_test123': 'personal' } },
+      projects: { personal: { cwd: '/Users/test/Agent_yaron', engine: 'codex', name: '小美' } },
+    });
+
+    await handleCommand(createBot(sent), 'oc_test123', '你好', config, null, 'user-1', false);
+    assert.equal(attachCalls, 0, 'should NOT call attachOrCreateSession when session already has codex engine slot');
+  });
+
+  it('should recreate session when multi-engine session is missing the required engine slot', async () => {
+    let attachCalls = 0;
+    const deps = createDeps({
+      loadState: () => ({
+        sessions: {
+          '_bound_personal': {
+            cwd: '/Users/test/Agent_yaron',
+            engines: { claude: { id: 'claude-session-id', started: true } },
+            last_active: Date.now(),
+          },
+        },
+      }),
+      attachOrCreateSession: () => { attachCalls++; },
+      getDefaultEngine: () => 'claude',
+    });
+    const { handleCommand } = createCommandRouter(deps);
+    const sent = [];
+    const config = createConfig({
+      feishu: { chat_agent_map: { 'oc_test123': 'personal' } },
+      projects: { personal: { cwd: '/Users/test/Agent_yaron', engine: 'codex', name: '小美' } },
+    });
+
+    await handleCommand(createBot(sent), 'oc_test123', '你好', config, null, 'user-1', false);
+    assert.equal(attachCalls, 1, 'should call attachOrCreateSession when codex slot is missing');
+  });
+
+  it('should recreate session when cwd changed', async () => {
+    let attachCalls = 0;
+    const deps = createDeps({
+      loadState: () => ({
+        sessions: {
+          '_bound_personal': {
+            cwd: '/Users/test/OLD_DIR',
+            engines: { codex: { id: 'old-session', started: true } },
+            last_active: Date.now(),
+          },
+        },
+      }),
+      attachOrCreateSession: () => { attachCalls++; },
+      getDefaultEngine: () => 'claude',
+    });
+    const { handleCommand } = createCommandRouter(deps);
+    const sent = [];
+    const config = createConfig({
+      feishu: { chat_agent_map: { 'oc_test123': 'personal' } },
+      projects: { personal: { cwd: '/Users/test/NEW_DIR', engine: 'codex', name: '小美' } },
+    });
+
+    await handleCommand(createBot(sent), 'oc_test123', '你好', config, null, 'user-1', false);
+    assert.equal(attachCalls, 1, 'should call attachOrCreateSession when cwd changed');
+  });
+
+  it('should handle legacy flat session format gracefully', async () => {
+    let attachCalls = 0;
+    const deps = createDeps({
+      loadState: () => ({
+        sessions: {
+          '_bound_personal': {
+            cwd: '/Users/test/Agent_yaron',
+            engine: 'codex',
+            id: 'legacy-session-id',
+            started: true,
+          },
+        },
+      }),
+      attachOrCreateSession: () => { attachCalls++; },
+      getDefaultEngine: () => 'claude',
+    });
+    const { handleCommand } = createCommandRouter(deps);
+    const sent = [];
+    const config = createConfig({
+      feishu: { chat_agent_map: { 'oc_test123': 'personal' } },
+      projects: { personal: { cwd: '/Users/test/Agent_yaron', engine: 'codex', name: '小美' } },
+    });
+
+    await handleCommand(createBot(sent), 'oc_test123', '你好', config, null, 'user-1', false);
+    assert.equal(attachCalls, 0, 'should NOT recreate session when legacy format engine matches');
+  });
+});

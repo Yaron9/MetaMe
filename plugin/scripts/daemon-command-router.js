@@ -289,6 +289,8 @@ function createCommandRouter(deps) {
     const map = {
       ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}),
       ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}),
+      ...(cfg.imessage ? cfg.imessage.chat_agent_map : {}),
+      ...(cfg.siri_bridge ? cfg.siri_bridge.chat_agent_map : {}),
     };
     const key = map[String(chatId)];
     const proj = key && cfg.projects ? cfg.projects[key] : null;
@@ -656,7 +658,12 @@ function createCommandRouter(deps) {
     // --- chat_agent_map: auto-switch agent based on dedicated chatId ---
     // Configure in daemon.yaml: feishu.chat_agent_map or telegram.chat_agent_map
     //   e.g.  chat_agent_map: { "oc_xxx": "personal", "oc_yyy": "metame" }
-    const chatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
+    const chatAgentMap = {
+      ...(config.telegram ? config.telegram.chat_agent_map : {}),
+      ...(config.feishu ? config.feishu.chat_agent_map : {}),
+      ...(config.imessage ? config.imessage.chat_agent_map : {}),
+      ...(config.siri_bridge ? config.siri_bridge.chat_agent_map : {}),
+    };
     const _chatIdStr = String(chatId);
     const mappedKey = chatAgentMap[_chatIdStr] ||
       projectKeyFromVirtualChatId(_chatIdStr);
@@ -665,9 +672,13 @@ function createCommandRouter(deps) {
       const projCwd = normalizeCwd(proj.cwd);
       const sessionChatId = buildSessionChatId(chatId, mappedKey);
       const cur = loadState().sessions?.[sessionChatId];
-      const curEngine = String((cur && cur.engine) || getDefaultEngine()).toLowerCase();
       const projEngine = String((proj && proj.engine) || getDefaultEngine()).toLowerCase();
-      if (!cur || cur.cwd !== projCwd || curEngine !== projEngine) {
+      // Multi-engine format stores engines in cur.engines object; legacy format uses cur.engine string.
+      // Check whether the session already has a slot for the project's configured engine.
+      const curHasEngine = cur && (
+        cur.engines ? !!cur.engines[projEngine] : String(cur.engine || '').toLowerCase() === projEngine
+      );
+      if (!cur || cur.cwd !== projCwd || !curHasEngine) {
         attachOrCreateSession(sessionChatId, projCwd, proj.name || mappedKey, proj.engine || getDefaultEngine());
       }
     }
@@ -809,7 +820,12 @@ function createCommandRouter(deps) {
       return;
     }
     // Strict mode: chats with a fixed agent in chat_agent_map must not cross-dispatch
-    const _strictChatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
+    const _strictChatAgentMap = {
+      ...(config.telegram ? config.telegram.chat_agent_map : {}),
+      ...(config.feishu ? config.feishu.chat_agent_map : {}),
+      ...(config.imessage ? config.imessage.chat_agent_map : {}),
+      ...(config.siri_bridge ? config.siri_bridge.chat_agent_map : {}),
+    };
     const _isStrictChat = !!(_strictChatAgentMap[String(chatId)] || projectKeyFromVirtualChatId(String(chatId)));
 
     // Nickname-only switch: bypass cooldown + budget (no Claude call)

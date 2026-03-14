@@ -155,7 +155,6 @@ const { createNotifier } = require('./daemon-notify');
 const { createClaudeEngine } = require('./daemon-claude-engine');
 const { createEngineRuntimeFactory, detectDefaultEngine, resolveEngineModel, ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
 const { createCommandRouter } = require('./daemon-command-router');
-const { startSiriImessageServer } = require('./daemon-siri-imessage');
 const { createTaskScheduler } = require('./daemon-task-scheduler');
 const { createAgentTools } = require('./daemon-agent-tools');
 if (!yaml) {
@@ -2481,7 +2480,7 @@ setDispatchHandler(handleCommand);
 // ---------------------------------------------------------
 // BOT BRIDGES
 // ---------------------------------------------------------
-const { startTelegramBridge, startFeishuBridge } = createBridgeStarter({
+const { startTelegramBridge, startFeishuBridge, startImessageBridge, startSiriBridge } = createBridgeStarter({
   fs,
   path,
   HOME,
@@ -2616,7 +2615,7 @@ async function main() {
   }
 
   // Config validation: warn on unknown/suspect fields
-  const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'heartbeat', 'budget', 'projects', 'siri_imessage'];
+  const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'heartbeat', 'budget', 'projects', 'imessage', 'siri_bridge'];
   const KNOWN_DAEMON = [
     'model',          // legacy (still valid as fallback)
     'models',         // per-engine model map: { claude, codex }
@@ -2804,7 +2803,8 @@ async function main() {
   // Start bridges (both can run simultaneously)
   telegramBridge = await startTelegramBridge(config, executeTaskByName);
   feishuBridge = await startFeishuBridge(config, executeTaskByName);
-  startSiriImessageServer(config, { log, sockPath: SOCK_PATH });
+  await startImessageBridge(config, executeTaskByName);
+  await startSiriBridge(config, executeTaskByName);
   if (feishuBridge) _dispatchBridgeRef = feishuBridge; // store bridge, not bot, so .bot stays live after reconnects
 
   // Notify once on startup (single message, no duplicates)
