@@ -147,7 +147,7 @@ const { createSessionCommandHandler } = require('./daemon-session-commands');
 const { createSessionStore } = require('./daemon-session-store');
 const { createCheckpointUtils } = require('./daemon-checkpoints');
 const { createBridgeStarter } = require('./daemon-bridges');
-const { buildTeamRosterHint, buildEnrichedPrompt, resolveDispatchActor, updateDispatchContextFiles } = require('./team-dispatch');
+const { buildTeamRosterHint, buildEnrichedPrompt, resolveDispatchActor, updateDispatchContextFiles } = require('./daemon-team-dispatch');
 const { createFileBrowser } = require('./daemon-file-browser');
 const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lifecycle');
 const { repairAgentLayer } = require('./agent-layer');
@@ -2480,7 +2480,7 @@ setDispatchHandler(handleCommand);
 // ---------------------------------------------------------
 // BOT BRIDGES
 // ---------------------------------------------------------
-const { startTelegramBridge, startFeishuBridge } = createBridgeStarter({
+const { startTelegramBridge, startFeishuBridge, startImessageBridge, startSiriBridge } = createBridgeStarter({
   fs,
   path,
   HOME,
@@ -2615,7 +2615,7 @@ async function main() {
   }
 
   // Config validation: warn on unknown/suspect fields
-  const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'heartbeat', 'budget', 'projects'];
+  const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'heartbeat', 'budget', 'projects', 'imessage', 'siri_bridge'];
   const KNOWN_DAEMON = [
     'model',          // legacy (still valid as fallback)
     'models',         // per-engine model map: { claude, codex }
@@ -2803,6 +2803,8 @@ async function main() {
   // Start bridges (both can run simultaneously)
   telegramBridge = await startTelegramBridge(config, executeTaskByName);
   feishuBridge = await startFeishuBridge(config, executeTaskByName);
+  await startImessageBridge(config, executeTaskByName);
+  await startSiriBridge(config, executeTaskByName);
   if (feishuBridge) _dispatchBridgeRef = feishuBridge; // store bridge, not bot, so .bot stays live after reconnects
 
   // Notify once on startup (single message, no duplicates)

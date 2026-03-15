@@ -16,7 +16,7 @@ const crypto = require('crypto');
 const os = require('os');
 const { socketPath } = require('../platform');
 const yaml = require('../resolve-yaml');
-const { buildEnrichedPrompt, buildTeamRosterHint } = require('../team-dispatch');
+const { buildEnrichedPrompt, buildTeamRosterHint } = require('../daemon-team-dispatch');
 const {
   parseRemoteTargetRef,
   normalizeRemoteDispatchConfig,

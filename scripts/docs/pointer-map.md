@@ -64,7 +64,7 @@
 ## 团队 Dispatch 与跨设备通信定位
 
 - 共享 Dispatch 工具：
-  - `scripts/team-dispatch.js`
+  - `scripts/daemon-team-dispatch.js`
   - 关键点：`resolveProjectKey()` 名称/昵称解析（含 team member `parent/member` 复合键）；
     `findTeamMember()` 文本前缀匹配团队成员昵称；
     `buildTeamRosterHint()` 生成团队上下文块（远端成员自动带 `peer:key` 前缀）；
@@ -156,7 +156,7 @@
 1. 先看配置：`~/.metame/daemon.yaml` 与 `scripts/daemon-default.yaml`
 2. 再看命令入口：`scripts/daemon-admin-commands.js`、`scripts/daemon-command-router.js`、`scripts/daemon-exec-commands.js`
 3. 再看执行链路：`scripts/daemon-engine-runtime.js` → `scripts/daemon-claude-engine.js` → `scripts/mentor-engine.js`
-4. 团队/跨设备：`scripts/team-dispatch.js` → `scripts/daemon-remote-dispatch.js` → `scripts/daemon-bridges.js`
+4. 团队/跨设备：`scripts/daemon-team-dispatch.js` → `scripts/daemon-remote-dispatch.js` → `scripts/daemon-bridges.js`
 5. 最后看离线任务：`scripts/distill.js`、`scripts/memory-extract.js`、`scripts/memory-nightly-reflect.js`
 
 ## 同步提示

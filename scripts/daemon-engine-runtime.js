@@ -345,8 +345,8 @@ function buildCodexArgs(options = {}) {
     // Keep the legacy shortcut for the fully-trusted mobile/default path.
     args.push('--dangerously-bypass-approvals-and-sandbox');
   } else {
+    // codex 0.114.0 removed --ask-for-approval; only -s <sandboxMode> is needed
     args.push('-s', effectivePermissionProfile.sandboxMode);
-    args.push('--ask-for-approval', effectivePermissionProfile.approvalPolicy);
   }
 
   // "-" means prompt is read from stdin.

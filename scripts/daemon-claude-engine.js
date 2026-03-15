@@ -1173,7 +1173,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     let _lastStatusCardContent = null; // tracks last clean text written to card (for final-reply dedup)
     // Early detect bound project for branded ack card (team members / dispatch agents)
     const _ackChatIdStr = String(chatId);
-    const _ackAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map || {} : {}), ...(config.feishu ? config.feishu.chat_agent_map || {} : {}) };
+    const _ackAgentMap = {
+      ...(config.telegram ? config.telegram.chat_agent_map || {} : {}),
+      ...(config.feishu ? config.feishu.chat_agent_map || {} : {}),
+      ...(config.imessage ? config.imessage.chat_agent_map || {} : {}),
+    };
     const _ackBoundKey = _ackAgentMap[_ackChatIdStr] || projectKeyFromVirtualChatId(_ackChatIdStr);
     const _ackBoundProj = _ackBoundKey && config.projects ? config.projects[_ackBoundKey] : null;
     // _ackCardHeader: non-null for agents with icon/name (team members, dispatch); passed to editMessage to preserve header on streaming edits
@@ -1183,12 +1187,14 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     // Fire-and-forget: don't await Telegram RTT before spawning the engine process.
     // statusMsgId will be populated well before the first model output (~5s for codex).
     // For branded agents: send a card with header so streaming edits preserve the agent identity.
-    const _ackFn = (_ackCardHeader && bot.sendCard)
-      ? () => bot.sendCard(chatId, { title: _ackCardHeader.title, body: '🤔', color: _ackCardHeader.color })
-      : () => (bot.sendMarkdown ? bot.sendMarkdown(chatId, '🤔') : bot.sendMessage(chatId, '🤔'));
-    _ackFn()
-      .then(msg => { if (msg && msg.message_id) statusMsgId = msg.message_id; })
-      .catch(e => log('ERROR', `Failed to send ack to ${chatId}: ${e.message}`));
+    if (!bot.suppressAck) {
+      const _ackFn = (_ackCardHeader && bot.sendCard)
+        ? () => bot.sendCard(chatId, { title: _ackCardHeader.title, body: '🤔', color: _ackCardHeader.color })
+        : () => (bot.sendMarkdown ? bot.sendMarkdown(chatId, '🤔') : bot.sendMessage(chatId, '🤔'));
+      _ackFn()
+        .then(msg => { if (msg && msg.message_id) statusMsgId = msg.message_id; })
+        .catch(e => log('ERROR', `Failed to send ack to ${chatId}: ${e.message}`));
+    }
     bot.sendTyping(chatId).catch(() => { });
     const typingTimer = setInterval(() => {
       bot.sendTyping(chatId).catch(() => { });
@@ -1201,7 +1207,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       // Agent nickname routing: "贾维斯" / "小美，帮我..." → switch project session
       // Strict chats (chat_agent_map bound groups) must NOT switch agents via nickname
-      const _strictAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
+      const _strictAgentMap = {
+        ...(config.telegram ? config.telegram.chat_agent_map : {}),
+        ...(config.feishu ? config.feishu.chat_agent_map : {}),
+        ...(config.imessage ? config.imessage.chat_agent_map : {}),
+      };
       const _isStrictChatSession = !!(_strictAgentMap[String(chatId)] || projectKeyFromVirtualChatId(String(chatId)));
       const agentMatch = _isStrictChatSession ? null : routeAgent(prompt, config);
       if (agentMatch) {
@@ -1223,7 +1233,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       // BUT: skip skill routing if agent addressed by nickname OR chat already has an active session
       // (active conversation should never be hijacked by keyword-based skill matching)
       const chatIdStr = String(chatId);
-      const chatAgentMap = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
+      const chatAgentMap = {
+        ...(config.telegram ? config.telegram.chat_agent_map : {}),
+        ...(config.feishu ? config.feishu.chat_agent_map : {}),
+        ...(config.imessage ? config.imessage.chat_agent_map : {}),
+      };
       const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
       const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
       const daemonCfg = (config && config.daemon) || {};
@@ -1398,7 +1412,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
 
       // projectKey must be declared outside the try block so the daemonHint template below can reference it.
       const _cid0 = String(chatId);
-      const _agentMap0 = { ...(config.telegram ? config.telegram.chat_agent_map : {}), ...(config.feishu ? config.feishu.chat_agent_map : {}) };
+      const _agentMap0 = {
+        ...(config.telegram ? config.telegram.chat_agent_map : {}),
+        ...(config.feishu ? config.feishu.chat_agent_map : {}),
+        ...(config.imessage ? config.imessage.chat_agent_map : {}),
+      };
       const projectKey = _agentMap0[_cid0] || projectKeyFromVirtualChatId(_cid0);
       try {
         const memory = require('./memory');
@@ -2047,6 +2065,11 @@ ${mentorRadarHint}
         let replyMsg;
         try {
           log('DEBUG', `[REPLY:${chatId}] statusMsgId=${statusMsgId} editFailed=${editFailed} activeProject=${activeProject && activeProject.name} lastCard=${_lastStatusCardContent ? _lastStatusCardContent.slice(0, 40) : 'null'}`);
+
+          // siri_ask: write full response to temp file for any dispatch-triggered reply
+          if (chatId && chatId.startsWith('_agent_') && cleanOutput) {
+            try { require('fs').writeFileSync('/tmp/siri_response.txt', cleanOutput); } catch {}
+          }
 
           // Strategy: always try to update the status card first (avoids sending a new card
           // while the old 🤔 card lingers, which would produce two messages).

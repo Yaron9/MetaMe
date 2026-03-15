@@ -9,7 +9,7 @@ const {
   buildEnrichedPrompt,
   resolveDispatchActor,
   updateDispatchContextFiles,
-} = require('./team-dispatch');
+} = require('./daemon-team-dispatch');
 
 describe('team-dispatch scoped context', () => {
   it('prefers target-private now file and excludes shared context by default', () => {

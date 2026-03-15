@@ -49,3 +49,21 @@ eslint.config.js
 __pycache__/
 *.pyc
 AGENTS.md
+
+# Local presentation and agent notes
+agents/bing/
+agents/jia/
+agents/yi/
+slides/
+metame_business_scene.png
+metame_zhongguancun_talk_notes.md
+中关村分享Slides提示词.md
+中关村分享_MetaMe_v1.pptx
+中关村分享_MetaMe总特征页.pptx
+中关村分享_亮点三_skill自我演化.pptx
+中关村分享_结尾更新页.pptx
+中关村分享_逐页讲稿.md
+中关村分享_逐页讲稿_直奔主题版.md
+中关村分享提纲_讨论版.md
+中关村分享演讲稿_15分钟.md
+中关村演讲稿_数智孪生.md

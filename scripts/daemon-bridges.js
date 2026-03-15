@@ -2,8 +2,10 @@
 
 let userAcl = null;
 try { userAcl = require('./daemon-user-acl'); } catch { /* optional */ }
-const { findTeamMember: _findTeamMember } = require('./team-dispatch');
+const { findTeamMember: _findTeamMember } = require('./daemon-team-dispatch');
 const { isRemoteMember } = require('./daemon-remote-dispatch');
+const imessageIO = (() => { try { return require('./daemon-siri-imessage'); } catch { return null; } })();
+const siriBridgeMod = (() => { try { return require('./daemon-siri-bridge'); } catch { return null; } })();
 
 function createBridgeStarter(deps) {
   const {
@@ -153,14 +155,15 @@ function createBridgeStarter(deps) {
   // ── Team group helpers ─────────────────────────────────────────────────
   function _getBoundProject(chatId, cfg) {
     const map = {
-      ...(cfg.telegram ? cfg.telegram.chat_agent_map || {} : {}),
-      ...(cfg.feishu ? cfg.feishu.chat_agent_map || {} : {}),
+      ...(cfg.telegram  ? cfg.telegram.chat_agent_map  || {} : {}),
+      ...(cfg.feishu    ? cfg.feishu.chat_agent_map    || {} : {}),
+      ...(cfg.imessage  ? cfg.imessage.chat_agent_map  || {} : {}),
     };
     const key = map[String(chatId)];
     const proj = key && cfg.projects ? cfg.projects[key] : null;
     return { key: key || null, project: proj || null };
   }
-  // _findTeamMember is imported from team-dispatch.js (shared with admin-commands)
+  // _findTeamMember is imported from daemon-team-dispatch.js (shared with admin-commands)
 
   // Creates a bot proxy that redirects all send methods to replyChatId
   function _createTeamProxyBot(bot, replyChatId) {
@@ -905,7 +908,227 @@ function createBridgeStarter(deps) {
     }
   }
 
-  return { startTelegramBridge, startFeishuBridge };
+  // ── iMessage Bridge ─────────────────────────────────────────────────────────
+  async function startImessageBridge(config, executeTaskByName) {
+    const cfg = config.imessage || {};
+    if (!cfg.enabled) return null;
+    if (!imessageIO) { log('WARN', '[IMESSAGE] daemon-siri-imessage module not found'); return null; }
+    if (!imessageIO.isAvailable()) { log('WARN', '[IMESSAGE] chat.db not found — bridge disabled'); return null; }
+
+    const selfId = cfg.self_id || '';
+    const allowedSenders = cfg.allowed_senders || (selfId ? [selfId] : []);
+    const allowedChats = cfg.allowed_chat_ids || [];
+    const pollMs = cfg.poll_ms || 2000;
+
+    if (!selfId) { log('WARN', '[IMESSAGE] self_id not configured — bridge disabled'); return null; }
+
+    let lastRowId  = imessageIO.getMaxRowId();
+    let processing = false;
+    let running    = true;
+
+    // Per-chat persistent bot instances (preserve state across polls)
+    const chatBots = new Map();
+    const getBot = (chatTarget) => {
+      if (!chatBots.has(chatTarget)) {
+        const bot = imessageIO.createImessageBot(chatTarget, log);
+        // After bot sends a reply, advance lastRowId immediately + again after delay
+        if (bot.setOnAfterSend) {
+          bot.setOnAfterSend(() => {
+            // Immediate advance — covers fast echo
+            const freshNow = imessageIO.getMaxRowId();
+            if (freshNow > lastRowId) {
+              log('INFO', `[IMESSAGE] Advanced lastRowId ${lastRowId}→${freshNow} (echo skip immediate)`);
+              lastRowId = freshNow;
+            }
+            // Delayed advance — covers slow iCloud sync echo
+            setTimeout(() => {
+              const freshLater = imessageIO.getMaxRowId();
+              if (freshLater > lastRowId) {
+                log('INFO', `[IMESSAGE] Advanced lastRowId ${lastRowId}→${freshLater} (echo skip delayed)`);
+                lastRowId = freshLater;
+              }
+            }, 3000);
+          });
+        }
+        chatBots.set(chatTarget, bot);
+      }
+      return chatBots.get(chatTarget);
+    };
+
+    log('INFO', `[IMESSAGE] Bridge started (poll=${pollMs}ms, self=${selfId}, lastRowId=${lastRowId})`);
+
+    const timer = setInterval(async () => {
+      if (!running || processing) return;
+      processing = true;
+      try {
+        const rows = imessageIO.queryNewMessages(lastRowId);
+        if (!rows) { processing = false; return; }
+
+        for (const row of rows.split('\n').filter(Boolean)) {
+          const parts = row.split('\t');
+          const rowId = parseInt(parts[0], 10);
+          const text = (parts[1] || '').trim();
+          const sender = (parts[2] || '').trim();
+          const chatGuid = (parts[3] || '').trim();
+          const chatIdentifier = (parts[4] || '').trim();
+          const chatName = (parts[5] || '').trim();
+          const chatTarget = chatGuid || chatIdentifier || sender;
+
+          if (!rowId || rowId <= lastRowId) continue;
+          lastRowId = rowId;
+          if (!text) continue;
+          if (!chatTarget) continue;
+
+          if (allowedSenders.length && !allowedSenders.includes(sender)) {
+            log('INFO', `[IMESSAGE] Ignored message from ${sender} (not in allowed_senders)`);
+            continue;
+          }
+          if (allowedChats.length && !allowedChats.includes(chatTarget) && !allowedChats.includes(chatIdentifier)) {
+            log('INFO', `[IMESSAGE] Ignored chat ${chatTarget} (${chatName || sender || 'unknown'}) not in allowed_chat_ids`);
+            continue;
+          }
+
+          const chatId = chatTarget;
+          const liveCfg = loadConfig();
+          const bot = getBot(chatTarget);
+
+          // Echo fingerprint check — skip if this text matches something we recently sent
+          if (bot.isEcho && bot.isEcho(text)) {
+            log('INFO', `[IMESSAGE] Skipped echo: "${text.slice(0, 40)}"`);
+            continue;
+          }
+
+          const trimmedText = text.trim();
+          let commandText = text;
+
+          log('INFO', `[IMESSAGE] Received chat=${chatTarget} sender=${sender || 'unknown'} name=${chatName || '-'}: "${text.slice(0, 60)}"`);
+
+          const acl = await applyUserAcl({
+            bot,
+            chatId,
+            text,
+            config: liveCfg,
+            senderId: sender,
+            bypassAcl: false,
+          });
+          if (acl.blocked) continue;
+
+          const { project: _boundProj } = _getBoundProject(chatId, liveCfg);
+          const _isTeamSlashCmd = trimmedText.startsWith('/') && !/^\/stop(\s|$)/i.test(trimmedText);
+          const _st = loadState();
+          const _chatKey = String(chatId);
+          const _setSticky = (key) => {
+            if (!_st.team_sticky) _st.team_sticky = {};
+            _st.team_sticky[_chatKey] = key;
+            saveState(_st);
+          };
+          const _clearSticky = () => {
+            if (_st.team_sticky) delete _st.team_sticky[_chatKey];
+            saveState(_st);
+          };
+          const _stickyKey = (_st.team_sticky || {})[_chatKey] || null;
+
+          if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0 && !_isTeamSlashCmd) {
+            const _stopMatch = trimmedText.match(/^\/stop(?:\s+(.+))?$/i);
+            if (_stopMatch) {
+              const _stopArg = (_stopMatch[1] || '').trim();
+              let _targetKey = null;
+              if (_stopArg) {
+                const _sa = _stopArg.toLowerCase();
+                const m = _boundProj.team.find(t =>
+                  (t.nicknames || []).some(n => n.toLowerCase() === _sa) || (t.name && t.name.toLowerCase() === _sa) || t.key === _sa
+                );
+                if (m) _targetKey = m.key;
+              }
+              if (!_targetKey && !_stopArg) _targetKey = _stickyKey;
+              if (_targetKey) {
+                const vid = `_agent_${_targetKey}`;
+                const member = _boundProj.team.find(t => t.key === _targetKey);
+                const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
+                if (messageQueue.has(vid)) {
+                  const vq = messageQueue.get(vid);
+                  if (vq && vq.timer) clearTimeout(vq.timer);
+                  messageQueue.delete(vid);
+                }
+                const vproc = activeProcesses && activeProcesses.get(vid);
+                if (vproc && vproc.child) {
+                  vproc.aborted = true;
+                  const sig = vproc.killSignal || 'SIGTERM';
+                  try { process.kill(-vproc.child.pid, sig); } catch { try { vproc.child.kill(sig); } catch { /* */ } }
+                  await bot.sendMessage(chatId, `Stopping ${label}...`);
+                } else {
+                  await bot.sendMessage(chatId, `${label} 当前没有活跃任务`);
+                }
+                continue;
+              }
+              if (_stopArg) {
+                await bot.sendMessage(chatId, `未找到团队成员: ${_stopArg}`);
+                continue;
+              }
+            }
+
+            const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
+            if (teamMatch) {
+              const { member, rest } = teamMatch;
+              _setSticky(member.key);
+              if (!rest) {
+                await bot.sendMessage(chatId, `${member.icon || '🤖'} ${member.name} 在线`);
+                continue;
+              }
+              log('INFO', `[IMESSAGE] Team route ${chatId} -> ${member.key}`);
+              _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, chatId, executeTaskByName, acl);
+              continue;
+            }
+
+            const _mainNicks = Array.isArray(_boundProj.nicknames) ? _boundProj.nicknames : [];
+            const _trimLower = trimmedText.toLowerCase();
+            const _mainMatch = _mainNicks.find(n =>
+              _trimLower === n.toLowerCase()
+              || _trimLower.startsWith(n.toLowerCase() + ' ')
+              || _trimLower.startsWith(n.toLowerCase() + '，')
+              || _trimLower.startsWith(n.toLowerCase() + ',')
+            );
+            if (_mainMatch) {
+              _clearSticky();
+              const rest = trimmedText.slice(_mainMatch.length).replace(/^[\s,，:：]+/, '');
+              if (!rest) {
+                await bot.sendMessage(chatId, `${_boundProj.icon || '🤖'} ${_boundProj.name || 'Agent'} 在线`);
+                continue;
+              }
+              commandText = rest;
+            } else if (_stickyKey) {
+              const member = _boundProj.team.find(m => m.key === _stickyKey);
+              if (member) {
+                log('INFO', `[IMESSAGE] Sticky route ${chatId} -> ${member.key}`);
+                _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+                continue;
+              }
+            }
+          }
+
+          handleCommand(bot, chatId, commandText, liveCfg, executeTaskByName, sender, false)
+            .catch(e => log('ERROR', `[IMESSAGE] handleCommand error: ${e.message}`));
+        }
+      } catch (e) {
+        log('WARN', `[IMESSAGE] poll error: ${e.message}`);
+      }
+      processing = false;
+    }, pollMs);
+
+    return {
+      stop: () => { running = false; clearInterval(timer); },
+      bot: imessageIO.createImessageBot(selfId, log),
+    };
+  }
+
+  // ── Siri HTTP Bridge ────────────────────────────────────────────────────────
+  function startSiriBridge(config, executeTaskByName) {
+    if (!siriBridgeMod) { log('WARN', '[SIRI] daemon-siri-bridge module not found'); return null; }
+    const bridge = siriBridgeMod.createSiriBridge({ log, loadConfig, handleCommand });
+    return bridge.startSiriBridge(config, executeTaskByName);
+  }
+
+  return { startTelegramBridge, startFeishuBridge, startImessageBridge, startSiriBridge };
 }
 
 module.exports = { createBridgeStarter };

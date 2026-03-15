@@ -147,7 +147,7 @@ feishu:
 - ENGINE_MODEL_CONFIG（daemon-engine-runtime.js 集中管理）
 - daemon-runtime-lifecycle.js 的语法检查和备份机制
 - daemon-remote-dispatch.js（纯逻辑，无平台差异）
-- team-dispatch.js（共享解析/hint/enrichment）
+- daemon-team-dispatch.js（共享解析/hint/enrichment）
 
 ### 需分别维护（有平台/引擎特殊分支）
 
@@ -345,7 +345,7 @@ Claude 看到 hook 注入:
 | `daemon-bridges.js` | Feishu bridge 拦截 relay 群消息 + `_dispatchToTeamMember` 远端分流 |
 | `daemon-admin-commands.js` | `/dispatch peers` 查看配置 + `/dispatch to peer:project` 手动派发 |
 | `scripts/bin/dispatch_to` | 支持 `peer:project` 格式 → 写 `remote-pending.jsonl` |
-| `team-dispatch.js` | `buildTeamRosterHint()` 为远端成员生成 `peer:key` 格式命令 |
+| `daemon-team-dispatch.js` | `buildTeamRosterHint()` 为远端成员生成 `peer:key` 格式命令 |
 | `hooks/team-context.js` | intent hook 注入远端 `peer:key` dispatch 命令 |
 
 ### 管理命令

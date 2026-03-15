@@ -7,7 +7,7 @@ const {
 } = require('./usage-classifier');
 const { IS_WIN } = require('./platform');
 const { ENGINE_MODEL_CONFIG, resolveEngineModel } = require('./daemon-engine-runtime');
-const { resolveProjectKey: _resolveProjectKey } = require('./team-dispatch');
+const { resolveProjectKey: _resolveProjectKey } = require('./daemon-team-dispatch');
 const {
   parseRemoteTargetRef,
   getRemoteDispatchStatus,
@@ -47,7 +47,7 @@ function createAdminCommandHandler(deps) {
     getDistillModel = () => 'haiku',
   } = deps;
 
-  // resolveProjectKey: imported from team-dispatch.js (shared with dispatch_to and daemon.js)
+  // resolveProjectKey: imported from daemon-team-dispatch.js (shared with dispatch_to and daemon.js)
   const resolveProjectKey = _resolveProjectKey;
 
   /**
