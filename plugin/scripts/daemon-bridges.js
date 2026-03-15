@@ -2,7 +2,7 @@
 
 let userAcl = null;
 try { userAcl = require('./daemon-user-acl'); } catch { /* optional */ }
-const { findTeamMember: _findTeamMember } = require('./team-dispatch');
+const { findTeamMember: _findTeamMember } = require('./daemon-team-dispatch');
 const { isRemoteMember } = require('./daemon-remote-dispatch');
 const imessageIO = (() => { try { return require('./daemon-siri-imessage'); } catch { return null; } })();
 const siriBridgeMod = (() => { try { return require('./daemon-siri-bridge'); } catch { return null; } })();
@@ -163,7 +163,7 @@ function createBridgeStarter(deps) {
     const proj = key && cfg.projects ? cfg.projects[key] : null;
     return { key: key || null, project: proj || null };
   }
-  // _findTeamMember is imported from team-dispatch.js (shared with admin-commands)
+  // _findTeamMember is imported from daemon-team-dispatch.js (shared with admin-commands)
 
   // Creates a bot proxy that redirects all send methods to replyChatId
   function _createTeamProxyBot(bot, replyChatId) {

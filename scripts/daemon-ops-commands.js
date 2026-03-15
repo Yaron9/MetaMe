@@ -86,7 +86,12 @@ function createOpsCommandHandler(deps) {
           let diffFiles = '';
           const _wh = process.platform === 'win32' ? { windowsHide: true } : {};
           try { diffFiles = execSync(`git diff --name-only HEAD ${match.hash}`, { cwd, encoding: 'utf8', timeout: 5000, ..._wh }).trim(); } catch { }
-          execSync(`git reset --hard ${match.hash}`, { cwd, stdio: 'ignore', timeout: 10000, ..._wh });
+          // Reset HEAD to checkpoint's parent (removes any commits Claude made)
+          if (match.parentHash) {
+            execSync(`git reset --hard ${match.parentHash}`, { cwd, stdio: 'ignore', timeout: 10000, ..._wh });
+          }
+          // Restore working tree to exact checkpoint state (recovers pre-Claude uncommitted changes)
+          execSync(`git checkout ${match.hash} -- .`, { cwd, stdio: 'ignore', timeout: 10000, ..._wh });
           // Truncate context to checkpoint time (covers multi-turn rollback)
           truncateSessionToCheckpoint(session.id, match.message);
           const fileList = diffFiles ? diffFiles.split('\n').map(f => path.basename(f)).join(', ') : '';
@@ -226,9 +231,12 @@ function createOpsCommandHandler(deps) {
               const _wh2 = process.platform === 'win32' ? { windowsHide: true } : {};
               try { diffFiles2 = execSync(`git diff --name-only HEAD ${cpMatch.hash}`, { cwd: cwd2, encoding: 'utf8', timeout: 5000, ..._wh2 }).trim(); } catch { }
               if (diffFiles2) {
-                // Save current state with distinct prefix (excluded from normal /undo list)
+                // Save current state before rollback (excluded from normal /undo list)
                 gitCheckpoint(cwd2, '[metame-safety] before rollback');
-                execSync(`git reset --hard ${cpMatch.hash}`, { cwd: cwd2, stdio: 'ignore', timeout: 10000, ..._wh2 });
+                if (cpMatch.parentHash) {
+                  execSync(`git reset --hard ${cpMatch.parentHash}`, { cwd: cwd2, stdio: 'ignore', timeout: 10000, ..._wh2 });
+                }
+                execSync(`git checkout ${cpMatch.hash} -- .`, { cwd: cwd2, stdio: 'ignore', timeout: 10000, ..._wh2 });
                 gitMsg2 = `\n📁 ${diffFiles2.split('\n').length} 个文件已恢复`;
                 cleanupCheckpoints(cwd2);
               }

@@ -6,6 +6,7 @@ function createCheckpointUtils(deps) {
   const execFileAsync = execFile ? promisify(execFile) : null;
 
   const CHECKPOINT_PREFIX = '[metame-checkpoint]';
+  const CHECKPOINT_REF_PREFIX = 'refs/metame/checkpoints/';
   const MAX_CHECKPOINTS = 20;
 
   function cpExtractTimestamp(message) {
@@ -40,68 +41,125 @@ function createCheckpointUtils(deps) {
   // On Windows, git.exe is a console app — windowsHide:true prevents flash
   const WIN_HIDE = process.platform === 'win32' ? { windowsHide: true } : {};
 
+  // Build a checkpoint commit stored under refs/metame/checkpoints/{ts} — never pushed by git push.
+  // Returns the commit SHA, or null if nothing changed.
   function gitCheckpoint(cwd, label) {
     try {
       execSync('git rev-parse --is-inside-work-tree', { cwd, stdio: 'ignore', ...WIN_HIDE });
+
+      // Snapshot current index so we can restore it after staging
+      const originalTree = execSync('git write-tree', { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }).trim();
+
+      // Stage everything to get a full snapshot tree
       execSync('git add -A', { cwd, stdio: 'ignore', timeout: 5000, ...WIN_HIDE });
-      const status = execSync('git status --porcelain', { cwd, encoding: 'utf8', timeout: 5000, ...WIN_HIDE }).trim();
-      if (!status) return null;
+      const cpTree = execSync('git write-tree', { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }).trim();
+
+      // Restore index immediately — leave the user's staged state intact
+      execSync(`git read-tree ${originalTree}`, { cwd, stdio: 'ignore', timeout: 3000, ...WIN_HIDE });
+
+      // Compare against HEAD tree — skip if nothing changed
+      let headTree = '';
+      try { headTree = execSync('git rev-parse HEAD^{tree}', { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }).trim(); } catch { /* no commits yet */ }
+      if (cpTree === headTree) return null;
+
       const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
       const safeLabel = label
         ? ' Before: ' + label.replace(/["\n\r]/g, ' ').slice(0, 60).trim()
         : '';
       const msg = `${CHECKPOINT_PREFIX}${safeLabel} (${ts})`;
-      execSync(`git commit -m "${msg}" --no-verify`, { cwd, stdio: 'ignore', timeout: 10000, ...WIN_HIDE });
-      const hash = execSync('git rev-parse HEAD', { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }).trim();
-      log('INFO', `Git checkpoint: ${hash.slice(0, 8)} in ${path.basename(cwd)}${safeLabel}`);
-      return hash;
+
+      // Build parent arg (-p HEAD, or nothing for initial commit)
+      let parentFlag = '';
+      try { parentFlag = `-p ${execSync('git rev-parse HEAD', { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }).trim()}`; } catch { /* no HEAD */ }
+
+      // Create an orphaned commit object — NOT on any branch
+      const cpSha = execSync(
+        `git commit-tree ${cpTree} ${parentFlag} -m "${msg}"`,
+        { cwd, encoding: 'utf8', timeout: 10000, ...WIN_HIDE }
+      ).trim();
+
+      // Point a local-only ref at it — git push never transfers refs/metame/*
+      execSync(`git update-ref ${CHECKPOINT_REF_PREFIX}${ts} ${cpSha}`, { cwd, stdio: 'ignore', timeout: 3000, ...WIN_HIDE });
+
+      log('INFO', `Git checkpoint: ${cpSha.slice(0, 8)} in ${path.basename(cwd)}${safeLabel}`);
+      return cpSha;
     } catch {
       return null;
     }
   }
 
-  // Async version: runs git commands without blocking the event loop.
-  // Call fire-and-forget before spawning Claude; completes well before Claude's first file write.
+  // Async version: same logic but non-blocking.
   async function gitCheckpointAsync(cwd, label) {
-    if (!execFileAsync) return gitCheckpoint(cwd, label); // fallback
+    if (!execFileAsync) return gitCheckpoint(cwd, label);
     try {
       await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd, timeout: 3000, ...WIN_HIDE });
+
+      const { stdout: originalTreeOut } = await execFileAsync('git', ['write-tree'], { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE });
+      const originalTree = originalTreeOut.trim();
+
       await execFileAsync('git', ['add', '-A'], { cwd, timeout: 5000, ...WIN_HIDE });
-      const { stdout: status } = await execFileAsync('git', ['status', '--porcelain'], { cwd, encoding: 'utf8', timeout: 5000, ...WIN_HIDE });
-      if (!status.trim()) return null;
+      const { stdout: cpTreeOut } = await execFileAsync('git', ['write-tree'], { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE });
+      const cpTree = cpTreeOut.trim();
+
+      // Restore index
+      await execFileAsync('git', ['read-tree', originalTree], { cwd, timeout: 3000, ...WIN_HIDE });
+
+      let headTree = '';
+      try { const r = await execFileAsync('git', ['rev-parse', 'HEAD^{tree}'], { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }); headTree = r.stdout.trim(); } catch { /* no HEAD */ }
+      if (cpTree === headTree) return null;
+
       const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
       const safeLabel = label
         ? ' Before: ' + label.replace(/["\n\r]/g, ' ').slice(0, 60).trim()
         : '';
       const msg = `${CHECKPOINT_PREFIX}${safeLabel} (${ts})`;
-      await execFileAsync('git', ['commit', '-m', msg, '--no-verify'], { cwd, timeout: 10000, ...WIN_HIDE });
-      const { stdout: hash } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE });
-      log('INFO', `Git checkpoint: ${hash.trim().slice(0, 8)} in ${path.basename(cwd)}${safeLabel}`);
-      return hash.trim();
+
+      let parentArgs = [];
+      try { const r = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }); parentArgs = ['-p', r.stdout.trim()]; } catch { /* no HEAD */ }
+
+      const { stdout: cpShaOut } = await execFileAsync('git', ['commit-tree', cpTree, ...parentArgs, '-m', msg], { cwd, encoding: 'utf8', timeout: 10000, ...WIN_HIDE });
+      const cpSha = cpShaOut.trim();
+
+      await execFileAsync('git', ['update-ref', `${CHECKPOINT_REF_PREFIX}${ts}`, cpSha], { cwd, timeout: 3000, ...WIN_HIDE });
+
+      log('INFO', `Git checkpoint: ${cpSha.slice(0, 8)} in ${path.basename(cwd)}${safeLabel}`);
+      return cpSha;
     } catch {
       return null;
     }
   }
 
+  // List checkpoints, newest first. Returns [{hash, message, ref, parentHash}].
   function listCheckpoints(cwd, limit = 20) {
     try {
       const raw = execSync(
-        `git log --fixed-strings --oneline --all --grep="${CHECKPOINT_PREFIX}" -n ${limit} --format="%H %s"`,
+        `git for-each-ref --sort=-committerdate --format="%(objectname) %(refname) %(contents:subject)" --count=${limit} ${CHECKPOINT_REF_PREFIX}`,
         { cwd, encoding: 'utf8', timeout: 5000, ...WIN_HIDE }
       ).trim();
       if (!raw) return [];
-      return raw.split('\n').map(line => {
-        const spaceIdx = line.indexOf(' ');
-        return { hash: line.slice(0, spaceIdx), message: line.slice(spaceIdx + 1) };
+      return raw.split('\n').filter(Boolean).map(line => {
+        const firstSpace = line.indexOf(' ');
+        const secondSpace = line.indexOf(' ', firstSpace + 1);
+        const hash = line.slice(0, firstSpace);
+        const ref = line.slice(firstSpace + 1, secondSpace);
+        const message = line.slice(secondSpace + 1);
+        let parentHash = null;
+        try { parentHash = execSync(`git rev-parse ${hash}^`, { cwd, encoding: 'utf8', stdio: 'pipe', timeout: 3000, ...WIN_HIDE }).trim(); } catch { /* initial commit */ }
+        return { hash, message, ref, parentHash };
       });
     } catch { return []; }
   }
 
+  // Delete checkpoints beyond MAX_CHECKPOINTS (oldest first).
   function cleanupCheckpoints(cwd) {
     try {
       const all = listCheckpoints(cwd, 100);
       if (all.length <= MAX_CHECKPOINTS) return;
-      log('INFO', `${all.length} checkpoints in ${path.basename(cwd)}, consider: git rebase -i`);
+      const toDelete = all.slice(MAX_CHECKPOINTS); // oldest (for-each-ref sorted newest-first)
+      for (const cp of toDelete) {
+        try { execSync(`git update-ref -d ${cp.ref}`, { cwd, stdio: 'ignore', timeout: 3000, ...WIN_HIDE }); } catch { /* ignore */ }
+      }
+      log('INFO', `Cleaned up ${toDelete.length} old checkpoints in ${path.basename(cwd)}`);
     } catch { /* ignore */ }
   }
 

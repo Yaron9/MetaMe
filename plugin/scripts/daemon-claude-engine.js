@@ -1685,7 +1685,8 @@ ${mentorRadarHint}
       const _isVirtualAgent = String(chatId).startsWith('_agent_') || String(chatId).startsWith('_scope_');
       if (!_isVirtualAgent) {
         try {
-          const checkpointResult = (gitCheckpointAsync || gitCheckpoint)(session.cwd, prompt);
+          // Do NOT pass prompt — conversation content must never enter git history
+          const checkpointResult = (gitCheckpointAsync || gitCheckpoint)(session.cwd);
           if (checkpointResult && typeof checkpointResult.catch === 'function') {
             checkpointResult.catch(() => { });
           }
