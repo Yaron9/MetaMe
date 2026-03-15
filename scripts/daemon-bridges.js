@@ -421,6 +421,19 @@ function createBridgeStarter(deps) {
                   ? `User uploaded a file to the project: ${destPath}\nUser says: "${caption}"`
                   : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
 
+                // Respect team_sticky: route to active agent same as text messages
+                const _stFile = loadState();
+                const _chatKeyFile = String(chatId);
+                const { project: _boundProjFile } = _getBoundProject(chatId, liveCfg);
+                const _stickyKeyFile = (_stFile.team_sticky || {})[_chatKeyFile];
+                if (_boundProjFile && Array.isArray(_boundProjFile.team) && _boundProjFile.team.length > 0 && _stickyKeyFile) {
+                  const _stickyMember = _boundProjFile.team.find(m => m.key === _stickyKeyFile);
+                  if (_stickyMember) {
+                    log('INFO', `Telegram file → sticky route to ${_stickyKeyFile}`);
+                    _dispatchToTeamMember(_stickyMember, _boundProjFile, prompt, liveCfg, bot, chatId, executeTaskByName, acl);
+                    continue;
+                  }
+                }
                 handleCommand(bot, chatId, prompt, liveCfg, executeTaskByName, acl.senderId, acl.readOnly).catch(e => {
                   log('ERROR', `Telegram file handler error: ${e.message}`);
                 });
@@ -701,6 +714,19 @@ function createBridgeStarter(deps) {
               ? `User uploaded a file to the project: ${destPath}\nUser says: "${text}"`
               : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
 
+            // Respect team_sticky: route to active agent same as text messages
+            const _stFile = loadState();
+            const _chatKeyFile = String(chatId);
+            const { project: _boundProjFile } = _getBoundProject(chatId, liveCfg);
+            const _stickyKeyFile = (_stFile.team_sticky || {})[_chatKeyFile];
+            if (_boundProjFile && Array.isArray(_boundProjFile.team) && _boundProjFile.team.length > 0 && _stickyKeyFile) {
+              const _stickyMember = _boundProjFile.team.find(m => m.key === _stickyKeyFile);
+              if (_stickyMember) {
+                log('INFO', `Feishu file → sticky route to ${_stickyKeyFile}`);
+                _dispatchToTeamMember(_stickyMember, _boundProjFile, prompt, liveCfg, bot, chatId, executeTaskByName, acl);
+                return;
+              }
+            }
             await handleCommand(bot, chatId, prompt, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
           } catch (err) {
             log('ERROR', `Feishu file download failed: ${err.message}`);
