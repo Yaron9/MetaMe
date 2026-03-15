@@ -227,7 +227,7 @@ function createOpsCommandHandler(deps) {
               try { diffFiles2 = execSync(`git diff --name-only HEAD ${cpMatch.hash}`, { cwd: cwd2, encoding: 'utf8', timeout: 5000, ..._wh2 }).trim(); } catch { }
               if (diffFiles2) {
                 // Save current state with distinct prefix (excluded from normal /undo list)
-                gitCheckpoint(cwd2, `[metame-safety] before rollback to: ${targetMsg.slice(0, 40)}`);
+                gitCheckpoint(cwd2, '[metame-safety] before rollback');
                 execSync(`git reset --hard ${cpMatch.hash}`, { cwd: cwd2, stdio: 'ignore', timeout: 10000, ..._wh2 });
                 gitMsg2 = `\n📁 ${diffFiles2.split('\n').length} 个文件已恢复`;
                 cleanupCheckpoints(cwd2);
