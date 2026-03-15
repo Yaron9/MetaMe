@@ -22,7 +22,10 @@ echo "[push] Fetching $upstream …"
 git fetch "$REMOTE" "$BRANCH" --quiet
 
 # ── 2. Collect ALL commits ahead of upstream (oldest first) ──────────────────
-mapfile -t all_commits < <(git log --reverse --format="%H" "$upstream"..HEAD 2>/dev/null)
+all_commits=()
+while IFS= read -r sha; do
+  [ -n "$sha" ] && all_commits+=("$sha")
+done < <(git log --reverse --format="%H" "$upstream"..HEAD 2>/dev/null)
 
 if [ ${#all_commits[@]} -eq 0 ]; then
   echo "[push] Nothing ahead of $upstream — already up to date."

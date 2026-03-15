@@ -41,6 +41,15 @@ function createCheckpointUtils(deps) {
   // On Windows, git.exe is a console app — windowsHide:true prevents flash
   const WIN_HIDE = process.platform === 'win32' ? { windowsHide: true } : {};
 
+  // Shared helper: build the commit message and timestamp for a checkpoint.
+  function buildCheckpointMsg(label) {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const safeLabel = label
+      ? ' Before: ' + label.replace(/["\n\r]/g, ' ').slice(0, 60).trim()
+      : '';
+    return { ts, safeLabel, msg: `${CHECKPOINT_PREFIX}${safeLabel} (${ts})` };
+  }
+
   // Build a checkpoint commit stored under refs/metame/checkpoints/{ts} — never pushed by git push.
   // Returns the commit SHA, or null if nothing changed.
   function gitCheckpoint(cwd, label) {
@@ -62,11 +71,7 @@ function createCheckpointUtils(deps) {
       try { headTree = execSync('git rev-parse HEAD^{tree}', { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }).trim(); } catch { /* no commits yet */ }
       if (cpTree === headTree) return null;
 
-      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const safeLabel = label
-        ? ' Before: ' + label.replace(/["\n\r]/g, ' ').slice(0, 60).trim()
-        : '';
-      const msg = `${CHECKPOINT_PREFIX}${safeLabel} (${ts})`;
+      const { ts, safeLabel, msg } = buildCheckpointMsg(label);
 
       // Build parent arg (-p HEAD, or nothing for initial commit)
       let parentFlag = '';
@@ -108,11 +113,7 @@ function createCheckpointUtils(deps) {
       try { const r = await execFileAsync('git', ['rev-parse', 'HEAD^{tree}'], { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }); headTree = r.stdout.trim(); } catch { /* no HEAD */ }
       if (cpTree === headTree) return null;
 
-      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const safeLabel = label
-        ? ' Before: ' + label.replace(/["\n\r]/g, ' ').slice(0, 60).trim()
-        : '';
-      const msg = `${CHECKPOINT_PREFIX}${safeLabel} (${ts})`;
+      const { ts, safeLabel, msg } = buildCheckpointMsg(label);
 
       let parentArgs = [];
       try { const r = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }); parentArgs = ['-p', r.stdout.trim()]; } catch { /* no HEAD */ }
@@ -130,22 +131,17 @@ function createCheckpointUtils(deps) {
   }
 
   // List checkpoints, newest first. Returns [{hash, message, ref, parentHash}].
+  // Uses %(parent) in for-each-ref format — no extra subprocess per checkpoint.
   function listCheckpoints(cwd, limit = 20) {
     try {
       const raw = execSync(
-        `git for-each-ref --sort=-committerdate --format="%(objectname) %(refname) %(contents:subject)" --count=${limit} ${CHECKPOINT_REF_PREFIX}`,
+        `git for-each-ref --sort=-committerdate --format="%(objectname)|%(refname)|%(parent)|%(contents:subject)" --count=${limit} ${CHECKPOINT_REF_PREFIX}`,
         { cwd, encoding: 'utf8', timeout: 5000, ...WIN_HIDE }
       ).trim();
       if (!raw) return [];
       return raw.split('\n').filter(Boolean).map(line => {
-        const firstSpace = line.indexOf(' ');
-        const secondSpace = line.indexOf(' ', firstSpace + 1);
-        const hash = line.slice(0, firstSpace);
-        const ref = line.slice(firstSpace + 1, secondSpace);
-        const message = line.slice(secondSpace + 1);
-        let parentHash = null;
-        try { parentHash = execSync(`git rev-parse ${hash}^`, { cwd, encoding: 'utf8', stdio: 'pipe', timeout: 3000, ...WIN_HIDE }).trim(); } catch { /* initial commit */ }
-        return { hash, message, ref, parentHash };
+        const [hash, ref, parent, ...rest] = line.split('|');
+        return { hash, ref, parentHash: parent || null, message: rest.join('|') };
       });
     } catch { return []; }
   }
