@@ -147,7 +147,16 @@ const { createSessionCommandHandler } = require('./daemon-session-commands');
 const { createSessionStore } = require('./daemon-session-store');
 const { createCheckpointUtils } = require('./daemon-checkpoints');
 const { createBridgeStarter } = require('./daemon-bridges');
-const { buildTeamRosterHint, buildEnrichedPrompt, resolveDispatchActor, updateDispatchContextFiles } = require('./daemon-team-dispatch');
+const { buildTeamRosterHint, buildEnrichedPrompt, updateDispatchContextFiles } = require('./daemon-team-dispatch');
+const {
+  resolveDispatchTarget,
+  buildTeamTaskResumeHint,
+  appendTeamTaskResumeHint,
+  buildDispatchResponseCard,
+  buildDispatchTaskCard,
+  buildDispatchReceipt,
+  sendDispatchTaskCard,
+} = require('./daemon-dispatch-cards');
 const { createFileBrowser } = require('./daemon-file-browser');
 const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lifecycle');
 const { repairAgentLayer } = require('./agent-layer');
@@ -1277,26 +1286,6 @@ function sendDispatchReceipt(item, config, receipt) {
   writeDispatchReceiptInbox(item, receipt);
 }
 
-function buildTeamTaskResumeHint(taskId, scopeId) {
-  const safeTaskId = String(taskId || '').trim();
-  if (!safeTaskId) return '';
-  const safeScopeId = String(scopeId || '').trim();
-  const lines = [
-    '',
-    `TeamTask: ${safeTaskId}`,
-  ];
-  if (safeScopeId && safeScopeId !== safeTaskId) lines.push(`Scope: ${safeScopeId}`);
-  lines.push(`如需复工，请使用: /TeamTask resume ${safeTaskId}`);
-  return lines.join('\n');
-}
-
-function appendTeamTaskResumeHint(text, taskId, scopeId) {
-  const base = String(text || '').trim();
-  const hint = buildTeamTaskResumeHint(taskId, scopeId);
-  if (!hint) return base;
-  return `${base}${hint}`;
-}
-
 function buildDispatchPrompt(targetProject, fullMsg, envelope, metameDir = METAME_DIR) {
   const promptBody = buildEnrichedPrompt(
     targetProject,
@@ -1309,79 +1298,6 @@ function buildDispatchPrompt(targetProject, fullMsg, envelope, metameDir = METAM
     : promptBody;
 }
 
-function resolveDispatchTarget(targetKey, config) {
-  const rawKey = String(targetKey || '').trim();
-  const projects = (config && config.projects) || {};
-  if (!rawKey) return null;
-  if (projects[rawKey]) {
-    const proj = projects[rawKey];
-    return {
-      key: rawKey,
-      name: proj.name || rawKey,
-      icon: proj.icon || '🤖',
-      color: proj.color || 'blue',
-      parentKey: rawKey,
-      parentProject: proj,
-      member: null,
-      isTeamMember: false,
-    };
-  }
-  for (const [parentKey, parent] of Object.entries(projects)) {
-    if (!Array.isArray(parent && parent.team)) continue;
-    const member = parent.team.find(m => m && m.key === rawKey);
-    if (!member) continue;
-    return {
-      key: rawKey,
-      name: member.name || rawKey,
-      icon: member.icon || parent.icon || '🤖',
-      color: member.color || parent.color || 'blue',
-      parentKey,
-      parentProject: parent,
-      member,
-      isTeamMember: true,
-    };
-  }
-  return null;
-}
-
-function buildDispatchResponseCard(targetKey, config) {
-  const target = resolveDispatchTarget(targetKey, config);
-  if (!target) return null;
-  return {
-    title: `${target.icon} ${target.name}`,
-    color: target.color || 'blue',
-  };
-}
-
-function buildDispatchTaskCard(fullMsg, targetProject, config) {
-  const projects = (config && config.projects) || {};
-  const actor = resolveDispatchActor(
-    (fullMsg && fullMsg.source_sender_key) || (fullMsg && fullMsg.from),
-    projects
-  );
-  const target = resolveDispatchTarget(targetProject, config) || {
-    icon: '🤖',
-    name: targetProject,
-    color: 'blue',
-  };
-  const prompt = String(fullMsg && fullMsg.payload && (fullMsg.payload.prompt || fullMsg.payload.title) || '').trim();
-  const preview = prompt ? `${prompt.slice(0, 300)}${prompt.length > 300 ? '…' : ''}` : '(empty)';
-  const lines = [
-    `发起: ${actor.icon} ${actor.name}`,
-    `目标: ${target.icon} ${target.name}`,
-    `编号: ${fullMsg.id}`,
-  ];
-  if (fullMsg.task_id) lines.push(`TeamTask: ${fullMsg.task_id}`);
-  if (fullMsg.scope_id && fullMsg.scope_id !== fullMsg.task_id) lines.push(`Scope: ${fullMsg.scope_id}`);
-  lines.push('', preview);
-  return {
-    title: '📬 新任务',
-    body: lines.join('\n'),
-    color: target.color || 'blue',
-    markdown: `## 📬 新任务\n\n${lines.join('\n')}\n\n---\n${preview}`,
-    text: `📬 新任务\n\n${lines.join('\n')}\n\n${preview}`,
-  };
-}
 
 function resolveDispatchReadOnly(message, config, targetProject) {
   if (message && typeof message.readOnly === 'boolean') return message.readOnly;
@@ -1394,48 +1310,6 @@ function resolveDispatchReadOnly(message, config, targetProject) {
   }
   void targetProject;
   return true;
-}
-
-async function sendDispatchTaskCard(bot, chatId, card) {
-  if (!bot || !chatId || !card) return null;
-  if (bot.sendCard) return bot.sendCard(chatId, { title: card.title, body: card.body, color: card.color || 'blue' });
-  if (bot.sendMarkdown) return bot.sendMarkdown(chatId, card.markdown);
-  return bot.sendMessage(chatId, card.text);
-}
-
-function buildDispatchReceipt(item, config, result, opts = {}) {
-  const targetKey = String(opts.targetKey || item.target || '').trim() || 'unknown';
-  const target = resolveDispatchTarget(targetKey, config) || {
-    icon: '🤖',
-    name: targetKey,
-  };
-  const actor = resolveDispatchActor(
-    String(item && (item.source_sender_key || item.from) || 'user').trim() || 'user',
-    (config && config.projects) || {}
-  );
-  const prompt = String(item && item.prompt || '').trim();
-  const preview = prompt ? `${prompt.slice(0, 120)}${prompt.length > 120 ? '...' : ''}` : '(empty)';
-  const isFailed = !result || !result.success;
-  const title = isFailed ? '❌ Dispatch 回执' : '📮 Dispatch 回执';
-  const statusLine = isFailed
-    ? `状态: 入队失败 (${String(result && result.error || 'unknown_error').slice(0, 120)})`
-    : '状态: 目标端已接收并入队';
-  const lines = [
-    title,
-    '',
-    statusLine,
-    `发起: ${actor.icon} ${actor.name}`,
-    `目标: ${target.icon} ${target.name}`,
-  ];
-  if (result && result.id) lines.push(`编号: ${result.id}`);
-  lines.push(`摘要: ${preview}`);
-  if (result && result.task_id) lines.push(buildTeamTaskResumeHint(result.task_id, result.scope_id));
-  return {
-    status: isFailed ? 'failed' : 'accepted',
-    dispatchId: result && result.id ? result.id : '',
-    targetKey,
-    text: lines.join('\n'),
-  };
 }
 
 function handleDispatchItem(item, config) {
