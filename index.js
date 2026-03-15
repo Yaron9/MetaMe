@@ -303,7 +303,7 @@ function requestDaemonRestart({
 // Auto-deploy bundled scripts to ~/.metame/
 // IMPORTANT: daemon.yaml is USER CONFIG — never overwrite it. Only daemon-default.yaml (template) is synced.
 const scriptsDir = path.join(__dirname, 'scripts');
-const BUNDLED_BASE_SCRIPTS = ['platform.js', 'signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'daemon.js', 'daemon-notify.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js', 'skill-evolution.js', 'memory.js', 'memory-extract.js', 'memory-search.js', 'memory-write.js', 'memory-gc.js', 'qmd-client.js', 'session-summarize.js', 'mentor-engine.js', 'check-macos-control-capabilities.sh', 'usage-classifier.js', 'task-board.js', 'memory-nightly-reflect.js', 'memory-index.js', 'skill-changelog.js', 'agent-layer.js'];
+const BUNDLED_BASE_SCRIPTS = ['platform.js', 'signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'daemon.js', 'daemon-notify.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js', 'skill-evolution.js', 'memory.js', 'memory-extract.js', 'memory-search.js', 'memory-write.js', 'memory-gc.js', 'qmd-client.js', 'session-summarize.js', 'mentor-engine.js', 'check-macos-control-capabilities.sh', 'usage-classifier.js', 'task-board.js', 'memory-nightly-reflect.js', 'memory-index.js', 'skill-changelog.js', 'agent-layer.js', 'intent-registry.js', 'self-reflect.js'];
 const DAEMON_MODULE_SCRIPTS = (() => {
   try {
     return fs.readdirSync(scriptsDir).filter((f) => /^daemon-[\w-]+\.js$/.test(f));
