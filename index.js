@@ -303,15 +303,20 @@ function requestDaemonRestart({
 // Auto-deploy bundled scripts to ~/.metame/
 // IMPORTANT: daemon.yaml is USER CONFIG — never overwrite it. Only daemon-default.yaml (template) is synced.
 const scriptsDir = path.join(__dirname, 'scripts');
-const BUNDLED_BASE_SCRIPTS = ['platform.js', 'signal-capture.js', 'distill.js', 'schema.js', 'pending-traits.js', 'daemon.js', 'daemon-notify.js', 'telegram-adapter.js', 'feishu-adapter.js', 'daemon-default.yaml', 'providers.js', 'session-analytics.js', 'resolve-yaml.js', 'utils.js', 'skill-evolution.js', 'memory.js', 'memory-extract.js', 'memory-search.js', 'memory-write.js', 'memory-gc.js', 'qmd-client.js', 'session-summarize.js', 'mentor-engine.js', 'check-macos-control-capabilities.sh', 'usage-classifier.js', 'task-board.js', 'memory-nightly-reflect.js', 'memory-index.js', 'skill-changelog.js', 'agent-layer.js', 'intent-registry.js', 'self-reflect.js'];
-const DAEMON_MODULE_SCRIPTS = (() => {
+// Auto-detect ALL runtime scripts: daemon-*.js + all other non-test, non-utility .js/.yaml/.sh files.
+// This prevents "missing module" crashes when new files are added without updating a manual list.
+const EXCLUDED_SCRIPTS = new Set(['sync-readme.js', 'test_daemon.js']);
+const BUNDLED_SCRIPTS = (() => {
   try {
-    return fs.readdirSync(scriptsDir).filter((f) => /^daemon-[\w-]+\.js$/.test(f));
+    return fs.readdirSync(scriptsDir).filter((f) => {
+      if (EXCLUDED_SCRIPTS.has(f)) return false;
+      if (/\.test\.js$/.test(f)) return false;
+      return /\.(js|yaml|sh)$/.test(f);
+    });
   } catch {
     return [];
   }
 })();
-const BUNDLED_SCRIPTS = [...new Set([...BUNDLED_BASE_SCRIPTS, ...DAEMON_MODULE_SCRIPTS])];
 
 // Protect daemon.yaml: create backup before any sync operation
 const DAEMON_YAML_BACKUP = path.join(METAME_DIR, 'daemon.yaml.bak');
