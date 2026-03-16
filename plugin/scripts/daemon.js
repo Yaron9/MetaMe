@@ -167,6 +167,7 @@ const { createEngineRuntimeFactory, detectDefaultEngine, resolveEngineModel, ENG
 const { createCommandRouter } = require('./daemon-command-router');
 const { createTaskScheduler } = require('./daemon-task-scheduler');
 const { createAgentTools } = require('./daemon-agent-tools');
+const { handleReactiveOutput } = require('./daemon-reactive-lifecycle');
 if (!yaml) {
   console.error('Cannot find js-yaml module. Ensure metame-cli is installed.');
   process.exit(1);
@@ -1046,6 +1047,29 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
       });
       _taskFinalized = true;
     }
+
+    // ── Reactive loop (delegated to daemon-reactive-lifecycle.js) ──
+    if (outStr.trim().length > 2 && config && config.projects) {
+      // Build notifyUser from live bridge (module-level _dispatchBridgeRef)
+      const _reactiveNotify = (msg) => {
+        const bot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
+        if (!bot) return;
+        // Find the reactive parent's bound chat to send notification
+        const feishuMap = (config.feishu && config.feishu.chat_agent_map) || {};
+        const parentKey = config.projects?.[targetProject]?.reactive
+          ? targetProject
+          : Object.keys(config.projects || {}).find(k =>
+            config.projects[k].reactive && Array.isArray(config.projects[k].team) &&
+            config.projects[k].team.some(m => m.key === targetProject));
+        const chatId = parentKey && Object.entries(feishuMap).find(([, v]) => v === parentKey)?.[0];
+        if (chatId) bot.sendMarkdown(chatId, msg).catch(e => log('WARN', `Reactive notify failed: ${e.message}`));
+      };
+      handleReactiveOutput(targetProject, outStr, config, {
+        log, loadState, saveState, checkBudget, handleDispatchItem,
+        notifyUser: _reactiveNotify,
+      });
+    }
+
     if (replyFn && outStr.trim().length > 2) {
       replyFn(displayOut);
     } else if (!replyFn && fullMsg.callback && fullMsg.from && config) {
@@ -1306,6 +1330,8 @@ function buildDispatchPrompt(targetProject, fullMsg, envelope, metameDir = METAM
 
 
 function resolveDispatchReadOnly(message, config, targetProject) {
+  // Reactive dispatches always get write access (daemon-orchestrated, not user-initiated)
+  if (message && message._reactive) return false;
   if (message && typeof message.readOnly === 'boolean') return message.readOnly;
   const senderId = String((message && message.source_sender_id) || '').trim();
   if (senderId && userAcl && typeof userAcl.resolveUserCtx === 'function') {
@@ -1317,6 +1343,7 @@ function resolveDispatchReadOnly(message, config, targetProject) {
   void targetProject;
   return true;
 }
+
 
 function handleDispatchItem(item, config) {
   if (!item.target || !item.prompt) return;

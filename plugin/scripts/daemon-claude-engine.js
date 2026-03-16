@@ -110,6 +110,9 @@ function createClaudeEngine(deps) {
 
   function shouldAutoRouteSkill({ agentMatch, hasActiveSession, boundProjectKey, skillName }) {
     if (agentMatch || hasActiveSession) return false;
+    // Dedicated agent chats (Munger, Jia, etc.) must never be hijacked by skill routing.
+    // agentMatch is null for strict-bound chats (by design), so we guard on boundProjectKey.
+    if (boundProjectKey && String(boundProjectKey).trim() !== 'personal') return false;
     if (
       String(boundProjectKey || '').trim() === 'personal'
       && String(skillName || '').trim() === 'macos-local-orchestrator'

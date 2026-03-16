@@ -148,8 +148,12 @@ describe('daemon-claude-engine private helpers', () => {
       },
     };
 
+    // Use a write-blocking fs wrapper so logRawSessionDiary does not pollute
+    // the real ~/.metame/sessions/ directory during tests.
+    const testFs = { ...fs, appendFileSync: () => {}, mkdirSync: () => {}, writeFileSync: () => {} };
+
     const engine = createClaudeEngine({
-      fs,
+      fs: testFs,
       path,
       spawn: () => createFakeCodexProcess([
         { type: 'item.completed', item: { type: 'agent_message', text: '甲的首轮回复' } },
@@ -720,10 +724,11 @@ describe('daemon-claude-engine private helpers', () => {
     );
   });
 
-  it('blocks only macos-local-orchestrator auto-routing for personal agent chats', () => {
+  it('blocks skill auto-routing for all non-personal bound agents, and macos-local-orchestrator for personal', () => {
     const state = { sessions: {} };
     const engine = createEngineWithState(state);
 
+    // personal: macos-local-orchestrator is blocked (dangerous local automation)
     assert.equal(
       engine._private.shouldAutoRouteSkill({
         agentMatch: null,
@@ -734,6 +739,7 @@ describe('daemon-claude-engine private helpers', () => {
       false
     );
 
+    // personal: other skills are allowed
     assert.equal(
       engine._private.shouldAutoRouteSkill({
         agentMatch: null,
@@ -744,6 +750,7 @@ describe('daemon-claude-engine private helpers', () => {
       true
     );
 
+    // non-personal bound agents: ALL skills blocked to prevent hijack
     assert.equal(
       engine._private.shouldAutoRouteSkill({
         agentMatch: null,
@@ -751,7 +758,7 @@ describe('daemon-claude-engine private helpers', () => {
         boundProjectKey: 'coder',
         skillName: 'macos-local-orchestrator',
       }),
-      true
+      false
     );
   });
 
