@@ -11,7 +11,7 @@ function createOpsCommandHandler(deps) {
     log,
     loadConfig,
     loadState,
-    messageQueue,
+    pipeline,
     activeProcesses,
     getSession,
     getSessionForEngine,
@@ -37,18 +37,20 @@ function createOpsCommandHandler(deps) {
   });
 
   function clearMessageQueue(chatId) {
-    if (messageQueue.has(chatId)) {
-      const q = messageQueue.get(chatId);
-      if (q.timer) clearTimeout(q.timer);
-      messageQueue.delete(chatId);
-    }
+    const _pl = pipeline && pipeline.current;
+    if (_pl) { _pl.clearQueue(chatId); }
   }
 
   function interruptActiveProcess(chatId) {
-    const proc = activeProcesses.get(chatId);
-    if (proc && proc.child) {
-      proc.aborted = true;
-      try { process.kill(-proc.child.pid, 'SIGINT'); } catch { proc.child.kill('SIGINT'); }
+    const _pl = pipeline && pipeline.current;
+    if (_pl) {
+      _pl.interruptActive(chatId);
+    } else {
+      const proc = activeProcesses.get(chatId);
+      if (proc && proc.child) {
+        proc.aborted = true;
+        try { process.kill(-proc.child.pid, 'SIGINT'); } catch { proc.child.kill('SIGINT'); }
+      }
     }
   }
 

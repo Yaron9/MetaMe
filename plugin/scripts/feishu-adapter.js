@@ -61,79 +61,6 @@ function withTimeout(promise, ms = 10000) {
 // Max chars per lark_md element (Feishu limit ~4000)
 const MAX_CHUNK = 3800;
 
-function collectPostText(node, parts) {
-  if (!node) return;
-  if (typeof node === 'string') {
-    const text = node.trim();
-    if (text) parts.push(text);
-    return;
-  }
-  if (Array.isArray(node)) {
-    for (const item of node) collectPostText(item, parts);
-    return;
-  }
-  if (typeof node !== 'object') return;
-
-  if (typeof node.text === 'string' && node.text.trim()) parts.push(node.text.trim());
-  if (typeof node.title === 'string' && node.title.trim()) parts.push(node.title.trim());
-
-  if (node.tag === 'img' || node.tag === 'media' || node.tag === 'emotion') return;
-
-  for (const value of Object.values(node)) {
-    if (value && typeof value === 'object') collectPostText(value, parts);
-  }
-}
-
-function extractTextFromPostContent(content) {
-  const parts = [];
-  collectPostText(content, parts);
-  return parts.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-}
-
-function parseIncomingMessage(msg, log = () => {}) {
-  const messageType = msg && msg.message_type;
-  let text = '';
-  let fileInfo = null;
-  let parsed = null;
-
-  try {
-    parsed = msg && typeof msg.content === 'string' ? JSON.parse(msg.content) : (msg && msg.content) || null;
-  } catch (err) {
-    log('WARN', `Feishu message parse failed type=${messageType || 'unknown'} id=${msg && msg.message_id || '-'}: ${err.message}`);
-  }
-
-  if (messageType === 'text') {
-    text = (parsed && parsed.text) || (typeof msg.content === 'string' ? msg.content : '');
-  } else if (messageType === 'post') {
-    text = extractTextFromPostContent(parsed);
-    if (!text) {
-      log('DEBUG', `Feishu post message had no extractable text id=${msg && msg.message_id || '-'}`);
-    }
-  } else if (['file', 'image', 'media', 'audio'].includes(messageType)) {
-    const fileKey = parsed && (parsed.file_key || parsed.image_key || parsed.media_key || parsed.audio_key);
-    if (fileKey) {
-      const fallbackName = messageType === 'image'
-        ? `image_${Date.now()}.png`
-        : messageType === 'audio'
-          ? `audio_${Date.now()}.mp3`
-          : `file_${Date.now()}`;
-      fileInfo = {
-        messageId: msg.message_id,
-        fileKey,
-        fileName: (parsed && parsed.file_name) || fallbackName,
-        msgType: messageType,
-      };
-    } else {
-      log('DEBUG', `Feishu attachment missing file key type=${messageType} id=${msg && msg.message_id || '-'}`);
-    }
-  } else if (messageType) {
-    log('DEBUG', `Feishu unsupported message type=${messageType} id=${msg && msg.message_id || '-'}`);
-  }
-
-  text = String(text || '').replace(/@_user_\d+\s*/g, '').trim();
-  return { text, fileInfo };
-}
-
 /**
  * Convert standard markdown to lark_md and split into chunks.
  * Shared by sendMarkdown and sendCard.
@@ -477,7 +404,29 @@ function createBot(config) {
 
               const chatId = msg.chat_id;
               const senderId = data.sender && data.sender.sender_id && data.sender.sender_id.open_id || null;
-              const { text, fileInfo } = parseIncomingMessage(msg, _log);
+              let text = '';
+              let fileInfo = null;
+
+              if (msg.message_type === 'text') {
+                try {
+                  const content = JSON.parse(msg.content);
+                  text = content.text || '';
+                } catch {
+                  text = msg.content || '';
+                }
+              } else if (msg.message_type === 'file' || msg.message_type === 'image' || msg.message_type === 'media') {
+                try {
+                  const content = JSON.parse(msg.content);
+                  fileInfo = {
+                    messageId: msg.message_id,
+                    fileKey: content.file_key || content.image_key,
+                    fileName: content.file_name || (content.image_key ? `image_${Date.now()}.png` : `file_${Date.now()}`),
+                    msgType: msg.message_type,
+                  };
+                } catch {}
+              }
+
+              text = text.replace(/@_user_\d+\s*/g, '').trim();
 
               if (text || fileInfo) {
                 Promise.resolve().then(() => onMessage(chatId, text, data, fileInfo, senderId)).catch((err) => {
@@ -589,4 +538,4 @@ function createBot(config) {
   };
 }
 
-module.exports = { createBot, extractTextFromPostContent, parseIncomingMessage };
+module.exports = { createBot };

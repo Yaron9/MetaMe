@@ -165,9 +165,10 @@ const { createNotifier } = require('./daemon-notify');
 const { createClaudeEngine } = require('./daemon-claude-engine');
 const { createEngineRuntimeFactory, detectDefaultEngine, resolveEngineModel, ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
 const { createCommandRouter } = require('./daemon-command-router');
+const { createMessagePipeline } = require('./daemon-message-pipeline');
+const { createWarmPool } = require('./daemon-warm-pool');
 const { createTaskScheduler } = require('./daemon-task-scheduler');
 const { createAgentTools } = require('./daemon-agent-tools');
-const { handleReactiveOutput } = require('./daemon-reactive-lifecycle');
 if (!yaml) {
   console.error('Cannot find js-yaml module. Ensure metame-cli is installed.');
   process.exit(1);
@@ -1047,33 +1048,6 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
       });
       _taskFinalized = true;
     }
-
-    // ── Reactive loop (delegated to daemon-reactive-lifecycle.js) ──
-    if (outStr.trim().length > 2 && config && config.projects) {
-      // Build notifyUser from live bridge (module-level _dispatchBridgeRef)
-      const _reactiveNotify = (msg) => {
-        const bot = _dispatchBridgeRef && _dispatchBridgeRef.bot;
-        if (!bot) return;
-        // Find the reactive parent's bound chat to send notification
-        const feishuMap = (config.feishu && config.feishu.chat_agent_map) || {};
-        const parentKey = config.projects?.[targetProject]?.reactive
-          ? targetProject
-          : Object.keys(config.projects || {}).find(k =>
-            config.projects[k].reactive && Array.isArray(config.projects[k].team) &&
-            config.projects[k].team.some(m => m.key === targetProject));
-        const chatId = parentKey && Object.entries(feishuMap).find(([, v]) => v === parentKey)?.[0];
-        if (chatId) bot.sendMarkdown(chatId, msg).catch(e => log('WARN', `Reactive notify failed: ${e.message}`));
-      };
-      try {
-        handleReactiveOutput(targetProject, outStr, config, {
-          log, loadState, saveState, checkBudget, handleDispatchItem,
-          notifyUser: _reactiveNotify,
-        });
-      } catch (reactiveErr) {
-        log('ERROR', `handleReactiveOutput failed for ${targetProject}: ${reactiveErr.message}`);
-      }
-    }
-
     if (replyFn && outStr.trim().length > 2) {
       replyFn(displayOut);
     } else if (!replyFn && fullMsg.callback && fullMsg.from && config) {
@@ -1334,8 +1308,6 @@ function buildDispatchPrompt(targetProject, fullMsg, envelope, metameDir = METAM
 
 
 function resolveDispatchReadOnly(message, config, targetProject) {
-  // Reactive dispatches always get write access (daemon-orchestrated, not user-initiated)
-  if (message && message._reactive) return false;
   if (message && typeof message.readOnly === 'boolean') return message.readOnly;
   const senderId = String((message && message.source_sender_id) || '').trim();
   if (senderId && userAcl && typeof userAcl.resolveUserCtx === 'function') {
@@ -1347,7 +1319,6 @@ function resolveDispatchReadOnly(message, config, targetProject) {
   void targetProject;
   return true;
 }
-
 
 function handleDispatchItem(item, config) {
   if (!item.target || !item.prompt) return;
@@ -2191,6 +2162,9 @@ const { handleSessionCommand } = createSessionCommandHandler({
 // Message queue for messages received while a task is running
 const messageQueue = new Map(); // chatId -> { messages: string[], notified: false }
 
+// Warm process pool for eliminating Claude CLI cold-start latency
+const warmPool = createWarmPool({ log });
+
 const { spawnClaudeAsync, askClaude } = createClaudeEngine({
   fs,
   path,
@@ -2236,6 +2210,7 @@ const { spawnClaudeAsync, askClaude } = createClaudeEngine({
   fallbackThrottleMs: FALLBACK_THROTTLE_MS,
   getEngineRuntime,
   getDefaultEngine,
+  warmPool,
 });
 
 const agentTools = createAgentTools({
@@ -2306,6 +2281,9 @@ const { handleAgentCommand } = createAgentCommandHandler({
 // Caffeinate process for /nosleep toggle (macOS only)
 let caffeinateProcess = null;
 
+// pipeline ref — late-bound after createMessagePipeline (circular: router needs pipeline, pipeline needs handleCommand)
+const _pipelineRef = { current: null };
+
 const { handleExecCommand } = createExecCommandHandler({
   fs,
   path,
@@ -2313,7 +2291,7 @@ const { handleExecCommand } = createExecCommandHandler({
   HOME,
   checkCooldown,
   activeProcesses,
-  messageQueue,
+  pipeline: _pipelineRef,
   findTask,
   checkPrecondition,
   buildProfilePreamble,
@@ -2340,7 +2318,7 @@ const { handleOpsCommand } = createOpsCommandHandler({
   log,
   loadConfig,
   loadState,
-  messageQueue,
+  pipeline: _pipelineRef,
   activeProcesses,
   getSession,
   getSessionForEngine,
@@ -2375,7 +2353,7 @@ const { handleCommand } = createCommandRouter({
   providerMod,
   getNoSleepProcess: () => caffeinateProcess,
   activeProcesses,
-  messageQueue,
+  pipeline: _pipelineRef,
   sleep,
   log,
   agentTools,
@@ -2387,6 +2365,15 @@ const { handleCommand } = createCommandRouter({
 
 // Bind handleCommand for agent dispatch (must come after handleCommand definition)
 setDispatchHandler(handleCommand);
+
+// Message pipeline: per-chatId serial execution
+const pipeline = createMessagePipeline({
+  activeProcesses,
+  handleCommand,
+  resetCooldown,
+  log,
+});
+_pipelineRef.current = pipeline;
 
 // ---------------------------------------------------------
 // BOT BRIDGES
@@ -2403,6 +2390,7 @@ const { startTelegramBridge, startFeishuBridge, startImessageBridge, startSiriBr
   getSession,
   restoreSessionFromReply,
   handleCommand,
+  pipeline,
   pendingActivations,
   activeProcesses,
   messageQueue,
@@ -2743,15 +2731,6 @@ async function main() {
   const shutdown = async (opts = {}) => {
     if (shuttingDown) return;
     shuttingDown = true;  // set immediately to prevent double-spawn race condition
-    log('INFO', 'Daemon shutting down...');
-    await notifyActiveUsers('关闭').catch(() => {});
-    runtimeWatchers.stop();
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    if (dispatchSocket) try { dispatchSocket.close(); } catch { }
-    try { fs.unlinkSync(SOCK_PATH); } catch { }
-    // Stop bridges BEFORE spawning replacement to avoid two Feishu WebSocket connections competing
-    if (telegramBridge) telegramBridge.stop();
-    if (feishuBridge) feishuBridge.stop();
     if (opts.restartReason) {
       const spawned = spawnReplacementDaemon(opts.restartReason);
       if (!spawned) {
@@ -2760,8 +2739,18 @@ async function main() {
         return;
       }
     }
+    log('INFO', 'Daemon shutting down...');
+    await notifyActiveUsers('关闭').catch(() => {});
+    runtimeWatchers.stop();
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (dispatchSocket) try { dispatchSocket.close(); } catch { }
+    try { fs.unlinkSync(SOCK_PATH); } catch { }
+    if (telegramBridge) telegramBridge.stop();
+    if (feishuBridge) feishuBridge.stop();
     // Stop QMD semantic search daemon if it was started
     try { require('./qmd-client').stopDaemon(); } catch { /* ignore */ }
+    // Release warm pool processes before killing active ones
+    warmPool.releaseAll();
     // Kill all tracked engine process groups before exiting (covers sub-agents too)
     for (const [cid, proc] of activeProcesses) {
       proc.aborted = true;

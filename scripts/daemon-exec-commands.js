@@ -13,7 +13,7 @@ function createExecCommandHandler(deps) {
     HOME,
     checkCooldown,
     activeProcesses,
-    messageQueue,
+    pipeline,
     findTask,
     checkPrecondition,
     buildProfilePreamble,
@@ -215,24 +215,29 @@ function createExecCommandHandler(deps) {
     }
 
     if (text === '/stop') {
-      // Clear message queue (don't process queued messages after stop)
-      if (messageQueue.has(chatId)) {
-        const q = messageQueue.get(chatId);
-        if (q.timer) clearTimeout(q.timer);
-        messageQueue.delete(chatId);
-      }
-      const proc = activeProcesses.get(chatId);
-      if (proc && proc.child) {
-        proc.aborted = true;
-        const signal = proc.killSignal || 'SIGTERM';
-        try { process.kill(-proc.child.pid, signal); } catch { try { proc.child.kill(signal); } catch { /* */ } }
-        await bot.sendMessage(chatId, '⏹ Stopping current engine task...');
-      } else if (proc && proc.child === null) {
-        // Pre-spawn sentinel: mark as aborted so askClaude bails out before spawn
-        proc.aborted = true;
-        await bot.sendMessage(chatId, '⏹ Stopping (pre-spawn phase)...');
+      const _pl = pipeline && pipeline.current;
+      if (_pl) {
+        _pl.clearQueue(chatId);
+        const stopped = _pl.interruptActive(chatId);
+        if (stopped) {
+          await bot.sendMessage(chatId, '⏹ Stopping current engine task...');
+        } else {
+          await bot.sendMessage(chatId, 'No active task to stop.');
+        }
       } else {
-        await bot.sendMessage(chatId, 'No active task to stop.');
+        // Fallback: direct activeProcesses manipulation (pipeline not yet initialized)
+        const proc = activeProcesses.get(chatId);
+        if (proc && proc.child) {
+          proc.aborted = true;
+          const signal = proc.killSignal || 'SIGTERM';
+          try { process.kill(-proc.child.pid, signal); } catch { try { proc.child.kill(signal); } catch { /* */ } }
+          await bot.sendMessage(chatId, '⏹ Stopping current engine task...');
+        } else if (proc && proc.child === null) {
+          proc.aborted = true;
+          await bot.sendMessage(chatId, '⏹ Stopping (pre-spawn phase)...');
+        } else {
+          await bot.sendMessage(chatId, 'No active task to stop.');
+        }
       }
       return true;
     }
@@ -240,16 +245,17 @@ function createExecCommandHandler(deps) {
     // /quit — restart session process (reloads MCP/config, keeps same session)
     if (text === '/quit') {
       // Stop running task if any
-      if (messageQueue.has(chatId)) {
-        const q = messageQueue.get(chatId);
-        if (q.timer) clearTimeout(q.timer);
-        messageQueue.delete(chatId);
-      }
-      const proc = activeProcesses.get(chatId);
-      if (proc && proc.child) {
-        proc.aborted = true;
-        const signal = proc.killSignal || 'SIGTERM';
-        try { process.kill(-proc.child.pid, signal); } catch { try { proc.child.kill(signal); } catch { /* */ } }
+      const _pl = pipeline && pipeline.current;
+      if (_pl) {
+        _pl.clearQueue(chatId);
+        _pl.interruptActive(chatId);
+      } else {
+        const proc = activeProcesses.get(chatId);
+        if (proc && proc.child) {
+          proc.aborted = true;
+          const signal = proc.killSignal || 'SIGTERM';
+          try { process.kill(-proc.child.pid, signal); } catch { try { proc.child.kill(signal); } catch { /* */ } }
+        }
       }
       const { session } = getActiveSession(chatId);
       const name = session ? getSessionName(session.id) : null;

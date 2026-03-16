@@ -969,13 +969,26 @@ function createSessionStore(deps) {
   function _isClaudeSessionValid(sessionId, normCwd) {
     try {
       const sessionFile = findSessionFile(sessionId);
-      if (!sessionFile) return false;
+      if (!sessionFile) {
+        log('WARN', `[SessionValid] ${sessionId.slice(0, 8)}: JSONL file not found`);
+        return false;
+      }
 
       // Try to read cwd/model from session JSONL file content (most reliable)
       const metadata = _readClaudeSessionMetadata(sessionFile);
-      if (metadata.model && !metadata.model.startsWith('claude-')) return false;
+      if (metadata.model && !metadata.model.startsWith('claude-')) {
+        log('WARN', `[SessionValid] ${sessionId.slice(0, 8)}: non-claude model "${metadata.model}"`);
+        return false;
+      }
       if (metadata.cwd && path.resolve(metadata.cwd) === normCwd) return true;
-      if (metadata.cwd) return false;
+      if (metadata.cwd) {
+        // CWD mismatch: the session was created for a different directory.
+        // However, if the JSONL file exists and has Claude content, the session is still
+        // usable — the cwd might have changed due to worktree cleanup, config reload, etc.
+        // Log the mismatch but allow resuming (Claude CLI handles cwd internally).
+        log('INFO', `[SessionValid] ${sessionId.slice(0, 8)}: cwd mismatch (jsonl="${metadata.cwd}" vs expected="${normCwd}") — allowing resume`);
+        return true;
+      }
       for (const line of metadata.lines.slice(0, 20)) { // preserve tolerant parsing for malformed heads
         try {
           const entry = JSON.parse(line);
@@ -984,27 +997,12 @@ function createSessionStore(deps) {
         } catch { /* skip non-JSON lines */ }
       }
 
-      // Fallback: check sessions-index.json if exists
-      const projectDir = path.dirname(sessionFile);
-      const indexFile = path.join(projectDir, 'sessions-index.json');
-      if (fs.existsSync(indexFile)) {
-        const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
-        const entries = Array.isArray(data && data.entries) ? data.entries : [];
-        const entry = entries.find(e => e && e.sessionId === sessionId);
-        if (entry && entry.projectPath) return path.resolve(entry.projectPath) === normCwd;
-        const anyPath = (entries.find(e => e && e.projectPath) || {}).projectPath;
-        if (anyPath) return path.resolve(anyPath) === normCwd;
-      }
-
-      // Last resort fallback: dir name match (less reliable, skip for worktree paths)
-      // Skip this for paths containing .worktree to avoid edge cases
-      if (normCwd.includes('.worktree')) return true; // trust the session exists
-      const actualDir = path.basename(projectDir).toLowerCase();
-      const expectedDir = process.platform === 'win32'
-        ? normCwd.replace(/[:\\\/_ ]/g, '-').toLowerCase()
-        : ('-' + normCwd.replace(/^\//, '').replace(/[\/_. ]/g, '-')).toLowerCase();
-      return actualDir === expectedDir;
-    } catch {
+      // JSONL exists but has no cwd metadata — trust it (e.g., very short session,
+      // or JSONL format changed). Better to attempt resume than force a new session.
+      log('INFO', `[SessionValid] ${sessionId.slice(0, 8)}: no cwd in JSONL, trusting file existence`);
+      return true;
+    } catch (e) {
+      log('WARN', `[SessionValid] ${sessionId.slice(0, 8)}: infra error "${e.message}" — trusting session`);
       return true; // conservative: infra failure ≠ invalid session
     }
   }

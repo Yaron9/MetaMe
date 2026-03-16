@@ -20,9 +20,10 @@ function createBridgeStarter(deps) {
     getSession,
     restoreSessionFromReply,
     handleCommand,
+    pipeline,            // message pipeline for per-chatId serial execution
     pendingActivations,  // optional — used to show smart activation hint
-    activeProcesses,     // optional — used for auto-dispatch to clones
-    messageQueue,        // optional — used for /stop to clear queued messages
+    activeProcesses: _activeProcesses, // legacy — now handled by pipeline
+    messageQueue: _messageQueue,       // legacy — now handled by pipeline
     sendRemoteDispatch,          // optional — send packet to remote peer via relay chat
     handleRemoteDispatchMessage, // optional — intercept relay chat messages
     getOrCreateWorktree,         // optional — isolated worktree per actor
@@ -302,7 +303,7 @@ function createBridgeStarter(deps) {
       },
     };
     const proxyBot = _createTeamProxyBot(bot, realChatId);
-    handleCommand(proxyBot, virtualChatId, text, teamCfg, executeTaskByName, acl.senderId, acl.readOnly)
+    pipeline.processMessage(virtualChatId, text, { bot: proxyBot, config: teamCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly })
       .catch(e => log('ERROR', `Team [${member.key}] error: ${e.message}`));
   }
   // ────────────────────────────────────────────────────────────────────────
@@ -362,7 +363,7 @@ function createBridgeStarter(deps) {
                   bypassAcl: !allowedIds.includes(chatId) && !!isBindCmd,
                 });
                 if (acl.blocked) continue;
-                handleCommand(bot, chatId, cb.data, liveCfg, executeTaskByName, acl.senderId, acl.readOnly).catch(e => {
+                pipeline.processMessage(chatId, cb.data, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly }).catch(e => {
                   log('ERROR', `Telegram callback handler error: ${e.message}`);
                 });
               }
@@ -437,7 +438,7 @@ function createBridgeStarter(deps) {
                     continue;
                   }
                 }
-                handleCommand(bot, chatId, prompt, liveCfg, executeTaskByName, acl.senderId, acl.readOnly).catch(e => {
+                pipeline.processMessage(chatId, prompt, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly }).catch(e => {
                   log('ERROR', `Telegram file handler error: ${e.message}`);
                 });
               } catch (err) {
@@ -518,16 +519,9 @@ function createBridgeStarter(deps) {
                     const vid = `_agent_${_targetKey}`;
                     const member = _boundProj.team.find(t => t.key === _targetKey);
                     const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
-                    if (messageQueue.has(vid)) {
-                      const vq = messageQueue.get(vid);
-                      if (vq && vq.timer) clearTimeout(vq.timer);
-                      messageQueue.delete(vid);
-                    }
-                    const vproc = activeProcesses && activeProcesses.get(vid);
-                    if (vproc && vproc.child) {
-                      vproc.aborted = true;
-                      const sig = vproc.killSignal || 'SIGTERM';
-                      try { process.kill(-vproc.child.pid, sig); } catch { try { vproc.child.kill(sig); } catch { /* */ } }
+                    pipeline.clearQueue(vid);
+                    const stopped = pipeline.interruptActive(vid);
+                    if (stopped) {
                       await bot.sendMessage(chatId, `⏹ Stopping ${label}...`);
                     } else {
                       await bot.sendMessage(chatId, `${label} 当前没有活跃任务`);
@@ -580,7 +574,7 @@ function createBridgeStarter(deps) {
                     continue;
                   }
                   try {
-                    await handleCommand(bot, chatId, rest, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
+                    await pipeline.processMessage(chatId, rest, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
                   } catch (e) {
                     log('ERROR', `Team main-route handleCommand failed: ${e.message}`);
                     bot.sendMessage(chatId, `❌ 执行失败: ${e.message}`).catch(() => {});
@@ -600,7 +594,7 @@ function createBridgeStarter(deps) {
               }
 
               // Default: route to main project
-              handleCommand(bot, chatId, text, liveCfg, executeTaskByName, acl.senderId, acl.readOnly).catch(e => {
+              pipeline.processMessage(chatId, text, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly }).catch(e => {
                 log('ERROR', `Telegram handler error: ${e.message}`);
               });
             }
@@ -730,7 +724,7 @@ function createBridgeStarter(deps) {
                 return;
               }
             }
-            await handleCommand(bot, chatId, prompt, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
+            await pipeline.processMessage(chatId, prompt, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
           } catch (err) {
             log('ERROR', `Feishu file download failed: ${err.message}`);
             await bot.sendMessage(chatId, `❌ Download failed: ${err.message}`);
@@ -819,17 +813,9 @@ function createBridgeStarter(deps) {
                 const vid = `_agent_${_targetKey}`;
                 const member = _boundProj.team.find(t => t.key === _targetKey);
                 const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
-                // Clear message queue for this virtual agent
-                if (messageQueue.has(vid)) {
-                  const vq = messageQueue.get(vid);
-                  if (vq && vq.timer) clearTimeout(vq.timer);
-                  messageQueue.delete(vid);
-                }
-                const vproc = activeProcesses && activeProcesses.get(vid);
-                if (vproc && vproc.child) {
-                  vproc.aborted = true;
-                  const sig = vproc.killSignal || 'SIGTERM';
-                  try { process.kill(-vproc.child.pid, sig); } catch { try { vproc.child.kill(sig); } catch { /* */ } }
+                pipeline.clearQueue(vid);
+                const stopped = pipeline.interruptActive(vid);
+                if (stopped) {
                   await bot.sendMessage(chatId, `⏹ Stopping ${label}...`);
                 } else {
                   await bot.sendMessage(chatId, `${label} 当前没有活跃任务`);
@@ -905,7 +891,7 @@ function createBridgeStarter(deps) {
                     return;
                   }
               try {
-                await handleCommand(bot, chatId, rest, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
+                await pipeline.processMessage(chatId, rest, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
               } catch (e) {
                 log('ERROR', `Team main-route handleCommand failed: ${e.message}`);
                 bot.sendMessage(chatId, `❌ 执行失败: ${e.message}`).catch(() => {});
@@ -926,7 +912,7 @@ function createBridgeStarter(deps) {
           }
 
           try {
-            await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
+            await pipeline.processMessage(chatId, text, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
           } catch (e) {
             log('ERROR', `Feishu handleCommand failed for ${chatId}: ${e.message}`);
             bot.sendMessage(chatId, `❌ 命令执行失败: ${e.message}`).catch(() => {});
@@ -1079,16 +1065,9 @@ function createBridgeStarter(deps) {
                 const vid = `_agent_${_targetKey}`;
                 const member = _boundProj.team.find(t => t.key === _targetKey);
                 const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
-                if (messageQueue.has(vid)) {
-                  const vq = messageQueue.get(vid);
-                  if (vq && vq.timer) clearTimeout(vq.timer);
-                  messageQueue.delete(vid);
-                }
-                const vproc = activeProcesses && activeProcesses.get(vid);
-                if (vproc && vproc.child) {
-                  vproc.aborted = true;
-                  const sig = vproc.killSignal || 'SIGTERM';
-                  try { process.kill(-vproc.child.pid, sig); } catch { try { vproc.child.kill(sig); } catch { /* */ } }
+                pipeline.clearQueue(vid);
+                const stopped = pipeline.interruptActive(vid);
+                if (stopped) {
                   await bot.sendMessage(chatId, `Stopping ${label}...`);
                 } else {
                   await bot.sendMessage(chatId, `${label} 当前没有活跃任务`);
@@ -1140,7 +1119,7 @@ function createBridgeStarter(deps) {
             }
           }
 
-          handleCommand(bot, chatId, commandText, liveCfg, executeTaskByName, sender, false)
+          pipeline.processMessage(chatId, commandText, { bot, config: liveCfg, executeTaskByName, senderId: sender, readOnly: false })
             .catch(e => log('ERROR', `[IMESSAGE] handleCommand error: ${e.message}`));
         }
       } catch (e) {

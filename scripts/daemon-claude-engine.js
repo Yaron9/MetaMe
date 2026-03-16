@@ -77,6 +77,7 @@ function createClaudeEngine(deps) {
     fallbackThrottleMs = 8000,
     getEngineRuntime: injectedGetEngineRuntime,
     getDefaultEngine: _getDefaultEngine,
+    warmPool,
   } = deps;
   function getDefaultEngine() {
     return (typeof _getDefaultEngine === 'function') ? _getDefaultEngine() : 'claude';
@@ -103,6 +104,10 @@ function createClaudeEngine(deps) {
     }
     return true;
   }
+  // Card reuse for merge-pause: when a task is paused for message merging,
+  // save the statusMsgId so the next askClaude reuses the same card.
+  const _pausedCards = new Map(); // chatId -> { statusMsgId, cardHeader }
+
   let mentorEngine = null;
   try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
   let sessionAnalytics = null;
@@ -435,11 +440,17 @@ function createClaudeEngine(deps) {
         if (sessionFamily && configFamily && sessionFamily === configFamily) {
           return result; // same family, no pin needed
         }
-        return {
-          shouldResume: true,
-          modelPin: sessionModel,
-          reason: '',
-        };
+        // Pin to the family alias (e.g., "opus") instead of the full JSONL model name
+        // (e.g., "claude-opus-4-6"). The Claude CLI rejects full model IDs via the API.
+        if (sessionFamily) {
+          return {
+            shouldResume: true,
+            modelPin: sessionFamily,
+            reason: '',
+          };
+        }
+        // Cannot determine session model family — don't pin, use configured model
+        return result;
       }
     } catch {
       return result;
@@ -786,6 +797,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     metameSenderId = '',
     runtime = null,
     onSession = null,
+    options = {},
   ) {
     return new Promise((resolve) => {
       let settled = false;
@@ -795,17 +807,31 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         resolve(payload);
       };
       const rt = runtime || getEngineRuntime(getDefaultEngine());
+      const { warmChild, persistent, warmPool: _warmPool, warmSessionKey } = options;
+      const isPersistent = persistent && rt.name === 'claude'; // Only Claude supports stream-json
       const streamArgs = rt.name === 'claude'
-        ? [...args, '--output-format', 'stream-json', '--verbose']
+        ? [...args, '--output-format', 'stream-json', '--verbose', ...(isPersistent ? ['--input-format', 'stream-json'] : [])]
         : args;
       const _spawnAt = Date.now();
-      const child = spawn(rt.binary, streamArgs, {
-        cwd,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        detached: process.platform !== 'win32',
-        env: rt.buildEnv({ metameProject, metameSenderId }),
-      });
-      log('INFO', `[TIMING:${chatId}] spawned ${rt.name} pid=${child.pid}`);
+
+      let child;
+      if (warmChild) {
+        // Reuse warm process — remove stale listeners, attach fresh ones below
+        child = warmChild;
+        child.stdout.removeAllListeners('data');
+        child.stderr.removeAllListeners('data');
+        child.removeAllListeners('close');
+        child.removeAllListeners('error');
+        log('INFO', `[TIMING:${chatId}] reusing warm pid=${child.pid} (+0ms)`);
+      } else {
+        child = spawn(rt.binary, streamArgs, {
+          cwd,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          detached: process.platform !== 'win32',
+          env: rt.buildEnv({ metameProject, metameSenderId }),
+        });
+        log('INFO', `[TIMING:${chatId}] spawned ${rt.name} pid=${child.pid}`);
+      }
 
       if (chatId) {
         activeProcesses.set(chatId, {
@@ -955,6 +981,27 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
                 _streamText = finalResult;
               }
               flushStream(true); // force final text flush before process ends
+
+              // Persistent mode: finalize on result event, keep process alive for reuse
+              if (isPersistent) {
+                clearTimeout(idleTimer);
+                clearTimeout(ceilingTimer);
+                clearTimeout(sigkillTimer);
+                clearInterval(milestoneTimer);
+                if (chatId) { activeProcesses.delete(chatId); saveActivePids(); }
+                // Store process back in warm pool for next turn
+                if (_warmPool && warmSessionKey && child && !child.killed && child.exitCode === null) {
+                  _warmPool.storeWarm(warmSessionKey, child, { sessionId: observedSessionId, cwd });
+                }
+                finalize({
+                  output: finalResult || '',
+                  error: null,
+                  files: writtenFiles,
+                  toolUsageLog,
+                  usage: finalUsage,
+                  sessionId: observedSessionId || '',
+                });
+              }
               continue;
             }
             if (event.type === 'tool_result') {
@@ -1041,6 +1088,10 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         resetIdleTimer();
         const chunk = data.toString();
         stderr += chunk;
+        // Detect API errors (400, model not supported, etc.) and log them explicitly
+        if (/\b(400|is not supported|model.*not found|invalid.*model)\b/i.test(chunk)) {
+          log('ERROR', `[API-ERROR] ${rt.name} stderr for ${chatId}: ${chunk.slice(0, 300)}`);
+        }
         if (!classifiedError && typeof rt.classifyError === 'function') {
           classifiedError = rt.classifyError(chunk);
         }
@@ -1052,6 +1103,14 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         clearTimeout(ceilingTimer);
         clearTimeout(sigkillTimer);
         clearInterval(milestoneTimer);
+
+        // Persistent mode: if already finalized on result event, just clean up
+        if (isPersistent && settled) {
+          if (chatId) { activeProcesses.delete(chatId); saveActivePids(); }
+          // Process died after we returned result — remove from warm pool
+          if (_warmPool && warmSessionKey) _warmPool.releaseWarm(warmSessionKey);
+          return;
+        }
 
         if (buffer.trim()) {
           const events = parseEventsFromLine(buffer.trim());
@@ -1069,12 +1128,15 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         if (chatId) { activeProcesses.delete(chatId); saveActivePids(); }
 
         if (wasAborted) {
+          const _errCode = (abortReason === 'daemon-restart' || abortReason === 'shutdown')
+            ? 'INTERRUPTED_RESTART'
+            : abortReason === 'merge-pause'
+              ? 'INTERRUPTED_MERGE_PAUSE'
+              : 'INTERRUPTED_USER';
           finalize({
             output: finalResult || null,
-            error: 'Stopped by user',
-            errorCode: (abortReason === 'daemon-restart' || abortReason === 'shutdown')
-              ? 'INTERRUPTED_RESTART'
-              : 'INTERRUPTED_USER',
+            error: abortReason === 'merge-pause' ? 'Paused for merge' : 'Stopped by user',
+            errorCode: _errCode,
             files: writtenFiles,
             toolUsageLog,
             usage: finalUsage,
@@ -1111,8 +1173,13 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       });
 
       try {
-        child.stdin.write(input);
-        child.stdin.end();
+        if (isPersistent && _warmPool) {
+          // Stream-json mode: write JSON-formatted message, keep stdin open
+          child.stdin.write(_warmPool.buildStreamMessage(input, observedSessionId || ''));
+        } else {
+          child.stdin.write(input);
+          child.stdin.end();
+        }
       } catch (e) {
         clearTimeout(idleTimer);
         clearTimeout(ceilingTimer);
@@ -1181,20 +1248,22 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const _t0 = Date.now();
     log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
 
-    // Race-condition guard: mark chatId as busy IMMEDIATELY so that messages arriving
-    // during the pre-spawn phase (session resolution, memory injection — up to 17s)
-    // are correctly queued by the command router's activeProcesses.has(chatId) check.
-    // The real entry (with child process) will overwrite this sentinel once spawn completes.
-    if (chatId && !activeProcesses.has(chatId)) {
-      activeProcesses.set(chatId, {
-        child: null,       // sentinel: no process yet
-        aborted: false,
-        abortReason: null,
-        startedAt: _t0,
-        engine: 'pending',
-        killSignal: 'SIGTERM',
-      });
+    // Serialization is now guaranteed by daemon-message-pipeline (per-chatId Promise chain).
+    // No race guard needed here — pipeline ensures only one askClaude runs per chatId.
+    // Defense-in-depth: if a stale entry exists with a live child, kill it first.
+    const _existing = activeProcesses.get(chatId);
+    if (_existing && _existing.child && !_existing.aborted) {
+      log('WARN', `askClaude: overwriting active process for ${chatId} — aborting previous`);
+      try { process.kill(-_existing.child.pid, 'SIGTERM'); } catch { try { _existing.child.kill('SIGTERM'); } catch { /* */ } }
     }
+    activeProcesses.set(chatId, {
+      child: null,       // sentinel: no process yet
+      aborted: false,
+      abortReason: null,
+      startedAt: _t0,
+      engine: 'pending',
+      killSignal: 'SIGTERM',
+    });
 
     // Track interaction time for idle/sleep detection
     if (touchInteraction) touchInteraction();
@@ -1220,13 +1289,33 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
     const _ackBoundKey = _ackAgentMap[_ackChatIdStr] || projectKeyFromVirtualChatId(_ackChatIdStr);
     const _ackBoundProj = _ackBoundKey && config.projects ? config.projects[_ackBoundKey] : null;
     // _ackCardHeader: non-null for agents with icon/name (team members, dispatch); passed to editMessage to preserve header on streaming edits
-    const _ackCardHeader = (_ackBoundProj && _ackBoundProj.icon && _ackBoundProj.name)
+    let _ackCardHeader = (_ackBoundProj && _ackBoundProj.icon && _ackBoundProj.name)
       ? { title: `${_ackBoundProj.icon} ${_ackBoundProj.name}`, color: _ackBoundProj.color || 'blue' }
       : null;
-    // Fire-and-forget: don't await Telegram RTT before spawning the engine process.
-    // statusMsgId will be populated well before the first model output (~5s for codex).
-    // For branded agents: send a card with header so streaming edits preserve the agent identity.
-    if (!bot.suppressAck) {
+    // Reuse card from a paused merge (same card, no new push)
+    const _pausedCard = _pausedCards.get(chatId);
+    if (_pausedCard) {
+      _pausedCards.delete(chatId);
+      // Discard stale paused cards (>30s old) — they may come from cancelled flushes
+      const cardAge = _pausedCard.savedAt ? Date.now() - _pausedCard.savedAt : 0;
+      if (cardAge > 30000) {
+        log('INFO', `[askClaude] Discarding stale paused card for ${chatId} (${Math.round(cardAge / 1000)}s old)`);
+        if (_pausedCard.statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, _pausedCard.statusMsgId).catch(() => {});
+      } else {
+        statusMsgId = _pausedCard.statusMsgId;
+        if (_pausedCard.cardHeader) _ackCardHeader = _pausedCard.cardHeader;
+        log('INFO', `[askClaude] Reusing paused card ${statusMsgId} for ${chatId}`);
+      }
+    }
+    if (_pausedCard && statusMsgId) {
+      // Update card to show "merging" state
+      if (statusMsgId && bot.editMessage) {
+        bot.editMessage(chatId, statusMsgId, '🔄 合并处理中…', _ackCardHeader).catch(() => {});
+      }
+    } else if (!bot.suppressAck) {
+      // Fire-and-forget: don't await Telegram RTT before spawning the engine process.
+      // statusMsgId will be populated well before the first model output (~5s for codex).
+      // For branded agents: send a card with header so streaming edits preserve the agent identity.
       const _ackFn = (_ackCardHeader && bot.sendCard)
         ? () => bot.sendCard(chatId, { title: _ackCardHeader.title, body: '🤔', color: _ackCardHeader.color })
         : () => (bot.sendMarkdown ? bot.sendMarkdown(chatId, '🤔') : bot.sendMessage(chatId, '🤔'));
@@ -1821,16 +1910,33 @@ ${mentorRadarHint}
       };
 
       // Check if user cancelled during pre-spawn phase (sentinel was marked aborted)
+      // Stamp session ID on card header so user can track session continuity
+      if (session && session.id && _ackCardHeader) {
+        _ackCardHeader = { ..._ackCardHeader, title: `${_ackCardHeader.title}（${session.id.slice(0, 8)}）` };
+      }
+
       const _preSentinel = activeProcesses.get(chatId);
       if (_preSentinel && _preSentinel.child === null && _preSentinel.aborted) {
         clearInterval(typingTimer);
+        const _preReason = _preSentinel.abortReason || '';
         activeProcesses.delete(chatId); saveActivePids();
-        if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => {});
-        log('INFO', `[askClaude] Pre-spawn abort for ${chatId}: user cancelled during preparation`);
-        return { ok: false, error: 'Stopped by user' };
+        if (_preReason === 'merge-pause' && statusMsgId) {
+          // Save card for reuse by the merged flush
+          _pausedCards.set(chatId, { statusMsgId, cardHeader: _ackCardHeader, savedAt: Date.now() });
+          if (bot.editMessage) bot.editMessage(chatId, statusMsgId, '⏸ 合并中…', _ackCardHeader).catch(() => {});
+        } else if (statusMsgId && bot.deleteMessage) {
+          bot.deleteMessage(chatId, statusMsgId).catch(() => {});
+        }
+        log('INFO', `[askClaude] Pre-spawn abort for ${chatId}: ${_preReason || 'user cancelled'}`);
+        return { ok: false, error: _preReason === 'merge-pause' ? 'Paused for merge' : 'Stopped by user' };
       }
 
       let output, error, errorCode, files, toolUsageLog, timedOut, sessionId;
+
+      // Warm pool: try to reuse a persistent process for this session (Claude only)
+      const _warmSessionKey = sessionChatId;
+      const _warmEntry = (warmPool && runtime.name === 'claude') ? warmPool.acquireWarm(_warmSessionKey) : null;
+
       try {
         ({
           output,
@@ -1851,6 +1957,12 @@ ${mentorRadarHint}
           normalizeSenderId(senderId),
           runtime,
           onSession,
+          {
+            warmChild: _warmEntry ? _warmEntry.child : null,
+            persistent: runtime.name === 'claude' && !!warmPool,
+            warmPool,
+            warmSessionKey: _warmSessionKey,
+          },
         ));
 
         if (sessionId) await onSession(sessionId);
@@ -2160,8 +2272,9 @@ ${mentorRadarHint}
           if (!replyMsg) {
             if (activeProject && bot.sendCard) {
               log('DEBUG', `[REPLY:${chatId}] sending sendCard`);
+              const _sessionTag = session && session.id ? `（${session.id.slice(0, 8)}）` : '';
               replyMsg = await bot.sendCard(chatId, {
-                title: `${activeProject.icon || '🤖'} ${activeProject.name || ''}`,
+                title: `${activeProject.icon || '🤖'} ${activeProject.name || ''}${_sessionTag}`,
                 body: cleanOutput,
                 color: activeProject.color || 'blue',
               });
@@ -2234,6 +2347,17 @@ ${mentorRadarHint}
           ? errMsg
           : `Error: ${errMsg.slice(0, 200)}`;
         log('ERROR', `ask${runtime.name === 'codex' ? 'Codex' : 'Claude'} failed for ${chatId}: ${errMsg.slice(0, 300)} (${errorCode || 'NO_CODE'})`);
+
+        // Merge-pause: save card for reuse, don't show error to user
+        if (errorCode === 'INTERRUPTED_MERGE_PAUSE') {
+          if (statusMsgId) {
+            _pausedCards.set(chatId, { statusMsgId, cardHeader: _ackCardHeader, savedAt: Date.now() });
+            // Update card to show paused state
+            if (bot.editMessage) bot.editMessage(chatId, statusMsgId, '⏸ 合并中…', _ackCardHeader).catch(() => {});
+            log('INFO', `[askClaude] Saved paused card ${statusMsgId} for ${chatId}`);
+          }
+          return { ok: false, error: errMsg, errorCode };
+        }
 
         // If session not found / locked / thinking signature invalid — create new and retry once (Claude path)
         const _isThinkingSignatureError = isClaudeThinkingSignatureError(errMsg);

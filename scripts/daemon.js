@@ -165,6 +165,8 @@ const { createNotifier } = require('./daemon-notify');
 const { createClaudeEngine } = require('./daemon-claude-engine');
 const { createEngineRuntimeFactory, detectDefaultEngine, resolveEngineModel, ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
 const { createCommandRouter } = require('./daemon-command-router');
+const { createMessagePipeline } = require('./daemon-message-pipeline');
+const { createWarmPool } = require('./daemon-warm-pool');
 const { createTaskScheduler } = require('./daemon-task-scheduler');
 const { createAgentTools } = require('./daemon-agent-tools');
 if (!yaml) {
@@ -2160,6 +2162,9 @@ const { handleSessionCommand } = createSessionCommandHandler({
 // Message queue for messages received while a task is running
 const messageQueue = new Map(); // chatId -> { messages: string[], notified: false }
 
+// Warm process pool for eliminating Claude CLI cold-start latency
+const warmPool = createWarmPool({ log });
+
 const { spawnClaudeAsync, askClaude } = createClaudeEngine({
   fs,
   path,
@@ -2205,6 +2210,7 @@ const { spawnClaudeAsync, askClaude } = createClaudeEngine({
   fallbackThrottleMs: FALLBACK_THROTTLE_MS,
   getEngineRuntime,
   getDefaultEngine,
+  warmPool,
 });
 
 const agentTools = createAgentTools({
@@ -2275,6 +2281,9 @@ const { handleAgentCommand } = createAgentCommandHandler({
 // Caffeinate process for /nosleep toggle (macOS only)
 let caffeinateProcess = null;
 
+// pipeline ref — late-bound after createMessagePipeline (circular: router needs pipeline, pipeline needs handleCommand)
+const _pipelineRef = { current: null };
+
 const { handleExecCommand } = createExecCommandHandler({
   fs,
   path,
@@ -2282,7 +2291,7 @@ const { handleExecCommand } = createExecCommandHandler({
   HOME,
   checkCooldown,
   activeProcesses,
-  messageQueue,
+  pipeline: _pipelineRef,
   findTask,
   checkPrecondition,
   buildProfilePreamble,
@@ -2309,7 +2318,7 @@ const { handleOpsCommand } = createOpsCommandHandler({
   log,
   loadConfig,
   loadState,
-  messageQueue,
+  pipeline: _pipelineRef,
   activeProcesses,
   getSession,
   getSessionForEngine,
@@ -2344,7 +2353,7 @@ const { handleCommand } = createCommandRouter({
   providerMod,
   getNoSleepProcess: () => caffeinateProcess,
   activeProcesses,
-  messageQueue,
+  pipeline: _pipelineRef,
   sleep,
   log,
   agentTools,
@@ -2356,6 +2365,15 @@ const { handleCommand } = createCommandRouter({
 
 // Bind handleCommand for agent dispatch (must come after handleCommand definition)
 setDispatchHandler(handleCommand);
+
+// Message pipeline: per-chatId serial execution
+const pipeline = createMessagePipeline({
+  activeProcesses,
+  handleCommand,
+  resetCooldown,
+  log,
+});
+_pipelineRef.current = pipeline;
 
 // ---------------------------------------------------------
 // BOT BRIDGES
@@ -2372,6 +2390,7 @@ const { startTelegramBridge, startFeishuBridge, startImessageBridge, startSiriBr
   getSession,
   restoreSessionFromReply,
   handleCommand,
+  pipeline,
   pendingActivations,
   activeProcesses,
   messageQueue,
@@ -2730,6 +2749,8 @@ async function main() {
     if (feishuBridge) feishuBridge.stop();
     // Stop QMD semantic search daemon if it was started
     try { require('./qmd-client').stopDaemon(); } catch { /* ignore */ }
+    // Release warm pool processes before killing active ones
+    warmPool.releaseAll();
     // Kill all tracked engine process groups before exiting (covers sub-agents too)
     for (const [cid, proc] of activeProcesses) {
       proc.aborted = true;
