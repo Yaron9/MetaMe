@@ -239,8 +239,15 @@ function parseCodexStreamEvent(line) {
 }
 
 function buildClaudeArgs(options = {}) {
-  const { model = ENGINE_MODEL_CONFIG.claude.main, readOnly = false, session = {} } = options;
+  const { model = ENGINE_MODEL_CONFIG.claude.main, readOnly = false, session = {}, addDirs } = options;
   const args = ['-p', '--model', model];
+  // --add-dir: grant file access to additional directories (e.g. worktrees)
+  // without changing session storage location (which follows cwd).
+  if (Array.isArray(addDirs)) {
+    for (const dir of addDirs) {
+      if (dir) args.push('--add-dir', dir);
+    }
+  }
   if (readOnly) {
     const readOnlyTools = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Task'];
     for (const tool of readOnlyTools) args.push('--allowedTools', tool);

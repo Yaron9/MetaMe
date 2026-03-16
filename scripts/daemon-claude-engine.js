@@ -674,31 +674,18 @@ function createClaudeEngine(deps) {
    * Auto-generate a session name using Haiku (async, non-blocking).
    * Writes to Claude's session file (unified with /rename).
    */
-  async function autoNameSession(chatId, sessionId, firstPrompt, cwd) {
+  function autoNameSession(_chatId, sessionId, firstPrompt, cwd, labelPrefix = '') {
     try {
-      const namePrompt = `Generate a very short session name (2-5 Chinese characters, no punctuation, no quotes) that captures the essence of this user request:
-
-"${firstPrompt.slice(0, 200)}"
-
-Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug修复, 代码审查`;
-
-      const { output } = await spawnClaudeAsync(
-        ['-p', '--model', 'haiku'],
-        namePrompt,
-        HOME,
-        15000 // 15s timeout
-      );
-
-      if (output) {
-        // Clean up: remove quotes, punctuation, trim
-        let name = output.replace(/["""''`]/g, '').replace(/[.,!?:;。，！？：；]/g, '').trim();
-        // Limit to reasonable length
-        if (name.length > 12) name = name.slice(0, 12);
-        if (name.length >= 2) {
-          // Write to Claude's session file (unified with /rename on desktop)
-          writeSessionName(sessionId, cwd, name);
-        }
-      }
+      // Use first user message as session name (same as desktop Claude Code behavior).
+      // No AI generation — instant, zero-cost, and more recognizable.
+      let name = String(firstPrompt || '').trim().split('\n')[0];
+      // Strip command prefixes
+      name = name.replace(/^\/\S+\s*/, '').trim();
+      // Truncate to reasonable display length
+      if (name.length > 60) name = name.slice(0, 57) + '...';
+      if (!name) return;
+      name = labelPrefix + name;
+      writeSessionName(sessionId, cwd, name);
     } catch (e) {
       log('DEBUG', `Auto-name failed for ${sessionId.slice(0, 8)}: ${e.message}`);
     }
@@ -1420,6 +1407,11 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       session.engine = engineName; // keep local copy for Codex resume detection below
       session.logicalChatId = sessionChatId;
 
+      // Warm pool: check if a persistent process is available for this session (Claude only).
+      // Declared early so downstream logic can skip expensive operations when reusing warm process.
+      const _warmSessionKey = sessionChatId;
+      const _warmEntry = (warmPool && runtime.name === 'claude') ? warmPool.acquireWarm(_warmSessionKey) : null;
+
       // Pre-spawn session validation: unified for all engines.
       // Claude checks JSONL file existence; Codex checks SQLite. Same interface, different backend.
       // Skip warning for virtual agents (team members) - they may use worktrees with fresh sessions
@@ -1495,7 +1487,8 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       // When resuming a Claude session, inspect the original model first.
       // Thinking block signatures are model-specific; non-Claude JSONL sessions
       // must not be resumed as Claude.
-      if (runtime.name === 'claude' && session.started && session.id) {
+      // Skip for warm process reuse — model is already loaded in the persistent process.
+      if (runtime.name === 'claude' && session.started && session.id && !_warmEntry) {
         const resumeInspection = inspectClaudeResumeSession(session, model);
         if (resumeInspection.shouldResume === false) {
           log('INFO', `[ModelPin] session ${session.id.slice(0, 8)} flagged as ${resumeInspection.reason}; starting fresh Claude session`);
@@ -1767,7 +1760,12 @@ ${mentorRadarHint}
           log('WARN', `Intent registry injection failed: ${e.message}`);
         }
       }
-      const fullPrompt = routedPrompt + daemonHint + intentHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
+      // For warm process reuse: context is already in the persistent process,
+      // so only send the user's actual prompt — skip all hint injection.
+      // This saves ~500-1500 tokens per turn and avoids context duplication.
+      const fullPrompt = _warmEntry
+        ? routedPrompt
+        : routedPrompt + daemonHint + intentHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
       if (runtime.name === 'codex' && session.started && session.id && requestedCodexPermissionProfile) {
         const actualPermissionProfile = getActualCodexPermissionProfile(session);
         if (codexNeedsFallbackForRequestedPermissions(actualPermissionProfile, requestedCodexPermissionProfile)) {
@@ -1785,6 +1783,7 @@ ${mentorRadarHint}
         daemonCfg,
         session,
         cwd: session.cwd,
+        addDirs: boundProject && boundProject.addDirs,
         permissionProfile: runtime.name === 'codex' ? requestedCodexPermissionProfile : null,
       });
 
@@ -1814,7 +1813,7 @@ ${mentorRadarHint}
       // Skip for virtual agents (team clones like _agent_yi) — each has its own worktree,
       // but checkpoint uses `git add -A` which could interfere with parallel work.
       const _isVirtualAgent = String(chatId).startsWith('_agent_') || String(chatId).startsWith('_scope_');
-      if (!_isVirtualAgent) {
+      if (!_isVirtualAgent && !_warmEntry) {
         try {
           // Do NOT pass prompt — conversation content must never enter git history
           const checkpointResult = (gitCheckpointAsync || gitCheckpoint)(session.cwd);
@@ -1932,11 +1931,6 @@ ${mentorRadarHint}
       }
 
       let output, error, errorCode, files, toolUsageLog, timedOut, sessionId;
-
-      // Warm pool: try to reuse a persistent process for this session (Claude only)
-      const _warmSessionKey = sessionChatId;
-      const _warmEntry = (warmPool && runtime.name === 'claude') ? warmPool.acquireWarm(_warmSessionKey) : null;
-
       try {
         ({
           output,
@@ -2317,9 +2311,13 @@ ${mentorRadarHint}
           try { await bot.sendMessage(chatId, error); } catch { /* */ }
         }
 
-        // Auto-name: if this was the first message and session has no name, generate one
+        // Auto-name: if this was the first message and session has no name, generate one.
+        // Add agent label prefix so desktop users can identify which agent owns the session.
         if (runtime.name === 'claude' && wasNew && !getSessionName(session.id)) {
-          autoNameSession(chatId, session.id, prompt, session.cwd).catch(() => { });
+          const _agentLabel = (boundProject && boundProject.name)
+            ? `[${boundProject.name}] `
+            : (projectKey ? `[${projectKey}] ` : '');
+          autoNameSession(chatId, session.id, prompt, session.cwd, _agentLabel).catch(() => { });
         }
 
         // Auto-refresh memory-snapshot.md for this agent on first session message (fire-and-forget)

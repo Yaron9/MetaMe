@@ -289,12 +289,17 @@ function createBridgeStarter(deps) {
       return;
     }
     log('INFO', `Team [${member.key}] using cwd: ${memberCwd}`);
+    // Spawn cwd MUST be the actual work directory (worktree/member dir) so that:
+    //   1. Claude CLI operates in the correct directory (git, file edits)
+    //   2. /undo, /redo, /reset target the right repo
+    // Session visibility on desktop is handled by findSessionFile scanning all project dirs,
+    // and by session naming (auto-name with agent label prefix).
     const teamCfg = {
       ...cfg,
       projects: {
         ...(cfg.projects || {}),
         [member.key]: {
-          cwd: memberCwd,
+          cwd: memberCwd,                                    // actual work directory
           name: member.name,
           icon: member.icon || '🤖',
           color: member.color || 'blue',

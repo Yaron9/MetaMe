@@ -841,6 +841,8 @@ function createSessionStore(deps) {
   function writeSessionName(sessionId, cwd, name) {
     void cwd;
     try {
+      // Clear stale cache — JSONL may have just been created by spawnClaudeStreaming
+      clearSessionFileCache(sessionId);
       const sessionFile = findSessionFile(sessionId);
       if (!sessionFile) {
         log('WARN', `writeSessionName: session file not found for ${sessionId.slice(0, 8)}`);
