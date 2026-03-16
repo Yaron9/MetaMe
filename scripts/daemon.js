@@ -146,6 +146,7 @@ const { createAgentCommandHandler } = require('./daemon-agent-commands');
 const { createSessionCommandHandler } = require('./daemon-session-commands');
 const { createSessionStore } = require('./daemon-session-store');
 const { createCheckpointUtils } = require('./daemon-checkpoints');
+const { createWorktreeUtils } = require('./daemon-worktrees');
 const { createBridgeStarter } = require('./daemon-bridges');
 const { buildTeamRosterHint, buildEnrichedPrompt, updateDispatchContextFiles } = require('./daemon-team-dispatch');
 const {
@@ -233,6 +234,11 @@ const {
   listCheckpoints,
   cleanupCheckpoints,
 } = createCheckpointUtils({ execSync, execFile, path, log });
+
+const {
+  resolveWorktreeKey: _resolveWorktreeKey,
+  getOrCreateWorktree,
+} = createWorktreeUtils({ fs, path, execFile, log, HOME });
 
 // ---------------------------------------------------------
 // CONFIG & STATE
@@ -2371,6 +2377,7 @@ const { startTelegramBridge, startFeishuBridge, startImessageBridge, startSiriBr
   messageQueue,
   sendRemoteDispatch,
   handleRemoteDispatchMessage,
+  getOrCreateWorktree,
 });
 
 const { killExistingDaemon, writePid, cleanPid } = createPidManager({

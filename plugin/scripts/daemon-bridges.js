@@ -25,6 +25,7 @@ function createBridgeStarter(deps) {
     messageQueue,        // optional — used for /stop to clear queued messages
     sendRemoteDispatch,          // optional — send packet to remote peer via relay chat
     handleRemoteDispatchMessage, // optional — intercept relay chat messages
+    getOrCreateWorktree,         // optional — isolated worktree per actor
   } = deps;
 
   async function sendAclReply(bot, chatId, text) {
@@ -278,7 +279,9 @@ function createBridgeStarter(deps) {
     const virtualChatId = `_agent_${member.key}`;
     const parentCwd = member.cwd || boundProj.cwd;
     const resolvedParentCwd = parentCwd.replace(/^~/, require('os').homedir());
-    const memberCwd = _getMemberCwd(resolvedParentCwd, member.key);
+    const memberCwd = typeof getOrCreateWorktree === 'function'
+      ? getOrCreateWorktree(resolvedParentCwd, member.key)
+      : _getMemberCwd(resolvedParentCwd, member.key);
     if (!memberCwd) {
       log('ERROR', `Team [${member.key}] cannot start: directory unavailable`);
       bot.sendMessage(realChatId, `❌ ${member.icon || '🤖'} ${member.name} 启动失败：工作目录创建失败`).catch(() => {});

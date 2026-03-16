@@ -1,12 +1,23 @@
 'use strict';
 
 function createCheckpointUtils(deps) {
-  const { execSync, execFile, path, log } = deps;
+  const { execSync: _execSync, execFile, path, log } = deps;
   const { promisify } = require('util');
   const execFileAsync = execFile ? promisify(execFile) : null;
 
   const CHECKPOINT_PREFIX = '[metame-checkpoint]';
   const CHECKPOINT_REF_PREFIX = 'refs/metame/checkpoints/';
+
+  // Build the ref path for a checkpoint.
+  // When agentKey is provided: refs/metame/checkpoints/<agentKey>/<ts>
+  // Otherwise:                 refs/metame/checkpoints/<ts>  (backward compat)
+  function _checkpointRef(ts, agentKey) {
+    if (agentKey && String(agentKey).trim()) {
+      const safe = String(agentKey).replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 60);
+      return `${CHECKPOINT_REF_PREFIX}${safe}/${ts}`;
+    }
+    return `${CHECKPOINT_REF_PREFIX}${ts}`;
+  }
   const MAX_CHECKPOINTS = 20;
 
   function cpExtractTimestamp(message) {
@@ -50,41 +61,41 @@ function createCheckpointUtils(deps) {
     return { ts, safeLabel, msg: `${CHECKPOINT_PREFIX}${safeLabel} (${ts})` };
   }
 
-  // Build a checkpoint commit stored under refs/metame/checkpoints/{ts} — never pushed by git push.
+  // Build a checkpoint commit stored under refs/metame/checkpoints/{agentKey}/{ts} — never pushed by git push.
   // Returns the commit SHA, or null if nothing changed.
-  function gitCheckpoint(cwd, label) {
+  function gitCheckpoint(cwd, label, agentKey) {
+    const { execFileSync } = require('child_process');
     try {
-      execSync('git rev-parse --is-inside-work-tree', { cwd, stdio: 'ignore', ...WIN_HIDE });
+      execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd, stdio: 'ignore', ...WIN_HIDE });
 
       // Snapshot current index so we can restore it after staging
-      const originalTree = execSync('git write-tree', { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }).trim();
+      const originalTree = execFileSync('git', ['write-tree'], { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }).toString().trim();
 
       // Stage everything to get a full snapshot tree
-      execSync('git add -A', { cwd, stdio: 'ignore', timeout: 5000, ...WIN_HIDE });
-      const cpTree = execSync('git write-tree', { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }).trim();
+      execFileSync('git', ['add', '-A'], { cwd, stdio: 'ignore', timeout: 5000, ...WIN_HIDE });
+      const cpTree = execFileSync('git', ['write-tree'], { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }).toString().trim();
 
       // Restore index immediately — leave the user's staged state intact
-      execSync(`git read-tree ${originalTree}`, { cwd, stdio: 'ignore', timeout: 3000, ...WIN_HIDE });
+      execFileSync('git', ['read-tree', originalTree], { cwd, stdio: 'ignore', timeout: 3000, ...WIN_HIDE });
 
       // Compare against HEAD tree — skip if nothing changed
       let headTree = '';
-      try { headTree = execSync('git rev-parse HEAD^{tree}', { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }).trim(); } catch { /* no commits yet */ }
+      try { headTree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }).toString().trim(); } catch { /* no commits yet */ }
       if (cpTree === headTree) return null;
 
       const { ts, safeLabel, msg } = buildCheckpointMsg(label);
 
-      // Build parent arg (-p HEAD, or nothing for initial commit)
-      let parentFlag = '';
-      try { parentFlag = `-p ${execSync('git rev-parse HEAD', { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }).trim()}`; } catch { /* no HEAD */ }
+      // Build parent args (-p HEAD, or empty for initial commit)
+      let parentArgs = [];
+      try { parentArgs = ['-p', execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8', timeout: 3000, ...WIN_HIDE }).toString().trim()]; } catch { /* no HEAD */ }
 
       // Create an orphaned commit object — NOT on any branch
-      const cpSha = execSync(
-        `git commit-tree ${cpTree} ${parentFlag} -m "${msg}"`,
+      const cpSha = execFileSync('git', ['commit-tree', cpTree, ...parentArgs, '-m', msg],
         { cwd, encoding: 'utf8', timeout: 10000, ...WIN_HIDE }
-      ).trim();
+      ).toString().trim();
 
       // Point a local-only ref at it — git push never transfers refs/metame/*
-      execSync(`git update-ref ${CHECKPOINT_REF_PREFIX}${ts} ${cpSha}`, { cwd, stdio: 'ignore', timeout: 3000, ...WIN_HIDE });
+      execFileSync('git', ['update-ref', _checkpointRef(ts, agentKey), cpSha], { cwd, stdio: 'ignore', timeout: 3000, ...WIN_HIDE });
 
       log('INFO', `Git checkpoint: ${cpSha.slice(0, 8)} in ${path.basename(cwd)}${safeLabel}`);
       return cpSha;
@@ -94,8 +105,8 @@ function createCheckpointUtils(deps) {
   }
 
   // Async version: same logic but non-blocking.
-  async function gitCheckpointAsync(cwd, label) {
-    if (!execFileAsync) return gitCheckpoint(cwd, label);
+  async function gitCheckpointAsync(cwd, label, agentKey) {
+    if (!execFileAsync) return gitCheckpoint(cwd, label, agentKey);
     try {
       await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd, timeout: 3000, ...WIN_HIDE });
 
@@ -121,7 +132,7 @@ function createCheckpointUtils(deps) {
       const { stdout: cpShaOut } = await execFileAsync('git', ['commit-tree', cpTree, ...parentArgs, '-m', msg], { cwd, encoding: 'utf8', timeout: 10000, ...WIN_HIDE });
       const cpSha = cpShaOut.trim();
 
-      await execFileAsync('git', ['update-ref', `${CHECKPOINT_REF_PREFIX}${ts}`, cpSha], { cwd, timeout: 3000, ...WIN_HIDE });
+      await execFileAsync('git', ['update-ref', _checkpointRef(ts, agentKey), cpSha], { cwd, timeout: 3000, ...WIN_HIDE });
 
       log('INFO', `Git checkpoint: ${cpSha.slice(0, 8)} in ${path.basename(cwd)}${safeLabel}`);
       return cpSha;
@@ -133,11 +144,13 @@ function createCheckpointUtils(deps) {
   // List checkpoints, newest first. Returns [{hash, message, ref, parentHash}].
   // Uses %(parent) in for-each-ref format — no extra subprocess per checkpoint.
   function listCheckpoints(cwd, limit = 20) {
+    const { execFileSync } = require('child_process');
     try {
-      const raw = execSync(
-        `git for-each-ref --sort=-committerdate --format="%(objectname)|%(refname)|%(parent)|%(contents:subject)" --count=${limit} ${CHECKPOINT_REF_PREFIX}`,
-        { cwd, encoding: 'utf8', timeout: 5000, ...WIN_HIDE }
-      ).trim();
+      const raw = execFileSync('git', [
+        'for-each-ref', '--sort=-committerdate',
+        `--format=%(objectname)|%(refname)|%(parent)|%(contents:subject)`,
+        `--count=${limit}`, CHECKPOINT_REF_PREFIX,
+      ], { cwd, encoding: 'utf8', timeout: 5000, ...WIN_HIDE }).toString().trim();
       if (!raw) return [];
       return raw.split('\n').filter(Boolean).map(line => {
         const [hash, ref, parent, ...rest] = line.split('|');
@@ -148,12 +161,13 @@ function createCheckpointUtils(deps) {
 
   // Delete checkpoints beyond MAX_CHECKPOINTS (oldest first).
   function cleanupCheckpoints(cwd) {
+    const { execFileSync } = require('child_process');
     try {
       const all = listCheckpoints(cwd, 100);
       if (all.length <= MAX_CHECKPOINTS) return;
       const toDelete = all.slice(MAX_CHECKPOINTS); // oldest (for-each-ref sorted newest-first)
       for (const cp of toDelete) {
-        try { execSync(`git update-ref -d ${cp.ref}`, { cwd, stdio: 'ignore', timeout: 3000, ...WIN_HIDE }); } catch { /* ignore */ }
+        try { execFileSync('git', ['update-ref', '-d', cp.ref], { cwd, stdio: 'ignore', timeout: 3000, ...WIN_HIDE }); } catch { /* ignore */ }
       }
       log('INFO', `Cleaned up ${toDelete.length} old checkpoints in ${path.basename(cwd)}`);
     } catch { /* ignore */ }

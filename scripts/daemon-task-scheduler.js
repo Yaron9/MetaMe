@@ -180,7 +180,6 @@ function createTaskScheduler(deps) {
     CLAUDE_BIN,
     spawn: _spawn,
     execSync,
-    execFileSync,
     parseInterval,
     loadState,
     saveState,
@@ -201,6 +200,60 @@ function createTaskScheduler(deps) {
 
   // Max characters from precondition context to inject into prompts (prevents token bombs)
   const MAX_PRECONDITION_CHARS = 4000;
+  // Cap stdout buffer to prevent memory growth in long-running tasks (output_preview uses 200 chars anyway)
+  const MAX_STDOUT_BYTES = 1024 * 1024;
+
+  // Shared primitive: spawn a single claude -p invocation with silence watchdog.
+  // Resolves to { ok, output, error } — never rejects.
+  // label is used only for log messages (e.g. "Task foo" or "Workflow bar step 2").
+  function spawnClaude(args, prompt, timeoutMs, cwdPath, label) {
+    const env = { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined, METAME_INTERNAL_PROMPT: '1' };
+    return new Promise((resolve) => {
+      const child = spawn(CLAUDE_BIN, args, {
+        cwd: cwdPath || undefined,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
+        env,
+      });
+
+      let stdout = '';
+      let stderr = '';
+      let timedOut = false;
+      let lastActivity = Date.now();
+      let sigkillTimer = null;
+
+      const watchdog = setInterval(() => {
+        if (Date.now() - lastActivity >= timeoutMs) {
+          clearInterval(watchdog);
+          timedOut = true;
+          log('WARN', `${label} silent for ${timeoutMs / 1000}s — killing`);
+          try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
+          sigkillTimer = setTimeout(() => {
+            try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { } }
+          }, 5000);
+        }
+      }, Math.min(timeoutMs, 30000));
+
+      child.stdin.write(prompt);
+      child.stdin.end();
+      child.stdout.on('data', (d) => { lastActivity = Date.now(); if (stdout.length < MAX_STDOUT_BYTES) stdout += d.toString(); });
+      child.stderr.on('data', (d) => { lastActivity = Date.now(); stderr += d.toString(); });
+
+      child.on('close', (code) => {
+        clearInterval(watchdog);
+        if (sigkillTimer) clearTimeout(sigkillTimer);
+        const output = stdout.trim();
+        if (timedOut) return resolve({ ok: false, error: 'silent_timeout', output });
+        if (code !== 0) return resolve({ ok: false, error: (stderr || `Exit code ${code}`).slice(0, 200), output: '' });
+        resolve({ ok: true, output, stderr });
+      });
+
+      child.on('error', (err) => {
+        clearInterval(watchdog);
+        resolve({ ok: false, error: err.message, output: '' });
+      });
+    });
+  }
 
   // On Windows, resolve .cmd → actual Node.js entry to avoid cmd.exe flash
   function _resolveNodeEntry(cmdPath) {
@@ -476,110 +529,46 @@ function createTaskScheduler(deps) {
       log('INFO', `Executing task: ${task.name} (model: ${model}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''})`);
     }
 
-    // Use spawnClaudeAsync (non-blocking spawn with process-group kill) instead of
-    // execFileSync (sync, blocks event loop, can't kill sub-agents).
-    // executeTask now returns a Promise — callers must handle it with .then() or await.
-    const timeoutMs = resolveTimeoutMs(task.timeout, 120);
-    const asyncArgs = [...claudeArgs];
-    const asyncEnv = {
-      ...process.env,
-      ...getDaemonProviderEnv(),
-      CLAUDECODE: undefined,
-      METAME_INTERNAL_PROMPT: '1',
-    };
+    const timeoutMs = resolveTimeoutMs(task.timeout, 1800);
+    return spawnClaude(claudeArgs, fullPrompt, timeoutMs, cwd, `Task ${task.name}`).then((result) => {
+      const { output } = result;
+      const prevSid = state.tasks[task.name]?.session_id;
+      const prevCreatedAt = state.tasks[task.name]?.session_created_at;
+      const sessionFields = { ...(prevSid && { session_id: prevSid }), ...(prevCreatedAt && { session_created_at: prevCreatedAt }) };
 
-    return new Promise((resolve) => {
-      const child = spawn(CLAUDE_BIN, asyncArgs, {
-        cwd: cwd || undefined,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        detached: process.platform !== 'win32', // process groups are POSIX-only
-        env: asyncEnv,
-      });
-
-      let stdout = '';
-      let stderr = '';
-      let timedOut = false;
-
-      const timer = setTimeout(() => {
-        timedOut = true;
-        log('WARN', `Task ${task.name} timeout (${timeoutMs / 1000}s) — killing process group`);
-        try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
-        setTimeout(() => {
-          try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { } }
-        }, 5000);
-      }, timeoutMs);
-
-      child.stdin.write(fullPrompt);
-      child.stdin.end();
-      child.stdout.on('data', (d) => { stdout += d.toString(); });
-      child.stderr.on('data', (d) => { stderr += d.toString(); });
-
-      child.on('close', (code) => {
-        clearTimeout(timer);
-        const output = stdout.trim();
-        if (timedOut) {
-          const prevSid = state.tasks[task.name]?.session_id;
-          const prevCreatedAt = state.tasks[task.name]?.session_created_at;
-          state.tasks[task.name] = {
-            last_run: new Date().toISOString(),
-            status: 'timeout',
-            error: 'Task exceeded timeout',
-            ...(prevSid && { session_id: prevSid }),
-            ...(prevCreatedAt && { session_created_at: prevCreatedAt }),
-          };
+      if (!result.ok) {
+        if (result.error === 'silent_timeout') {
+          state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: `Task silent for ${timeoutMs / 1000}s`, ...sessionFields };
           saveState(state);
-          return resolve({ success: false, error: 'timeout', output: '' });
+          return { success: false, error: 'silent_timeout', output: output || '' };
         }
-        if (code !== 0) {
-          const errMsg = (stderr || `Exit code ${code}`).slice(0, 200);
-          // Persistent session expired: reset so next run creates a new one
-          if (task.persistent_session && (errMsg.includes('not found') || errMsg.includes('No session'))) {
-            log('WARN', `Persistent session for ${task.name} expired, will create new on next run`);
-            state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'session_reset', error: 'Session expired' };
-            saveState(state);
-            return resolve({ success: false, error: 'session_expired', output: '' });
-          }
-          log('ERROR', `Task ${task.name} failed (exit ${code}): ${errMsg}`);
-          const prevSid = state.tasks[task.name]?.session_id;
-          const prevCreatedAt = state.tasks[task.name]?.session_created_at;
-          state.tasks[task.name] = {
-            last_run: new Date().toISOString(),
-            status: 'error',
-            error: errMsg,
-            ...(prevSid && { session_id: prevSid }),
-            ...(prevCreatedAt && { session_created_at: prevCreatedAt }),
-          };
+        const errMsg = result.error;
+        // Persistent session expired: reset so next run creates a new one
+        if (task.persistent_session && (errMsg.includes('not found') || errMsg.includes('No session'))) {
+          log('WARN', `Persistent session for ${task.name} expired, will create new on next run`);
+          state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'session_reset', error: 'Session expired' };
           saveState(state);
-          return resolve({ success: false, error: errMsg, output: '' });
+          return { success: false, error: 'session_expired', output: '' };
         }
-        const estimatedTokens = Math.ceil((fullPrompt.length + output.length) / 4);
-        recordTokens(state, estimatedTokens, { category: classifyTaskUsage(task) });
-        const prevSessionId = state.tasks[task.name]?.session_id;
-        const prevCreatedAt = state.tasks[task.name]?.session_created_at;
-        state.tasks[task.name] = {
-          last_run: new Date().toISOString(),
-          status: 'success',
-          output_preview: output.slice(0, 200),
-          ...(prevSessionId && { session_id: prevSessionId }),
-          ...(prevCreatedAt && { session_created_at: prevCreatedAt }),
-        };
+        log('ERROR', `Task ${task.name} failed: ${errMsg}`);
+        state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: errMsg, ...sessionFields };
         saveState(state);
-        maybeSaveTaskMemory(task, output, estimatedTokens, prevSessionId || '');
-        log('INFO', `Task ${task.name} completed (est. ${estimatedTokens} tokens)`);
-        resolve({ success: true, output, tokens: estimatedTokens });
-      });
+        return { success: false, error: errMsg, output: '' };
+      }
 
-      child.on('error', (err) => {
-        clearTimeout(timer);
-        log('ERROR', `Task ${task.name} spawn error: ${err.message}`);
-        resolve({ success: false, error: err.message, output: '' });
-      });
+      const estimatedTokens = Math.ceil((fullPrompt.length + output.length) / 4);
+      recordTokens(state, estimatedTokens, { category: classifyTaskUsage(task) });
+      state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'success', output_preview: output.slice(0, 200), ...sessionFields };
+      saveState(state);
+      maybeSaveTaskMemory(task, output, estimatedTokens, prevSid || '');
+      log('INFO', `Task ${task.name} completed (est. ${estimatedTokens} tokens)`);
+      return { success: true, output, tokens: estimatedTokens };
     });
   }
 
   // parseInterval — imported from ./utils
 
-  function executeWorkflow(task, config, precheck) {
+  async function executeWorkflow(task, config, precheck) {
     const state = loadState();
     if (!checkBudget(config, state)) {
       log('WARN', `Budget exceeded, skipping workflow: ${task.name}`);
@@ -622,30 +611,19 @@ function createTaskScheduler(deps) {
       args.push(i === 0 ? '--session-id' : '--resume', sessionId);
 
       log('INFO', `Workflow ${task.name} step ${i + 1}/${steps.length}: ${step.skill || 'prompt'}`);
-      try {
-        const output = execFileSync(CLAUDE_BIN, args, {
-          input: prompt,
-          encoding: 'utf8',
-          timeout: resolveTimeoutMs(step.timeout, 300),
-          maxBuffer: 5 * 1024 * 1024,
-          cwd,
-          ...(process.platform === 'win32' ? { windowsHide: true } : {}),
-          env: {
-            ...process.env,
-            ...getDaemonProviderEnv(),
-            CLAUDECODE: undefined,
-            METAME_INTERNAL_PROMPT: '1',
-          },
-          ...(process.platform === 'win32' ? { shell: process.env.COMSPEC || true, windowsHide: true } : {}),
-        }).trim();
+      // Steps share a session and must run sequentially
+      const stepResult = await spawnClaude(args, prompt, resolveTimeoutMs(step.timeout, 1800), cwd, `Workflow ${task.name} step ${i + 1}`);
+      if (stepResult.ok) {
+        const output = stepResult.output;
         const tk = Math.ceil((prompt.length + output.length) / 4);
         totalTokens += tk;
         outputs.push({ step: i + 1, skill: step.skill || null, output: output.slice(0, 500), tokens: tk });
         log('INFO', `Workflow ${task.name} step ${i + 1} done (${tk} tokens)`);
         if (!checkBudget(config, loopState)) { log('WARN', 'Budget exceeded mid-workflow'); break; }
-      } catch (e) {
-        log('ERROR', `Workflow ${task.name} step ${i + 1} failed: ${e.message.slice(0, 200)}`);
-        outputs.push({ step: i + 1, skill: step.skill || null, error: e.message.slice(0, 200) });
+      } else {
+        const errMsg = stepResult.error.slice(0, 200);
+        log('ERROR', `Workflow ${task.name} step ${i + 1} failed: ${errMsg}`);
+        outputs.push({ step: i + 1, skill: step.skill || null, error: errMsg });
         if (!step.optional) {
           recordTokens(loopState, totalTokens, { category: classifyTaskUsage(task) });
           state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: `Step ${i + 1} failed`, steps_completed: i, steps_total: steps.length };
