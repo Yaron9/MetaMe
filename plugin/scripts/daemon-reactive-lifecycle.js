@@ -19,11 +19,12 @@ const { execSync } = require('child_process');
 
 // ── Signal parsing ──────────────────────────────────────────────
 
+// Signal patterns (created per-call to avoid global regex lastIndex state)
 // Supports two formats (both common in LLM output):
 //   NEXT_DISPATCH: target "prompt here"           (quoted, single-line)
 //   NEXT_DISPATCH: target: prompt here             (colon-separated, until next directive or end)
-const QUOTED_RE = /NEXT_DISPATCH:\s*(\S+)\s+"([^"]+)"/g;
-const COLON_RE = /NEXT_DISPATCH\s*:\s*(\w+)\s*:\s*(.+?)(?=\nNEXT_DISPATCH\s*:|$)/gs;
+const QUOTED_PATTERN = /NEXT_DISPATCH:\s*(\S+)\s+"([^"]+)"/g;
+const COLON_PATTERN = /NEXT_DISPATCH\s*:\s*(\S+)\s*:\s*(.+?)(?=\nNEXT_DISPATCH\s*:|$)/gs;
 const RESEARCH_COMPLETE_RE = /RESEARCH_COMPLETE/;
 
 /**
@@ -37,16 +38,17 @@ function parseReactiveSignals(output) {
   const directives = [];
   let match;
   // Try quoted format first (preferred, documented in CLAUDE.md)
-  QUOTED_RE.lastIndex = 0;
-  while ((match = QUOTED_RE.exec(output)) !== null) {
+  // Create fresh regex each call to avoid global lastIndex state pollution
+  const quotedRe = new RegExp(QUOTED_PATTERN.source, QUOTED_PATTERN.flags);
+  while ((match = quotedRe.exec(output)) !== null) {
     const target = match[1].trim();
     const prompt = match[2].trim();
     if (target && prompt) directives.push({ target, prompt });
   }
   // Fallback: colon-separated format (tolerant of LLM variation)
   if (directives.length === 0) {
-    COLON_RE.lastIndex = 0;
-    while ((match = COLON_RE.exec(output)) !== null) {
+    const colonRe = new RegExp(COLON_PATTERN.source, COLON_PATTERN.flags);
+    while ((match = colonRe.exec(output)) !== null) {
       const target = match[1].trim();
       const prompt = match[2].trim();
       if (target && prompt) directives.push({ target, prompt });
@@ -164,7 +166,6 @@ function runProjectVerifier(projectKey, config, deps) {
  */
 function runCompletionHooks(projectKey, projectCwd, deps) {
   const result = { archived: false, nextTopic: null, nextTopicPrompt: null };
-  const { execSync } = require('child_process');
 
   // 1. Archive
   const archiveScript = path.join(projectCwd, 'scripts', 'research-archive.js');
@@ -296,19 +297,24 @@ function handleReactiveOutput(targetProject, output, config, deps) {
           : '\u2705 科研课题已完成并归档。无待处理课题，系统进入等待。';
         if (deps.notifyUser) deps.notifyUser(notifyMsg);
 
-        // Auto-start next topic if available
+        // Auto-start next topic if available — requires budget to be OK
         if (completionResult.nextTopic && completionResult.nextTopicPrompt) {
-          deps.log('INFO', `Reactive: auto-starting next topic for ${projectKey}: ${completionResult.nextTopic}`);
-          setReactiveStatus(st, projectKey, 'running', '');
-          st.reactive[projectKey].depth = 0;
-          deps.saveState(st);
-          deps.handleDispatchItem({
-            target: projectKey,
-            prompt: completionResult.nextTopicPrompt,
-            from: '_system',
-            _reactive: true,
-            new_session: true,
-          }, config);
+          if (!deps.checkBudget(config, st)) {
+            deps.log('WARN', `Reactive: budget exceeded, skipping auto-start of next topic for ${projectKey}`);
+            if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f 下一课题 "${completionResult.nextTopic}" 已就绪但预算不足，暂不启动`);
+          } else {
+            deps.log('INFO', `Reactive: auto-starting next topic for ${projectKey}: ${completionResult.nextTopic}`);
+            setReactiveStatus(st, projectKey, 'running', '');
+            st.reactive[projectKey].depth = 0;
+            deps.saveState(st);
+            deps.handleDispatchItem({
+              target: projectKey,
+              prompt: completionResult.nextTopicPrompt,
+              from: '_system',
+              _reactive: true,
+              new_session: true,
+            }, config);
+          }
         }
       } else {
         if (deps.notifyUser) deps.notifyUser('\u2705 科研课题已完成');
