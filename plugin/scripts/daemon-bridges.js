@@ -925,7 +925,12 @@ function createBridgeStarter(deps) {
 
           }
 
-          await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
+          try {
+            await handleCommand(bot, chatId, text, liveCfg, executeTaskByName, acl.senderId, acl.readOnly);
+          } catch (e) {
+            log('ERROR', `Feishu handleCommand failed for ${chatId}: ${e.message}`);
+            bot.sendMessage(chatId, `❌ 命令执行失败: ${e.message}`).catch(() => {});
+          }
         }
       }, { log: (lvl, msg) => log(lvl, msg) });
 

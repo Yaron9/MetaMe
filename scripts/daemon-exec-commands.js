@@ -2,6 +2,7 @@
 
 const { classifyTaskUsage } = require('./usage-classifier');
 const { normalizeModel } = require('./daemon-task-scheduler');
+const { resolveEngineModel } = require('./daemon-engine-runtime');
 const { createCommandSessionResolver } = require('./daemon-command-session-route');
 
 function createExecCommandHandler(deps) {
@@ -226,6 +227,10 @@ function createExecCommandHandler(deps) {
         const signal = proc.killSignal || 'SIGTERM';
         try { process.kill(-proc.child.pid, signal); } catch { try { proc.child.kill(signal); } catch { /* */ } }
         await bot.sendMessage(chatId, '⏹ Stopping current engine task...');
+      } else if (proc && proc.child === null) {
+        // Pre-spawn sentinel: mark as aborted so askClaude bails out before spawn
+        proc.aborted = true;
+        await bot.sendMessage(chatId, '⏹ Stopping (pre-spawn phase)...');
       } else {
         await bot.sendMessage(chatId, 'No active task to stop.');
       }
@@ -380,7 +385,7 @@ function createExecCommandHandler(deps) {
         saveState(state2);
       } else {
         // Claude: warm up the new session immediately via --session-id
-        const model = daemonCfg.model || 'opus';
+        const model = resolveEngineModel('claude', daemonCfg);
         const initArgs = ['-p', '--session-id', newSession.id, '--model', model];
         if (daemonCfg.dangerously_skip_permissions) initArgs.push('--dangerously-skip-permissions');
         const preamble = buildProfilePreamble();

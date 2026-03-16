@@ -157,6 +157,94 @@ function runProjectVerifier(projectKey, config, deps) {
   }
 }
 
+/**
+ * Run project-level completion hooks (archive + topic pool).
+ * Platform only calls scripts if they exist — no business logic here.
+ * @returns {{ archived: boolean, nextTopic: string|null, nextTopicPrompt: string|null }}
+ */
+function runCompletionHooks(projectKey, projectCwd, deps) {
+  const result = { archived: false, nextTopic: null, nextTopicPrompt: null };
+  const { execSync } = require('child_process');
+
+  // 1. Archive
+  const archiveScript = path.join(projectCwd, 'scripts', 'research-archive.js');
+  if (fs.existsSync(archiveScript)) {
+    try {
+      // Read project name from state file
+      const statePath = path.join(
+        deps.metameDir || path.join(os.homedir(), '.metame'),
+        'memory', 'now', `${projectKey}.md`
+      );
+      let projectName = projectKey;
+      try {
+        const stateContent = fs.readFileSync(statePath, 'utf8');
+        const m = stateContent.match(/^project:\s*"?(.+?)"?\s*$/m);
+        if (m) projectName = m[1];
+      } catch { /* use projectKey */ }
+
+      const archiveOut = execSync('node scripts/research-archive.js', {
+        cwd: projectCwd, encoding: 'utf8', timeout: 30000,
+        env: { ...process.env, ARCHIVE_CWD: projectCwd, ARCHIVE_PROJECT_NAME: projectName, ARCHIVE_STATE_PATH: statePath },
+      }).trim();
+      const archiveResult = JSON.parse(archiveOut);
+      result.archived = archiveResult.success === true;
+      deps.log('INFO', `Reactive: archive result for ${projectKey}: ${archiveOut.slice(0, 200)}`);
+    } catch (e) {
+      deps.log('WARN', `Reactive: archive failed for ${projectKey}: ${e.message}`);
+    }
+  }
+
+  // 2. Topic pool — only proceed if archive succeeded
+  const topicScript = path.join(projectCwd, 'scripts', 'topic-pool.js');
+  if (result.archived && fs.existsSync(topicScript)) {
+    const topicEnv = { ...process.env, TOPICS_CWD: projectCwd };
+    // 2a. Complete current active topic first
+    try {
+      const listOut = execSync('node scripts/topic-pool.js list', {
+        cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: topicEnv,
+      }).trim();
+      const listResult = JSON.parse(listOut);
+      if (listResult.success && Array.isArray(listResult.topics)) {
+        const activeTopic = listResult.topics.find(t => t.status === 'active');
+        if (activeTopic) {
+          execSync(`node scripts/topic-pool.js complete ${activeTopic.id}`, {
+            cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: topicEnv,
+          });
+          deps.log('INFO', `Reactive: completed active topic ${activeTopic.id}: ${activeTopic.title}`);
+        }
+      }
+    } catch (e) {
+      deps.log('WARN', `Reactive: topic complete failed: ${e.message}`);
+    }
+    // 2b. Get next pending topic
+    try {
+      const nextOut = execSync('node scripts/topic-pool.js next', {
+        cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: topicEnv,
+      }).trim();
+      const nextResult = JSON.parse(nextOut);
+      if (nextResult.success && nextResult.topic) {
+        // Activate the next topic
+        try {
+          execSync(`node scripts/topic-pool.js activate ${nextResult.topic.id}`, {
+            cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: topicEnv,
+          });
+        } catch (e) {
+          deps.log('WARN', `Reactive: topic activate failed: ${e.message}`);
+        }
+        result.nextTopic = nextResult.topic.title;
+        result.nextTopicPrompt = `新课题启动: "${nextResult.topic.title}"\n\n请开始研究这个课题。第一步：更新 now/${projectKey}.md 的 project 和 phase 字段，然后 NEXT_DISPATCH scout 进行文献调研。`;
+        deps.log('INFO', `Reactive: next topic for ${projectKey}: ${nextResult.topic.title}`);
+      }
+    } catch (e) {
+      deps.log('WARN', `Reactive: topic pool query failed for ${projectKey}: ${e.message}`);
+    }
+  } else if (!result.archived && fs.existsSync(topicScript)) {
+    deps.log('WARN', `Reactive: skipping topic pool for ${projectKey} — archive did not succeed`);
+  }
+
+  return result;
+}
+
 // ── Main handler ────────────────────────────────────────────────
 
 /**
@@ -198,7 +286,33 @@ function handleReactiveOutput(targetProject, output, config, deps) {
       st.reactive[projectKey].depth = 0;
       rs.last_signal = 'RESEARCH_COMPLETE';
       deps.saveState(st);
-      if (deps.notifyUser) deps.notifyUser('\u2705 \u79d1\u7814\u8bfe\u9898\u5df2\u5b8c\u6210');
+
+      // Run completion hooks (archive + next topic) if project has scripts/
+      const projectCwd = resolveProjectCwd(projectKey, config);
+      if (projectCwd) {
+        const completionResult = runCompletionHooks(projectKey, projectCwd, deps);
+        const notifyMsg = completionResult.nextTopic
+          ? `\u2705 科研课题已完成并归档。下一课题: ${completionResult.nextTopic}`
+          : '\u2705 科研课题已完成并归档。无待处理课题，系统进入等待。';
+        if (deps.notifyUser) deps.notifyUser(notifyMsg);
+
+        // Auto-start next topic if available
+        if (completionResult.nextTopic && completionResult.nextTopicPrompt) {
+          deps.log('INFO', `Reactive: auto-starting next topic for ${projectKey}: ${completionResult.nextTopic}`);
+          setReactiveStatus(st, projectKey, 'running', '');
+          st.reactive[projectKey].depth = 0;
+          deps.saveState(st);
+          deps.handleDispatchItem({
+            target: projectKey,
+            prompt: completionResult.nextTopicPrompt,
+            from: '_system',
+            _reactive: true,
+            new_session: true,
+          }, config);
+        }
+      } else {
+        if (deps.notifyUser) deps.notifyUser('\u2705 科研课题已完成');
+      }
       return;
     }
 

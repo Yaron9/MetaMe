@@ -1064,10 +1064,14 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
         const chatId = parentKey && Object.entries(feishuMap).find(([, v]) => v === parentKey)?.[0];
         if (chatId) bot.sendMarkdown(chatId, msg).catch(e => log('WARN', `Reactive notify failed: ${e.message}`));
       };
-      handleReactiveOutput(targetProject, outStr, config, {
-        log, loadState, saveState, checkBudget, handleDispatchItem,
-        notifyUser: _reactiveNotify,
-      });
+      try {
+        handleReactiveOutput(targetProject, outStr, config, {
+          log, loadState, saveState, checkBudget, handleDispatchItem,
+          notifyUser: _reactiveNotify,
+        });
+      } catch (reactiveErr) {
+        log('ERROR', `handleReactiveOutput failed for ${targetProject}: ${reactiveErr.message}`);
+      }
     }
 
     if (replyFn && outStr.trim().length > 2) {
@@ -2739,6 +2743,15 @@ async function main() {
   const shutdown = async (opts = {}) => {
     if (shuttingDown) return;
     shuttingDown = true;  // set immediately to prevent double-spawn race condition
+    log('INFO', 'Daemon shutting down...');
+    await notifyActiveUsers('关闭').catch(() => {});
+    runtimeWatchers.stop();
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (dispatchSocket) try { dispatchSocket.close(); } catch { }
+    try { fs.unlinkSync(SOCK_PATH); } catch { }
+    // Stop bridges BEFORE spawning replacement to avoid two Feishu WebSocket connections competing
+    if (telegramBridge) telegramBridge.stop();
+    if (feishuBridge) feishuBridge.stop();
     if (opts.restartReason) {
       const spawned = spawnReplacementDaemon(opts.restartReason);
       if (!spawned) {
@@ -2747,14 +2760,6 @@ async function main() {
         return;
       }
     }
-    log('INFO', 'Daemon shutting down...');
-    await notifyActiveUsers('关闭').catch(() => {});
-    runtimeWatchers.stop();
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    if (dispatchSocket) try { dispatchSocket.close(); } catch { }
-    try { fs.unlinkSync(SOCK_PATH); } catch { }
-    if (telegramBridge) telegramBridge.stop();
-    if (feishuBridge) feishuBridge.stop();
     // Stop QMD semantic search daemon if it was started
     try { require('./qmd-client').stopDaemon(); } catch { /* ignore */ }
     // Kill all tracked engine process groups before exiting (covers sub-agents too)

@@ -44,6 +44,11 @@ function createCommandRouter(deps) {
       try { process.kill(-proc.child.pid, signal); } catch { try { proc.child.kill(signal); } catch { /* */ } }
       return true;
     }
+    // Sentinel (pre-spawn phase): mark as aborted so askClaude can bail out before spawn
+    if (proc && proc.child === null) {
+      proc.aborted = true;
+      return true;
+    }
     return false;
   }
 

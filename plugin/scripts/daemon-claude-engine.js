@@ -393,7 +393,19 @@ function createClaudeEngine(deps) {
     return null;
   }
 
-  function inspectClaudeResumeSession(session) {
+  // Map full API model IDs back to their CLI alias family.
+  // When the configured model is an alias (e.g. "sonnet") and the JSONL records the full ID
+  // (e.g. "claude-sonnet-4-6"), they are the same family — no pin needed.
+  // This prevents pinning to a deprecated/retired full model name.
+  function _modelFamilyAlias(fullModelId) {
+    const m = String(fullModelId || '').toLowerCase();
+    if (m.includes('opus')) return 'opus';
+    if (m.includes('sonnet')) return 'sonnet';
+    if (m.includes('haiku')) return 'haiku';
+    return null;
+  }
+
+  function inspectClaudeResumeSession(session, configuredModel) {
     const result = {
       shouldResume: true,
       modelPin: null,
@@ -414,6 +426,14 @@ function createClaudeEngine(deps) {
             modelPin: null,
             reason: 'non-claude-session',
           };
+        }
+        // If the configured model is a short alias (sonnet/opus/haiku) and the JSONL model
+        // belongs to the same family, do NOT pin — let the alias resolve to the latest version.
+        // Only pin when the families genuinely differ (e.g. session was opus, config says sonnet).
+        const sessionFamily = _modelFamilyAlias(sessionModel);
+        const configFamily = _modelFamilyAlias(configuredModel);
+        if (sessionFamily && configFamily && sessionFamily === configFamily) {
+          return result; // same family, no pin needed
         }
         return {
           shouldResume: true,
@@ -1160,6 +1180,22 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
   async function askClaude(bot, chatId, prompt, config, readOnly = false, senderId = null) {
     const _t0 = Date.now();
     log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
+
+    // Race-condition guard: mark chatId as busy IMMEDIATELY so that messages arriving
+    // during the pre-spawn phase (session resolution, memory injection — up to 17s)
+    // are correctly queued by the command router's activeProcesses.has(chatId) check.
+    // The real entry (with child process) will overwrite this sentinel once spawn completes.
+    if (chatId && !activeProcesses.has(chatId)) {
+      activeProcesses.set(chatId, {
+        child: null,       // sentinel: no process yet
+        aborted: false,
+        abortReason: null,
+        startedAt: _t0,
+        engine: 'pending',
+        killSignal: 'SIGTERM',
+      });
+    }
+
     // Track interaction time for idle/sleep detection
     if (touchInteraction) touchInteraction();
     // Track per-session last_active for summary generation (P2-B)
@@ -1225,6 +1261,9 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
         if (!rest) {
           // Pure nickname call — confirm switch and stop
           clearInterval(typingTimer);
+          // Clean up pending sentinel (no spawn will follow)
+          const _ps = activeProcesses.get(chatId);
+          if (_ps && _ps.child === null) { activeProcesses.delete(chatId); saveActivePids(); }
           await bot.sendMessage(chatId, `${proj.icon || '🤖'} ${proj.name || key} 在线`);
           return { ok: true };
         }
@@ -1368,7 +1407,7 @@ Reply with ONLY the name, nothing else. Examples: 插件开发, API重构, Bug�
       // Thinking block signatures are model-specific; non-Claude JSONL sessions
       // must not be resumed as Claude.
       if (runtime.name === 'claude' && session.started && session.id) {
-        const resumeInspection = inspectClaudeResumeSession(session);
+        const resumeInspection = inspectClaudeResumeSession(session, model);
         if (resumeInspection.shouldResume === false) {
           log('INFO', `[ModelPin] session ${session.id.slice(0, 8)} flagged as ${resumeInspection.reason}; starting fresh Claude session`);
           session = createSession(sessionChatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', runtime.name);
@@ -1781,6 +1820,16 @@ ${mentorRadarHint}
         }
       };
 
+      // Check if user cancelled during pre-spawn phase (sentinel was marked aborted)
+      const _preSentinel = activeProcesses.get(chatId);
+      if (_preSentinel && _preSentinel.child === null && _preSentinel.aborted) {
+        clearInterval(typingTimer);
+        activeProcesses.delete(chatId); saveActivePids();
+        if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => {});
+        log('INFO', `[askClaude] Pre-spawn abort for ${chatId}: user cancelled during preparation`);
+        return { ok: false, error: 'Stopped by user' };
+      }
+
       let output, error, errorCode, files, toolUsageLog, timedOut, sessionId;
       try {
         ({
@@ -1939,6 +1988,9 @@ ${mentorRadarHint}
         }
       } catch (spawnErr) {
         clearInterval(typingTimer);
+        // Clean up pending sentinel if spawn never completed
+        const _ps2 = activeProcesses.get(chatId);
+        if (_ps2 && _ps2.child === null) { activeProcesses.delete(chatId); saveActivePids(); }
         if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => { });
         log('ERROR', `spawnClaudeStreaming crashed for ${chatId}: ${spawnErr.message}`);
         await bot.sendMessage(chatId, `❌ 内部错误: ${spawnErr.message}`).catch(() => { });
@@ -2230,8 +2282,8 @@ ${mentorRadarHint}
           // Auto-fallback: if custom provider/model fails, revert to anthropic + opus (Claude path only)
           if (runtime.name === 'claude') {
             const activeProv = providerMod ? providerMod.getActiveName() : 'anthropic';
-            const builtinModels = ENGINE_MODEL_CONFIG.claude.options;
-            if ((activeProv !== 'anthropic' || !builtinModels.includes(model)) && !errMsg.includes('Stopped by user')) {
+            const builtinModelValues = (ENGINE_MODEL_CONFIG.claude.options || []).map(o => typeof o === 'string' ? o : o.value);
+            if ((activeProv !== 'anthropic' || !builtinModelValues.includes(model)) && !errMsg.includes('Stopped by user')) {
               try {
                 config = fallbackToDefaultProvider(`${activeProv}/${model} error: ${errMsg.slice(0, 100)}`);
                 await bot.sendMessage(chatId, `⚠️ ${activeProv}/${model} 失败，已回退到 anthropic/opus\n原因: ${errMsg.slice(0, 100)}`);
@@ -2251,6 +2303,9 @@ ${mentorRadarHint}
 
     } catch (fatalErr) { // ── safety-net-catch ──
       clearInterval(typingTimer);
+      // Clean up pending sentinel if spawn never completed
+      const _ps3 = activeProcesses.get(chatId);
+      if (_ps3 && _ps3.child === null) { activeProcesses.delete(chatId); saveActivePids(); }
       if (statusMsgId && bot.deleteMessage) await bot.deleteMessage(chatId, statusMsgId).catch(() => { });
       log('FATAL', `[askClaude] Uncaught error for ${chatId}: ${fatalErr.message}\n${fatalErr.stack}`);
       try { await bot.sendMessage(chatId, `❌ 内部错误: ${fatalErr.message}`); } catch { /* */ }

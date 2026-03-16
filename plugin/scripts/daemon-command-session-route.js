@@ -33,7 +33,13 @@ function createCommandSessionResolver(deps) {
   function normalizeRouteCwd(cwd) {
     if (!cwd) return null;
     try {
-      return path.resolve(String(cwd));
+      let s = String(cwd);
+      // Expand ~ to HOME before resolving (path.resolve does not handle ~)
+      if (s.startsWith('~/') || s === '~') {
+        const home = process.env.HOME || require('os').homedir();
+        s = s === '~' ? home : path.join(home, s.slice(2));
+      }
+      return path.resolve(s);
     } catch {
       return String(cwd);
     }
