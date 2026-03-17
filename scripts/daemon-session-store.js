@@ -89,6 +89,67 @@ function createSessionStore(deps) {
 
   const CLAUDE_PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
   const CODEX_DB = path.join(HOME, '.codex', 'state_5.sqlite');
+
+  // Decode Claude CLI project directory name back to filesystem path.
+  // Claude CLI encodes: / → -, _ → -, leading dot → - (so -- means /.).
+  // Hyphens in original names create ambiguity (e.g. "metame-desktop" ← "metame/desktop" or "metame-desktop").
+  // Strategy: first try naive decode; if not found, resolve segment by segment via filesystem,
+  // also trying underscore variants for each segment (since _ is encoded as -).
+  function decodeProjectDirName(dirName) {
+    if (!dirName || !dirName.startsWith('-')) return null;
+    // Step 1: naive decode
+    let decoded = dirName.replace(/-/g, '/');
+    decoded = decoded.replace(/\/\//g, '/.');
+    if (fs.existsSync(decoded)) return decoded;
+    // Step 2: greedy segment-by-segment resolution
+    const parts = dirName.slice(1).split('-'); // remove leading '-', split rest
+    if (parts.length === 0) return null;
+    let current = '';
+    let i = 0;
+    while (i < parts.length) {
+      // Handle leading-dot components: empty part means the next part starts with '.'
+      if (parts[i] === '' && i + 1 < parts.length) {
+        const dotSegment = '.' + parts[i + 1];
+        const candidate = current + '/' + dotSegment;
+        if (fs.existsSync(candidate)) {
+          current = candidate;
+          i += 2;
+          continue;
+        }
+      }
+      // Try longest possible segment first (greedy: prefer "metame-desktop" over "metame/desktop")
+      // For each candidate, also try replacing internal hyphens with underscores
+      let found = false;
+      for (let end = parts.length; end > i; end--) {
+        const segment = parts.slice(i, end).join('-');
+        const base = current || '';
+        const candidate = base + '/' + segment;
+        if (fs.existsSync(candidate)) {
+          current = candidate;
+          i = end;
+          found = true;
+          break;
+        }
+        // Try underscore variant: Claude CLI also encodes _ as -
+        if (end - i > 1) {
+          const underscored = parts.slice(i, end).join('_');
+          const underCandidate = base + '/' + underscored;
+          if (fs.existsSync(underCandidate)) {
+            current = underCandidate;
+            i = end;
+            found = true;
+            break;
+          }
+        }
+      }
+      if (!found) {
+        const segment = parts[i];
+        current = current ? current + '/' + segment : '/' + segment;
+        i++;
+      }
+    }
+    return current || null;
+  }
   const _sessionFileCache = new Map(); // sessionId -> { path, ts }
   const _codexRolloutCache = new Map(); // sessionId -> { path, ts }
   let _sessionCache = null;
@@ -252,16 +313,15 @@ function createSessionStore(deps) {
               const realPath = data.entries[0].projectPath;
               if (realPath) projPathCache.set(proj, realPath);
               for (const entry of data.entries) {
-                if (entry.messageCount >= 1) sessionMap.set(entry.sessionId, entry);
+                if (entry.messageCount >= 1) sessionMap.set(entry.sessionId, { ...entry, _projDirName: proj });
               }
             }
           }
           // Fallback: decode projectPath from directory name (e.g. -Users-yaron-AGI-AChat → /Users/yaron/AGI/AChat)
-          // Claude CLI encodes dots: .metame → -metame (dot stripped), so -- means /. (e.g. //.metame)
+          // Uses smart decoding that handles hyphens in original path names
           if (!projPathCache.has(proj) && proj.startsWith('-')) {
-            let decoded = proj.replace(/-/g, '/');
-            decoded = decoded.replace(/\/\//g, '/.');
-            if (fs.existsSync(decoded)) projPathCache.set(proj, decoded);
+            const decoded = decodeProjectDirName(proj);
+            if (decoded && fs.existsSync(decoded)) projPathCache.set(proj, decoded);
           }
         } catch { /* skip */ }
 
@@ -275,15 +335,16 @@ function createSessionStore(deps) {
             const existing = sessionMap.get(sessionId);
             if (!existing || fileMtime > (existing.fileMtime || 0)) {
               const projectPath = projPathCache.get(proj);
-              // Don't skip sessions without projectPath — use decoded dir name as fallback
+              // Don't skip sessions without projectPath — use smart-decoded dir name as fallback
               // so they still appear in /resume (better to show with unknown path than hide)
-              const fallbackPath = proj.startsWith('-') ? proj.replace(/-/g, '/').replace(/\/\//g, '/.') : null;
+              const fallbackPath = !projectPath ? decodeProjectDirName(proj) : null;
               if (!projectPath && !fallbackPath) continue;
               sessionMap.set(sessionId, {
                 sessionId, projectPath: projectPath || fallbackPath, fileMtime,
                 modified: new Date(fileMtime).toISOString(),
                 messageCount: 1,
                 ...(existing || {}),
+                _projDirName: proj,
                 fileMtime,
               });
             }
@@ -524,6 +585,14 @@ function createSessionStore(deps) {
     }
   }
 
+  // Encode a filesystem path the same way Claude CLI does for project directory names.
+  // This allows matching sessions whose projectPath couldn't be decoded back correctly.
+  function encodeCwdToDirName(cwdPath) {
+    if (!cwdPath) return null;
+    // Claude CLI: replace / with -, leading dots become just - (dot stripped)
+    return cwdPath.replace(/\//g, '-').replace(/-\./g, '--');
+  }
+
   function listRecentSessions(limit, cwd, engine, agentKey) {
     let all = scanAllSessions();
     if (agentKey) {
@@ -534,7 +603,22 @@ function createSessionStore(deps) {
     } else if (cwd) {
       // Match exact cwd OR worktree children (~/.metame/worktrees/<basename>/<actor>/)
       const worktreePrefix = path.join(HOME, '.metame', 'worktrees', path.basename(cwd)) + path.sep;
-      all = all.filter(s => s.projectPath === cwd || (s.projectPath && s.projectPath.startsWith(worktreePrefix)));
+      // Also match sessions whose Claude project dir name matches the encoded cwd
+      // This handles cases where the dir name couldn't be decoded back due to hyphen ambiguity
+      // Skip this for HOME-level cwd (too broad — would match everything)
+      const encodedPrefix = (cwd !== HOME) ? encodeCwdToDirName(cwd) : null;
+      // Require exact match or a path-boundary after the prefix (the next char must be '-' for a subdir)
+      const encodedExact = encodedPrefix ? encodedPrefix + '-' : null;
+      all = all.filter(s => {
+        if (!s.projectPath) return false;
+        if (s.projectPath === cwd) return true;
+        if (s.projectPath.startsWith(worktreePrefix)) return true;
+        // Fallback: check if the session's project dir name matches the encoded cwd exactly
+        // (or is a subdirectory of it). Only use this when projectPath doesn't already match.
+        if (encodedPrefix && s._projDirName
+          && (s._projDirName === encodedPrefix || (encodedExact && s._projDirName.startsWith(encodedExact)))) return true;
+        return false;
+      });
     }
     if (engine) {
       const safeEngine = String(engine).trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
