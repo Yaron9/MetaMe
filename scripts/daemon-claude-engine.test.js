@@ -661,7 +661,7 @@ describe('daemon-claude-engine private helpers', () => {
 
     assert.deepEqual(
       engine._private.inspectClaudeResumeSession({ started: true, id: 'sid-1' }),
-      { shouldResume: true, modelPin: 'claude-sonnet-4-20250514', reason: '' }
+      { shouldResume: true, modelPin: 'sonnet', reason: '' }
     );
 
     // When configured model is 'sonnet' (same family), no pin needed
@@ -673,7 +673,7 @@ describe('daemon-claude-engine private helpers', () => {
     // When configured model is 'opus' (different family), pin is required
     assert.deepEqual(
       engine._private.inspectClaudeResumeSession({ started: true, id: 'sid-1' }, 'opus'),
-      { shouldResume: true, modelPin: 'claude-sonnet-4-20250514', reason: '' }
+      { shouldResume: true, modelPin: 'sonnet', reason: '' }
     );
   });
 
