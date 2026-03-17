@@ -2686,7 +2686,26 @@ async function main() {
   let heartbeatTimer = startHeartbeat(config, notifyFn, notifyPersonalFn);
 
   let shuttingDown = false;
+  // Detect if we're managed by launchd (com.metame.npm-daemon).
+  // If so, don't self-spawn — just exit and let launchd restart us (KeepAlive=true).
+  // This prevents duplicate daemon processes that fight over Feishu WebSocket connections.
+  function _isLaunchdManaged() {
+    try {
+      // launchd sets __CFBundleIdentifier or we can check ppid=1
+      if (process.ppid === 1) return true;
+      // Also check if caffeinate is our parent (launchd plist wraps with caffeinate)
+      const ppidInfo = execSync(`ps -p ${process.ppid} -o comm=`, { encoding: 'utf8', timeout: 2000 }).trim();
+      if (ppidInfo.includes('caffeinate') || ppidInfo.includes('launchd')) return true;
+    } catch { /* ignore */ }
+    return false;
+  }
+
   function spawnReplacementDaemon(reason) {
+    if (_isLaunchdManaged()) {
+      log('INFO', `[RESTART] launchd-managed — exiting to let launchd restart (reason=${reason})`);
+      // Return true so shutdown proceeds; launchd KeepAlive will restart us
+      return true;
+    }
     try {
       const replacementScript = path.join(METAME_DIR, 'daemon.js');
       const bg = spawn(process.execPath, [replacementScript], {
