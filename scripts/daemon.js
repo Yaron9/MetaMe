@@ -1777,7 +1777,21 @@ function attachOrCreateSession(chatId, projCwd, name, engine) {
     }
     return;
   }
-  createSession(chatId, projCwd, name || '', engine);
+  // No active session — instead of auto-creating, set up a --continue placeholder.
+  // createSession is reserved for user-initiated /new only.
+  // This ensures askClaude will use --continue to pick up the most recent session in this cwd.
+  const state = loadState();
+  if (!state.sessions[chatId]) state.sessions[chatId] = {};
+  state.sessions[chatId].cwd = projCwd;
+  // Mark engine slot with __continue__ so askClaude uses --continue flag
+  if (!state.sessions[chatId].engines) state.sessions[chatId].engines = {};
+  state.sessions[chatId].engines[engine] = {
+    ...(state.sessions[chatId].engines[engine] || {}),
+    id: '__continue__',
+    started: true,
+  };
+  saveState(state);
+  log('INFO', `[SESSION-ATTACH] ${chatId} set to --continue mode (cwd: ${projCwd}, engine: ${engine})`);
 }
 
 /**

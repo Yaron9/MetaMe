@@ -1395,16 +1395,20 @@ function createClaudeEngine(deps) {
         : null;
 
       if (!sessionRaw) {
-        // No saved state for this chatId: start a fresh session.
-        // Note: daemon_state.json persists across restarts, so this only happens on truly first use
-        // or after an explicit /new command.
-        createSession(
-          sessionChatId,
-          boundCwd || undefined,
-          boundProject && boundProject.name ? boundProject.name : '',
-          boundEngineName,
-          boundEngineName === 'codex' ? requestedCodexPermissionProfile : undefined
-        );
+        // No saved state for this chatId — use --continue instead of auto-creating.
+        // createSession is reserved for user-initiated /new only.
+        // --continue will pick up the most recent session in the cwd, or start fresh if none exists.
+        log('INFO', `[SESSION-CONTINUE] No session for ${sessionChatId}; using --continue mode (cwd: ${boundCwd || HOME})`);
+        const _initState = loadState();
+        if (!_initState.sessions[sessionChatId]) _initState.sessions[sessionChatId] = {};
+        _initState.sessions[sessionChatId].cwd = boundCwd || HOME;
+        if (!_initState.sessions[sessionChatId].engines) _initState.sessions[sessionChatId].engines = {};
+        _initState.sessions[sessionChatId].engines[boundEngineName] = {
+          ...(_initState.sessions[sessionChatId].engines[boundEngineName] || {}),
+          id: '__continue__',
+          started: true,
+        };
+        saveState(_initState);
       }
 
       // Resolve flat view for current engine (id + started are engine-specific; cwd is shared)
@@ -1492,8 +1496,8 @@ function createClaudeEngine(deps) {
       if (runtime.name === 'claude' && session.started && session.id && !_warmEntry) {
         const resumeInspection = inspectClaudeResumeSession(session, model);
         if (resumeInspection.shouldResume === false) {
-          log('INFO', `[ModelPin] session ${session.id.slice(0, 8)} flagged as ${resumeInspection.reason}; starting fresh Claude session`);
-          session = createSession(sessionChatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', runtime.name);
+          log('INFO', `[ModelPin] session ${session.id.slice(0, 8)} flagged as ${resumeInspection.reason}; falling back to --continue`);
+          session = { ...session, id: '__continue__', started: true };
         } else if (resumeInspection.modelPin) {
           if (resumeInspection.modelPin !== model) {
             log('INFO', `[ModelPin] resuming ${session.id.slice(0, 8)} with original model ${resumeInspection.modelPin} (configured: ${model})`);

@@ -132,15 +132,10 @@ function createSessionCommandHandler(deps) {
     return null;
   }
 
-  async function autoCreateSessionWhenEmpty(bot, chatId, cwd, engine) {
+  async function autoCreateSessionWhenEmpty(bot, chatId, cwd, _engine) {
     const resolvedCwd = cwd ? normalizeCwd(cwd) : null;
-    if (!resolvedCwd || !fs.existsSync(resolvedCwd)) {
-      await bot.sendMessage(chatId, `No sessions found${resolvedCwd ? ' in ' + path.basename(resolvedCwd) : ''}. Try /new first.`);
-      return true;
-    }
-    const route = getSessionRoute(chatId);
-    const session = createSession(route.sessionChatId, resolvedCwd, '', engine || getDefaultEngine());
-    await bot.sendMessage(chatId, `📁 ${path.basename(resolvedCwd)}\n✅ 已自动创建新会话\nWorkdir: ${session.cwd}`);
+    // Never auto-create sessions. Always tell user to /new manually.
+    await bot.sendMessage(chatId, `No sessions found${resolvedCwd ? ' in ' + path.basename(resolvedCwd) : ''}. Use /new to create one.`);
     return true;
   }
 
@@ -574,11 +569,11 @@ function createSessionCommandHandler(deps) {
         const label = target.customTitle || target.summary?.slice(0, 30) || target.sessionId.slice(0, 8);
         await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)}\n🔄 Attached: ${label}`);
       } else if (!state2.sessions[getSessionRoute(chatId).sessionChatId]) {
-        const cfgForEngine = loadConfig();
-        const engineByCwd = inferEngineByCwd(cfgForEngine, newCwd);
-        const currentEngine = getDefaultEngine();
-        createSession(getSessionRoute(chatId).sessionChatId, newCwd, '', engineByCwd || currentEngine);
-        await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)} (new session)`);
+        // No session exists — just set cwd without auto-creating. User can /new if needed.
+        const sessionChatId = getSessionRoute(chatId).sessionChatId;
+        state2.sessions[sessionChatId] = { cwd: newCwd };
+        saveState(state2);
+        await bot.sendMessage(chatId, `📁 ${path.basename(newCwd)} (no active session — use /new to start one)`);
       } else {
         state2.sessions[getSessionRoute(chatId).sessionChatId].cwd = newCwd;
         saveState(state2);

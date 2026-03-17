@@ -60,7 +60,7 @@ function createHarness(options = {}) {
 }
 
 describe('daemon-session-commands empty session bootstrap', () => {
-  it('auto-creates a session for /sessions when bound cwd exists', async () => {
+  it('tells user to /new instead of auto-creating when /sessions finds nothing', async () => {
     const cwd = os.tmpdir();
     const h = createHarness({
       config: {
@@ -84,9 +84,8 @@ describe('daemon-session-commands empty session bootstrap', () => {
     });
 
     assert.equal(handled, true);
-    assert.equal(h.created.length, 1);
-    assert.deepEqual(h.created[0], { cid: '_bound_metame', cwd, name: '', engine: 'codex' });
-    assert.match(h.sent[0], /已自动创建新会话/);
+    assert.equal(h.created.length, 0, 'should NOT auto-create session');
+    assert.match(h.sent[0], /No sessions found|Use \/new/);
   });
 
   it('creates sticky member session for /new in team group', async () => {
