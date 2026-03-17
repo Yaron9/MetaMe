@@ -616,6 +616,8 @@ function createCommandRouter(deps) {
         cur.engines ? !!cur.engines[projEngine] : String(cur.engine || '').toLowerCase() === projEngine
       );
       if (!cur || cur.cwd !== projCwd || !curHasEngine) {
+        const reason = !cur ? 'no-session' : cur.cwd !== projCwd ? `cwd-mismatch(${cur.cwd}→${projCwd})` : `engine-missing(${projEngine})`;
+        log('INFO', `[SESSION-INIT] ${sessionChatId} reason=${reason}`);
         attachOrCreateSession(sessionChatId, projCwd, proj.name || mappedKey, proj.engine || getDefaultEngine());
       }
     }

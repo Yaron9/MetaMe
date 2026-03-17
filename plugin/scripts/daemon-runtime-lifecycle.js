@@ -12,9 +12,18 @@ function createPidManager(deps) {
       const oldPid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
       if (oldPid && oldPid !== process.pid) {
         process.kill(oldPid, 'SIGTERM');
-        log('INFO', `Killed existing daemon (PID: ${oldPid})`);
+        log('INFO', `Killing existing daemon (PID: ${oldPid}) with SIGTERM`);
+        let alive = true;
         for (let i = 0; i < 10; i++) {
-          try { process.kill(oldPid, 0); } catch { break; }
+          try { process.kill(oldPid, 0); } catch { alive = false; break; }
+          sleepSync(500);
+        }
+        // Escalate to SIGKILL if SIGTERM didn't work within 5s
+        if (alive) {
+          try {
+            process.kill(oldPid, 'SIGKILL');
+            log('WARN', `Old daemon (PID: ${oldPid}) did not respond to SIGTERM — sent SIGKILL`);
+          } catch { /* already dead */ }
           sleepSync(500);
         }
       }
@@ -288,6 +297,14 @@ function setupRuntimeWatchers(deps) {
 
   // ── Safe restart: validate then proceed ──────────────────────────────────
   function safeRestart() {
+    // Guard: if a new task started during the deferred-restart grace period,
+    // re-defer instead of killing active processes (fixes team-agent concurrency bug).
+    if (activeProcesses.size > 0) {
+      log('INFO', `[RESTART] Re-deferred — ${activeProcesses.size} active task(s) started during grace period`);
+      deferredRestartTimer = null;
+      // pendingRestart stays true → next activeProcesses.delete will re-trigger
+      return;
+    }
     const validation = validateScriptsSyntax();
     if (!validation.ok) {
       const errSummary = validation.errors.slice(0, 3).join('\n');

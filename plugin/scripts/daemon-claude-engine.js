@@ -419,13 +419,17 @@ function createClaudeEngine(deps) {
     if (!session || !session.started || !session.id) return result;
     try {
       const sessionFile = findSessionFile && findSessionFile(session.id);
-      if (!sessionFile) return result;
+      if (!sessionFile) {
+        log('WARN', `[INSPECT] session=${session.id.slice(0, 8)} JSONL not found — will resume blind (configured: ${configuredModel})`);
+        return result;
+      }
       const lines = fs.readFileSync(sessionFile, 'utf8').split('\n').filter(Boolean);
       for (const line of lines.slice(0, 30)) {
         const entry = JSON.parse(line);
         const sessionModel = entry && entry.message && entry.message.model;
         if (!sessionModel || sessionModel === '<synthetic>') continue;
         if (!sessionModel.startsWith('claude-')) {
+          log('INFO', `[INSPECT] session=${session.id.slice(0, 8)} has non-claude model "${sessionModel}" — will NOT resume`);
           return {
             shouldResume: false,
             modelPin: null,
@@ -1144,6 +1148,7 @@ function createClaudeEngine(deps) {
           const engineErr = classifiedError && classifiedError.message
             ? classifiedError.message
             : (stderr || `Exit code ${code}`);
+          log('WARN', `[SPAWN-ERR] ${chatId} code=${code} warm=${!!warmChild} err=${engineErr.slice(0, 200)} stderr=${stderr.slice(0, 200)} args=${JSON.stringify(streamArgs.slice(0, 6))}`);
           finalize({ output: finalResult || null, error: engineErr, errorCode: classifiedError ? classifiedError.code : undefined, files: writtenFiles, toolUsageLog, usage: finalUsage, sessionId: observedSessionId || '' });
           return;
         }
@@ -2344,7 +2349,7 @@ ${mentorRadarHint}
         const userErrMsg = (errorCode === 'AUTH_REQUIRED' || errorCode === 'RATE_LIMIT')
           ? errMsg
           : `Error: ${errMsg.slice(0, 200)}`;
-        log('ERROR', `ask${runtime.name === 'codex' ? 'Codex' : 'Claude'} failed for ${chatId}: ${errMsg.slice(0, 300)} (${errorCode || 'NO_CODE'})`);
+        log('ERROR', `ask${runtime.name === 'codex' ? 'Codex' : 'Claude'} failed for ${chatId}: ${errMsg.slice(0, 300)} (${errorCode || 'NO_CODE'}) model=${model} session=${session && session.id ? session.id.slice(0, 8) : 'none'}`);
 
         // Merge-pause: save card for reuse, don't show error to user
         if (errorCode === 'INTERRUPTED_MERGE_PAUSE') {
@@ -2362,7 +2367,7 @@ ${mentorRadarHint}
         const _isSessionResumeFail = errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use') || _isThinkingSignatureError;
         if (runtime.name === 'claude' && _isSessionResumeFail) {
           const _reason = errMsg.includes('already in use') ? 'locked' : _isThinkingSignatureError ? 'thinking-signature-invalid' : 'not found';
-          log('WARN', `Session ${session.id} unusable (${_reason}), creating new`);
+          log('WARN', `[SESSION-RESET] ${chatId} session=${session.id.slice(0, 8)} reason=${_reason} model=${model} cwd=${session.cwd} err=${errMsg.slice(0, 150)}`);
           session = createSession(sessionChatId, session.cwd, '', runtime.name);
 
           const retryArgs = runtime.buildArgs({
@@ -2414,9 +2419,11 @@ ${mentorRadarHint}
                 try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
               }
             } else {
+              log('WARN', `[USER-ERR] ${chatId} sending error to user: model=${model} err=${errMsg.slice(0, 150)} code=${errorCode || 'none'}`);
               try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
             }
           } else {
+            log('WARN', `[USER-ERR] ${chatId} sending error to user: model=${model} err=${errMsg.slice(0, 150)} code=${errorCode || 'none'}`);
             try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
           }
           return { ok: false, error: errMsg, errorCode };

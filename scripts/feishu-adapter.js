@@ -400,7 +400,11 @@ function createBot(config) {
             try {
               const msg = data.message;
               if (!msg) return;
-              if (isDuplicate(msg.message_id)) return;
+              if (isDuplicate(msg.message_id)) {
+                _log('DEBUG', `[feishu] Dedup dropped: ${msg.message_id} chat=${msg.chat_id}`);
+                return;
+              }
+              _log('DEBUG', `[feishu] Raw event: chat=${msg.chat_id} type=${msg.message_type} msgId=${msg.message_id}`);
 
               const chatId = msg.chat_id;
               const senderId = data.sender && data.sender.sender_id && data.sender.sender_id.open_id || null;

@@ -203,23 +203,42 @@ function refreshLogMaxSize(cfg) {
   _logMaxSize = (cfg && cfg.daemon && cfg.daemon.log_max_size) || 1048576;
 }
 
+let _logRotateCheck = 0; // last rotation check timestamp
+const LOG_ROTATE_INTERVAL = 30000; // check rotation every 30s, not every write
+let _logWriteFailCount = 0;
+
 function log(level, msg) {
   const ts = new Date().toISOString();
   const line = `[${ts}] [${level}] ${msg}\n`;
   try {
-    // Rotate if over max size
-    if (fs.existsSync(LOG_FILE)) {
-      const stat = fs.statSync(LOG_FILE);
-      if (stat.size > _logMaxSize) {
-        const bakFile = LOG_FILE + '.bak';
-        if (fs.existsSync(bakFile)) fs.unlinkSync(bakFile);
-        fs.renameSync(LOG_FILE, bakFile);
-      }
+    // Rotation check: throttled to avoid stat() on every log call
+    const now = Date.now();
+    if (now - _logRotateCheck > LOG_ROTATE_INTERVAL) {
+      _logRotateCheck = now;
+      try {
+        const stat = fs.statSync(LOG_FILE);
+        if (stat.size > _logMaxSize) {
+          const bakFile = LOG_FILE + '.bak';
+          try { fs.unlinkSync(bakFile); } catch { /* ok if absent */ }
+          fs.renameSync(LOG_FILE, bakFile);
+        }
+      } catch { /* rotation is best-effort; write still proceeds */ }
     }
     fs.appendFileSync(LOG_FILE, line, 'utf8');
-  } catch {
-    // Last resort
+    if (_logWriteFailCount > 0) {
+      _logWriteFailCount = 0; // recovered
+    }
+  } catch (e) {
+    _logWriteFailCount++;
+    // Fallback: stderr + stdout
     process.stderr.write(line);
+    // Every 10 consecutive failures, try to recreate the log file
+    if (_logWriteFailCount > 0 && _logWriteFailCount % 10 === 0) {
+      try {
+        fs.writeFileSync(LOG_FILE, `[${ts}] [WARN] Log file recreated after ${_logWriteFailCount} write failures: ${e.message}\n`, 'utf8');
+        _logWriteFailCount = 0;
+      } catch { /* truly broken, keep writing to stderr */ }
+    }
   }
   // When running as LaunchAgent (stdout redirected to file), mirror structured logs there too.
   // This unifies daemon.log and daemon-npm-stdout.log into one source of truth.
