@@ -330,6 +330,17 @@ try {
   }
 } catch { /* non-fatal */ }
 
+// Worktree guard: team members running in worktrees must NEVER deploy to ~/.metame/
+// Their worktree is an isolated sandbox — deploying would overwrite production symlinks.
+const WORKTREES_DIR = path.join(HOME_DIR, '.metame', 'worktrees');
+if (__dirname.startsWith(WORKTREES_DIR)) {
+  console.error(`\n${icon("stop")} ACTION BLOCKED: Worktree Deploy Prevented`);
+  console.error(`   You are running from a worktree (${path.basename(__dirname)}).`);
+  console.error('   Deploying from a worktree would overwrite production daemon code.');
+  console.error('   Use \x1b[36mtouch ~/.metame/daemon.js\x1b[0m to hot-reload instead.\n');
+  process.exit(1);
+}
+
 // Pre-deploy syntax validation: check all .js files before syncing to ~/.metame/
 // Catches bad merges and careless agent edits BEFORE they can crash the daemon.
 const { execSync: _execSync } = require('child_process');

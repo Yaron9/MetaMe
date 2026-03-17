@@ -275,9 +275,12 @@ function createSessionStore(deps) {
             const existing = sessionMap.get(sessionId);
             if (!existing || fileMtime > (existing.fileMtime || 0)) {
               const projectPath = projPathCache.get(proj);
-              if (!projectPath) continue;
+              // Don't skip sessions without projectPath — use decoded dir name as fallback
+              // so they still appear in /resume (better to show with unknown path than hide)
+              const fallbackPath = proj.startsWith('-') ? proj.replace(/-/g, '/').replace(/\/\//g, '/.') : null;
+              if (!projectPath && !fallbackPath) continue;
               sessionMap.set(sessionId, {
-                sessionId, projectPath, fileMtime,
+                sessionId, projectPath: projectPath || fallbackPath, fileMtime,
                 modified: new Date(fileMtime).toISOString(),
                 messageCount: 1,
                 ...(existing || {}),
@@ -521,9 +524,14 @@ function createSessionStore(deps) {
     }
   }
 
-  function listRecentSessions(limit, cwd, engine) {
+  function listRecentSessions(limit, cwd, engine, agentKey) {
     let all = scanAllSessions();
-    if (cwd) {
+    if (agentKey) {
+      // Filter by agent key: match any project directory containing the agent key
+      // This catches sessions across all historical directory layouts (worktrees, .worktree, agents/)
+      const keyPattern = new RegExp(`[-/]${agentKey}(?:$|/)`);
+      all = all.filter(s => s.projectPath && keyPattern.test(s.projectPath));
+    } else if (cwd) {
       // Match exact cwd OR worktree children (~/.metame/worktrees/<basename>/<actor>/)
       const worktreePrefix = path.join(HOME, '.metame', 'worktrees', path.basename(cwd)) + path.sep;
       all = all.filter(s => s.projectPath === cwd || (s.projectPath && s.projectPath.startsWith(worktreePrefix)));

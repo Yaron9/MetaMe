@@ -73,6 +73,7 @@ function createSessionCommandHandler(deps) {
       return {
         sessionChatId: `_agent_${stickyMember.key}`,
         cwd: effectiveCwd,
+        agentKey: stickyMember.key,
         engine: normalizeEngineName(stickyMember.engine || (boundProj && boundProj.engine)),
       };
     }
@@ -100,6 +101,12 @@ function createSessionCommandHandler(deps) {
   function getBoundCwd(chatId) {
     try {
       return getSessionRoute(chatId).cwd;
+    } catch { return null; }
+  }
+
+  function getAgentKey(chatId) {
+    try {
+      return getSessionRoute(chatId).agentKey || null;
     } catch { return null; }
   }
 
@@ -331,7 +338,8 @@ function createSessionCommandHandler(deps) {
 
     // /sessions — compact list, tap to see details, then tap to switch
     if (text === '/sessions') {
-      const allSessions = listRecentSessions(15, getBoundCwd(chatId), getCurrentEngine(chatId));
+      const _ak = getAgentKey(chatId);
+      const allSessions = listRecentSessions(15, _ak ? null : getBoundCwd(chatId), getCurrentEngine(chatId), _ak);
       if (allSessions.length === 0) {
         return autoCreateSessionWhenEmpty(
           bot,
@@ -425,7 +433,8 @@ function createSessionCommandHandler(deps) {
       const arg = text.slice(7).trim();
       if (!arg) {
         // No argument — show rich session list with last user message + AI reply
-        const allSessions = listRecentSessions(15, getBoundCwd(chatId), getCurrentEngine(chatId));
+        const _ak2 = getAgentKey(chatId);
+        const allSessions = listRecentSessions(15, _ak2 ? null : getBoundCwd(chatId), getCurrentEngine(chatId), _ak2);
         if (allSessions.length === 0) {
           await bot.sendMessage(chatId, 'No sessions found. Use /new to create one.');
           return true;
@@ -487,7 +496,12 @@ function createSessionCommandHandler(deps) {
       saveState(state2);
       const label = s.customTitle || s.summary?.slice(0, 40) || s.sessionId.slice(0, 8);
       log('INFO', `Session resumed: ${s.sessionId.slice(0, 8)} (${path.basename(projPath)})`);
-      await bot.sendMessage(chatId, `▶️ Resumed: ${label}\n📁 ${path.basename(projPath)}`);
+      // Show context so user can confirm it's the right session
+      const ctx = getSessionRecentContext ? getSessionRecentContext(s.sessionId) : null;
+      let confirmMsg = `▶️ Resumed: ${label}\n📁 ${path.basename(projPath)}\n🆔 ${s.sessionId.slice(0, 8)}`;
+      if (ctx && ctx.lastUser) confirmMsg += `\n\n👤 ${ctx.lastUser.replace(/\n/g, ' ').slice(0, 80)}`;
+      if (ctx && ctx.lastAssistant) confirmMsg += `\n🤖 ${ctx.lastAssistant.replace(/\n/g, ' ').slice(0, 80)}`;
+      await bot.sendMessage(chatId, confirmMsg);
       return true;
     }
 

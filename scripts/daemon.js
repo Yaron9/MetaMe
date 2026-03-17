@@ -1765,8 +1765,18 @@ const {
  */
 function attachOrCreateSession(chatId, projCwd, name, engine) {
   engine = engine || getDefaultEngine();
-  // Virtual chatIds (_agent_* / _scope_*) are isolated from real user chats.
-  // This avoids cross-context session collisions between user chat and dispatch flows.
+  // Check if this chatId already has an active session — if so, just update cwd if needed.
+  // This prevents silent session recreation on every message (e.g., bound-chat guard).
+  const existing = getSessionForEngine(chatId, engine);
+  if (existing && existing.id && existing.started) {
+    // Session exists — only update cwd if it changed
+    const state = loadState();
+    if (state.sessions[chatId] && state.sessions[chatId].cwd !== projCwd) {
+      state.sessions[chatId].cwd = projCwd;
+      saveState(state);
+    }
+    return;
+  }
   createSession(chatId, projCwd, name || '', engine);
 }
 
