@@ -333,8 +333,8 @@ function createSessionCommandHandler(deps) {
 
     // /sessions — compact list, tap to see details, then tap to switch
     if (text === '/sessions') {
-      const _ak = getAgentKey(chatId);
-      const allSessions = listRecentSessions(15, _ak ? null : getBoundCwd(chatId), getCurrentEngine(chatId), _ak);
+      const agentKey = getAgentKey(chatId);
+      const allSessions = listRecentSessions(15, agentKey ? null : getBoundCwd(chatId), getCurrentEngine(chatId), agentKey);
       if (allSessions.length === 0) {
         return autoCreateSessionWhenEmpty(
           bot,
@@ -428,45 +428,20 @@ function createSessionCommandHandler(deps) {
       const arg = text.slice(7).trim();
       if (!arg) {
         // No argument — show rich session list with last user message + AI reply
-        const _ak2 = getAgentKey(chatId);
-        const allSessions = listRecentSessions(15, _ak2 ? null : getBoundCwd(chatId), getCurrentEngine(chatId), _ak2);
+        const agentKey = getAgentKey(chatId);
+        const allSessions = listRecentSessions(15, agentKey ? null : getBoundCwd(chatId), getCurrentEngine(chatId), agentKey);
         if (allSessions.length === 0) {
           await bot.sendMessage(chatId, 'No sessions found. Use /new to create one.');
           return true;
         }
-        const sessionTags = loadSessionTags();
-        const escapeMd = (t) => t.replace(/[_*`\\]/g, '\\$&');
-        if (bot.sendCard) {
-          const elements = [];
-          for (let i = 0; i < allSessions.length; i++) {
-            const s = allSessions[i];
-            if (i > 0) elements.push({ tag: 'hr' });
-            const title = s.customTitle || s.summary || s.sessionId.slice(0, 8);
-            const proj = s.projectPath ? path.basename(s.projectPath) : '~';
-            const ago = formatRelativeTime(new Date(getSessionFileMtime(s.sessionId) || s.fileMtime || Date.now()).toISOString());
-            const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 4);
-            // Fetch last user + assistant context
-            const ctx = getSessionRecentContext ? getSessionRecentContext(s.sessionId) : null;
-            const lastUser = (ctx && ctx.lastUser) || s.lastUser || '';
-            const lastAI = (ctx && ctx.lastAssistant) || '';
-            let body = `**${i + 1}. ${title}**\n📁${proj} · ${ago}`;
-            if (tags.length) body += `\n${tags.map(t => `\`${t}\``).join(' ')}`;
-            if (lastUser) body += `\n👤 ${escapeMd(lastUser.replace(/\n/g, ' ').slice(0, 80))}`;
-            if (lastAI) body += `\n🤖 ${escapeMd(lastAI.replace(/\n/g, ' ').slice(0, 80))}`;
-            elements.push({ tag: 'div', text: { tag: 'lark_md', content: body } });
-            elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Resume #${s.sessionId.slice(0, 6)}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
-          }
-          await bot.sendRawCard(chatId, '📋 Resume Session', elements);
+        if (bot.sendButtons) {
+          await bot.sendRawCard(chatId, '📋 Resume Session', buildSessionCardElements(allSessions));
         } else {
-          // Fallback: text mode
+          const _tags2 = loadSessionTags();
           let msg = '📋 Resume Session:\n\n';
-          for (let i = 0; i < allSessions.length; i++) {
-            const s = allSessions[i];
-            msg += sessionRichLabel(s, i + 1, sessionTags) + '\n';
-            const ctx = getSessionRecentContext ? getSessionRecentContext(s.sessionId) : null;
-            if (ctx && ctx.lastUser) msg += `  👤 ${ctx.lastUser.slice(0, 60)}\n`;
-            if (ctx && ctx.lastAssistant) msg += `  🤖 ${ctx.lastAssistant.slice(0, 60)}\n`;
-          }
+          allSessions.forEach((s, i) => {
+            msg += sessionRichLabel(s, i + 1, _tags2) + '\n';
+          });
           await bot.sendMessage(chatId, msg);
         }
         return true;
@@ -491,8 +466,7 @@ function createSessionCommandHandler(deps) {
       saveState(state2);
       const label = s.customTitle || s.summary?.slice(0, 40) || s.sessionId.slice(0, 8);
       log('INFO', `Session resumed: ${s.sessionId.slice(0, 8)} (${path.basename(projPath)})`);
-      // Show context so user can confirm it's the right session
-      const ctx = getSessionRecentContext ? getSessionRecentContext(s.sessionId) : null;
+      const ctx = getSessionRecentContext(s.sessionId);
       let confirmMsg = `▶️ Resumed: ${label}\n📁 ${path.basename(projPath)}\n🆔 ${s.sessionId.slice(0, 8)}`;
       if (ctx && ctx.lastUser) confirmMsg += `\n\n👤 ${ctx.lastUser.replace(/\n/g, ' ').slice(0, 80)}`;
       if (ctx && ctx.lastAssistant) confirmMsg += `\n🤖 ${ctx.lastAssistant.replace(/\n/g, ' ').slice(0, 80)}`;

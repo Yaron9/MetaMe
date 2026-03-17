@@ -1395,18 +1395,25 @@ function createClaudeEngine(deps) {
         : null;
 
       if (!sessionRaw) {
-        // No saved state for this chatId — use --continue instead of auto-creating.
-        // createSession is reserved for user-initiated /new only.
-        // --continue will pick up the most recent session in the cwd, or start fresh if none exists.
-        log('INFO', `[SESSION-CONTINUE] No session for ${sessionChatId}; using --continue mode (cwd: ${boundCwd || HOME})`);
+        // Virgin state: this chatId has never had a session in daemon_state.json.
+        // This is the ONLY path where auto-createSession is allowed — new user first message.
+        // All other "missing session" cases (validation failure, stale state) use __continue__ fallback
+        // at lines below (session.started && session.id check).
+        log('INFO', `[SESSION-NEW-USER] No session record for ${sessionChatId}; auto-creating first session (cwd: ${boundCwd || HOME})`);
+        const autoSession = createSession(
+          sessionChatId,
+          boundCwd || HOME,
+          boundProject && boundProject.name ? boundProject.name : '',
+          engineName
+        );
         const _initState = loadState();
         if (!_initState.sessions[sessionChatId]) _initState.sessions[sessionChatId] = {};
-        _initState.sessions[sessionChatId].cwd = boundCwd || HOME;
+        _initState.sessions[sessionChatId].cwd = autoSession.cwd;
         if (!_initState.sessions[sessionChatId].engines) _initState.sessions[sessionChatId].engines = {};
         _initState.sessions[sessionChatId].engines[boundEngineName] = {
           ...(_initState.sessions[sessionChatId].engines[boundEngineName] || {}),
-          id: '__continue__',
-          started: true,
+          id: autoSession.id,
+          started: false,
         };
         saveState(_initState);
       }

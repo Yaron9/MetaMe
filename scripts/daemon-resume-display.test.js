@@ -39,7 +39,19 @@ function createHarness(options = {}) {
     getSessionName: () => '',
     loadSessionTags: () => ({}),
     sessionRichLabel: (s) => `${s.sessionId.slice(0, 8)} - ${s.customTitle || s.summary || ''}`,
-    buildSessionCardElements: () => [],
+    buildSessionCardElements: (sessions) => {
+      const elems = [];
+      sessions.forEach((s, i) => {
+        if (i > 0) elems.push({ tag: 'hr' });
+        const ctx = options.contextMap ? (options.contextMap[s.sessionId] || null) : null;
+        contextCalls.push(s.sessionId);
+        let desc = `**${i + 1}. ${s.customTitle || s.sessionId.slice(0, 8)}**`;
+        if (ctx && ctx.lastUser) desc += `\n👤 ${ctx.lastUser.replace(/\n/g, ' ').slice(0, 80)}`;
+        if (ctx && ctx.lastAssistant) desc += `\n🤖 ${ctx.lastAssistant.replace(/\n/g, ' ').slice(0, 80)}`;
+        elems.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
+      });
+      return elems;
+    },
     sessionLabel: (s) => s.sessionId,
     getDefaultEngine: () => options.defaultEngine || 'claude',
     getSessionRecentContext: (sid) => {
@@ -52,7 +64,7 @@ function createHarness(options = {}) {
   const bot = {
     sendMessage: async (_chatId, text) => { sent.push(String(text)); },
     sendRawCard: async (_chatId, title, elements) => { cards.push({ title, elements }); },
-    sendCard: true,
+    sendButtons: true,
   };
 
   // bot without sendCard (text fallback mode)
@@ -126,15 +138,13 @@ describe('/resume display tests', () => {
     assert.ok(body2.includes('🤖'), 'Second session card should have assistant marker');
   });
 
-  it('/resume (no args) text fallback includes user and assistant context', async () => {
+  it('/resume (no args) text fallback includes session list via sessionRichLabel', async () => {
     const h = createHarness({ sessions: SESSIONS, contextMap: CONTEXT_MAP });
     await h.handleSessionCommand({ bot: h.botText, chatId: h.chatId, text: '/resume' });
     assert.equal(h.sent.length, 1);
     const msg = h.sent[0];
-    assert.ok(msg.includes('👤'), 'Text fallback should include user marker');
-    assert.ok(msg.includes('🤖'), 'Text fallback should include assistant marker');
-    assert.ok(msg.includes('login validation'), 'Text fallback should include user message');
-    assert.ok(msg.includes('validation logic'), 'Text fallback should include assistant reply');
+    assert.ok(msg.includes('📋 Resume Session'), 'Text fallback should have title');
+    assert.ok(msg.includes(SESSIONS[0].sessionId.slice(0, 8)), 'Text fallback should include session id');
   });
 
   it('/resume <id> confirmation message includes user and assistant context', async () => {
