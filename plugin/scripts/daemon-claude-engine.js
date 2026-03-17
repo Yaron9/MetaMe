@@ -2362,43 +2362,87 @@ ${mentorRadarHint}
           return { ok: false, error: errMsg, errorCode };
         }
 
-        // If session not found / locked / thinking signature invalid — create new and retry once (Claude path)
+        // If session resume fails — try harder before giving up.
+        // Strategy: --resume → --continue (same cwd) → new session (last resort + notify user)
         const _isThinkingSignatureError = isClaudeThinkingSignatureError(errMsg);
         const _isSessionResumeFail = errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use') || _isThinkingSignatureError;
         if (runtime.name === 'claude' && _isSessionResumeFail) {
           const _reason = errMsg.includes('already in use') ? 'locked' : _isThinkingSignatureError ? 'thinking-signature-invalid' : 'not found';
-          log('WARN', `[SESSION-RESET] ${chatId} session=${session.id.slice(0, 8)} reason=${_reason} model=${model} cwd=${session.cwd} err=${errMsg.slice(0, 150)}`);
+          log('WARN', `[SESSION-RESUME-FAIL] ${chatId} session=${session.id.slice(0, 8)} reason=${_reason} model=${model} cwd=${session.cwd} err=${errMsg.slice(0, 150)}`);
+
+          // ── Retry 1: --continue (picks up most recent session in same cwd automatically) ──
+          // This preserves conversation context when the specific session ID can't be found
+          // but the session JSONL still exists in the project directory.
+          if (_reason !== 'locked') {
+            log('INFO', `[SESSION-RECOVER] ${chatId} trying --continue fallback (cwd: ${session.cwd})`);
+            const continueSession = { ...session, id: '__continue__', started: true };
+            const continueArgs = runtime.buildArgs({
+              model, readOnly, daemonCfg,
+              session: continueSession,
+              cwd: session.cwd,
+            });
+            const cont = await spawnClaudeStreaming(
+              continueArgs, fullPrompt, session.cwd, onStatus, 600000,
+              chatId, boundProjectKey || '', normalizeSenderId(senderId), runtime, onSession,
+            );
+            if (cont.sessionId) {
+              // --continue found a session — adopt it as our active session
+              log('INFO', `[SESSION-RECOVER] ${chatId} --continue succeeded, adopted session ${cont.sessionId.slice(0, 8)}`);
+              await onSession(cont.sessionId);
+            }
+            if (cont.output || cont.sessionId) {
+              // Session recovered — even if output is empty (tool-only response), the session is alive
+              markSessionStarted(sessionChatId, runtime.name);
+              if (cont.output) {
+                const { markedFiles: contMarked, cleanOutput: contClean } = parseFileMarkers(cont.output);
+                await bot.sendMarkdown(chatId, contClean);
+                await sendFileButtons(bot, chatId, mergeFileCollections(contMarked, cont.files));
+              }
+              return { ok: true };
+            }
+            log('WARN', `[SESSION-RECOVER] ${chatId} --continue also failed: ${(cont.error || '').slice(0, 150)}`);
+          }
+
+          // ── Retry 2 (locked): wait briefly and retry same --resume ──
+          if (_reason === 'locked') {
+            log('INFO', `[SESSION-RECOVER] ${chatId} session locked, waiting 3s before retry`);
+            await new Promise(r => setTimeout(r, 3000));
+            const lockRetry = await spawnClaudeStreaming(
+              args, fullPrompt, session.cwd, onStatus, 600000,
+              chatId, boundProjectKey || '', normalizeSenderId(senderId), runtime, onSession,
+            );
+            if (lockRetry.sessionId) await onSession(lockRetry.sessionId);
+            if (lockRetry.output || lockRetry.sessionId) {
+              markSessionStarted(sessionChatId, runtime.name);
+              if (lockRetry.output) {
+                const { markedFiles: lrMarked, cleanOutput: lrClean } = parseFileMarkers(lockRetry.output);
+                await bot.sendMarkdown(chatId, lrClean);
+                await sendFileButtons(bot, chatId, mergeFileCollections(lrMarked, lockRetry.files));
+              }
+              return { ok: true };
+            }
+            log('WARN', `[SESSION-RECOVER] ${chatId} locked retry also failed: ${(lockRetry.error || '').slice(0, 150)}`);
+          }
+
+          // ── Last resort: new session + notify user ──
+          log('WARN', `[SESSION-RESET] ${chatId} all recovery failed, creating new session`);
           session = createSession(sessionChatId, session.cwd, '', runtime.name);
-
-          const retryArgs = runtime.buildArgs({
-            model,
-            readOnly,
-            daemonCfg,
-            session,
-            cwd: session.cwd,
-          });
-
+          const retryArgs = runtime.buildArgs({ model, readOnly, daemonCfg, session, cwd: session.cwd });
           const retry = await spawnClaudeStreaming(
-            retryArgs,
-            fullPrompt,
-            session.cwd,
-            onStatus,
-            600000,
-            chatId,
-            boundProjectKey || '',
-            normalizeSenderId(senderId),
-            runtime,
-            onSession,
+            retryArgs, fullPrompt, session.cwd, onStatus, 600000,
+            chatId, boundProjectKey || '', normalizeSenderId(senderId), runtime, onSession,
           );
           if (retry.sessionId) await onSession(retry.sessionId);
           if (retry.output) {
             markSessionStarted(sessionChatId, runtime.name);
             const { markedFiles: retryMarked, cleanOutput: retryClean } = parseFileMarkers(retry.output);
+            // Notify user that context was lost
+            await bot.sendMessage(chatId, '⚠️ 上一个会话无法恢复，已自动新建。如需接续，可发 /continue');
             await bot.sendMarkdown(chatId, retryClean);
             await sendFileButtons(bot, chatId, mergeFileCollections(retryMarked, retry.files));
             return { ok: true };
           } else {
-            log('ERROR', `askClaude retry failed: ${(retry.error || '').slice(0, 200)}`);
+            log('ERROR', `askClaude all retries failed: ${(retry.error || '').slice(0, 200)}`);
             const retryUserMsg = _isThinkingSignatureError
               ? formatClaudeResumeFallbackUserMessage(retry.error || errMsg)
               : userErrMsg;
