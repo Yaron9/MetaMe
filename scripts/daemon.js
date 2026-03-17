@@ -2198,6 +2198,7 @@ const { handleSessionCommand } = createSessionCommandHandler({
   loadSessionTags,
   sessionRichLabel,
   buildSessionCardElements,
+  getSessionRecentContext,
   sessionLabel,
   getDefaultEngine,
 });
