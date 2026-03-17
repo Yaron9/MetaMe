@@ -454,10 +454,22 @@ function createBot(config) {
               if (action && chatId) {
                 const cmd = action.value && action.value.cmd;
                 if (cmd) {
+                  // Dedup card actions — Feishu may redeliver on slow ack
+                  const actionToken = data.token || '';
+                  const dedupKey = actionToken
+                    ? `card_${actionToken}`
+                    : `card_${chatId}_${cmd}_${Math.floor(Date.now() / 3000)}`;
+                  if (isDuplicate(dedupKey)) {
+                    _log('DEBUG', `[feishu] Card action dedup dropped: ${dedupKey}`);
+                    return {};
+                  }
+                  _log('DEBUG', `[feishu] Card action: chat=${chatId} cmd=${cmd}`);
                   Promise.resolve().then(() => onMessage(chatId, cmd, data, null, senderId)).catch((err) => {
                     try { console.error(`[feishu-adapter] card action error: ${err && err.message || err}`); } catch { }
                   });
                 }
+              } else {
+                _log('DEBUG', `[feishu] Card action missing chatId or action: chatId=${chatId} action=${!!action}`);
               }
             } catch (e) { /* Non-fatal */ }
             return {};

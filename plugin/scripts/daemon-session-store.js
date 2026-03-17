@@ -735,6 +735,7 @@ function createSessionStore(deps) {
 
   function buildSessionCardElements(sessions) {
     const sessionTags = loadSessionTags();
+    const escapeMd = (t) => t.replace(/[_*`\\]/g, '\\$&');
     const elements = [];
     sessions.forEach((s, i) => {
       if (i > 0) elements.push({ tag: 'hr' });
@@ -744,14 +745,21 @@ function createSessionStore(deps) {
       const shortId = s.sessionId.slice(0, 6);
       const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 4);
       const engineLabel = (s.engine || 'claude') === 'codex' ? 'codex' : 'claude';
-      // [M2] 转义 markdown 特殊字符；[M4] title 已有 sessionId 兜底
-      const escapeMd = (t) => t.replace(/[_*`\\]/g, '\\$&');
-      const snippetRaw = s.lastUser || (s.firstPrompt || '').replace(/<[^>]+>/g, '').replace(/\[System hints[\s\S]*/i, '').trim().slice(0, 80);
+      // Fetch recent context for richer display (👤 user / 🤖 assistant)
+      const ctx = getSessionRecentContext(s.sessionId);
+      const lastUser = (ctx && ctx.lastUser) || s.lastUser || '';
+      const lastAI = (ctx && ctx.lastAssistant) || '';
       let desc = `**${i + 1}. ${title}**\n📁${proj} · ${ago} · ${engineLabel}`;
       if (tags.length) desc += `\n${tags.map(t => `\`${t}\``).join(' ')}`;
-      if (snippetRaw && snippetRaw.length > 2) {
-        const snippet = escapeMd(snippetRaw.replace(/\n/g, ' ').slice(0, 60));
-        desc += `\n💬 ${snippet}${snippetRaw.length > 60 ? '…' : ''}`;
+      if (lastUser) desc += `\n👤 ${escapeMd(lastUser.replace(/\n/g, ' ').slice(0, 80))}`;
+      if (lastAI) desc += `\n🤖 ${escapeMd(lastAI.replace(/\n/g, ' ').slice(0, 80))}`;
+      if (!lastUser && !lastAI) {
+        // Fallback: show first prompt snippet if no recent context
+        const snippetRaw = (s.firstPrompt || '').replace(/<[^>]+>/g, '').replace(/\[System hints[\s\S]*/i, '').trim().slice(0, 80);
+        if (snippetRaw && snippetRaw.length > 2) {
+          const snippet = escapeMd(snippetRaw.replace(/\n/g, ' ').slice(0, 60));
+          desc += `\n💬 ${snippet}${snippetRaw.length > 60 ? '…' : ''}`;
+        }
       }
       elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
       elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Switch #${shortId}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
