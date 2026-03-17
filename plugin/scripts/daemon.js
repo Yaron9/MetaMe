@@ -2754,7 +2754,7 @@ async function main() {
     setHeartbeatTimer: (next) => { heartbeatTimer = next; },
     onRestartRequested: () => {
       // Reuse full shutdown logic, then self-spawn replacement.
-      shutdown({ restartReason: 'daemon-script-changed' }).catch(() => process.exit(1));
+      shutdown({ restartReason: 'daemon-script-changed' }).catch(() => process.exit(0));
     },
     // Agent soul layer auto-repair on config hot-reload
     repairAgentLayer,

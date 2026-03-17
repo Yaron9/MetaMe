@@ -313,6 +313,10 @@ function setupRuntimeWatchers(deps) {
       pendingRestart = false;
       return;
     }
+    // Stop watching files BEFORE backup/exit to prevent backup writes
+    // from triggering another watchFile callback → restart loop
+    fs.unwatchFile(daemonScript);
+    fs.unwatchFile(CONFIG_FILE);
     // Backup current known-good set before restarting with new code
     backupLastGood();
     onRestartRequested();
@@ -326,7 +330,7 @@ function setupRuntimeWatchers(deps) {
 
   fs.watchFile(daemonScript, { interval: 3000 }, (curr, prev) => {
     if (curr.mtimeMs === prev.mtimeMs) return;
-    if (Date.now() - startTime < 10000) return;
+    if (Date.now() - startTime < 20000) return;
     if (restartDebounce) clearTimeout(restartDebounce);
     restartDebounce = setTimeout(() => {
       if (activeProcesses.size > 0) {
