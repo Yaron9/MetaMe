@@ -25,6 +25,7 @@ function createSessionCommandHandler(deps) {
     loadSessionTags,
     sessionRichLabel,
     buildSessionCardElements,
+    getSessionRecentContext,
     getDefaultEngine = () => 'claude',
   } = deps;
 
@@ -62,9 +63,16 @@ function createSessionCommandHandler(deps) {
       : null;
 
     if (stickyMember) {
+      const parentCwd = stickyMember.cwd ? normalizeCwd(stickyMember.cwd) : (boundProj && boundProj.cwd ? normalizeCwd(boundProj.cwd) : null);
+      // Prefer worktree path if it exists — that's where sessions actually run
+      let effectiveCwd = parentCwd;
+      if (parentCwd) {
+        const worktreePath = path.join(HOME, '.metame', 'worktrees', path.basename(parentCwd), stickyMember.key);
+        if (fs.existsSync(worktreePath)) effectiveCwd = worktreePath;
+      }
       return {
         sessionChatId: `_agent_${stickyMember.key}`,
-        cwd: stickyMember.cwd ? normalizeCwd(stickyMember.cwd) : (boundProj && boundProj.cwd ? normalizeCwd(boundProj.cwd) : null),
+        cwd: effectiveCwd,
         engine: normalizeEngineName(stickyMember.engine || (boundProj && boundProj.engine)),
       };
     }
@@ -409,6 +417,77 @@ function createSessionCommandHandler(deps) {
       } else {
         await bot.sendMessage(chatId, detail + `\n\n/resume ${s.sessionId.slice(0, 8)}`);
       }
+      return true;
+    }
+
+    // /resume [sid|name] — switch to a specific session by ID, prefix, or name
+    if (text === '/resume' || text.startsWith('/resume ')) {
+      const arg = text.slice(7).trim();
+      if (!arg) {
+        // No argument — show rich session list with last user message + AI reply
+        const allSessions = listRecentSessions(15, getBoundCwd(chatId), getCurrentEngine(chatId));
+        if (allSessions.length === 0) {
+          await bot.sendMessage(chatId, 'No sessions found. Use /new to create one.');
+          return true;
+        }
+        const sessionTags = loadSessionTags();
+        const escapeMd = (t) => t.replace(/[_*`\\]/g, '\\$&');
+        if (bot.sendCard) {
+          const elements = [];
+          for (let i = 0; i < allSessions.length; i++) {
+            const s = allSessions[i];
+            if (i > 0) elements.push({ tag: 'hr' });
+            const title = s.customTitle || s.summary || s.sessionId.slice(0, 8);
+            const proj = s.projectPath ? path.basename(s.projectPath) : '~';
+            const ago = formatRelativeTime(new Date(getSessionFileMtime(s.sessionId) || s.fileMtime || Date.now()).toISOString());
+            const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 4);
+            // Fetch last user + assistant context
+            const ctx = getSessionRecentContext ? getSessionRecentContext(s.sessionId) : null;
+            const lastUser = (ctx && ctx.lastUser) || s.lastUser || '';
+            const lastAI = (ctx && ctx.lastAssistant) || '';
+            let body = `**${i + 1}. ${title}**\n📁${proj} · ${ago}`;
+            if (tags.length) body += `\n${tags.map(t => `\`${t}\``).join(' ')}`;
+            if (lastUser) body += `\n👤 ${escapeMd(lastUser.replace(/\n/g, ' ').slice(0, 80))}`;
+            if (lastAI) body += `\n🤖 ${escapeMd(lastAI.replace(/\n/g, ' ').slice(0, 80))}`;
+            elements.push({ tag: 'div', text: { tag: 'lark_md', content: body } });
+            elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Resume #${s.sessionId.slice(0, 6)}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
+          }
+          await bot.sendRawCard(chatId, '📋 Resume Session', elements);
+        } else {
+          // Fallback: text mode
+          let msg = '📋 Resume Session:\n\n';
+          for (let i = 0; i < allSessions.length; i++) {
+            const s = allSessions[i];
+            msg += sessionRichLabel(s, i + 1, sessionTags) + '\n';
+            const ctx = getSessionRecentContext ? getSessionRecentContext(s.sessionId) : null;
+            if (ctx && ctx.lastUser) msg += `  👤 ${ctx.lastUser.slice(0, 60)}\n`;
+            if (ctx && ctx.lastAssistant) msg += `  🤖 ${ctx.lastAssistant.slice(0, 60)}\n`;
+          }
+          await bot.sendMessage(chatId, msg);
+        }
+        return true;
+      }
+      const allSessions = listRecentSessions(50, null, getCurrentEngine(chatId));
+      const argLower = arg.toLowerCase();
+      // 1. Session ID exact/prefix match
+      let s = allSessions.find(x => x.sessionId === arg || x.sessionId.startsWith(arg));
+      // 2. customTitle exact match
+      if (!s) s = allSessions.find(x => x.customTitle && x.customTitle.toLowerCase() === argLower);
+      // 3. customTitle partial match
+      if (!s) s = allSessions.find(x => x.customTitle && x.customTitle.toLowerCase().includes(argLower));
+      if (!s) {
+        await bot.sendMessage(chatId, `Session not found: ${arg.slice(0, 12)}`);
+        return true;
+      }
+      const state2 = loadState();
+      const cfgForEngine = loadConfig();
+      const projPath = s.projectPath || HOME;
+      const engineByCwd = inferEngineByCwd(cfgForEngine, projPath) || normalizeEngineName(s.engine) || getDefaultEngine();
+      attachEngineSession(state2, chatId, engineByCwd, s.sessionId, projPath);
+      saveState(state2);
+      const label = s.customTitle || s.summary?.slice(0, 40) || s.sessionId.slice(0, 8);
+      log('INFO', `Session resumed: ${s.sessionId.slice(0, 8)} (${path.basename(projPath)})`);
+      await bot.sendMessage(chatId, `▶️ Resumed: ${label}\n📁 ${path.basename(projPath)}`);
       return true;
     }
 

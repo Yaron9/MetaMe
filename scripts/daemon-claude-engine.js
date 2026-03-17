@@ -1424,17 +1424,13 @@ function createClaudeEngine(deps) {
       if (session.started && session.id && session.id !== '__continue__' && session.cwd) {
         const valid = validateEngineSession(engineName, session.id, session.cwd);
         if (!valid) {
-          log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${sessionChatId}; starting fresh ${engineName} session`);
+          // Session file missing/invalid — try --continue to recover instead of creating new session.
+          // --continue will pick up the most recent session in the same cwd automatically.
+          log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${sessionChatId}; falling back to --continue (cwd: ${session.cwd})`);
+          session = { ...session, id: '__continue__', started: true };
           if (!isVirtualAgent) {
-            await bot.sendMessage(chatId, '⚠️ 上次 session 已失效，已自动开启新 session。').catch(() => { });
+            await bot.sendMessage(chatId, '⚠️ 上次 session 文件丢失，正在尝试恢复…').catch(() => { });
           }
-          session = createSession(
-            sessionChatId,
-            session.cwd,
-            boundProject && boundProject.name ? boundProject.name : '',
-            engineName,
-            engineName === 'codex' ? requestedCodexPermissionProfile : undefined
-          );
         }
       }
 
@@ -2424,31 +2420,12 @@ ${mentorRadarHint}
             log('WARN', `[SESSION-RECOVER] ${chatId} locked retry also failed: ${(lockRetry.error || '').slice(0, 150)}`);
           }
 
-          // ── Last resort: new session + notify user ──
-          log('WARN', `[SESSION-RESET] ${chatId} all recovery failed, creating new session`);
-          session = createSession(sessionChatId, session.cwd, '', runtime.name);
-          const retryArgs = runtime.buildArgs({ model, readOnly, daemonCfg, session, cwd: session.cwd });
-          const retry = await spawnClaudeStreaming(
-            retryArgs, fullPrompt, session.cwd, onStatus, 600000,
-            chatId, boundProjectKey || '', normalizeSenderId(senderId), runtime, onSession,
-          );
-          if (retry.sessionId) await onSession(retry.sessionId);
-          if (retry.output) {
-            markSessionStarted(sessionChatId, runtime.name);
-            const { markedFiles: retryMarked, cleanOutput: retryClean } = parseFileMarkers(retry.output);
-            // Notify user that context was lost
-            await bot.sendMessage(chatId, '⚠️ 上一个会话无法恢复，已自动新建。如需接续，可发 /continue');
-            await bot.sendMarkdown(chatId, retryClean);
-            await sendFileButtons(bot, chatId, mergeFileCollections(retryMarked, retry.files));
-            return { ok: true };
-          } else {
-            log('ERROR', `askClaude all retries failed: ${(retry.error || '').slice(0, 200)}`);
-            const retryUserMsg = _isThinkingSignatureError
-              ? formatClaudeResumeFallbackUserMessage(retry.error || errMsg)
-              : userErrMsg;
-            try { await bot.sendMessage(chatId, retryUserMsg); } catch { /* */ }
-            return { ok: false, error: retry.error || errMsg };
-          }
+          // ── Last resort: notify user, do NOT silently create new session ──
+          log('ERROR', `[SESSION-RECOVER-EXHAUSTED] ${chatId} all recovery failed — refusing to create new session`);
+          try {
+            await bot.sendMessage(chatId, '❌ 会话恢复失败（--resume 和 --continue 均失败）。\n请手动 /new 新建，或 /resume 选择其他会话。');
+          } catch { /* */ }
+          return { ok: false, error: errMsg };
         } else {
           // Auto-fallback: if custom provider/model fails, revert to anthropic + opus (Claude path only)
           if (runtime.name === 'claude') {

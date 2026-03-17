@@ -257,8 +257,10 @@ function createSessionStore(deps) {
             }
           }
           // Fallback: decode projectPath from directory name (e.g. -Users-yaron-AGI-AChat → /Users/yaron/AGI/AChat)
+          // Claude CLI encodes dots: .metame → -metame (dot stripped), so -- means /. (e.g. //.metame)
           if (!projPathCache.has(proj) && proj.startsWith('-')) {
-            const decoded = proj.replace(/-/g, '/');
+            let decoded = proj.replace(/-/g, '/');
+            decoded = decoded.replace(/\/\//g, '/.');
             if (fs.existsSync(decoded)) projPathCache.set(proj, decoded);
           }
         } catch { /* skip */ }
@@ -522,7 +524,9 @@ function createSessionStore(deps) {
   function listRecentSessions(limit, cwd, engine) {
     let all = scanAllSessions();
     if (cwd) {
-      all = all.filter(s => s.projectPath === cwd);
+      // Match exact cwd OR worktree children (~/.metame/worktrees/<basename>/<actor>/)
+      const worktreePrefix = path.join(HOME, '.metame', 'worktrees', path.basename(cwd)) + path.sep;
+      all = all.filter(s => s.projectPath === cwd || (s.projectPath && s.projectPath.startsWith(worktreePrefix)));
     }
     if (engine) {
       const safeEngine = String(engine).trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
