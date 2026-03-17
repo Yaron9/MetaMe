@@ -2690,10 +2690,11 @@ async function main() {
   // If so, don't self-spawn — just exit and let launchd restart us (KeepAlive=true).
   // This prevents duplicate daemon processes that fight over Feishu WebSocket connections.
   function _isLaunchdManaged() {
+    // Fastest: explicit env var set by our launchd plist
+    if (process.env.LAUNCHED_BY_LAUNCHD === '1') return true;
     try {
-      // launchd sets __CFBundleIdentifier or we can check ppid=1
+      // Fallback: check ppid=1 (launchd) or caffeinate parent
       if (process.ppid === 1) return true;
-      // Also check if caffeinate is our parent (launchd plist wraps with caffeinate)
       const ppidInfo = execSync(`ps -p ${process.ppid} -o comm=`, { encoding: 'utf8', timeout: 2000 }).trim();
       if (ppidInfo.includes('caffeinate') || ppidInfo.includes('launchd')) return true;
     } catch { /* ignore */ }
@@ -2708,9 +2709,10 @@ async function main() {
     }
     try {
       const replacementScript = path.join(METAME_DIR, 'daemon.js');
+      const spawnLogFd = fs.openSync(path.join(METAME_DIR, 'daemon-spawn.log'), 'a');
       const bg = spawn(process.execPath, [replacementScript], {
         detached: process.platform !== 'win32',
-        stdio: 'ignore',
+        stdio: ['ignore', spawnLogFd, spawnLogFd],
         windowsHide: true,
         cwd: METAME_DIR,
         env: {

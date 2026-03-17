@@ -1940,6 +1940,8 @@ if (isDaemon) {
     <string>${currentPath}</string>
     <key>HOME</key>
     <string>${HOME_DIR}</string>
+    <key>LAUNCHED_BY_LAUNCHD</key>
+    <string>1</string>
   </dict>
 </dict>
 </plist>`;
@@ -2057,10 +2059,11 @@ WantedBy=default.target
         sleepSync(1000);
       }
     } catch { /* ignore */ }
-    // Check if already running
+    // Clean stale PID and lock files before spawning new daemon
     if (fs.existsSync(DAEMON_PID)) {
       try { fs.unlinkSync(DAEMON_PID); } catch { /* */ }
     }
+    try { fs.unlinkSync(DAEMON_LOCK); } catch { /* */ }
     if (!fs.existsSync(DAEMON_CONFIG)) {
       console.error(`${icon("fail")} No config found. Run: metame daemon init`);
       process.exit(1);
@@ -2108,6 +2111,7 @@ WantedBy=default.target
       console.log(`${icon("warn")}  Process ${pid} not found (may have already exited).`);
     }
     try { fs.unlinkSync(DAEMON_PID); } catch { /* ignore */ }
+    try { fs.unlinkSync(DAEMON_LOCK); } catch { /* ignore */ }
     process.exit(0);
   }
 

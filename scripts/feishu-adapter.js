@@ -542,6 +542,7 @@ function createBot(config) {
         reconnect() {
           _log('INFO', 'Feishu manual reconnect triggered');
           reconnectDelay = 5000;
+          try { currentWs?.stop?.(); } catch { /* ignore */ }
           connect();
         },
         isAlive() {
