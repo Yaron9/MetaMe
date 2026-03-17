@@ -247,6 +247,51 @@ function appendCapsuleUpdate(filePath, markdownContent, today) {
   }
 }
 
+const AUTO_RULES_FILE = path.join(METAME_DIR, 'auto-rules.md');
+const MAX_AUTO_RULES = 20;
+
+/**
+ * Merge new rules into ~/.metame/auto-rules.md.
+ * Deduplicates by pattern_key. Caps at MAX_AUTO_RULES (oldest dropped).
+ * Returns count of newly added rules.
+ */
+function writeAutoRules(rules) {
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Parse existing rules: Map<key, text>
+  const existing = new Map();
+  try {
+    const lines = fs.readFileSync(AUTO_RULES_FILE, 'utf8')
+      .split('\n')
+      .map(l => l.trim())
+      .filter(l => l && !l.startsWith('<!--'));
+    for (const line of lines) {
+      const m = line.match(/^\[([^\]]+)\]/);
+      const k = m ? m[1] : line.slice(0, 40);
+      existing.set(k, line);
+    }
+  } catch { /* first run — file doesn't exist */ }
+
+  let added = 0;
+  for (const r of rules) {
+    const key = String(r.key || '').trim() || String(r.rule || '').slice(0, 40);
+    const ruleText = String(r.rule || '').trim();
+    if (!key || !ruleText) continue;
+    if (!existing.has(key)) {
+      existing.set(key, `[${key}] ${ruleText}`);
+      added++;
+    }
+  }
+
+  // Cap (Map preserves insertion order; drop oldest entries)
+  const all = [...existing.entries()];
+  const capped = all.length > MAX_AUTO_RULES ? all.slice(all.length - MAX_AUTO_RULES) : all;
+
+  const header = `<!-- managed by nightly-reflect | last: ${today} | count: ${capped.length} -->\n`;
+  fs.writeFileSync(AUTO_RULES_FILE, header + capped.map(([, t]) => t).join('\n') + '\n', 'utf8');
+  return added;
+}
+
 /**
  * Main nightly reflect run.
  */
@@ -322,12 +367,16 @@ ${factsJson}
 Analyze and output a JSON object:
 {
   "decisions": [{"title": "中文标题", "content": "## 背景\\n...\\n## 结论\\n..."}],
-  "lessons": [{"title": "中文标题", "content": "## 问题\\n...\\n## 操作手册\\n1. ..."}]
+  "lessons": [{"title": "中文标题", "content": "## 问题\\n...\\n## 操作手册\\n1. ..."}],
+  "rules": [{"key": "category.tag", "rule": "Concise defensive rule in imperative form (max 120 chars)"}]
 }
 
 Rules:
 - decisions: strategic/architectural insights (why we chose X over Y)
 - lessons: operational SOPs (how to do X correctly)
+- rules: one-liner defensive rules extracted from lessons — ONLY if a recurring mistake is detectable
+  Format key as "category.tag" e.g. "harden.await", "arch.worktree", "ops.pnpm"
+  Max 5 rules. Skip obvious rules. Prefer rules that prevent silent failures.
 - Each array can be empty if no pattern found
 - content in 中文, 100-250 chars each
 - Output ONLY the JSON object`;
@@ -357,8 +406,9 @@ Rules:
 
     const decisions = Array.isArray(parsed.decisions) ? parsed.decisions.filter(d => d.title && d.content) : [];
     const lessons = Array.isArray(parsed.lessons) ? parsed.lessons.filter(l => l.title && l.content) : [];
+    const rules = Array.isArray(parsed.rules) ? parsed.rules.filter(r => r.rule) : [];
 
-    console.log(`[NIGHTLY-REFLECT] Distilled: ${decisions.length} decision(s), ${lessons.length} lesson(s).`);
+    console.log(`[NIGHTLY-REFLECT] Distilled: ${decisions.length} decision(s), ${lessons.length} lesson(s), ${rules.length} rule(s).`);
 
     // Write decisions file (even if empty array — record the run)
     if (decisions.length > 0) {
@@ -370,6 +420,19 @@ Rules:
     if (lessons.length > 0) {
       writeReflectFile(lessonFile, lessons, hotFacts.length, 'lessons');
       console.log(`[NIGHTLY-REFLECT] Lessons written: ${lessonFile}`);
+    }
+
+    // Promote rules to auto-rules.md (injected on every future session via intent-engine)
+    let rulesAdded = 0;
+    if (rules.length > 0) {
+      try {
+        rulesAdded = writeAutoRules(rules);
+        if (rulesAdded > 0) {
+          console.log(`[NIGHTLY-REFLECT] Auto-rules: ${rulesAdded} new rule(s) promoted → ~/.metame/auto-rules.md`);
+        }
+      } catch (e) {
+        console.log(`[NIGHTLY-REFLECT] Warning: auto-rules promotion failed: ${e.message}`);
+      }
     }
 
     let synthesizedSaved = 0;
@@ -509,6 +572,7 @@ entity_prefix: ${group.prefix}
       facts_analyzed: hotFacts.length,
       decisions_written: decisions.length,
       lessons_written: lessons.length,
+      rules_promoted: rulesAdded,
       synthesized_insights_saved: synthesizedSaved,
       capsules_written: capsulesWritten,
       capsule_facts_saved: capsuleFactsSaved,

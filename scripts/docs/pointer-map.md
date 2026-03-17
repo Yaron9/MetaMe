@@ -102,7 +102,16 @@
     `/dispatch to peer:project` 手动远端派发；
     按昵称解析到远端 member 时自动走 `sendRemoteDispatch`
 
-- Intent Hook：
+- Intent Engine（Hook / 意图路由）：
+  - 注册中枢：`scripts/intent-registry.js`（模块注册 + 收集逻辑）
+  - Claude hook adapter：`scripts/hooks/intent-engine.js`
+  - 意图模块：`scripts/hooks/intent-*.js`（team_dispatch / ops_assist / task_create / file_transfer / memory_recall / doc_router / auto_rules）
+  - 自动规则：`scripts/hooks/intent-auto-rules.js`（读 `~/.metame/auto-rules.md`，缓存 60s）
+  - 规则生成：`scripts/memory-nightly-reflect.js` 夜间蒸馏 → `writeAutoRules()` → `~/.metame/auto-rules.md`
+  - 配置手册：`scripts/docs/hook-config.md`
+  - 关键点：零匹配零输出；温进程复用时跳过注入；`daemon.yaml` `hooks:` 段可逐模块开关
+
+- Team Context Hook：
   - `scripts/hooks/team-context.js`
   - 关键点：检测通信意图 → 注入 dispatch_to 命令提示；远端成员自动带 `peer:key` 前缀
 
