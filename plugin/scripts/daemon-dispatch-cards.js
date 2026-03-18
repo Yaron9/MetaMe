@@ -10,7 +10,7 @@
  * Used by: daemon.js, daemon-command-router.js
  */
 
-const { resolveDispatchActor } = require('./daemon-team-dispatch');
+const { resolveDispatchActor, resolveProjectKey } = require('./daemon-team-dispatch');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Target resolution
@@ -25,35 +25,42 @@ function resolveDispatchTarget(targetKey, config) {
   const projects = (config && config.projects) || {};
   if (!rawKey) return null;
 
-  if (projects[rawKey]) {
-    const proj = projects[rawKey];
+  // Resolve nicknames → canonical key (e.g. "老贾" → "metame")
+  const resolvedKey = projects[rawKey] ? rawKey : (resolveProjectKey(rawKey, projects) || rawKey);
+  // resolveProjectKey returns "parent/member" for team members, or just "key" for top-level
+  const [topKey, memberKey] = resolvedKey.includes('/') ? resolvedKey.split('/') : [resolvedKey, null];
+
+  if (memberKey) {
+    const parent = projects[topKey] || {};
+    const member = Array.isArray(parent.team) ? parent.team.find(m => m && m.key === memberKey) : null;
+    if (member) {
+      return {
+        key: memberKey,
+        name: member.name || memberKey,
+        icon: member.icon || parent.icon || '🤖',
+        color: member.color || parent.color || 'blue',
+        parentKey: topKey,
+        parentProject: parent,
+        member,
+        isTeamMember: true,
+      };
+    }
+  }
+
+  if (projects[topKey]) {
+    const proj = projects[topKey];
     return {
-      key: rawKey,
-      name: proj.name || rawKey,
+      key: topKey,
+      name: proj.name || topKey,
       icon: proj.icon || '🤖',
       color: proj.color || 'blue',
-      parentKey: rawKey,
+      parentKey: topKey,
       parentProject: proj,
       member: null,
       isTeamMember: false,
     };
   }
 
-  for (const [parentKey, parent] of Object.entries(projects)) {
-    if (!Array.isArray(parent && parent.team)) continue;
-    const member = parent.team.find(m => m && m.key === rawKey);
-    if (!member) continue;
-    return {
-      key: rawKey,
-      name: member.name || rawKey,
-      icon: member.icon || parent.icon || '🤖',
-      color: member.color || parent.color || 'blue',
-      parentKey,
-      parentProject: parent,
-      member,
-      isTeamMember: true,
-    };
-  }
   return null;
 }
 

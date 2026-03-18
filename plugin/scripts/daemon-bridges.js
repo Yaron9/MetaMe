@@ -307,7 +307,14 @@ function createBridgeStarter(deps) {
         },
       },
     };
-    const proxyBot = _createTeamProxyBot(bot, realChatId);
+    // Prefer the target agent's own bound chat; fall back to dispatcher's chat
+    const _agentChatMap = {
+      ...(cfg.telegram ? cfg.telegram.chat_agent_map || {} : {}),
+      ...(cfg.feishu   ? cfg.feishu.chat_agent_map   || {} : {}),
+      ...(cfg.imessage ? cfg.imessage.chat_agent_map || {} : {}),
+    };
+    const agentOwnChatId = Object.entries(_agentChatMap).find(([, v]) => v === member.key)?.[0] || realChatId;
+    const proxyBot = _createTeamProxyBot(bot, agentOwnChatId);
     pipeline.processMessage(virtualChatId, text, { bot: proxyBot, config: teamCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly })
       .catch(e => log('ERROR', `Team [${member.key}] error: ${e.message}`));
   }

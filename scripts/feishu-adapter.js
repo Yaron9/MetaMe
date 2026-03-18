@@ -323,7 +323,8 @@ function createBot(config) {
           throw new Error(`No file_key in response: ${JSON.stringify(uploadRes).slice(0, 200)}`);
         }
 
-        // 2. Send file message
+        // 2. Send caption first (if any), then file message
+        if (caption) await this.sendMessage(chatId, caption);
         const sendRes = await client.im.message.create({
           params: { receive_id_type: 'chat_id' },
           data: {
@@ -333,7 +334,6 @@ function createBot(config) {
           },
         });
         const msgId = sendRes?.data?.message_id;
-        if (caption) await this.sendMessage(chatId, caption);
         return msgId ? { message_id: msgId } : null;
       } catch (uploadErr) {
         // Log detailed error
@@ -344,8 +344,8 @@ function createBot(config) {
         if (isText) {
           const content = fs.readFileSync(filePath, 'utf8');
           const truncated = content.length > 3000 ? content.slice(0, 3000) + '\n...(truncated)' : content;
-          const textMsg = await this.sendMessage(chatId, `📄 ${fileName}:\n\`\`\`\n${truncated}\n\`\`\``);
           if (caption) await this.sendMessage(chatId, caption);
+          const textMsg = await this.sendMessage(chatId, `📄 ${fileName}:\n\`\`\`\n${truncated}\n\`\`\``);
           return textMsg || null;
         } else {
           // For binary files, give more helpful error
