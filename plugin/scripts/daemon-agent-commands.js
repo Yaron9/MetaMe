@@ -1,7 +1,5 @@
 'use strict';
 
-const { normalizeEngineName: _normalizeEngine } = require('./daemon-utils');
-
 function createAgentCommandHandler(deps) {
   const {
     fs,
@@ -39,7 +37,8 @@ function createAgentCommandHandler(deps) {
   } = deps;
 
   function normalizeEngineName(name) {
-    return _normalizeEngine(name, getDefaultEngine);
+    const n = String(name || '').trim().toLowerCase();
+    return n === 'codex' ? 'codex' : getDefaultEngine();
   }
 
   function inferStoredEngine(rawSession) {

@@ -12,18 +12,9 @@ function createPidManager(deps) {
       const oldPid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
       if (oldPid && oldPid !== process.pid) {
         process.kill(oldPid, 'SIGTERM');
-        log('INFO', `Killing existing daemon (PID: ${oldPid}) with SIGTERM`);
-        let alive = true;
+        log('INFO', `Killed existing daemon (PID: ${oldPid})`);
         for (let i = 0; i < 10; i++) {
-          try { process.kill(oldPid, 0); } catch { alive = false; break; }
-          sleepSync(500);
-        }
-        // Escalate to SIGKILL if SIGTERM didn't work within 5s
-        if (alive) {
-          try {
-            process.kill(oldPid, 'SIGKILL');
-            log('WARN', `Old daemon (PID: ${oldPid}) did not respond to SIGTERM — sent SIGKILL`);
-          } catch { /* already dead */ }
+          try { process.kill(oldPid, 0); } catch { break; }
           sleepSync(500);
         }
       }
@@ -297,14 +288,6 @@ function setupRuntimeWatchers(deps) {
 
   // ── Safe restart: validate then proceed ──────────────────────────────────
   function safeRestart() {
-    // Guard: if a new task started during the deferred-restart grace period,
-    // re-defer instead of killing active processes (fixes team-agent concurrency bug).
-    if (activeProcesses.size > 0) {
-      log('INFO', `[RESTART] Re-deferred — ${activeProcesses.size} active task(s) started during grace period`);
-      deferredRestartTimer = null;
-      // pendingRestart stays true → next activeProcesses.delete will re-trigger
-      return;
-    }
     const validation = validateScriptsSyntax();
     if (!validation.ok) {
       const errSummary = validation.errors.slice(0, 3).join('\n');
@@ -313,10 +296,6 @@ function setupRuntimeWatchers(deps) {
       pendingRestart = false;
       return;
     }
-    // Stop watching files BEFORE backup/exit to prevent backup writes
-    // from triggering another watchFile callback → restart loop
-    fs.unwatchFile(daemonScript);
-    fs.unwatchFile(CONFIG_FILE);
     // Backup current known-good set before restarting with new code
     backupLastGood();
     onRestartRequested();
@@ -330,7 +309,7 @@ function setupRuntimeWatchers(deps) {
 
   fs.watchFile(daemonScript, { interval: 3000 }, (curr, prev) => {
     if (curr.mtimeMs === prev.mtimeMs) return;
-    if (Date.now() - startTime < 20000) return;
+    if (Date.now() - startTime < 10000) return;
     if (restartDebounce) clearTimeout(restartDebounce);
     restartDebounce = setTimeout(() => {
       if (activeProcesses.size > 0) {

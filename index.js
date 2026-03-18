@@ -305,7 +305,7 @@ function requestDaemonRestart({
 const scriptsDir = path.join(__dirname, 'scripts');
 // Auto-detect ALL runtime scripts: daemon-*.js + all other non-test, non-utility .js/.yaml/.sh files.
 // This prevents "missing module" crashes when new files are added without updating a manual list.
-const EXCLUDED_SCRIPTS = new Set(['sync-readme.js', 'test_daemon.js']);
+const EXCLUDED_SCRIPTS = new Set(['sync-readme.js', 'test_daemon.js', 'daemon.yaml']);
 const BUNDLED_SCRIPTS = (() => {
   try {
     return fs.readdirSync(scriptsDir).filter((f) => {
