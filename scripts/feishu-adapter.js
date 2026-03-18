@@ -320,7 +320,7 @@ function createBot(config) {
         // Response is { code, msg, data: { file_key } }
         const fileKey = uploadRes?.data?.file_key || uploadRes?.file_key;
         if (!fileKey) {
-          throw new Error(`No file_key in response: ${JSON.stringify(uploadRes)}`);
+          throw new Error(`No file_key in response: ${JSON.stringify(uploadRes).slice(0, 200)}`);
         }
 
         // 2. Send file message
@@ -338,7 +338,7 @@ function createBot(config) {
       } catch (uploadErr) {
         // Log detailed error
         const errDetail = uploadErr.response?.data || uploadErr.message || uploadErr;
-        console.error('[Feishu] File upload error:', JSON.stringify(errDetail));
+        console.error('[Feishu] File upload error:', JSON.stringify(errDetail).slice(0, 500));
 
         // Fallback: for text files, send content truncated
         if (isText) {

@@ -1,32 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-
-function normalizeCodexSandboxMode(value, fallback = null) {
-  const text = String(value || '').trim().toLowerCase();
-  if (!text) return fallback;
-  if (text === 'read-only' || text === 'readonly') return 'read-only';
-  if (text === 'workspace-write' || text === 'workspace') return 'workspace-write';
-  if (
-    text === 'danger-full-access'
-    || text === 'dangerous'
-    || text === 'full-access'
-    || text === 'full'
-    || text === 'bypass'
-    || text === 'writable'
-  ) return 'danger-full-access';
-  return fallback;
-}
-
-function normalizeCodexApprovalPolicy(value, fallback = null) {
-  const text = String(value || '').trim().toLowerCase();
-  if (!text) return fallback;
-  if (text === 'never' || text === 'no' || text === 'none') return 'never';
-  if (text === 'on-failure' || text === 'on_failure' || text === 'failure') return 'on-failure';
-  if (text === 'on-request' || text === 'on_request' || text === 'request') return 'on-request';
-  if (text === 'untrusted') return 'untrusted';
-  return fallback;
-}
+const { normalizeEngineName, normalizeCodexSandboxMode, normalizeCodexApprovalPolicy } = require('./daemon-utils');
 
 function normalizeCodexPermissionMeta(meta = {}) {
   const sandboxMode = normalizeCodexSandboxMode(
@@ -45,9 +20,7 @@ function normalizeCodexPermissionMeta(meta = {}) {
   };
 }
 
-function normalizeEngineName(name) {
-  return String(name || 'claude').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
-}
+// normalizeEngineName now imported from daemon-utils
 
 function stripCodexInjectedHints(text) {
   return String(text || '')
@@ -155,6 +128,12 @@ function createSessionStore(deps) {
   let _sessionCache = null;
   let _sessionCacheTime = 0;
   const SESSION_CACHE_TTL = 30000; // 30s — scan is expensive, 10s was too frequent
+
+  function logSessionScanError(scope, error, extra = '') {
+    const detail = error && error.message ? error.message : String(error || 'unknown error');
+    const suffix = extra ? ` ${extra}` : '';
+    log('WARN', `[session-store] ${scope} failed pid=${process.pid}${suffix}: ${detail}`);
+  }
 
   function findSessionFile(sessionId) {
     if (!sessionId || !fs.existsSync(CLAUDE_PROJECTS_DIR)) return null;
@@ -297,123 +276,131 @@ function createSessionStore(deps) {
   }
 
   function scanClaudeSessions() {
+    if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return [];
+    let projects = [];
     try {
-      if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return [];
-      const projects = fs.readdirSync(CLAUDE_PROJECTS_DIR);
-      const sessionMap = new Map();
-      const projPathCache = new Map();
-
-      for (const proj of projects) {
-        const projDir = path.join(CLAUDE_PROJECTS_DIR, proj);
-        const indexFile = path.join(projDir, 'sessions-index.json');
-        try {
-          if (fs.existsSync(indexFile)) {
-            const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
-            if (data.entries && data.entries.length > 0) {
-              const realPath = data.entries[0].projectPath;
-              if (realPath) projPathCache.set(proj, realPath);
-              for (const entry of data.entries) {
-                if (entry.messageCount >= 1) sessionMap.set(entry.sessionId, { ...entry, _projDirName: proj });
-              }
-            }
-          }
-          // Fallback: decode projectPath from directory name (e.g. -Users-yaron-AGI-AChat → /Users/yaron/AGI/AChat)
-          // Uses smart decoding that handles hyphens in original path names
-          if (!projPathCache.has(proj) && proj.startsWith('-')) {
-            const decoded = decodeProjectDirName(proj);
-            if (decoded && fs.existsSync(decoded)) projPathCache.set(proj, decoded);
-          }
-        } catch { /* skip */ }
-
-        try {
-          const files = fs.readdirSync(projDir).filter(f => f.endsWith('.jsonl'));
-          for (const file of files) {
-            const sessionId = file.replace('.jsonl', '');
-            const filePath = path.join(projDir, file);
-            const stat = fs.statSync(filePath);
-            const fileMtime = stat.mtimeMs;
-            const existing = sessionMap.get(sessionId);
-            if (!existing || fileMtime > (existing.fileMtime || 0)) {
-              const projectPath = projPathCache.get(proj);
-              // Don't skip sessions without projectPath — use smart-decoded dir name as fallback
-              // so they still appear in /resume (better to show with unknown path than hide)
-              const fallbackPath = !projectPath ? decodeProjectDirName(proj) : null;
-              if (!projectPath && !fallbackPath) continue;
-              sessionMap.set(sessionId, {
-                sessionId, projectPath: projectPath || fallbackPath, fileMtime,
-                modified: new Date(fileMtime).toISOString(),
-                messageCount: 1,
-                ...(existing || {}),
-                _projDirName: proj,
-                fileMtime,
-              });
-            }
-          }
-        } catch { /* skip */ }
-      }
-
-      const all = Array.from(sessionMap.values()).map((entry) => ({ ...entry, engine: 'claude' }));
-      const ENRICH_LIMIT = 20;
-      for (let i = 0; i < Math.min(all.length, ENRICH_LIMIT); i++) {
-        const s = all[i];
-        // [M1] 用 _enriched 标志替代三字段联合判断
-        // customTitle 是可选的，无命名 session 合法值为 undefined，不能作为 skip 条件
-        if (s._enriched) continue;
-        try {
-          const sessionFile = findSessionFile(s.sessionId);
-          if (!sessionFile) continue;
-          const fd = fs.openSync(sessionFile, 'r');
-          try {
-            if (!s.firstPrompt) {
-              const headBuf = Buffer.alloc(8192);
-              const headBytes = fs.readSync(fd, headBuf, 0, 8192, 0);
-              const headStr = headBuf.toString('utf8', 0, headBytes);
-              for (const line of headStr.split('\n')) {
-                if (!line) continue;
-                try {
-                  const d = JSON.parse(line);
-                  if (d.type === 'user' && d.message && d.userType !== 'internal') {
-                    const content = d.message.content;
-                    let raw = '';
-                    if (typeof content === 'string') raw = content;
-                    else if (Array.isArray(content)) {
-                      const txt = content.find(c => c.type === 'text');
-                      if (txt) raw = txt.text;
-                    }
-                    raw = raw.replace(/\n?\[System hints[\s\S]*/i, '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
-                    if (raw && raw.length > 2) { s.firstPrompt = raw.slice(0, 120); break; }
-                  }
-                } catch { /* skip line */ }
-              }
-            }
-            // 从尾部读取：customTitle + lastUser（256KB 覆盖 tool-heavy session）
-            const stat = fs.fstatSync(fd);
-            const tailSize = Math.min(262144, stat.size);
-            const tailBuf = Buffer.alloc(tailSize);
-            fs.readSync(fd, tailBuf, 0, tailSize, stat.size - tailSize);
-            const tailLines = tailBuf.toString('utf8').split('\n').reverse();
-            if (!s.customTitle) {
-              for (const line of tailLines) {
-                if (!line) continue;
-                try {
-                  const d = JSON.parse(line);
-                  if (d.type === 'custom-title' && d.customTitle) { s.customTitle = d.customTitle; break; }
-                } catch { /* skip */ }
-              }
-            }
-            if (!s.lastUser) {
-              s.lastUser = extractLastUserFromLines(tailLines);
-            }
-          } finally {
-            fs.closeSync(fd);
-          }
-          s._enriched = true; // [M1] 标记已完成富化，下次跳过
-        } catch { /* non-fatal */ }
-      }
-      return all;
-    } catch {
+      projects = fs.readdirSync(CLAUDE_PROJECTS_DIR);
+    } catch (e) {
+      logSessionScanError('scanClaudeSessions readdir', e, `dir=${CLAUDE_PROJECTS_DIR}`);
       return [];
     }
+
+    const sessionMap = new Map();
+    const projPathCache = new Map();
+    for (const proj of projects) {
+      const projDir = path.join(CLAUDE_PROJECTS_DIR, proj);
+      const indexFile = path.join(projDir, 'sessions-index.json');
+      try {
+        if (fs.existsSync(indexFile)) {
+          const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+          if (data.entries && data.entries.length > 0) {
+            const realPath = data.entries[0].projectPath;
+            if (realPath) projPathCache.set(proj, realPath);
+            for (const entry of data.entries) {
+              if (entry.messageCount >= 1) sessionMap.set(entry.sessionId, { ...entry, _projDirName: proj });
+            }
+          }
+        }
+        // Fallback: decode projectPath from directory name (e.g. -Users-yaron-AGI-AChat → /Users/yaron/AGI/AChat)
+        // Uses smart decoding that handles hyphens in original path names
+        if (!projPathCache.has(proj) && proj.startsWith('-')) {
+          const decoded = decodeProjectDirName(proj);
+          if (decoded && fs.existsSync(decoded)) projPathCache.set(proj, decoded);
+        }
+      } catch (e) {
+        logSessionScanError('scanClaudeSessions index', e, `project=${proj}`);
+      }
+
+      try {
+        const files = fs.readdirSync(projDir).filter(f => f.endsWith('.jsonl'));
+        for (const file of files) {
+          const sessionId = file.replace('.jsonl', '');
+          const filePath = path.join(projDir, file);
+          const stat = fs.statSync(filePath);
+          const fileMtime = stat.mtimeMs;
+          const existing = sessionMap.get(sessionId);
+          if (!existing || fileMtime > (existing.fileMtime || 0)) {
+            const projectPath = projPathCache.get(proj);
+            // Don't skip sessions without projectPath — use smart-decoded dir name as fallback
+            // so they still appear in /resume (better to show with unknown path than hide)
+            const fallbackPath = !projectPath ? decodeProjectDirName(proj) : null;
+            if (!projectPath && !fallbackPath) continue;
+            sessionMap.set(sessionId, {
+              sessionId, projectPath: projectPath || fallbackPath, fileMtime,
+              modified: new Date(fileMtime).toISOString(),
+              messageCount: 1,
+              ...(existing || {}),
+              _projDirName: proj,
+              fileMtime,
+            });
+          }
+        }
+      } catch (e) {
+        logSessionScanError('scanClaudeSessions project', e, `project=${proj}`);
+      }
+    }
+
+    const all = Array.from(sessionMap.values()).map((entry) => ({ ...entry, engine: 'claude' }));
+    const ENRICH_LIMIT = 20;
+    for (let i = 0; i < Math.min(all.length, ENRICH_LIMIT); i++) {
+      const s = all[i];
+      // [M1] 用 _enriched 标志替代三字段联合判断
+      // customTitle 是可选的，无命名 session 合法值为 undefined，不能作为 skip 条件
+      if (s._enriched) continue;
+      try {
+        const sessionFile = findSessionFile(s.sessionId);
+        if (!sessionFile) continue;
+        const fd = fs.openSync(sessionFile, 'r');
+        try {
+          if (!s.firstPrompt) {
+            const headBuf = Buffer.alloc(8192);
+            const headBytes = fs.readSync(fd, headBuf, 0, 8192, 0);
+            const headStr = headBuf.toString('utf8', 0, headBytes);
+            for (const line of headStr.split('\n')) {
+              if (!line) continue;
+              try {
+                const d = JSON.parse(line);
+                if (d.type === 'user' && d.message && d.userType !== 'internal') {
+                  const content = d.message.content;
+                  let raw = '';
+                  if (typeof content === 'string') raw = content;
+                  else if (Array.isArray(content)) {
+                    const txt = content.find(c => c.type === 'text');
+                    if (txt) raw = txt.text;
+                  }
+                  raw = raw.replace(/\n?\[System hints[\s\S]*/i, '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+                  if (raw && raw.length > 2) { s.firstPrompt = raw.slice(0, 120); break; }
+                }
+              } catch { /* skip line */ }
+            }
+          }
+          // 从尾部读取：customTitle + lastUser（256KB 覆盖 tool-heavy session）
+          const stat = fs.fstatSync(fd);
+          const tailSize = Math.min(262144, stat.size);
+          const tailBuf = Buffer.alloc(tailSize);
+          fs.readSync(fd, tailBuf, 0, tailSize, stat.size - tailSize);
+          const tailLines = tailBuf.toString('utf8').split('\n').reverse();
+          if (!s.customTitle) {
+            for (const line of tailLines) {
+              if (!line) continue;
+              try {
+                const d = JSON.parse(line);
+                if (d.type === 'custom-title' && d.customTitle) { s.customTitle = d.customTitle; break; }
+              } catch { /* skip */ }
+            }
+          }
+          if (!s.lastUser) {
+            s.lastUser = extractLastUserFromLines(tailLines);
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
+        s._enriched = true; // [M1] 标记已完成富化，下次跳过
+      } catch (e) {
+        logSessionScanError('scanClaudeSessions enrich', e, `session=${s.sessionId}`);
+      }
+    }
+    return all;
   }
 
   function scanCodexSessions() {
@@ -470,7 +457,8 @@ function createSessionStore(deps) {
           };
         })
         .map((session) => enrichCodexSession(session));
-    } catch {
+    } catch (e) {
+      logSessionScanError('scanCodexSessions', e, `db=${CODEX_DB}`);
       if (db) { try { db.close(); } catch { /* ignore */ } }
       return [];
     }
@@ -570,19 +558,29 @@ function createSessionStore(deps) {
 
   function scanAllSessions() {
     if (_sessionCache && (Date.now() - _sessionCacheTime < SESSION_CACHE_TTL)) return _sessionCache;
+    const all = [];
     try {
-      const all = [...scanClaudeSessions(), ...scanCodexSessions()];
+      all.push(...scanClaudeSessions());
+    } catch (e) {
+      logSessionScanError('scanAllSessions claude', e);
+    }
+    try {
+      all.push(...scanCodexSessions());
+    } catch (e) {
+      logSessionScanError('scanAllSessions codex', e);
+    }
+    try {
       all.sort((a, b) => {
         const aTime = a.fileMtime || new Date(a.modified).getTime();
         const bTime = b.fileMtime || new Date(b.modified).getTime();
         return bTime - aTime;
       });
-      _sessionCache = all;
-      _sessionCacheTime = Date.now();
-      return all;
-    } catch {
-      return [];
+    } catch (e) {
+      logSessionScanError('scanAllSessions sort', e, `count=${all.length}`);
     }
+    _sessionCache = all;
+    _sessionCacheTime = Date.now();
+    return all;
   }
 
   // Encode a filesystem path the same way Claude CLI does for project directory names.

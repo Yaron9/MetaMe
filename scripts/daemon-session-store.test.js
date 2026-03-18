@@ -642,4 +642,107 @@ describe('daemon-session-store codex metadata', () => {
       lastAssistant: '最终回复：resume 逻辑已重新检查。',
     });
   });
+
+  it('keeps healthy Claude sessions visible when one project directory scan fails', () => {
+    const state = { sessions: {} };
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
+    const goodProjectDir = path.join(tempHome, '.claude', 'projects', 'good-project');
+    const badProjectDir = path.join(tempHome, '.claude', 'projects', 'bad-project');
+    fs.mkdirSync(goodProjectDir, { recursive: true });
+    fs.mkdirSync(badProjectDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(goodProjectDir, 'good-session.jsonl'),
+      `${JSON.stringify({ type: 'user', userType: 'external', message: { content: 'Keep this session visible' } })}\n`,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(goodProjectDir, 'sessions-index.json'),
+      JSON.stringify({
+        entries: [{
+          sessionId: 'good-session',
+          projectPath: '/tmp/bound-project',
+          messageCount: 2,
+          modified: new Date('2026-03-12T00:00:00.000Z').toISOString(),
+        }],
+      }),
+      'utf8'
+    );
+
+    const logs = [];
+    const noisyFs = {
+      ...fs,
+      readdirSync(target, options) {
+        if (target === badProjectDir) {
+          throw new Error('simulated bad-project readdir failure');
+        }
+        return fs.readdirSync(target, options);
+      },
+    };
+
+    const store = createSessionStore({
+      fs: noisyFs,
+      path,
+      HOME: tempHome,
+      loadState: () => state,
+      saveState: (next) => {
+        state.sessions = next.sessions;
+      },
+      log: (level, message) => logs.push({ level, message }),
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+
+    const sessions = store.listRecentSessions(10, '/tmp/bound-project', 'claude');
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0].sessionId, 'good-session');
+    assert.equal(logs.some(entry => entry.message.includes('scanClaudeSessions project') && entry.message.includes('bad-project')), true);
+  });
+
+  it('keeps Claude sessions visible when Codex DB scan fails', () => {
+    const state = { sessions: {} };
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
+
+    const claudeProjectDir = path.join(tempHome, '.claude', 'projects', 'project-a');
+    fs.mkdirSync(claudeProjectDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(claudeProjectDir, 'claude-session.jsonl'),
+      `${JSON.stringify({ type: 'user', userType: 'external', message: { content: 'Claude survives codex failure' } })}\n`,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(claudeProjectDir, 'sessions-index.json'),
+      JSON.stringify({
+        entries: [{
+          sessionId: 'claude-session',
+          projectPath: '/tmp/shared-proj',
+          messageCount: 1,
+          modified: new Date('2026-03-13T00:00:00.000Z').toISOString(),
+        }],
+      }),
+      'utf8'
+    );
+
+    const codexDir = path.join(tempHome, '.codex');
+    fs.mkdirSync(codexDir, { recursive: true });
+    fs.writeFileSync(path.join(codexDir, 'state_5.sqlite'), 'not-a-real-sqlite-db', 'utf8');
+
+    const logs = [];
+    const store = createSessionStore({
+      fs,
+      path,
+      HOME: tempHome,
+      loadState: () => state,
+      saveState: (next) => {
+        state.sessions = next.sessions;
+      },
+      log: (level, message) => logs.push({ level, message }),
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+
+    const sessions = store.listRecentSessions(10, '/tmp/shared-proj', 'claude');
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0].sessionId, 'claude-session');
+    assert.equal(logs.some(entry => entry.message.includes('scanCodexSessions') && entry.message.includes('state_5.sqlite')), true);
+  });
 });
