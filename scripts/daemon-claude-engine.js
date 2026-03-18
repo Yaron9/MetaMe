@@ -2,6 +2,7 @@
 
 const { classifyChatUsage } = require('./usage-classifier');
 const { deriveProjectInfo } = require('./utils');
+const { normalizeCodexSandboxMode, normalizeCodexApprovalPolicy } = require('./daemon-utils');
 const {
   createEngineRuntimeFactory,
   normalizeEngineName,
@@ -275,31 +276,7 @@ function createClaudeEngine(deps) {
     return rawChatId || chatId;
   }
 
-  function normalizeCodexSandboxMode(value, fallback = null) {
-    const text = String(value || '').trim().toLowerCase();
-    if (!text) return fallback;
-    if (text === 'read-only' || text === 'readonly') return 'read-only';
-    if (text === 'workspace-write' || text === 'workspace') return 'workspace-write';
-    if (
-      text === 'danger-full-access'
-      || text === 'dangerous'
-      || text === 'full-access'
-      || text === 'full'
-      || text === 'bypass'
-      || text === 'writable'
-    ) return 'danger-full-access';
-    return fallback;
-  }
-
-  function normalizeCodexApprovalPolicy(value, fallback = null) {
-    const text = String(value || '').trim().toLowerCase();
-    if (!text) return fallback;
-    if (text === 'never' || text === 'no' || text === 'none') return 'never';
-    if (text === 'on-failure' || text === 'on_failure' || text === 'failure') return 'on-failure';
-    if (text === 'on-request' || text === 'on_request' || text === 'request') return 'on-request';
-    if (text === 'untrusted') return 'untrusted';
-    return fallback;
-  }
+  // normalizeCodexSandboxMode and normalizeCodexApprovalPolicy imported from daemon-utils
 
   function normalizeComparableCodexPermissionProfile(profile) {
     if (!profile) return null;
@@ -939,7 +916,13 @@ function createClaudeEngine(deps) {
           for (const event of events) {
             if (!event || !event.type) continue;
             if (event.type === 'session' && event.sessionId) {
+              const prevObserved = observedSessionId;
               observedSessionId = String(event.sessionId);
+              if (prevObserved && prevObserved !== observedSessionId) {
+                log('WARN', `[SESSION-SWITCH] ${chatId} session changed: ${prevObserved.slice(0, 8)} -> ${observedSessionId.slice(0, 8)} (cwd: ${cwd})`);
+              } else if (!prevObserved) {
+                log('INFO', `[SESSION-OBSERVED] ${chatId} session=${observedSessionId.slice(0, 8)} (cwd: ${cwd})`);
+              }
               if (typeof onSession === 'function') {
                 Promise.resolve(onSession(observedSessionId)).catch(() => { });
               }
@@ -1108,7 +1091,13 @@ function createClaudeEngine(deps) {
           for (const event of events) {
             if (event.type === 'text' && event.text) finalResult = String(event.text);
             if (event.type === 'done') finalUsage = event.usage || null;
-            if (event.type === 'session' && event.sessionId) observedSessionId = String(event.sessionId);
+            if (event.type === 'session' && event.sessionId) {
+              const _prev = observedSessionId;
+              observedSessionId = String(event.sessionId);
+              if (_prev && _prev !== observedSessionId) {
+                log('WARN', `[SESSION-SWITCH] ${chatId} session changed in buffer: ${_prev.slice(0, 8)} -> ${observedSessionId.slice(0, 8)}`);
+              }
+            }
             if (event.type === 'error') classifiedError = event;
           }
         }
@@ -1426,7 +1415,14 @@ function createClaudeEngine(deps) {
       // Warm pool: check if a persistent process is available for this session (Claude only).
       // Declared early so downstream logic can skip expensive operations when reusing warm process.
       const _warmSessionKey = sessionChatId;
-      const _warmEntry = (warmPool && runtime.name === 'claude') ? warmPool.acquireWarm(_warmSessionKey) : null;
+      let _warmEntry = (warmPool && runtime.name === 'claude') ? warmPool.acquireWarm(_warmSessionKey) : null;
+      // Guard: if user switched session (e.g. /resume), the warm pool process still holds
+      // the old session. Discard it to avoid silent session reversion.
+      if (_warmEntry && session.id && session.id !== '__continue__' && _warmEntry.sessionId && _warmEntry.sessionId !== session.id) {
+        log('WARN', `[WarmPool] Session mismatch: pool=${_warmEntry.sessionId.slice(0, 8)} state=${session.id.slice(0, 8)} — discarding warm process`);
+        try { process.kill(-_warmEntry.child.pid, 'SIGTERM'); } catch { try { _warmEntry.child.kill('SIGTERM'); } catch { /* */ } }
+        _warmEntry = null;
+      }
 
       // Pre-spawn session validation: unified for all engines.
       // Claude checks JSONL file existence; Codex checks SQLite. Same interface, different backend.

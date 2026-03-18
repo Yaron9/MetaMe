@@ -35,7 +35,7 @@ process.on('uncaughtException', (err) => {
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync, execFileSync, execFile, spawn } = require('child_process');
+const { execSync, execFile, spawn } = require('child_process');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
@@ -61,7 +61,7 @@ const CLAUDE_BIN = (() => {
   try {
     const cmd = process.platform === 'win32' ? 'where claude' : 'which claude 2>/dev/null';
     return execSync(cmd, { encoding: 'utf8', ...(process.platform === 'win32' ? { windowsHide: true } : {}) }).trim().split('\n')[0];
-  } catch {}
+  } catch { /* which/where not found — try candidates below */ }
   for (const p of candidates) { if (fs.existsSync(p)) return p; }
   return 'claude'; // fallback: hope it's in PATH
 })();
@@ -239,11 +239,6 @@ function log(level, msg) {
         _logWriteFailCount = 0;
       } catch { /* truly broken, keep writing to stderr */ }
     }
-  }
-  // When running as LaunchAgent (stdout redirected to file), mirror structured logs there too.
-  // This unifies daemon.log and daemon-npm-stdout.log into one source of truth.
-  if (!process.stdout.isTTY) {
-    process.stdout.write(line);
   }
 }
 
@@ -2109,7 +2104,6 @@ const {
   CLAUDE_BIN,
   spawn,
   execSync,
-  execFileSync,
   parseInterval,
   loadState,
   saveState,

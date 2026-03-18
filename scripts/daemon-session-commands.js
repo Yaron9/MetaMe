@@ -1,5 +1,7 @@
 'use strict';
 
+const { normalizeEngineName: _normalizeEngine, mergeAgentMaps } = require('./daemon-utils');
+
 function createSessionCommandHandler(deps) {
   const {
     fs,
@@ -30,8 +32,7 @@ function createSessionCommandHandler(deps) {
   } = deps;
 
   function normalizeEngineName(name) {
-    const n = String(name || '').trim().toLowerCase();
-    return n === 'codex' ? 'codex' : getDefaultEngine();
+    return _normalizeEngine(name, getDefaultEngine);
   }
 
   function inferStoredEngine(rawSession) {
@@ -54,7 +55,7 @@ function createSessionCommandHandler(deps) {
     const cfg = loadConfig();
     const state = loadState();
     const chatKey = String(chatId);
-    const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
+    const agentMap = mergeAgentMaps(cfg);
     const boundKey = agentMap[chatKey] || null;
     const boundProj = boundKey && cfg.projects ? cfg.projects[boundKey] : null;
     const stickyKey = state && state.team_sticky ? state.team_sticky[chatKey] : null;
@@ -195,7 +196,7 @@ function createSessionCommandHandler(deps) {
         }
       }
       const cfgForEngine = loadConfig();
-      const mapForEngine = { ...(cfgForEngine.telegram ? cfgForEngine.telegram.chat_agent_map : {}), ...(cfgForEngine.feishu ? cfgForEngine.feishu.chat_agent_map : {}) };
+      const mapForEngine = mergeAgentMaps(cfgForEngine);
       const mappedKeyForEngine = mapForEngine[String(chatId)];
       const mappedProjForEngine = mappedKeyForEngine && cfgForEngine.projects ? cfgForEngine.projects[mappedKeyForEngine] : null;
       const currentEngine = getDefaultEngine();
@@ -305,7 +306,7 @@ function createSessionCommandHandler(deps) {
             s.newestDate ? `🕐 Last updated: ${new Date(s.newestDate).toLocaleDateString()}` : '',
             '',
             '搜索: /memory <关键词>',
-          ].filter(l => l !== undefined && !(l === '' && false));
+          ].filter(Boolean);
           await bot.sendMessage(chatId, lines.join('\n'));
         } catch (e) {
           await bot.sendMessage(chatId, `❌ Memory stats error: ${e.message}`);
@@ -429,7 +430,10 @@ function createSessionCommandHandler(deps) {
       if (!arg) {
         // No argument — show rich session list with last user message + AI reply
         const agentKey = getAgentKey(chatId);
-        const allSessions = listRecentSessions(15, agentKey ? null : getBoundCwd(chatId), getCurrentEngine(chatId), agentKey);
+        const _resumeCwd = agentKey ? null : getBoundCwd(chatId);
+        const _resumeEngine = getCurrentEngine(chatId);
+        const allSessions = listRecentSessions(15, _resumeCwd, _resumeEngine, agentKey);
+        log('INFO', `/resume: chatId=${chatId} cwd=${_resumeCwd} engine=${_resumeEngine} agentKey=${agentKey} found=${allSessions.length}`);
         if (allSessions.length === 0) {
           await bot.sendMessage(chatId, 'No sessions found. Use /new to create one.');
           return true;
