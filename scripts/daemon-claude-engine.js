@@ -274,7 +274,7 @@ function createClaudeEngine(deps) {
     return resolveCodexPermissionProfile({ readOnly, daemonCfg, session });
   }
 
-  function getSessionChatId(chatId, boundProjectKey) {
+  function getSessionChatId(chatId, boundProjectKey, cfg, state) {
     const rawChatId = String(chatId || '');
     if (rawChatId.startsWith('_agent_') || rawChatId.startsWith('_scope_')) return rawChatId;
     // Must check team_sticky — same logic as handleCommand in command-router.
@@ -282,16 +282,16 @@ function createClaudeEngine(deps) {
     // but askClaude resolves _bound_<project>, causing two sessions on the same worktree.
     if (boundProjectKey) {
       try {
-        const cfg = loadConfig();
-        const proj = cfg.projects ? cfg.projects[boundProjectKey] : null;
+        const _cfg = cfg || loadConfig();
+        const proj = _cfg.projects ? _cfg.projects[boundProjectKey] : null;
         if (proj && Array.isArray(proj.team)) {
-          const st = loadState();
-          const stickyKey = st.team_sticky ? st.team_sticky[rawChatId] : null;
+          const _st = state || loadState();
+          const stickyKey = _st.team_sticky ? _st.team_sticky[rawChatId] : null;
           if (stickyKey && proj.team.find(m => m && m.key === stickyKey)) {
             return `_agent_${stickyKey}`;
           }
         }
-      } catch { /* fall through to default */ }
+      } catch (e) { log('WARN', `getSessionChatId sticky lookup failed: ${e.message}`); }
       return `_bound_${boundProjectKey}`;
     }
     return rawChatId || chatId;
@@ -1254,17 +1254,18 @@ function createClaudeEngine(deps) {
     const _chatStr = String(chatId || '');
     const _agentMapForLock = mergeAgentMaps(config);
     const _boundKeyForLock = _agentMapForLock[_chatStr] || projectKeyFromVirtualChatId(_chatStr);
-    const _sessionLockKey = getSessionChatId(chatId, _boundKeyForLock);
+    const _sessionLockKey = getSessionChatId(chatId, _boundKeyForLock, config);
 
-    // Wait for any prior askClaude on the same session to finish
-    const _priorLock = _sessionLocks.get(_sessionLockKey);
-    if (_priorLock) {
-      log('INFO', `[SESSION-LOCK] ${chatId} waiting — session ${_sessionLockKey} busy`);
-      await _priorLock.catch(() => { /* fire-and-forget: wait for prior session lock to settle */ });
+    // Chain-based lock: atomic — no TOCTOU gap between check and set.
+    // Each new call chains onto the previous promise for the same sessionChatId.
+    const prior = _sessionLocks.get(_sessionLockKey) || Promise.resolve();
+    if (_sessionLocks.has(_sessionLockKey)) {
+      log('INFO', `[SESSION-LOCK] ${chatId} queued — session ${_sessionLockKey} busy`);
     }
-
-    const p = _askClaudeCore(bot, chatId, prompt, config, readOnly, senderId);
-    _sessionLocks.set(_sessionLockKey, p);
+    const p = prior
+      .catch(() => {})  // ignore prior failure
+      .then(() => _askClaudeCore(bot, chatId, prompt, config, readOnly, senderId));
+    _sessionLocks.set(_sessionLockKey, p);  // atomic: set before any await
     try {
       return await p;
     } finally {
@@ -1275,6 +1276,8 @@ function createClaudeEngine(deps) {
   async function _askClaudeCore(bot, chatId, prompt, config, readOnly = false, senderId = null) {
     const _t0 = Date.now();
     log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
+    // Compute once — reused by all agent-map lookups in this call
+    const _cachedAgentMap = mergeAgentMaps(config);
 
     // Per-chatId serialization: pipeline. Per-session serialization: askClaude wrapper above.
     // Defense-in-depth: if a stale entry exists with a live child, kill it first.
@@ -1308,7 +1311,7 @@ function createClaudeEngine(deps) {
     let _lastStatusCardContent = null; // tracks last clean text written to card (for final-reply dedup)
     // Early detect bound project for branded ack card (team members / dispatch agents)
     const _ackChatIdStr = String(chatId);
-    const _ackAgentMap = mergeAgentMaps(config);
+    const _ackAgentMap = _cachedAgentMap;
     const _ackBoundKey = _ackAgentMap[_ackChatIdStr] || projectKeyFromVirtualChatId(_ackChatIdStr);
     const _ackBoundProj = _ackBoundKey && config.projects ? config.projects[_ackBoundKey] : null;
     // _ackCardHeader: non-null for agents with icon/name (team members, dispatch); passed to editMessage to preserve header on streaming edits
@@ -1358,7 +1361,7 @@ function createClaudeEngine(deps) {
 
       // Agent nickname routing: "贾维斯" / "小美，帮我..." → switch project session
       // Strict chats (chat_agent_map bound groups) must NOT switch agents via nickname
-      const _strictAgentMap = mergeAgentMaps(config);
+      const _strictAgentMap = _cachedAgentMap;
       const _isStrictChatSession = !!(_strictAgentMap[String(chatId)] || projectKeyFromVirtualChatId(String(chatId)));
       const agentMatch = _isStrictChatSession ? null : routeAgent(prompt, config);
       if (agentMatch) {
@@ -1383,13 +1386,13 @@ function createClaudeEngine(deps) {
       // BUT: skip skill routing if agent addressed by nickname OR chat already has an active session
       // (active conversation should never be hijacked by keyword-based skill matching)
       const chatIdStr = String(chatId);
-      const chatAgentMap = mergeAgentMaps(config);
+      const chatAgentMap = _cachedAgentMap;
       const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
       const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
       const daemonCfg = (config && config.daemon) || {};
       // Keep real group chats on their own session key.
       // Only true virtual agents (_agent_*) should use the virtual namespace.
-      const sessionChatId = getSessionChatId(chatId, boundProjectKey);
+      const sessionChatId = getSessionChatId(chatId, boundProjectKey, config);
       const sessionRaw = getSession(sessionChatId);
       const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
       const boundEngineName = (boundProject && boundProject.engine) ? normalizeEngineName(boundProject.engine) : getDefaultEngine();
@@ -1578,7 +1581,7 @@ function createClaudeEngine(deps) {
 
       // projectKey must be declared outside the try block so the daemonHint template below can reference it.
       const _cid0 = String(chatId);
-      const projectKey = mergeAgentMaps(config)[_cid0] || projectKeyFromVirtualChatId(_cid0);
+      const projectKey = _cachedAgentMap[_cid0] || projectKeyFromVirtualChatId(_cid0);
       try {
         const memory = require('./memory');
 

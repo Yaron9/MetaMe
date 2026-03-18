@@ -101,7 +101,7 @@ function createCheckpointUtils(deps) {
       return cpSha;
     } catch (e) {
       log('WARN', `Git checkpoint failed in ${path.basename(cwd)}: ${e.message}`);
-      return { error: e.message };
+      return null;
     }
   }
 
@@ -139,7 +139,7 @@ function createCheckpointUtils(deps) {
       return cpSha;
     } catch (e) {
       log('WARN', `Git checkpoint (async) failed in ${path.basename(cwd)}: ${e.message}`);
-      return { error: e.message };
+      return null;
     }
   }
 
