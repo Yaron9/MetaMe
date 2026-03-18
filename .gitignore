@@ -24,7 +24,7 @@ SOUL.md
 .playwright-mcp/
 
 # Team worktrees (auto-created per agent)
-.worktree/
+.worktrees/
 
 # Local working dirs (never push)
 docs/
