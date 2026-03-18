@@ -686,7 +686,7 @@ function createAgentCommandHandler(deps) {
         const cwd = normalizeCwd(boundProj.cwd);
         // Lazy migration: ensure soul layer exists for agents created before this feature
         if (agentTools && typeof agentTools.repairAgentSoul === 'function') {
-          await agentTools.repairAgentSoul(cwd).catch(() => {});
+          await agentTools.repairAgentSoul(cwd).catch(() => { /* fire-and-forget: lazy soul migration */ });
         }
         const inlineDelta = agentParts.slice(1).join(' ').trim();
         if (inlineDelta) {

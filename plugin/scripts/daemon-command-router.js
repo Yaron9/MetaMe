@@ -505,7 +505,7 @@ function createCommandRouter(deps) {
       }
       // Lazy migration: ensure soul layer exists for agents created before this feature
       if (agentTools && typeof agentTools.repairAgentSoul === 'function') {
-        await agentTools.repairAgentSoul(bound.project.cwd).catch(() => {});
+        await agentTools.repairAgentSoul(bound.project.cwd).catch(e => log('WARN', 'repairAgentSoul failed: ' + e.message));
       }
       const roleDelta = deriveRoleDelta(input);
       const res = await agentTools.editAgentRoleDefinition(bound.project.cwd, roleDelta);
@@ -607,16 +607,26 @@ function createCommandRouter(deps) {
     if (mappedKey && config.projects && config.projects[mappedKey]) {
       const proj = config.projects[mappedKey];
       const projCwd = normalizeCwd(proj.cwd);
-      const sessionChatId = buildSessionChatId(chatId, mappedKey);
-      const cur = loadState().sessions?.[sessionChatId];
+      // When team_sticky is active, the session lives at _agent_<key>, not _bound_<project>.
+      // We must check the sticky-adjusted key to avoid falsely seeing "no session" and recreating.
+      const _state = loadState();
+      const _stickyKey = _state.team_sticky ? _state.team_sticky[_chatIdStr] : null;
+      const _stickyMember = _stickyKey && Array.isArray(proj.team)
+        ? proj.team.find(m => m && m.key === _stickyKey)
+        : null;
+      const effectiveSessionChatId = _stickyMember
+        ? `_agent_${_stickyMember.key}`
+        : buildSessionChatId(chatId, mappedKey);
+      const cur = _state.sessions?.[effectiveSessionChatId];
       const projEngine = String((proj && proj.engine) || getDefaultEngine()).toLowerCase();
-      // Multi-engine format stores engines in cur.engines object; legacy format uses cur.engine string.
-      // Check whether the session already has a slot for the project's configured engine.
       const curHasEngine = cur && (
         cur.engines ? !!cur.engines[projEngine] : String(cur.engine || '').toLowerCase() === projEngine
       );
-      if (!cur || cur.cwd !== projCwd || !curHasEngine) {
-        attachOrCreateSession(sessionChatId, projCwd, proj.name || mappedKey, proj.engine || getDefaultEngine());
+      if (!cur || !curHasEngine) {
+        // Only create if truly no session exists — never recreate for cwd mismatch alone
+        const reason = !cur ? 'no-session' : `engine-missing(${projEngine})`;
+        log('INFO', `[SESSION-INIT] ${effectiveSessionChatId} reason=${reason}`);
+        attachOrCreateSession(effectiveSessionChatId, projCwd, proj.name || mappedKey, proj.engine || getDefaultEngine());
       }
     }
 

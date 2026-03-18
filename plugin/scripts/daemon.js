@@ -35,7 +35,7 @@ process.on('uncaughtException', (err) => {
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync, execFileSync, execFile, spawn } = require('child_process');
+const { execSync, execFile, spawn } = require('child_process');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
@@ -61,7 +61,7 @@ const CLAUDE_BIN = (() => {
   try {
     const cmd = process.platform === 'win32' ? 'where claude' : 'which claude 2>/dev/null';
     return execSync(cmd, { encoding: 'utf8', ...(process.platform === 'win32' ? { windowsHide: true } : {}) }).trim().split('\n')[0];
-  } catch {}
+  } catch { /* which/where not found — try candidates below */ }
   for (const p of candidates) { if (fs.existsSync(p)) return p; }
   return 'claude'; // fallback: hope it's in PATH
 })();
@@ -203,28 +203,42 @@ function refreshLogMaxSize(cfg) {
   _logMaxSize = (cfg && cfg.daemon && cfg.daemon.log_max_size) || 1048576;
 }
 
+let _logRotateCheck = 0; // last rotation check timestamp
+const LOG_ROTATE_INTERVAL = 30000; // check rotation every 30s, not every write
+let _logWriteFailCount = 0;
+
 function log(level, msg) {
   const ts = new Date().toISOString();
   const line = `[${ts}] [${level}] ${msg}\n`;
   try {
-    // Rotate if over max size
-    if (fs.existsSync(LOG_FILE)) {
-      const stat = fs.statSync(LOG_FILE);
-      if (stat.size > _logMaxSize) {
-        const bakFile = LOG_FILE + '.bak';
-        if (fs.existsSync(bakFile)) fs.unlinkSync(bakFile);
-        fs.renameSync(LOG_FILE, bakFile);
-      }
+    // Rotation check: throttled to avoid stat() on every log call
+    const now = Date.now();
+    if (now - _logRotateCheck > LOG_ROTATE_INTERVAL) {
+      _logRotateCheck = now;
+      try {
+        const stat = fs.statSync(LOG_FILE);
+        if (stat.size > _logMaxSize) {
+          const bakFile = LOG_FILE + '.bak';
+          try { fs.unlinkSync(bakFile); } catch { /* ok if absent */ }
+          fs.renameSync(LOG_FILE, bakFile);
+        }
+      } catch { /* rotation is best-effort; write still proceeds */ }
     }
     fs.appendFileSync(LOG_FILE, line, 'utf8');
-  } catch {
-    // Last resort
+    if (_logWriteFailCount > 0) {
+      _logWriteFailCount = 0; // recovered
+    }
+  } catch (e) {
+    _logWriteFailCount++;
+    // Fallback: stderr + stdout
     process.stderr.write(line);
-  }
-  // When running as LaunchAgent (stdout redirected to file), mirror structured logs there too.
-  // This unifies daemon.log and daemon-npm-stdout.log into one source of truth.
-  if (!process.stdout.isTTY) {
-    process.stdout.write(line);
+    // Every 10 consecutive failures, try to recreate the log file
+    if (_logWriteFailCount > 0 && _logWriteFailCount % 10 === 0) {
+      try {
+        fs.writeFileSync(LOG_FILE, `[${ts}] [WARN] Log file recreated after ${_logWriteFailCount} write failures: ${e.message}\n`, 'utf8');
+        _logWriteFailCount = 0;
+      } catch { /* truly broken, keep writing to stderr */ }
+    }
   }
 }
 
@@ -1746,9 +1760,33 @@ const {
  */
 function attachOrCreateSession(chatId, projCwd, name, engine) {
   engine = engine || getDefaultEngine();
-  // Virtual chatIds (_agent_* / _scope_*) are isolated from real user chats.
-  // This avoids cross-context session collisions between user chat and dispatch flows.
-  createSession(chatId, projCwd, name || '', engine);
+  // Check if this chatId already has an active session — if so, just update cwd if needed.
+  // This prevents silent session recreation on every message (e.g., bound-chat guard).
+  const existing = getSessionForEngine(chatId, engine);
+  if (existing && existing.id && existing.started) {
+    // Session exists — only update cwd if it changed
+    const state = loadState();
+    if (state.sessions[chatId] && state.sessions[chatId].cwd !== projCwd) {
+      state.sessions[chatId].cwd = projCwd;
+      saveState(state);
+    }
+    return;
+  }
+  // No active session — instead of auto-creating, set up a --continue placeholder.
+  // createSession is reserved for user-initiated /new only.
+  // This ensures askClaude will use --continue to pick up the most recent session in this cwd.
+  const state = loadState();
+  if (!state.sessions[chatId]) state.sessions[chatId] = {};
+  state.sessions[chatId].cwd = projCwd;
+  // Mark engine slot with __continue__ so askClaude uses --continue flag
+  if (!state.sessions[chatId].engines) state.sessions[chatId].engines = {};
+  state.sessions[chatId].engines[engine] = {
+    ...(state.sessions[chatId].engines[engine] || {}),
+    id: '__continue__',
+    started: true,
+  };
+  saveState(state);
+  log('INFO', `[SESSION-ATTACH] ${chatId} set to --continue mode (cwd: ${projCwd}, engine: ${engine})`);
 }
 
 /**
@@ -2066,7 +2104,6 @@ const {
   CLAUDE_BIN,
   spawn,
   execSync,
-  execFileSync,
   parseInterval,
   loadState,
   saveState,
@@ -2155,6 +2192,7 @@ const { handleSessionCommand } = createSessionCommandHandler({
   loadSessionTags,
   sessionRichLabel,
   buildSessionCardElements,
+  getSessionRecentContext,
   sessionLabel,
   getDefaultEngine,
 });
@@ -2643,12 +2681,33 @@ async function main() {
   let heartbeatTimer = startHeartbeat(config, notifyFn, notifyPersonalFn);
 
   let shuttingDown = false;
+  // Detect if we're managed by launchd (com.metame.npm-daemon).
+  // If so, don't self-spawn — just exit and let launchd restart us (KeepAlive=true).
+  // This prevents duplicate daemon processes that fight over Feishu WebSocket connections.
+  function _isLaunchdManaged() {
+    // Fastest: explicit env var set by our launchd plist
+    if (process.env.LAUNCHED_BY_LAUNCHD === '1') return true;
+    try {
+      // Fallback: check ppid=1 (launchd) or caffeinate parent
+      if (process.ppid === 1) return true;
+      const ppidInfo = execSync(`ps -p ${process.ppid} -o comm=`, { encoding: 'utf8', timeout: 2000 }).trim();
+      if (ppidInfo.includes('caffeinate') || ppidInfo.includes('launchd')) return true;
+    } catch { /* ignore */ }
+    return false;
+  }
+
   function spawnReplacementDaemon(reason) {
+    if (_isLaunchdManaged()) {
+      log('INFO', `[RESTART] launchd-managed — exiting to let launchd restart (reason=${reason})`);
+      // Return true so shutdown proceeds; launchd KeepAlive will restart us
+      return true;
+    }
     try {
       const replacementScript = path.join(METAME_DIR, 'daemon.js');
+      const spawnLogFd = fs.openSync(path.join(METAME_DIR, 'daemon-spawn.log'), 'a');
       const bg = spawn(process.execPath, [replacementScript], {
         detached: process.platform !== 'win32',
-        stdio: 'ignore',
+        stdio: ['ignore', spawnLogFd, spawnLogFd],
         windowsHide: true,
         cwd: METAME_DIR,
         env: {
@@ -2689,7 +2748,7 @@ async function main() {
     setHeartbeatTimer: (next) => { heartbeatTimer = next; },
     onRestartRequested: () => {
       // Reuse full shutdown logic, then self-spawn replacement.
-      shutdown({ restartReason: 'daemon-script-changed' }).catch(() => process.exit(1));
+      shutdown({ restartReason: 'daemon-script-changed' }).catch(() => process.exit(0));
     },
     // Agent soul layer auto-repair on config hot-reload
     repairAgentLayer,

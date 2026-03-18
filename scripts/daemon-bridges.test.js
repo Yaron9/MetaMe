@@ -123,6 +123,15 @@ describe('daemon-bridges telegram reply routing', () => {
       handleCommand: async (_bot, chatId, text) => {
         handled.push({ chatId, text });
       },
+      pipeline: {
+        processMessage: async (chatId, text, ctx) => {
+          // Delegate to handleCommand for test observability
+          handled.push({ chatId, text });
+        },
+        isActive: () => false,
+        interruptActive: () => false,
+        clearQueue: () => {},
+      },
       pendingActivations: new Map(),
       activeProcesses: new Map(),
       messageQueue: new Map(),

@@ -178,13 +178,17 @@ function setupRuntimeWatchers(deps) {
     if (curr.mtimeMs === prev.mtimeMs) return;
     if (reloadDebounce) clearTimeout(reloadDebounce);
     reloadDebounce = setTimeout(() => {
-      log('INFO', 'daemon.yaml changed on disk — auto-reloading config');
-      const r = reloadConfig();
-      if (r.success) {
-        log('INFO', `Auto-reload OK: ${r.tasks} tasks`);
-        adminNotifyFn(`🔄 Config auto-reloaded. ${r.tasks} heartbeat tasks active.`).catch(() => { });
-      } else {
-        log('ERROR', `Auto-reload failed: ${r.error}`);
+      try {
+        log('INFO', 'daemon.yaml changed on disk — auto-reloading config');
+        const r = reloadConfig();
+        if (r.success) {
+          log('INFO', `Auto-reload OK: ${r.tasks} tasks`);
+          adminNotifyFn(`🔄 Config auto-reloaded. ${r.tasks} heartbeat tasks active.`).catch(e => log('WARN', 'Failed to send config-reload notification: ' + e.message));
+        } else {
+          log('ERROR', `Auto-reload failed: ${r.error}`);
+        }
+      } catch (e) {
+        log('ERROR', `Auto-reload crashed: ${e.message}`);
       }
     }, 1000);
   });
@@ -281,7 +285,7 @@ function setupRuntimeWatchers(deps) {
             log('FATAL', `[CRASH-LOOP] ${crashCount} consecutive fast crashes — restoring from .last-good`);
             const restored = restoreFromLastGood();
             if (restored) {
-              adminNotifyFn('⚠️ 检测到 daemon 连续崩溃，已从上一个正常版本恢复。请检查最近的代码改动。').catch(() => {});
+              adminNotifyFn('⚠️ 检测到 daemon 连续崩溃，已从上一个正常版本恢复。请检查最近的代码改动。').catch(e => log('WARN', 'Failed to send crash-loop admin notification: ' + e.message));
               try { fs.writeFileSync(crashCountFile, '0', 'utf8'); } catch { /* non-fatal */ }
             }
           }
@@ -309,7 +313,7 @@ function setupRuntimeWatchers(deps) {
     if (!validation.ok) {
       const errSummary = validation.errors.slice(0, 3).join('\n');
       log('ERROR', `[RESTART BLOCKED] Syntax errors detected:\n${errSummary}`);
-      adminNotifyFn(`🚫 Daemon 热重载已阻止 — 新代码有语法错误:\n${errSummary}\n\n当前 daemon 继续运行。`).catch(() => {});
+      adminNotifyFn(`🚫 Daemon 热重载已阻止 — 新代码有语法错误:\n${errSummary}\n\n当前 daemon 继续运行。`).catch(e => log('WARN', 'Failed to send syntax-error admin notification: ' + e.message));
       pendingRestart = false;
       return;
     }

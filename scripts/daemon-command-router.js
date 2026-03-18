@@ -505,7 +505,7 @@ function createCommandRouter(deps) {
       }
       // Lazy migration: ensure soul layer exists for agents created before this feature
       if (agentTools && typeof agentTools.repairAgentSoul === 'function') {
-        await agentTools.repairAgentSoul(bound.project.cwd).catch(() => {});
+        await agentTools.repairAgentSoul(bound.project.cwd).catch(e => log('WARN', 'repairAgentSoul failed: ' + e.message));
       }
       const roleDelta = deriveRoleDelta(input);
       const res = await agentTools.editAgentRoleDefinition(bound.project.cwd, roleDelta);

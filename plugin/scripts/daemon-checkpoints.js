@@ -99,8 +99,9 @@ function createCheckpointUtils(deps) {
 
       log('INFO', `Git checkpoint: ${cpSha.slice(0, 8)} in ${path.basename(cwd)}${safeLabel}`);
       return cpSha;
-    } catch {
-      return null;
+    } catch (e) {
+      log('WARN', `Git checkpoint failed in ${path.basename(cwd)}: ${e.message}`);
+      return { error: e.message };
     }
   }
 
@@ -136,8 +137,9 @@ function createCheckpointUtils(deps) {
 
       log('INFO', `Git checkpoint: ${cpSha.slice(0, 8)} in ${path.basename(cwd)}${safeLabel}`);
       return cpSha;
-    } catch {
-      return null;
+    } catch (e) {
+      log('WARN', `Git checkpoint (async) failed in ${path.basename(cwd)}: ${e.message}`);
+      return { error: e.message };
     }
   }
 

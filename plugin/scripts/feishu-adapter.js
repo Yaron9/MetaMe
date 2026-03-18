@@ -320,7 +320,7 @@ function createBot(config) {
         // Response is { code, msg, data: { file_key } }
         const fileKey = uploadRes?.data?.file_key || uploadRes?.file_key;
         if (!fileKey) {
-          throw new Error(`No file_key in response: ${JSON.stringify(uploadRes)}`);
+          throw new Error(`No file_key in response: ${JSON.stringify(uploadRes).slice(0, 200)}`);
         }
 
         // 2. Send file message
@@ -338,7 +338,7 @@ function createBot(config) {
       } catch (uploadErr) {
         // Log detailed error
         const errDetail = uploadErr.response?.data || uploadErr.message || uploadErr;
-        console.error('[Feishu] File upload error:', JSON.stringify(errDetail));
+        console.error('[Feishu] File upload error:', JSON.stringify(errDetail).slice(0, 500));
 
         // Fallback: for text files, send content truncated
         if (isText) {
@@ -400,7 +400,11 @@ function createBot(config) {
             try {
               const msg = data.message;
               if (!msg) return;
-              if (isDuplicate(msg.message_id)) return;
+              if (isDuplicate(msg.message_id)) {
+                _log('DEBUG', `[feishu] Dedup dropped: ${msg.message_id} chat=${msg.chat_id}`);
+                return;
+              }
+              _log('DEBUG', `[feishu] Raw event: chat=${msg.chat_id} type=${msg.message_type} msgId=${msg.message_id}`);
 
               const chatId = msg.chat_id;
               const senderId = data.sender && data.sender.sender_id && data.sender.sender_id.open_id || null;
@@ -450,10 +454,22 @@ function createBot(config) {
               if (action && chatId) {
                 const cmd = action.value && action.value.cmd;
                 if (cmd) {
+                  // Dedup card actions — Feishu may redeliver on slow ack
+                  const actionToken = data.token || '';
+                  const dedupKey = actionToken
+                    ? `card_${actionToken}`
+                    : `card_${chatId}_${cmd}_${Math.floor(Date.now() / 3000)}`;
+                  if (isDuplicate(dedupKey)) {
+                    _log('DEBUG', `[feishu] Card action dedup dropped: ${dedupKey}`);
+                    return {};
+                  }
+                  _log('DEBUG', `[feishu] Card action: chat=${chatId} cmd=${cmd}`);
                   Promise.resolve().then(() => onMessage(chatId, cmd, data, null, senderId)).catch((err) => {
                     try { console.error(`[feishu-adapter] card action error: ${err && err.message || err}`); } catch { }
                   });
                 }
+              } else {
+                _log('DEBUG', `[feishu] Card action missing chatId or action: chatId=${chatId} action=${!!action}`);
               }
             } catch (e) { /* Non-fatal */ }
             return {};
@@ -526,6 +542,7 @@ function createBot(config) {
         reconnect() {
           _log('INFO', 'Feishu manual reconnect triggered');
           reconnectDelay = 5000;
+          try { currentWs?.stop?.(); } catch { /* ignore */ }
           connect();
         },
         isAlive() {

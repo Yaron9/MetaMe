@@ -1,5 +1,7 @@
 'use strict';
 
+const { normalizeEngineName: _normalizeEngine } = require('./daemon-utils');
+
 function createAgentCommandHandler(deps) {
   const {
     fs,
@@ -37,8 +39,7 @@ function createAgentCommandHandler(deps) {
   } = deps;
 
   function normalizeEngineName(name) {
-    const n = String(name || '').trim().toLowerCase();
-    return n === 'codex' ? 'codex' : getDefaultEngine();
+    return _normalizeEngine(name, getDefaultEngine);
   }
 
   function inferStoredEngine(rawSession) {
@@ -685,7 +686,7 @@ function createAgentCommandHandler(deps) {
         const cwd = normalizeCwd(boundProj.cwd);
         // Lazy migration: ensure soul layer exists for agents created before this feature
         if (agentTools && typeof agentTools.repairAgentSoul === 'function') {
-          await agentTools.repairAgentSoul(cwd).catch(() => {});
+          await agentTools.repairAgentSoul(cwd).catch(() => { /* fire-and-forget: lazy soul migration */ });
         }
         const inlineDelta = agentParts.slice(1).join(' ').trim();
         if (inlineDelta) {

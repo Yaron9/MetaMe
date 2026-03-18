@@ -2,7 +2,7 @@
 
 const { classifyChatUsage } = require('./usage-classifier');
 const { deriveProjectInfo } = require('./utils');
-const { normalizeCodexSandboxMode, normalizeCodexApprovalPolicy } = require('./daemon-utils');
+const { normalizeCodexSandboxMode, normalizeCodexApprovalPolicy, mergeAgentMaps } = require('./daemon-utils');
 const {
   createEngineRuntimeFactory,
   normalizeEngineName,
@@ -108,6 +108,11 @@ function createClaudeEngine(deps) {
   // Card reuse for merge-pause: when a task is paused for message merging,
   // save the statusMsgId so the next askClaude reuses the same card.
   const _pausedCards = new Map(); // chatId -> { statusMsgId, cardHeader }
+
+  // Session-level concurrency guard: prevents two pipeline chains (different chatIds)
+  // from running askClaude concurrently on the same sessionChatId.
+  // Key = sessionChatId, Value = Promise (the running askClaude)
+  const _sessionLocks = new Map();
 
   let mentorEngine = null;
   try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
@@ -272,7 +277,23 @@ function createClaudeEngine(deps) {
   function getSessionChatId(chatId, boundProjectKey) {
     const rawChatId = String(chatId || '');
     if (rawChatId.startsWith('_agent_') || rawChatId.startsWith('_scope_')) return rawChatId;
-    if (boundProjectKey) return `_bound_${boundProjectKey}`;
+    // Must check team_sticky — same logic as handleCommand in command-router.
+    // Without this, handleCommand creates session at _agent_<key> (sticky path)
+    // but askClaude resolves _bound_<project>, causing two sessions on the same worktree.
+    if (boundProjectKey) {
+      try {
+        const cfg = loadConfig();
+        const proj = cfg.projects ? cfg.projects[boundProjectKey] : null;
+        if (proj && Array.isArray(proj.team)) {
+          const st = loadState();
+          const stickyKey = st.team_sticky ? st.team_sticky[rawChatId] : null;
+          if (stickyKey && proj.team.find(m => m && m.key === stickyKey)) {
+            return `_agent_${stickyKey}`;
+          }
+        }
+      } catch { /* fall through to default */ }
+      return `_bound_${boundProjectKey}`;
+    }
     return rawChatId || chatId;
   }
 
@@ -833,7 +854,7 @@ function createClaudeEngine(deps) {
         const now = Date.now();
         if (!force && now - _lastStreamFlush < STREAM_THROTTLE) return;
         _lastStreamFlush = now;
-        onStatus('__STREAM_TEXT__' + _streamText).catch(() => { });
+        onStatus('__STREAM_TEXT__' + _streamText).catch(() => { /* fire-and-forget: stream status update */ });
       }
       const writtenFiles = [];
       const toolUsageLog = [];
@@ -887,7 +908,7 @@ function createClaudeEngine(deps) {
           if (onStatus) {
             const milestoneMsg = parts.join(' | ');
             const msg = _streamText ? `__TOOL_OVERLAY__${_streamText}\n\n> ${milestoneMsg}` : milestoneMsg;
-            onStatus(msg).catch(() => { });
+            onStatus(msg).catch(() => { /* fire-and-forget: milestone status update */ });
           }
         }
       }, 30000);
@@ -924,7 +945,7 @@ function createClaudeEngine(deps) {
                 log('INFO', `[SESSION-OBSERVED] ${chatId} session=${observedSessionId.slice(0, 8)} (cwd: ${cwd})`);
               }
               if (typeof onSession === 'function') {
-                Promise.resolve(onSession(observedSessionId)).catch(() => { });
+                Promise.resolve(onSession(observedSessionId)).catch(() => { /* fire-and-forget: session observer callback */ });
               }
               continue;
             }
@@ -1052,7 +1073,7 @@ function createClaudeEngine(deps) {
             if (onStatus) {
               // Overlay tool status on top of streamed text (if any); else show plain status
               const msg = _streamText ? `__TOOL_OVERLAY__${_streamText}\n\n> ${status}` : status;
-              onStatus(msg).catch(() => { });
+              onStatus(msg).catch(() => { /* fire-and-forget: tool status update */ });
             }
           }
         }
@@ -1225,12 +1246,37 @@ function createClaudeEngine(deps) {
     return loadConfig();
   }
 
+  // Session-level concurrency guard wrapper.
+  // Pipeline serializes per-chatId, but different chatIds can map to the same session
+  // (e.g., bound chat oc_xxx → _bound_proj AND team dispatch _agent_jiayibing → _agent_jiayibing
+  //  share the same worktree). This wrapper ensures only one askClaude runs per sessionChatId.
   async function askClaude(bot, chatId, prompt, config, readOnly = false, senderId = null) {
+    const _chatStr = String(chatId || '');
+    const _agentMapForLock = mergeAgentMaps(config);
+    const _boundKeyForLock = _agentMapForLock[_chatStr] || projectKeyFromVirtualChatId(_chatStr);
+    const _sessionLockKey = getSessionChatId(chatId, _boundKeyForLock);
+
+    // Wait for any prior askClaude on the same session to finish
+    const _priorLock = _sessionLocks.get(_sessionLockKey);
+    if (_priorLock) {
+      log('INFO', `[SESSION-LOCK] ${chatId} waiting — session ${_sessionLockKey} busy`);
+      await _priorLock.catch(() => { /* fire-and-forget: wait for prior session lock to settle */ });
+    }
+
+    const p = _askClaudeCore(bot, chatId, prompt, config, readOnly, senderId);
+    _sessionLocks.set(_sessionLockKey, p);
+    try {
+      return await p;
+    } finally {
+      if (_sessionLocks.get(_sessionLockKey) === p) _sessionLocks.delete(_sessionLockKey);
+    }
+  }
+
+  async function _askClaudeCore(bot, chatId, prompt, config, readOnly = false, senderId = null) {
     const _t0 = Date.now();
     log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
 
-    // Serialization is now guaranteed by daemon-message-pipeline (per-chatId Promise chain).
-    // No race guard needed here — pipeline ensures only one askClaude runs per chatId.
+    // Per-chatId serialization: pipeline. Per-session serialization: askClaude wrapper above.
     // Defense-in-depth: if a stale entry exists with a live child, kill it first.
     const _existing = activeProcesses.get(chatId);
     if (_existing && _existing.child && !_existing.aborted) {
@@ -1262,11 +1308,7 @@ function createClaudeEngine(deps) {
     let _lastStatusCardContent = null; // tracks last clean text written to card (for final-reply dedup)
     // Early detect bound project for branded ack card (team members / dispatch agents)
     const _ackChatIdStr = String(chatId);
-    const _ackAgentMap = {
-      ...(config.telegram ? config.telegram.chat_agent_map || {} : {}),
-      ...(config.feishu ? config.feishu.chat_agent_map || {} : {}),
-      ...(config.imessage ? config.imessage.chat_agent_map || {} : {}),
-    };
+    const _ackAgentMap = mergeAgentMaps(config);
     const _ackBoundKey = _ackAgentMap[_ackChatIdStr] || projectKeyFromVirtualChatId(_ackChatIdStr);
     const _ackBoundProj = _ackBoundKey && config.projects ? config.projects[_ackBoundKey] : null;
     // _ackCardHeader: non-null for agents with icon/name (team members, dispatch); passed to editMessage to preserve header on streaming edits
@@ -1281,7 +1323,7 @@ function createClaudeEngine(deps) {
       const cardAge = _pausedCard.savedAt ? Date.now() - _pausedCard.savedAt : 0;
       if (cardAge > 30000) {
         log('INFO', `[askClaude] Discarding stale paused card for ${chatId} (${Math.round(cardAge / 1000)}s old)`);
-        if (_pausedCard.statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, _pausedCard.statusMsgId).catch(() => {});
+        if (_pausedCard.statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, _pausedCard.statusMsgId).catch(() => { /* cleanup: discard stale paused card */ });
       } else {
         statusMsgId = _pausedCard.statusMsgId;
         if (_pausedCard.cardHeader) _ackCardHeader = _pausedCard.cardHeader;
@@ -1291,7 +1333,7 @@ function createClaudeEngine(deps) {
     if (_pausedCard && statusMsgId) {
       // Update card to show "merging" state
       if (statusMsgId && bot.editMessage) {
-        bot.editMessage(chatId, statusMsgId, '🔄 合并处理中…', _ackCardHeader).catch(() => {});
+        bot.editMessage(chatId, statusMsgId, '🔄 合并处理中…', _ackCardHeader).catch(e => log('WARN', 'Failed to update merge status card: ' + e.message));
       }
     } else if (!bot.suppressAck) {
       // Fire-and-forget: don't await Telegram RTT before spawning the engine process.
@@ -1316,11 +1358,7 @@ function createClaudeEngine(deps) {
 
       // Agent nickname routing: "贾维斯" / "小美，帮我..." → switch project session
       // Strict chats (chat_agent_map bound groups) must NOT switch agents via nickname
-      const _strictAgentMap = {
-        ...(config.telegram ? config.telegram.chat_agent_map : {}),
-        ...(config.feishu ? config.feishu.chat_agent_map : {}),
-        ...(config.imessage ? config.imessage.chat_agent_map : {}),
-      };
+      const _strictAgentMap = mergeAgentMaps(config);
       const _isStrictChatSession = !!(_strictAgentMap[String(chatId)] || projectKeyFromVirtualChatId(String(chatId)));
       const agentMatch = _isStrictChatSession ? null : routeAgent(prompt, config);
       if (agentMatch) {
@@ -1345,11 +1383,7 @@ function createClaudeEngine(deps) {
       // BUT: skip skill routing if agent addressed by nickname OR chat already has an active session
       // (active conversation should never be hijacked by keyword-based skill matching)
       const chatIdStr = String(chatId);
-      const chatAgentMap = {
-        ...(config.telegram ? config.telegram.chat_agent_map : {}),
-        ...(config.feishu ? config.feishu.chat_agent_map : {}),
-        ...(config.imessage ? config.imessage.chat_agent_map : {}),
-      };
+      const chatAgentMap = mergeAgentMaps(config);
       const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
       const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
       const daemonCfg = (config && config.daemon) || {};
@@ -1436,7 +1470,7 @@ function createClaudeEngine(deps) {
           log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${sessionChatId}; falling back to --continue (cwd: ${session.cwd})`);
           session = { ...session, id: '__continue__', started: true };
           if (!isVirtualAgent) {
-            await bot.sendMessage(chatId, '⚠️ 上次 session 文件丢失，正在尝试恢复…').catch(() => { });
+            await bot.sendMessage(chatId, '⚠️ 上次 session 文件丢失，正在尝试恢复…').catch(e => log('WARN', 'Failed to notify user (session recovery): ' + e.message));
           }
         }
       }
@@ -1481,7 +1515,7 @@ function createClaudeEngine(deps) {
           if (breaker && breaker.tripped) {
             mentorSuppressed = true;
             if (breaker.reason !== 'cooldown_active' && breaker.response) {
-              await bot.sendMessage(chatId, breaker.response).catch(() => { });
+              await bot.sendMessage(chatId, breaker.response).catch(e => log('WARN', 'Failed to send mentor breaker response: ' + e.message));
             }
           }
         } catch (e) {
@@ -1544,12 +1578,7 @@ function createClaudeEngine(deps) {
 
       // projectKey must be declared outside the try block so the daemonHint template below can reference it.
       const _cid0 = String(chatId);
-      const _agentMap0 = {
-        ...(config.telegram ? config.telegram.chat_agent_map : {}),
-        ...(config.feishu ? config.feishu.chat_agent_map : {}),
-        ...(config.imessage ? config.imessage.chat_agent_map : {}),
-      };
-      const projectKey = _agentMap0[_cid0] || projectKeyFromVirtualChatId(_cid0);
+      const projectKey = mergeAgentMaps(config)[_cid0] || projectKeyFromVirtualChatId(_cid0);
       try {
         const memory = require('./memory');
 
@@ -1826,7 +1855,7 @@ ${mentorRadarHint}
           // Do NOT pass prompt — conversation content must never enter git history
           const checkpointResult = (gitCheckpointAsync || gitCheckpoint)(session.cwd);
           if (checkpointResult && typeof checkpointResult.catch === 'function') {
-            checkpointResult.catch(() => { });
+            checkpointResult.catch(() => { /* fire-and-forget: git checkpoint */ });
           }
         } catch { /* non-critical */ }
       }
@@ -1930,9 +1959,9 @@ ${mentorRadarHint}
         if (_preReason === 'merge-pause' && statusMsgId) {
           // Save card for reuse by the merged flush
           _pausedCards.set(chatId, { statusMsgId, cardHeader: _ackCardHeader, savedAt: Date.now() });
-          if (bot.editMessage) bot.editMessage(chatId, statusMsgId, '⏸ 合并中…', _ackCardHeader).catch(() => {});
+          if (bot.editMessage) bot.editMessage(chatId, statusMsgId, '⏸ 合并中…', _ackCardHeader).catch(e => log('WARN', 'Failed to update merge-pause card: ' + e.message));
         } else if (statusMsgId && bot.deleteMessage) {
-          bot.deleteMessage(chatId, statusMsgId).catch(() => {});
+          bot.deleteMessage(chatId, statusMsgId).catch(() => { /* cleanup: remove status card on pre-spawn abort */ });
         }
         log('INFO', `[askClaude] Pre-spawn abort for ${chatId}: ${_preReason || 'user cancelled'}`);
         return { ok: false, error: _preReason === 'merge-pause' ? 'Paused for merge' : 'Stopped by user' };
@@ -2059,7 +2088,7 @@ ${mentorRadarHint}
             'WARN',
             `Codex resume failed for ${chatId}, retrying once with ${resumeFailure.kind === 'interrupted' ? 'native resume recovery' : 'fresh exec'}: ${String(error).slice(0, 120)}`
           );
-          await bot.sendMessage(chatId, resumeFailure.userMessage).catch(() => { });
+          await bot.sendMessage(chatId, resumeFailure.userMessage).catch(e => log('WARN', 'Failed to notify user (resume failure): ' + e.message));
           if (resumeFailure.kind !== 'interrupted') {
             session = createSession(
               sessionChatId,
@@ -2105,9 +2134,9 @@ ${mentorRadarHint}
         // Clean up pending sentinel if spawn never completed
         const _ps2 = activeProcesses.get(chatId);
         if (_ps2 && _ps2.child === null) { activeProcesses.delete(chatId); saveActivePids(); }
-        if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => { });
+        if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => { /* cleanup: remove status card on spawn crash */ });
         log('ERROR', `spawnClaudeStreaming crashed for ${chatId}: ${spawnErr.message}`);
-        await bot.sendMessage(chatId, `❌ 内部错误: ${spawnErr.message}`).catch(() => { });
+        await bot.sendMessage(chatId, `❌ 内部错误: ${spawnErr.message}`).catch(e => log('WARN', 'Failed to notify user (spawn error): ' + e.message));
         return { ok: false, error: spawnErr.message };
       }
       clearInterval(typingTimer);
@@ -2268,7 +2297,7 @@ ${mentorRadarHint}
             }
           } else if (_statusMsgIdForReply && bot.deleteMessage) {
             // No editMessage — delete the status card
-            await bot.deleteMessage(chatId, _statusMsgIdForReply).catch(() => { });
+            await bot.deleteMessage(chatId, _statusMsgIdForReply).catch(() => { /* cleanup: remove status card after reply */ });
           }
 
           if (!replyMsg) {
@@ -2325,7 +2354,7 @@ ${mentorRadarHint}
           const _agentLabel = (boundProject && boundProject.name)
             ? `[${boundProject.name}] `
             : (projectKey ? `[${projectKey}] ` : '');
-          autoNameSession(chatId, session.id, prompt, session.cwd, _agentLabel).catch(() => { });
+          autoNameSession(chatId, session.id, prompt, session.cwd, _agentLabel).catch(e => log('WARN', 'autoNameSession failed: ' + e.message));
         }
 
         // Auto-refresh memory-snapshot.md for this agent on first session message (fire-and-forget)
@@ -2359,7 +2388,7 @@ ${mentorRadarHint}
           if (statusMsgId) {
             _pausedCards.set(chatId, { statusMsgId, cardHeader: _ackCardHeader, savedAt: Date.now() });
             // Update card to show paused state
-            if (bot.editMessage) bot.editMessage(chatId, statusMsgId, '⏸ 合并中…', _ackCardHeader).catch(() => {});
+            if (bot.editMessage) bot.editMessage(chatId, statusMsgId, '⏸ 合并中…', _ackCardHeader).catch(e => log('WARN', 'Failed to update merge-pause card (post-error): ' + e.message));
             log('INFO', `[askClaude] Saved paused card ${statusMsgId} for ${chatId}`);
           }
           return { ok: false, error: errMsg, errorCode };
@@ -2463,7 +2492,7 @@ ${mentorRadarHint}
       // Clean up pending sentinel if spawn never completed
       const _ps3 = activeProcesses.get(chatId);
       if (_ps3 && _ps3.child === null) { activeProcesses.delete(chatId); saveActivePids(); }
-      if (statusMsgId && bot.deleteMessage) await bot.deleteMessage(chatId, statusMsgId).catch(() => { });
+      if (statusMsgId && bot.deleteMessage) await bot.deleteMessage(chatId, statusMsgId).catch(() => { /* cleanup: remove status card on fatal error */ });
       log('FATAL', `[askClaude] Uncaught error for ${chatId}: ${fatalErr.message}\n${fatalErr.stack}`);
       try { await bot.sendMessage(chatId, `❌ 内部错误: ${fatalErr.message}`); } catch { /* */ }
       return { ok: false, error: fatalErr.message };

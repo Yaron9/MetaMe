@@ -269,9 +269,9 @@ function createBridgeStarter(deps) {
         source_sender_id: acl.senderId || '',
       }, cfg).then(res => {
         if (res.success) {
-          bot.sendMessage(realChatId, `📡 已发送给 ${member.icon || '🤖'} ${member.name} (${member.peer})`).catch(() => {});
+          bot.sendMessage(realChatId, `📡 已发送给 ${member.icon || '🤖'} ${member.name} (${member.peer})`).catch(e => log('WARN', 'Failed to notify user (remote dispatch success): ' + e.message));
         } else {
-          bot.sendMessage(realChatId, `❌ 远端派发失败: ${res.error}`).catch(() => {});
+          bot.sendMessage(realChatId, `❌ 远端派发失败: ${res.error}`).catch(e => log('WARN', 'Failed to notify user (remote dispatch error): ' + e.message));
         }
       });
       return;
@@ -285,7 +285,7 @@ function createBridgeStarter(deps) {
       : _getMemberCwd(resolvedParentCwd, member.key);
     if (!memberCwd) {
       log('ERROR', `Team [${member.key}] cannot start: directory unavailable`);
-      bot.sendMessage(realChatId, `❌ ${member.icon || '🤖'} ${member.name} 启动失败：工作目录创建失败`).catch(() => {});
+      bot.sendMessage(realChatId, `❌ ${member.icon || '🤖'} ${member.name} 启动失败：工作目录创建失败`).catch(e => log('WARN', 'Failed to notify user (team member cwd error): ' + e.message));
       return;
     }
     log('INFO', `Team [${member.key}] using cwd: ${memberCwd}`);
@@ -350,7 +350,7 @@ function createBridgeStarter(deps) {
               const cb = update.callback_query;
               const chatId = cb.message && cb.message.chat.id;
               const senderId = cb.from && cb.from.id ? String(cb.from.id) : null;
-              bot.answerCallback(cb.id).catch(() => { });
+              bot.answerCallback(cb.id).catch(() => { /* fire-and-forget: Telegram callback ack */ });
               if (chatId && cb.data) {
                 const liveCfg = loadConfig();
                 const allowedIds = (liveCfg.telegram && liveCfg.telegram.allowed_chat_ids) || [];
@@ -370,6 +370,7 @@ function createBridgeStarter(deps) {
                 if (acl.blocked) continue;
                 pipeline.processMessage(chatId, cb.data, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly }).catch(e => {
                   log('ERROR', `Telegram callback handler error: ${e.message}`);
+                  bot.sendMessage(chatId, `❌ 回调处理失败: ${e.message}`).catch(e2 => log('WARN', 'Failed to notify user (callback error): ' + e2.message));
                 });
               }
               continue;
@@ -393,7 +394,7 @@ function createBridgeStarter(deps) {
             const isAllowedChat = allowedIds.includes(chatId);
             if (!isAllowedChat && !isBindCmd) {
               log('WARN', `Rejected message from unauthorized chat: ${chatId}`);
-              bot.sendMessage(chatId, unauthorizedMsg(chatId)).catch(() => {});
+              bot.sendMessage(chatId, unauthorizedMsg(chatId)).catch(e => log('WARN', 'Failed to send unauthorized notice: ' + e.message));
               continue;
             }
 
@@ -534,7 +535,7 @@ function createBridgeStarter(deps) {
                     continue;
                   }
                   if (_stopArg) {
-                    await bot.sendMessage(chatId, `❌ 未找到团队成员: ${_stopArg}`).catch(() => {});
+                    await bot.sendMessage(chatId, `❌ 未找到团队成员: ${_stopArg}`).catch(e => log('WARN', 'Failed to notify user (team member not found): ' + e.message));
                     continue;
                   }
                 }
@@ -558,7 +559,7 @@ function createBridgeStarter(deps) {
                   _setSticky(member.key);
                   if (!rest) {
                     log('INFO', `Sticky set (pure nickname): ${_chatKey.slice(-8)} → ${member.key}`);
-                    bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`).catch(() => {});
+                    bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`).catch(e => log('WARN', 'Failed to send team member online notice: ' + e.message));
                     continue;
                   }
                   log('INFO', `Sticky set: ${_chatKey.slice(-8)} → ${member.key}`);
@@ -575,14 +576,14 @@ function createBridgeStarter(deps) {
                   const rest = trimmedText.slice(_mainMatch.length).replace(/^[\s,，:：]+/, '');
                   log('INFO', `Main nickname → cleared sticky, routing to main${rest ? ` (task: ${rest.slice(0, 30)})` : ''}`);
                   if (!rest) {
-                    bot.sendMarkdown(chatId, `${_boundProj.icon || '🤖'} **${_boundProj.name}** 在线`).catch(() => {});
+                    bot.sendMarkdown(chatId, `${_boundProj.icon || '🤖'} **${_boundProj.name}** 在线`).catch(e => log('WARN', 'Failed to send main project online notice: ' + e.message));
                     continue;
                   }
                   try {
                     await pipeline.processMessage(chatId, rest, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
                   } catch (e) {
                     log('ERROR', `Team main-route handleCommand failed: ${e.message}`);
-                    bot.sendMessage(chatId, `❌ 执行失败: ${e.message}`).catch(() => {});
+                    bot.sendMessage(chatId, `❌ 执行失败: ${e.message}`).catch(e2 => log('WARN', 'Failed to notify user (main-route error): ' + e2.message));
                   }
                   continue;
                 }
@@ -687,7 +688,7 @@ function createBridgeStarter(deps) {
         if (!isAllowedChat && !isBindCmd) {
           log('WARN', `Feishu: rejected message from ${chatId}`);
           const msg = unauthorizedMsg(chatId);
-          (bot.sendMarkdown ? bot.sendMarkdown(chatId, msg) : bot.sendMessage(chatId, msg)).catch(() => {});
+          (bot.sendMarkdown ? bot.sendMarkdown(chatId, msg) : bot.sendMessage(chatId, msg)).catch(e => log('WARN', 'Failed to send unauthorized notice (Feishu): ' + e.message));
           return;
         }
 
@@ -708,10 +709,16 @@ function createBridgeStarter(deps) {
           if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
           const destPath = path.join(uploadDir, fileInfo.fileName);
 
+          let downloaded = false;
           try {
             await bot.downloadFile(fileInfo.messageId, fileInfo.fileKey, destPath, fileInfo.msgType);
+            downloaded = true;
             await bot.sendMessage(chatId, `📥 Saved: ${fileInfo.fileName}`);
-
+          } catch (err) {
+            log('ERROR', `Feishu file download failed: ${err.message}`);
+            await bot.sendMessage(chatId, `❌ 文件下载失败: ${err.message}`).catch(e => log('WARN', 'Failed to notify user (file download error): ' + e.message));
+          }
+          if (downloaded) {
             const prompt = text
               ? `User uploaded a file to the project: ${destPath}\nUser says: "${text}"`
               : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
@@ -729,10 +736,12 @@ function createBridgeStarter(deps) {
                 return;
               }
             }
-            await pipeline.processMessage(chatId, prompt, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
-          } catch (err) {
-            log('ERROR', `Feishu file download failed: ${err.message}`);
-            await bot.sendMessage(chatId, `❌ Download failed: ${err.message}`);
+            try {
+              await pipeline.processMessage(chatId, prompt, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
+            } catch (err) {
+              log('ERROR', `Feishu file pipeline error: ${err.message}`);
+              await bot.sendMessage(chatId, `❌ 处理失败: ${err.message}`).catch(e => log('WARN', 'Failed to notify user (file pipeline error): ' + e.message));
+            }
           }
           return;
         }
@@ -864,7 +873,7 @@ function createBridgeStarter(deps) {
                           }));
                         }
                       })
-                      .catch(() => {});
+                      .catch(e => log('WARN', 'Failed to send team member online notice (Feishu): ' + e.message));
                     return;
                   }
                   log('INFO', `Sticky set: ${_chatKey.slice(-8)} → ${member.key}`);
@@ -892,14 +901,14 @@ function createBridgeStarter(deps) {
                           }));
                         }
                       })
-                      .catch(() => {});
+                      .catch(e => log('WARN', 'Failed to send main project online notice (Feishu): ' + e.message));
                     return;
                   }
               try {
                 await pipeline.processMessage(chatId, rest, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
               } catch (e) {
                 log('ERROR', `Team main-route handleCommand failed: ${e.message}`);
-                bot.sendMessage(chatId, `❌ 执行失败: ${e.message}`).catch(() => {});
+                bot.sendMessage(chatId, `❌ 执行失败: ${e.message}`).catch(e2 => log('WARN', 'Failed to notify user (Feishu main-route error): ' + e2.message));
               }
               return;
             }
@@ -920,7 +929,7 @@ function createBridgeStarter(deps) {
             await pipeline.processMessage(chatId, text, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
           } catch (e) {
             log('ERROR', `Feishu handleCommand failed for ${chatId}: ${e.message}`);
-            bot.sendMessage(chatId, `❌ 命令执行失败: ${e.message}`).catch(() => {});
+            bot.sendMessage(chatId, `❌ 命令执行失败: ${e.message}`).catch(e2 => log('WARN', 'Failed to notify user (Feishu command error): ' + e2.message));
           }
         }
       }, { log: (lvl, msg) => log(lvl, msg) });
