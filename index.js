@@ -332,8 +332,10 @@ try {
 
 // Worktree guard: team members running in worktrees must NEVER deploy to ~/.metame/
 // Their worktree is an isolated sandbox — deploying would overwrite production symlinks.
-const WORKTREES_DIR = path.join(HOME_DIR, '.metame', 'worktrees');
-if (__dirname.startsWith(WORKTREES_DIR)) {
+// Detect any .worktrees/ parent in the path (covers both ~/.metame/worktrees/ and repo-local .worktrees/).
+const _isInWorktree = __dirname.split(path.sep).includes('.worktrees') ||
+  __dirname.startsWith(path.join(HOME_DIR, '.metame', 'worktrees'));
+if (_isInWorktree) {
   console.error(`\n${icon("stop")} ACTION BLOCKED: Worktree Deploy Prevented`);
   console.error(`   You are running from a worktree (${path.basename(__dirname)}).`);
   console.error('   Deploying from a worktree would overwrite production daemon code.');
