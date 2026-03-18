@@ -862,6 +862,11 @@ function createBridgeStarter(deps) {
               }
               log('INFO', `Quoted reply agentKey=${_replyAgentKey} not in team, falling through`);
             }
+            // 0b. Quoted reply to main project (agentKey=null but mapping exists) → clear sticky
+            if (!_replyAgentKey && parentId && _st.msg_sessions && _st.msg_sessions[parentId]) {
+              _clearSticky();
+              log('INFO', `Quoted reply to main project → cleared sticky, routing to main`);
+            }
             // 1. Explicit nickname → route + set sticky
             const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
               if (teamMatch) {

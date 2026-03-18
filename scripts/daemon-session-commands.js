@@ -446,7 +446,7 @@ function createSessionCommandHandler(deps) {
           allSessions.forEach((s, i) => {
             msg += sessionRichLabel(s, i + 1, _tags2) + '\n';
           });
-          await bot.sendMessage(chatId, msg);
+          await bot.sendMarkdown(chatId, msg);
         }
         return true;
       }
@@ -471,10 +471,11 @@ function createSessionCommandHandler(deps) {
       const label = s.customTitle || s.summary?.slice(0, 40) || s.sessionId.slice(0, 8);
       log('INFO', `Session resumed: ${s.sessionId.slice(0, 8)} (${path.basename(projPath)})`);
       const ctx = getSessionRecentContext(s.sessionId);
-      let confirmMsg = `▶️ Resumed: ${label}\n📁 ${path.basename(projPath)}\n🆔 ${s.sessionId.slice(0, 8)}`;
-      if (ctx && ctx.lastUser) confirmMsg += `\n\n👤 ${ctx.lastUser.replace(/\n/g, ' ').slice(0, 80)}`;
-      if (ctx && ctx.lastAssistant) confirmMsg += `\n🤖 ${ctx.lastAssistant.replace(/\n/g, ' ').slice(0, 80)}`;
-      await bot.sendMessage(chatId, confirmMsg);
+      const stripMd = (t) => t.replace(/(\*\*|__|[*_`#~>])/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+      let confirmMsg = `▶️ **Resumed**: ${stripMd(label)}\n📁 \`${path.basename(projPath)}\` · 🆔 \`${s.sessionId.slice(0, 8)}\``;
+      if (ctx && ctx.lastUser) confirmMsg += `\n\n👤 ${stripMd(ctx.lastUser).replace(/\n/g, ' ').slice(0, 80)}`;
+      if (ctx && ctx.lastAssistant) confirmMsg += `\n🤖 ${stripMd(ctx.lastAssistant).replace(/\n/g, ' ').slice(0, 80)}`;
+      await bot.sendMarkdown(chatId, confirmMsg);
       return true;
     }
 
