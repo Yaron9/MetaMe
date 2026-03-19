@@ -183,11 +183,12 @@ function runProjectVerifier(projectKey, config, deps) {
   const scripts = resolveProjectScripts(projectCwd, manifest);
   if (!fs.existsSync(scripts.verifier)) return null;
 
-  const statePath = path.join(
-    deps.metameDir || path.join(os.homedir(), '.metame'),
-    'memory', 'now', `${projectKey}.md`
-  );
-  const phase = readPhaseFromState(statePath);
+  const metameDir = deps.metameDir || path.join(os.homedir(), '.metame');
+  const statePath = path.join(metameDir, 'memory', 'now', `${projectKey}.md`);
+
+  // Read phase from event log (SoT), fall back to state file for backward compat
+  const { phase: eventPhase } = replayEventLog(projectKey, deps);
+  const phase = eventPhase || readPhaseFromState(statePath);
   const relVerifier = path.relative(projectCwd, scripts.verifier);
 
   try {
