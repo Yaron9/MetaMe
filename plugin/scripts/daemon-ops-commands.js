@@ -92,8 +92,12 @@ function createOpsCommandHandler(deps) {
           if (match.parentHash) {
             execSync(`git reset --hard ${match.parentHash}`, { cwd, stdio: 'ignore', timeout: 10000, ..._wh });
           }
-          // Restore working tree to exact checkpoint state (recovers pre-Claude uncommitted changes)
-          execSync(`git checkout ${match.hash} -- .`, { cwd, stdio: 'ignore', timeout: 10000, ..._wh });
+          // Restore only files that differ between HEAD and checkpoint (not entire worktree)
+          // This prevents overwriting user's manual edits to unrelated files
+          if (diffFiles) {
+            const files = diffFiles.split('\n').filter(Boolean).map(f => `"${f}"`).join(' ');
+            execSync(`git checkout ${match.hash} -- ${files}`, { cwd, stdio: 'ignore', timeout: 10000, ..._wh });
+          }
           // Truncate context to checkpoint time (covers multi-turn rollback)
           truncateSessionToCheckpoint(session.id, match.message);
           const fileList = diffFiles ? diffFiles.split('\n').map(f => path.basename(f)).join(', ') : '';
@@ -238,7 +242,9 @@ function createOpsCommandHandler(deps) {
                 if (cpMatch.parentHash) {
                   execSync(`git reset --hard ${cpMatch.parentHash}`, { cwd: cwd2, stdio: 'ignore', timeout: 10000, ..._wh2 });
                 }
-                execSync(`git checkout ${cpMatch.hash} -- .`, { cwd: cwd2, stdio: 'ignore', timeout: 10000, ..._wh2 });
+                // Restore only changed files (not entire worktree) to preserve user's manual edits
+                const files2 = diffFiles2.split('\n').filter(Boolean).map(f => `"${f}"`).join(' ');
+                execSync(`git checkout ${cpMatch.hash} -- ${files2}`, { cwd: cwd2, stdio: 'ignore', timeout: 10000, ..._wh2 });
                 gitMsg2 = `\n📁 ${diffFiles2.split('\n').length} 个文件已恢复`;
                 cleanupCheckpoints(cwd2);
               }

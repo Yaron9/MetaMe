@@ -173,10 +173,18 @@ if (!fs.existsSync(METAME_DIR)) {
 // DEPLOY PHASE: sync scripts, docs, bin to ~/.metame/
 // ---------------------------------------------------------
 
-// Dev mode: when running from git repo, symlink instead of copy.
+// Dev mode: when running from the real git repo, symlink instead of copy.
 // This ensures source files and runtime files are always the same,
 // preventing agents from accidentally editing copies instead of source.
-const IS_DEV_MODE = fs.existsSync(path.join(__dirname, '.git'));
+// IMPORTANT: git worktrees have a `.git` FILE (not directory) pointing to the main repo.
+// They must NOT be treated as dev mode — deploying from a worktree would overwrite
+// production symlinks with stale code. Only a real .git directory qualifies.
+const IS_DEV_MODE = (() => {
+  const dotGit = path.join(__dirname, '.git');
+  try {
+    return fs.statSync(dotGit).isDirectory();
+  } catch { return false; }
+})();
 
 /**
  * Sync files from srcDir to destDir.
@@ -257,6 +265,70 @@ function readRunningDaemonPid({ pidFile, lockFile }) {
   return null;
 }
 
+// --- macOS launchd integration ---
+const LAUNCHD_LABEL = 'com.metame.npm-daemon';
+const LAUNCHD_PLIST = path.join(HOME_DIR, 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist`);
+
+function ensureLaunchdPlist({ daemonScript, daemonLog }) {
+  const plistDir = path.join(HOME_DIR, 'Library', 'LaunchAgents');
+  if (!fs.existsSync(plistDir)) fs.mkdirSync(plistDir, { recursive: true });
+  const nodePath = process.execPath;
+  const currentPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin';
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
+    <string>${nodePath}</string>
+    <string>${daemonScript}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>${daemonLog}</string>
+  <key>StandardErrorPath</key>
+  <string>${daemonLog}</string>
+  <key>WorkingDirectory</key>
+  <string>${HOME_DIR}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${currentPath}</string>
+    <key>HOME</key>
+    <string>${HOME_DIR}</string>
+    <key>METAME_ROOT</key>
+    <string>${__dirname}</string>
+    <key>LAUNCHED_BY_LAUNCHD</key>
+    <string>1</string>
+  </dict>
+</dict>
+</plist>`;
+  const existing = fs.existsSync(LAUNCHD_PLIST) ? fs.readFileSync(LAUNCHD_PLIST, 'utf8') : '';
+  if (existing !== plist) {
+    // Bootout old version if loaded, ignore errors
+    try { execSync(`launchctl bootout gui/$(id -u) ${LAUNCHD_PLIST} 2>/dev/null`); } catch { /* not loaded */ }
+    fs.writeFileSync(LAUNCHD_PLIST, plist, 'utf8');
+  }
+  return LAUNCHD_PLIST;
+}
+
+function launchdIsRunning() {
+  try {
+    const out = execSync(`launchctl list ${LAUNCHD_LABEL} 2>/dev/null`, { encoding: 'utf8' });
+    const m = out.match(/"PID"\s*=\s*(\d+)/);
+    return m ? parseInt(m[1], 10) : null;
+  } catch { return null; }
+}
+
 function requestDaemonRestart({
   reason = 'manual-restart',
   daemonPidFile = path.join(METAME_DIR, 'daemon.pid'),
@@ -265,6 +337,16 @@ function requestDaemonRestart({
 } = {}) {
   const pid = readRunningDaemonPid({ pidFile: daemonPidFile, lockFile: daemonLockFile });
   if (!pid) return { ok: false, status: 'not_running' };
+
+  // macOS: use launchctl kickstart -k for atomic restart (no orphan/race)
+  if (process.platform === 'darwin') {
+    try {
+      execSync(`launchctl kickstart -k gui/$(id -u)/${LAUNCHD_LABEL} 2>/dev/null`);
+      return { ok: true, status: 'signaled', pid };
+    } catch {
+      // launchd job not loaded — fall through to SIGUSR2
+    }
+  }
 
   if (process.platform !== 'win32') {
     try {
@@ -1907,50 +1989,20 @@ if (isDaemon) {
       console.error(`${icon("fail")} launchd is macOS-only.`);
       process.exit(1);
     }
-    const plistDir = path.join(HOME_DIR, 'Library', 'LaunchAgents');
-    if (!fs.existsSync(plistDir)) fs.mkdirSync(plistDir, { recursive: true });
-    const plistPath = path.join(plistDir, 'com.metame.daemon.plist');
-    const nodePath = process.execPath;
-    // Capture current PATH so launchd can find `claude` and other tools
-    const currentPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin';
-    const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.metame.daemon</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/bin/caffeinate</string>
-    <string>-i</string>
-    <string>${nodePath}</string>
-    <string>${DAEMON_SCRIPT}</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>${DAEMON_LOG}</string>
-  <key>StandardErrorPath</key>
-  <string>${DAEMON_LOG}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>METAME_ROOT</key>
-    <string>${__dirname}</string>
-    <key>PATH</key>
-    <string>${currentPath}</string>
-    <key>HOME</key>
-    <string>${HOME_DIR}</string>
-    <key>LAUNCHED_BY_LAUNCHD</key>
-    <string>1</string>
-  </dict>
-</dict>
-</plist>`;
-    fs.writeFileSync(plistPath, plistContent, 'utf8');
+    // Clean up legacy plist with different label if exists
+    const legacyPlist = path.join(HOME_DIR, 'Library', 'LaunchAgents', 'com.metame.daemon.plist');
+    if (fs.existsSync(legacyPlist)) {
+      try { execSync(`launchctl bootout gui/$(id -u) ${legacyPlist} 2>/dev/null`); } catch { /* */ }
+      try { fs.unlinkSync(legacyPlist); } catch { /* */ }
+    }
+    const plistPath = ensureLaunchdPlist({ daemonScript: DAEMON_SCRIPT, daemonLog: DAEMON_LOG });
+    try {
+      execSync(`launchctl bootstrap gui/$(id -u) ${plistPath} 2>/dev/null`);
+    } catch { /* already bootstrapped */ }
     console.log(`${icon("ok")} launchd plist installed: ${plistPath}`);
-    console.log("   Load now: launchctl load " + plistPath);
-    console.log("   Unload:   launchctl unload " + plistPath);
+    console.log("   The daemon will auto-start at login and restart if it crashes.");
+    console.log("   Start now: metame start");
+    console.log("   Remove:    launchctl bootout gui/$(id -u)/" + LAUNCHD_LABEL);
     process.exit(0);
   }
 
@@ -2051,7 +2103,61 @@ WantedBy=default.target
   }
 
   if (subCmd === 'start') {
-    // Kill any lingering daemon.js processes to avoid Feishu WebSocket conflicts
+    if (!fs.existsSync(DAEMON_CONFIG)) {
+      console.error(`${icon("fail")} No config found. Run: metame daemon init`);
+      process.exit(1);
+    }
+    if (!fs.existsSync(DAEMON_SCRIPT)) {
+      console.error(`${icon("fail")} daemon.js not found. Reinstall MetaMe.`);
+      process.exit(1);
+    }
+
+    if (process.platform === 'darwin') {
+      // macOS: delegate to launchd for auto-restart and boot persistence
+      // Kill any orphan daemon processes NOT managed by launchd
+      try {
+        const pids = findProcessesByPattern('node.*daemon\\.js');
+        const launchdPid = launchdIsRunning();
+        for (const n of pids) {
+          if (n !== launchdPid) {
+            try { process.kill(n, 'SIGTERM'); } catch { /* */ }
+          }
+        }
+      } catch { /* ignore */ }
+      // Clean stale lock/pid from orphan processes
+      if (fs.existsSync(DAEMON_LOCK)) {
+        try {
+          const lock = JSON.parse(fs.readFileSync(DAEMON_LOCK, 'utf8'));
+          const pid = parseInt(lock && lock.pid, 10);
+          if (pid) { process.kill(pid, 0); } // throws if dead
+        } catch {
+          // Owner is dead — clean stale files
+          try { fs.unlinkSync(DAEMON_PID); } catch { /* */ }
+          try { fs.unlinkSync(DAEMON_LOCK); } catch { /* */ }
+        }
+      }
+      ensureLaunchdPlist({ daemonScript: DAEMON_SCRIPT, daemonLog: DAEMON_LOG });
+      try {
+        execSync(`launchctl bootstrap gui/$(id -u) ${LAUNCHD_PLIST} 2>/dev/null`);
+      } catch { /* already bootstrapped */ }
+      // kickstart ensures the process is actually running now
+      try {
+        execSync(`launchctl kickstart gui/$(id -u)/${LAUNCHD_LABEL}`);
+      } catch { /* already running */ }
+      sleepSync(1500);
+      const pid = launchdIsRunning();
+      if (pid) {
+        console.log(`${icon("ok")} MetaMe daemon started via launchd (PID: ${pid})`);
+      } else {
+        console.log(`${icon("ok")} MetaMe daemon starting via launchd...`);
+      }
+      console.log("   Auto-restart: enabled (KeepAlive)");
+      console.log("   Logs: metame logs");
+      console.log("   Stop: metame stop");
+      process.exit(0);
+    }
+
+    // Non-macOS: direct spawn (original behavior)
     try {
       const pids = findProcessesByPattern('node.*daemon\\.js');
       if (pids.length) {
@@ -2061,24 +2167,11 @@ WantedBy=default.target
         sleepSync(1000);
       }
     } catch { /* ignore */ }
-    // Clean stale PID and lock files before spawning new daemon
     if (fs.existsSync(DAEMON_PID)) {
       try { fs.unlinkSync(DAEMON_PID); } catch { /* */ }
     }
     try { fs.unlinkSync(DAEMON_LOCK); } catch { /* */ }
-    if (!fs.existsSync(DAEMON_CONFIG)) {
-      console.error(`${icon("fail")} No config found. Run: metame daemon init`);
-      process.exit(1);
-    }
-    if (!fs.existsSync(DAEMON_SCRIPT)) {
-      console.error(`${icon("fail")} daemon.js not found. Reinstall MetaMe.`);
-      process.exit(1);
-    }
-    // Use caffeinate on macOS to prevent sleep while daemon is running
-    const isMac = process.platform === 'darwin';
-    const cmd = isMac ? 'caffeinate' : process.execPath;
-    const args = isMac ? ['-i', process.execPath, DAEMON_SCRIPT] : [DAEMON_SCRIPT];
-    const bg = spawn(cmd, args, {
+    const bg = spawn(process.execPath, [DAEMON_SCRIPT], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
@@ -2092,6 +2185,30 @@ WantedBy=default.target
   }
 
   if (subCmd === 'stop') {
+    if (process.platform === 'darwin') {
+      // macOS: bootout the launchd job (stops process + prevents auto-restart)
+      try {
+        execSync(`launchctl bootout gui/$(id -u)/${LAUNCHD_LABEL} 2>/dev/null`);
+      } catch { /* not loaded */ }
+      // Also kill any orphan daemon processes not managed by launchd
+      try {
+        const pids = findProcessesByPattern('node.*daemon\\.js');
+        for (const n of pids) {
+          try { process.kill(n, 'SIGTERM'); } catch { /* */ }
+        }
+        if (pids.length) sleepSync(2000);
+        for (const n of pids) {
+          try { process.kill(n, 'SIGKILL'); } catch { /* already gone */ }
+        }
+      } catch { /* */ }
+      try { fs.unlinkSync(DAEMON_PID); } catch { /* */ }
+      try { fs.unlinkSync(DAEMON_LOCK); } catch { /* */ }
+      console.log(`${icon("ok")} Daemon stopped. launchd auto-restart disabled.`);
+      console.log(`   To re-enable: metame start`);
+      process.exit(0);
+    }
+
+    // Non-macOS: original behavior
     if (!fs.existsSync(DAEMON_PID)) {
       console.log(`${icon("info")}  No daemon running (no PID file).`);
       process.exit(0);
@@ -2099,7 +2216,6 @@ WantedBy=default.target
     const pid = parseInt(fs.readFileSync(DAEMON_PID, 'utf8').trim(), 10);
     try {
       process.kill(pid, 'SIGTERM');
-      // Wait for process to die (up to 3s), then force kill
       let dead = false;
       for (let i = 0; i < 6; i++) {
         sleepSync(500);
@@ -2126,6 +2242,30 @@ WantedBy=default.target
       console.error(`${icon("fail")} daemon.js not found. Reinstall MetaMe.`);
       process.exit(1);
     }
+
+    if (process.platform === 'darwin') {
+      // macOS: use launchctl kickstart -k (kills + restarts in one atomic op)
+      ensureLaunchdPlist({ daemonScript: DAEMON_SCRIPT, daemonLog: DAEMON_LOG });
+      try {
+        execSync(`launchctl bootstrap gui/$(id -u) ${LAUNCHD_PLIST} 2>/dev/null`);
+      } catch { /* already bootstrapped */ }
+      try {
+        execSync(`launchctl kickstart -k gui/$(id -u)/${LAUNCHD_LABEL}`);
+        sleepSync(1500);
+        const pid = launchdIsRunning();
+        if (pid) {
+          console.log(`${icon("ok")} Daemon restarted via launchd (PID: ${pid})`);
+        } else {
+          console.log(`${icon("ok")} Daemon restart requested via launchd...`);
+        }
+      } catch (e) {
+        console.error(`${icon("fail")} launchctl kickstart failed: ${e.message}`);
+        process.exit(1);
+      }
+      process.exit(0);
+    }
+
+    // Non-macOS: original SIGUSR2 / respawn logic
     const result = requestDaemonRestart({
       reason: 'cli-restart',
       daemonPidFile: DAEMON_PID,
@@ -2142,10 +2282,7 @@ WantedBy=default.target
     }
     if (result.status === 'not_running') {
       console.log(`${icon("info")}  No daemon running. Starting a fresh daemon instead.`);
-      const isMac = process.platform === 'darwin';
-      const cmd = isMac ? 'caffeinate' : process.execPath;
-      const args = isMac ? ['-i', process.execPath, DAEMON_SCRIPT] : [DAEMON_SCRIPT];
-      const bg = spawn(cmd, args, {
+      const bg = spawn(process.execPath, [DAEMON_SCRIPT], {
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
