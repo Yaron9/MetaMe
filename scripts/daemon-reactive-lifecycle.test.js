@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { handleReactiveOutput, parseReactiveSignals, __test } = require('./daemon-reactive-lifecycle');
-const { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, replayEventLog, projectProgressTsv, loadProjectManifest, resolveProjectScripts, buildCompletionRegex, generateStateFile } = __test;
+const { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, replayEventLog, projectProgressTsv, loadProjectManifest, resolveProjectScripts, generateStateFile } = __test;
 
 // ── parseReactiveSignals ──────────────────────────────────────
 
@@ -503,17 +503,6 @@ describe('Manifest discovery', () => {
     }
   });
 
-  it('buildCompletionRegex uses manifest signal', () => {
-    const re = buildCompletionRegex({ completion_signal: 'ALL_DONE' });
-    assert.ok(re.test('ALL_DONE'));
-    assert.ok(!re.test('MISSION_COMPLETE'));
-  });
-
-  it('buildCompletionRegex defaults to MISSION_COMPLETE', () => {
-    const re = buildCompletionRegex(null);
-    assert.ok(re.test('MISSION_COMPLETE'));
-    assert.ok(!re.test('ALL_DONE'));
-  });
 });
 
 // ── Generalization ────────────────────────────────────────────

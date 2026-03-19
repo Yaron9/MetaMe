@@ -155,16 +155,6 @@ function resolveProjectScripts(projectCwd, manifest) {
   };
 }
 
-/**
- * Build completion signal regex from manifest or use default.
- *
- * @param {object|null} manifest - Parsed perpetual.yaml or null
- * @returns {RegExp}
- */
-function buildCompletionRegex(manifest) {
-  return new RegExp(manifest?.completion_signal || 'MISSION_COMPLETE');
-}
-
 // ── Verifier helpers ────────────────────────────────────────────
 
 function resolveProjectCwd(projectKey, config) {
@@ -227,7 +217,7 @@ function runProjectVerifier(projectKey, config, deps) {
 function runCompletionHooks(projectKey, projectCwd, deps) {
   const manifest = loadProjectManifest(projectCwd);
   const scripts = resolveProjectScripts(projectCwd, manifest);
-  const result = { archived: false, nextMission: null, nextMissionPrompt: null };
+  const result = { archived: false, nextMission: null, nextMissionId: null, nextMissionPrompt: null };
 
   // 1. Archive (if script exists)
   if (fs.existsSync(scripts.archiver)) {
@@ -260,6 +250,8 @@ function runCompletionHooks(projectKey, projectCwd, deps) {
   if (result.archived && fs.existsSync(scripts.missionQueue)) {
     const relQueue = path.relative(projectCwd, scripts.missionQueue);
     const queueEnv = { ...process.env, MISSION_CWD: projectCwd, TOPICS_CWD: projectCwd };
+    // Sanitize topic IDs to prevent shell injection (only allow alphanumeric, dash, underscore)
+    const sanitizeId = (id) => String(id || '').replace(/[^a-zA-Z0-9_-]/g, '');
     // 2a. Complete current active mission
     try {
       const listOut = execSync(`node "${relQueue}" list`, {
@@ -269,7 +261,7 @@ function runCompletionHooks(projectKey, projectCwd, deps) {
       if (listResult.success && Array.isArray(listResult.topics)) {
         const activeTopic = listResult.topics.find(t => t.status === 'active');
         if (activeTopic) {
-          execSync(`node "${relQueue}" complete ${activeTopic.id}`, {
+          execSync(`node "${relQueue}" complete ${sanitizeId(activeTopic.id)}`, {
             cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: queueEnv,
           });
           deps.log('INFO', `Reactive: completed mission ${activeTopic.id}: ${activeTopic.title}`);
@@ -286,13 +278,14 @@ function runCompletionHooks(projectKey, projectCwd, deps) {
       const nextResult = JSON.parse(nextOut);
       if (nextResult.success && nextResult.topic) {
         try {
-          execSync(`node "${relQueue}" activate ${nextResult.topic.id}`, {
+          execSync(`node "${relQueue}" activate ${sanitizeId(nextResult.topic.id)}`, {
             cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: queueEnv,
           });
         } catch (e) {
           deps.log('WARN', `Reactive: mission activate failed: ${e.message}`);
         }
         result.nextMission = nextResult.topic.title;
+        result.nextMissionId = nextResult.topic.id || '';
         result.nextMissionPrompt = `New mission: "${nextResult.topic.title}"\n\nStart this mission. Read your CLAUDE.md for instructions, then decide on the first step using NEXT_DISPATCH.`;
         deps.log('INFO', `Reactive: next mission for ${projectKey}: ${nextResult.topic.title}`);
       }
@@ -509,7 +502,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
             if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f Next mission "${completionResult.nextMission}" ready but budget exceeded`);
           } else {
             deps.log('INFO', `Reactive: auto-starting next mission for ${projectKey}: ${completionResult.nextMission}`);
-            appendEvent(projectKey, { type: 'MISSION_START', mission_title: completionResult.nextMission });
+            appendEvent(projectKey, { type: 'MISSION_START', mission_id: completionResult.nextMissionId || '', mission_title: completionResult.nextMission });
             setReactiveStatus(st, projectKey, 'running', '');
             st.reactive[projectKey].depth = 0;
             deps.saveState(st);
@@ -541,8 +534,8 @@ function handleReactiveOutput(targetProject, output, config, deps) {
       return;
     }
 
-    // Depth gate
-    const maxDepth = rs.max_depth || 50;
+    // Depth gate (manifest max_depth overrides default)
+    const maxDepth = manifest?.max_depth || rs.max_depth || 50;
     if (rs.depth >= maxDepth) {
       deps.log('WARN', `Reactive: depth ${rs.depth} >= ${maxDepth}, pausing ${projectKey}`);
       setReactiveStatus(st, projectKey, 'paused', 'depth_exceeded');
@@ -588,9 +581,10 @@ function handleReactiveOutput(targetProject, output, config, deps) {
     return;
   }
 
-  // Depth gate
+  // Depth gate (manifest max_depth overrides default)
   const rs = getReactiveState(st, parentKey);
-  const maxDepth = rs.max_depth || 50;
+  const parentManifestForDepth = projectCwd ? loadProjectManifest(projectCwd) : null;
+  const maxDepth = parentManifestForDepth?.max_depth || rs.max_depth || 50;
   if (rs.depth >= maxDepth) {
     deps.log('WARN', `Reactive: depth ${rs.depth} >= ${maxDepth}, pausing ${parentKey} (via member ${targetProject})`);
     setReactiveStatus(st, parentKey, 'paused', 'depth_exceeded');
@@ -645,6 +639,11 @@ function handleReactiveOutput(targetProject, output, config, deps) {
     ? `\n\n[Verifier] phase=${verifyResult.phase} passed=${verifyResult.passed}\n${verifyResult.details}${verifyResult.hints?.length ? '\nHints: ' + verifyResult.hints.join('; ') : ''}`
     : '\n\n[Verifier] not configured — proceed with caution';
 
+  // Generate state file from event log BEFORE waking parent (event sourcing projection)
+  if (parentCwd) {
+    try { generateStateFile(parentKey, config, deps); } catch { /* non-critical */ }
+  }
+
   // Trigger parent with member's output summary
   const parentManifest = parentCwd ? loadProjectManifest(parentCwd) : null;
   const signal = parentManifest?.completion_signal || 'MISSION_COMPLETE';
@@ -661,5 +660,5 @@ function handleReactiveOutput(targetProject, output, config, deps) {
 module.exports = {
   handleReactiveOutput,
   parseReactiveSignals,
-  __test: { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, replayEventLog, projectProgressTsv, generateStateFile, loadProjectManifest, resolveProjectScripts, buildCompletionRegex },
+  __test: { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, replayEventLog, projectProgressTsv, generateStateFile, loadProjectManifest, resolveProjectScripts },
 };
