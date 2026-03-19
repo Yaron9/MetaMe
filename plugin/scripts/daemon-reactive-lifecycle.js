@@ -431,6 +431,36 @@ function generateStateFile(projectKey, config, deps) {
   return statePath;
 }
 
+/**
+ * Periodic reconciliation check for all perpetual projects.
+ * Zero-token: pure state file inspection, no LLM calls.
+ */
+function reconcilePerpetualProjects(config, deps) {
+  const projects = config.projects || {};
+  for (const [key, proj] of Object.entries(projects)) {
+    if (!proj.reactive) continue;
+
+    const st = deps.loadState();
+    const rs = st.reactive?.[key];
+    if (!rs || rs.status !== 'running') continue;
+
+    const lastUpdate = new Date(rs.updated_at).getTime();
+    const staleMinutes = proj.stale_timeout_minutes || 120;
+    const staleThreshold = staleMinutes * 60 * 1000;
+
+    if (Date.now() - lastUpdate > staleThreshold) {
+      deps.log('WARN', `Reconcile: ${key} stuck since ${rs.updated_at}`);
+      setReactiveStatus(st, key, 'stale', 'no_activity');
+      deps.saveState(st);
+      appendEvent(key, { type: 'STALE', last_signal: rs.last_signal || '' });
+      if (deps.notifyUser) {
+        const pName = proj.name || key;
+        deps.notifyUser(`⚠️ ${pName} stale: no activity for ${staleMinutes}+ minutes (last signal: ${rs.last_signal || 'none'})`);
+      }
+    }
+  }
+}
+
 // ── Main handler ────────────────────────────────────────────────
 
 /**
@@ -660,5 +690,6 @@ function handleReactiveOutput(targetProject, output, config, deps) {
 module.exports = {
   handleReactiveOutput,
   parseReactiveSignals,
+  reconcilePerpetualProjects,
   __test: { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, replayEventLog, projectProgressTsv, generateStateFile, loadProjectManifest, resolveProjectScripts },
 };

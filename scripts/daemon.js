@@ -1752,6 +1752,27 @@ function physiologicalHeartbeat(config) {
   } catch (e) {
     log('WARN', `Dispatch log rotation failed: ${e.message}`);
   }
+
+  // 4. Reconcile perpetual projects — detect stale reactive loops
+  try {
+    const { reconcilePerpetualProjects } = require('./daemon-reactive-lifecycle');
+    reconcilePerpetualProjects(config, {
+      log,
+      loadState,
+      saveState,
+      notifyUser: (msg) => {
+        try {
+          const cfg = loadConfig();
+          if (cfg.feishu && cfg.feishu.enabled && cfg.feishu.admin_chat_id) {
+            const { sendFeishuText } = require('./daemon-notify');
+            sendFeishuText(cfg.feishu.admin_chat_id, msg, cfg);
+          }
+        } catch (e) { log('WARN', `Reconcile notify failed: ${e.message}`); }
+      },
+    });
+  } catch (e) {
+    log('WARN', `Reconcile check failed: ${e.message}`);
+  }
 }
 
 // ── Timing constants ─────────────────────────────────────────────────────────

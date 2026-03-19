@@ -289,6 +289,40 @@ function createAdminCommandHandler(deps) {
     const state = ctx.state || {};
     let config = ctx.config || {};
 
+    if (text === '/status perpetual' || text === '/status reactive') {
+      const { replayEventLog } = require('./daemon-reactive-lifecycle');
+      const projects = config.projects || {};
+      const lines = ['**Perpetual Projects**\n'];
+      let found = false;
+
+      for (const [key, proj] of Object.entries(projects)) {
+        if (!proj.reactive) continue;
+        found = true;
+
+        const rs = (state.reactive && state.reactive[key]) || {};
+        const { phase, mission } = replayEventLog(key, { log: () => {} });
+
+        const icon = proj.icon || '🔄';
+        const name = proj.name || key;
+        const status = rs.status || 'idle';
+        const depth = rs.depth || 0;
+        const maxDepth = rs.max_depth || 50;
+        const lastSignal = rs.last_signal || '-';
+        const updatedAt = rs.updated_at ? new Date(rs.updated_at).toLocaleString() : '-';
+
+        lines.push(`${icon} **${name}** (\`${key}\`)`);
+        lines.push(`  Status: ${status} | Phase: ${phase || '-'} | Depth: ${depth}/${maxDepth}`);
+        if (mission) lines.push(`  Mission: ${mission.title}`);
+        lines.push(`  Last signal: ${lastSignal} | Updated: ${updatedAt}`);
+        lines.push('');
+      }
+
+      if (!found) lines.push('No reactive projects configured.');
+
+      await bot.sendMessage(chatId, lines.join('\n'));
+      return { handled: true, config };
+    }
+
     if (text === '/status') {
       const session = getSession(chatId);
       let msg = `MetaMe Daemon\nStatus: Running\nStarted: ${state.started_at || 'unknown'}\n`;
