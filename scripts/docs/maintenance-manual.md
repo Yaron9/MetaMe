@@ -354,7 +354,60 @@ Claude 看到 hook 注入:
 - `/dispatch to windows:hunter <任务>`：手动跨设备派发
 - `/dispatch to 猎手 <任务>`：按昵称解析，自动检测 `member.peer` 走远端
 
-## 12. 私人配置保护
+## 12. 永续任务系统（Perpetual Task Engine）
+
+### 概念
+
+永续任务系统允许任何项目作为 reactive 永续循环运行。Agent 产出信号 → daemon 解析 → 门控检查 → 调度下一步。平台完全领域无关，科研、代码审计、文档维护等任何长期任务均可接入。
+
+### 核心组件
+
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| Reactive Lifecycle | `daemon-reactive-lifecycle.js` | 信号解析、budget/depth gate、事件溯源、verifier 调用、state 生成 |
+| Event Log | `~/.metame/events/<key>.jsonl` | 唯一 Source of Truth，daemon 独占写入 |
+| Manifest | `<cwd>/perpetual.yaml` | 可选项目清单（completion_signal、脚本路径、约束） |
+| Reconciliation | `reconcilePerpetualProjects()` | heartbeat 中零 token 停滞检测 |
+| Status 命令 | `/status perpetual` | 查看所有永续项目的 phase/depth/mission/status |
+
+### 接入一个新永续项目
+
+1. 在 `daemon.yaml` 中注册项目，添加 `reactive: true`
+2. 在项目目录创建 `CLAUDE.md`（定义 agent 行为）
+3. 可选：创建 `scripts/verifier.js`（阶段门控）
+4. 可选：创建 `perpetual.yaml`（覆盖默认约定）
+5. 可选：创建 `scripts/archiver.js` + `scripts/mission-queue.js`（归档与任务队列）
+
+不创建 perpetual.yaml 时，平台使用默认约定：
+- Verifier: `scripts/verifier.js`
+- Archiver: `scripts/archiver.js`
+- Mission Queue: `scripts/mission-queue.js`
+- 完成信号: `MISSION_COMPLETE`
+
+### 事件溯源协议
+
+所有状态变更记录在 `~/.metame/events/<projectKey>.jsonl`，一行一个 JSON 事件。`now/<key>.md` 和 `workspace/progress.tsv` 都是 event log 的投影（Projection），可随时从 event log 重建。
+
+Event 类型：`MISSION_START` / `DISPATCH` / `MEMBER_COMPLETE` / `PHASE_GATE` / `DEPTH_LIMIT` / `BUDGET_LIMIT` / `MISSION_COMPLETE` / `ARCHIVE` / `STALE` / `INFRA_PAUSE`
+
+### 设计契约
+
+1. **Tolerant Reader**：`replayEventLog` 逐行解析，损坏行 WARN + skip，绝不 crash
+2. **Error Semantic Isolation**：verifier L2b 区分 404（幻觉，打回 agent）和 50x（基建故障，挂起项目通知人类）
+3. **State 由 daemon 生成**：agent 只读 `now/<key>.md`，不负责维护
+
+### 故障排查
+
+| 症状 | 检查 |
+|------|------|
+| 永续项目不启动 | `daemon.yaml` 中是否有 `reactive: true`？ |
+| 完成信号不触发 | 检查 `perpetual.yaml` 中的 `completion_signal` 是否与 CLAUDE.md 一致 |
+| Verifier 不运行 | 检查 `scripts/verifier.js` 路径（或 manifest 中的自定义路径）是否存在 |
+| 项目挂起 (infra_failure) | 外部 API 不可用，检查网络。非 agent 错误。 |
+| Event log 损坏 | 重启后 replay 会跳过损坏行。`progress.tsv` 和 `now/<key>.md` 可从 event log 重建 |
+| `/status perpetual` 无输出 | 确认项目配置了 `reactive: true` |
+
+## 13. 私人配置保护（原 §12）
 
 - `daemon.yaml` 是用户私人配置，包含 API keys、chat IDs、个人项目配置
 - **绝不上传**到代码仓库，已加入 `.gitignore`
@@ -363,7 +416,7 @@ Claude 看到 hook 注入:
 - 同样不应上传的文件：`MEMORY.md`、`SOUL.md`、`.env*`
 - Agent 在执行任务时，**绝不能** `cp scripts/daemon.yaml ~/.metame/daemon.yaml`，这会覆盖用户私人配置
 
-## 13. 变更后维护动作
+## 14. 变更后维护动作
 
 1. `npm test`
 2. `npm run sync:plugin`
