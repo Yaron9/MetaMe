@@ -74,6 +74,7 @@ const SESSION_TAGS_FILE = path.join(os.homedir(), '.metame', 'session_tags.json'
 
 /**
  * Persist session name and derived tags to ~/.metame/session_tags.json.
+ * Consumed by /sessions and /resume commands for friendly display titles.
  * Merges into existing file — never overwrites existing entries.
  */
 function saveSessionTag(sessionId, sessionName, facts) {
@@ -337,6 +338,19 @@ async function run() {
 
         sessionAnalytics.markFactsExtracted(skeleton.session_id);
 
+        // Persist session summary to memory.db sessions table (makes sessions searchable)
+        try {
+          const keywords = facts.flatMap(f => Array.isArray(f.tags) ? f.tags : [])
+            .filter((v, i, a) => a.indexOf(v) === i).slice(0, 10).join(',');
+          memory.saveSession({
+            sessionId: skeleton.session_id,
+            project: skeleton.project || 'unknown',
+            scope: skeleton.project_id || null,
+            summary: `[${session_name}] ${facts.map(f => f.value).join(' | ').slice(0, 2000)}`,
+            keywords,
+          });
+        } catch { /* non-fatal — facts already saved, session is bonus */ }
+
         // P2-A: persist session name + tags to session_tags.json
         saveSessionTag(skeleton.session_id, session_name, facts);
 
@@ -391,12 +405,26 @@ async function run() {
             const superMsg = superseded > 0 ? `, ${superseded} superseded` : '';
             const labelMsg = labelsSaved > 0 ? `, ${labelsSaved} labels` : '';
             console.log(`[memory-extract] Codex ${cs.session_id.slice(0, 8)} (${session_name}): ${saved} facts saved${superMsg}${labelMsg}`);
+
+            // Persist Codex session summary to memory.db sessions table
+            try {
+              const keywords = facts.flatMap(f => Array.isArray(f.tags) ? f.tags : [])
+                .filter((v, i, a) => a.indexOf(v) === i).slice(0, 10).join(',');
+              memory.saveSession({
+                sessionId: cs.session_id,
+                project: skeleton.project || 'unknown',
+                scope: skeleton.project_id || null,
+                summary: `[${session_name}] ${facts.map(f => f.value).join(' | ').slice(0, 2000)}`,
+                keywords,
+              });
+            } catch { /* non-fatal */ }
+
+            saveSessionTag(cs.session_id, session_name, facts);
           } else {
             console.log(`[memory-extract] Codex ${cs.session_id.slice(0, 8)} (${session_name}): no facts extracted`);
           }
 
           sessionAnalytics.markCodexFactsExtracted(cs.session_id);
-          saveSessionTag(cs.session_id, session_name, facts);
           processed++;
         } catch (e) {
           console.log(`[memory-extract] Codex session error: ${e.message}`);

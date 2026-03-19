@@ -1605,6 +1605,33 @@ function createClaudeEngine(deps) {
           }
         }
 
+        // Inject latest nightly insight (decisions/lessons) — one-liner per file, ~100 tokens
+        if (!session.started) {
+          try {
+            const reflectDirs = [
+              path.join(HOME, '.metame', 'memory', 'decisions'),
+              path.join(HOME, '.metame', 'memory', 'lessons'),
+            ];
+            const reflectItems = [];
+            for (const dir of reflectDirs) {
+              if (!fs.existsSync(dir)) continue;
+              const files = fs.readdirSync(dir).filter(f => f.endsWith('.md')).sort();
+              const latest = files[files.length - 1];
+              if (!latest) continue;
+              const content = fs.readFileSync(path.join(dir, latest), 'utf8');
+              // Extract ## headings as one-line summaries (skip frontmatter)
+              const headings = content.match(/^## .+$/gm);
+              if (headings && headings.length > 0) {
+                const type = dir.endsWith('decisions') ? 'decision' : 'lesson';
+                reflectItems.push(...headings.slice(0, 2).map(h => `- [${type}] ${h.replace(/^## /, '')}`));
+              }
+            }
+            if (reflectItems.length > 0) {
+              memoryHint += `\n\n[Recent insights:\n${reflectItems.join('\n')}]`;
+            }
+          } catch { /* non-critical */ }
+        }
+
         memory.close();
       } catch (e) {
         if (e.code !== 'MODULE_NOT_FOUND') log('WARN', `Memory injection failed: ${e.message}`);
@@ -1636,6 +1663,19 @@ function createClaudeEngine(deps) {
         } catch { /* ignore */ }
       }
 
+      // Self-reflection patterns: behavioral guardrails distilled from past mistakes
+      let reflectHint = '';
+      if (!session.started && brainDoc) {
+        try {
+          const patterns = (brainDoc.growth && Array.isArray(brainDoc.growth.self_reflection_patterns))
+            ? brainDoc.growth.self_reflection_patterns.filter(p => p && p.summary).slice(0, 3)
+            : [];
+          if (patterns.length > 0) {
+            reflectHint = `\n- Self-correction patterns (avoid repeating these mistakes):\n${patterns.map(p => `  - ${String(p.summary).slice(0, 150)}`).join('\n')}`;
+          }
+        } catch { /* non-critical */ }
+      }
+
       // Inject daemon hints only on first message of a session
       // Task-specific rules (3-4) are injected only when isTaskIntent() returns true (~250 token saving for casual chat)
       let daemonHint = '';
@@ -1654,7 +1694,7 @@ ${mentorRadarHint}
    Keep it under 200 words. Clear it when the task is fully complete by running: \`> ~/.metame/memory/now/${projectKey || 'default'}.md\`` : '';
         daemonHint = `\n\n[System hints - DO NOT mention these to user:
 1. Daemon config: The ONLY config is ~/.metame/daemon.yaml (never edit daemon-default.yaml). Auto-reloads on change.
-2. Explanation depth (ZPD):${zdpHint ? zdpHint : '\n- User competence map unavailable. Default to concise expert-first explanations unless the user asks for teaching mode.'}${taskRules}]`;
+2. Explanation depth (ZPD):${zdpHint ? zdpHint : '\n- User competence map unavailable. Default to concise expert-first explanations unless the user asks for teaching mode.'}${reflectHint}${taskRules}]`;
       }
 
       daemonHint = adaptDaemonHintForEngine(daemonHint, runtime.name);

@@ -503,6 +503,109 @@ entity_prefix: ${group.prefix}
       try { if (memory && typeof memory.close === 'function') memory.close(); } catch { /* non-fatal */ }
     }
 
+    // ── Conflict Resolution ──────────────────────────────────────────────
+    // Query CONFLICT facts grouped by entity+relation, ask Haiku to pick winner.
+    // Loser is marked superseded_by winner; winner restored to OK.
+    let conflictsResolved = 0;
+    try {
+      const conflictGroups = db.prepare(`
+        SELECT entity, relation, COUNT(*) as cnt
+        FROM facts
+        WHERE conflict_status = 'CONFLICT' AND superseded_by IS NULL
+        GROUP BY entity, relation
+        HAVING cnt >= 2
+        ORDER BY cnt DESC
+        LIMIT 10
+      `).all();
+
+      if (conflictGroups.length > 0) {
+        console.log(`[NIGHTLY-REFLECT] Found ${conflictGroups.length} conflict group(s) to resolve.`);
+
+        // Collect all conflicting facts for these groups (batch to reduce queries)
+        const allConflicts = [];
+        for (const g of conflictGroups) {
+          const rows = db.prepare(`
+            SELECT id, entity, relation, value, confidence, created_at
+            FROM facts
+            WHERE entity = ? AND relation = ? AND conflict_status = 'CONFLICT' AND superseded_by IS NULL
+            ORDER BY created_at DESC
+          `).all(g.entity, g.relation);
+          if (rows.length >= 2) allConflicts.push({ entity: g.entity, relation: g.relation, facts: rows });
+        }
+
+        if (allConflicts.length > 0) {
+          // Limit to 5 groups to avoid truncating serialized JSON
+          const conflictInput = allConflicts.slice(0, 5).map(g => ({
+            entity: g.entity,
+            relation: g.relation,
+            candidates: g.facts.slice(0, 5).map(f => ({ id: f.id, value: f.value.slice(0, 150), confidence: f.confidence, created_at: f.created_at })),
+          }));
+
+          const resolvePrompt = `你是知识库冲突调解员。以下是同一 entity+relation 下的冲突事实，请选出每组最准确的一条保留。
+
+冲突组(JSON):
+${JSON.stringify(conflictInput, null, 2)}
+
+输出 JSON 数组，每个元素对应一组冲突的裁决：
+[
+  {
+    "entity": "...",
+    "relation": "...",
+    "winner_id": "保留的fact id",
+    "reason": "一句话理由"
+  }
+]
+
+规则：
+- 优先选最新（created_at）且 confidence=high 的
+- 如果旧条目更准确具体，选旧的
+- 只输出 JSON 数组`;
+
+          try {
+            const resolveRaw = await Promise.race([
+              callHaiku(resolvePrompt, distillEnv, 60000),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 65000)),
+            ]);
+            const verdicts = parseJsonFromLlm(resolveRaw);
+            if (Array.isArray(verdicts)) {
+              for (const v of verdicts) {
+                if (!v || !v.winner_id || !v.entity || !v.relation) continue;
+                // Validate winner exists in our conflict set
+                const group = allConflicts.find(g => g.entity === v.entity && g.relation === v.relation);
+                if (!group) continue;
+                const winnerExists = group.facts.some(f => f.id === v.winner_id);
+                if (!winnerExists) continue;
+
+                const loserIds = group.facts.filter(f => f.id !== v.winner_id).map(f => f.id);
+                if (loserIds.length === 0) continue;
+
+                // Mark losers as superseded
+                const placeholders = loserIds.map(() => '?').join(',');
+                db.prepare(
+                  `UPDATE facts SET superseded_by = ?, conflict_status = 'OK', updated_at = datetime('now')
+                   WHERE id IN (${placeholders})`
+                ).run(v.winner_id, ...loserIds);
+
+                // Restore winner
+                db.prepare(
+                  `UPDATE facts SET conflict_status = 'OK', updated_at = datetime('now') WHERE id = ?`
+                ).run(v.winner_id);
+
+                conflictsResolved += loserIds.length;
+              }
+              if (conflictsResolved > 0) {
+                console.log(`[NIGHTLY-REFLECT] Resolved ${conflictsResolved} conflicting fact(s).`);
+              }
+            }
+          } catch (e) {
+            console.log(`[NIGHTLY-REFLECT] Conflict resolution failed (non-fatal): ${e.message}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.log(`[NIGHTLY-REFLECT] Conflict query failed (non-fatal): ${e.message}`);
+    }
+
     // Write audit log
     writeReflectLog({
       status: 'success',
@@ -510,6 +613,7 @@ entity_prefix: ${group.prefix}
       decisions_written: decisions.length,
       lessons_written: lessons.length,
       synthesized_insights_saved: synthesizedSaved,
+      conflicts_resolved: conflictsResolved,
       capsules_written: capsulesWritten,
       capsule_facts_saved: capsuleFactsSaved,
       decision_file: decisions.length > 0 ? decisionFile : null,

@@ -221,7 +221,7 @@ ${promptInput}
 
   fs.mkdirSync(POSTMORTEM_DIR, { recursive: true });
   const day = new Date().toISOString().slice(0, 10);
-  const topicSlug = sanitizeSlug(skeleton.intent || title, `session-${String(skeleton.session_id || '').slice(0, 8)}`);
+  const topicSlug = sanitizeSlug(title || skeleton.intent, `session-${String(skeleton.session_id || '').slice(0, 8)}`);
   const filePath = path.join(POSTMORTEM_DIR, `${day}-${topicSlug}.md`);
   const markdown = [
     `# ${title}`,
