@@ -185,7 +185,7 @@ Chain skills into multi-step workflows — research → write → publish — fu
 | `cwd` | Working directory for the task |
 | `timeout` | Max run time |
 
-> **Scheduled tasks require system registration.** Run `metame daemon install-launchd` (macOS) or `metame daemon install-task-scheduler` (Windows) and tasks fire on schedule even with the screen locked — as long as the machine is on.
+> **Scheduled tasks require the daemon to be running.** On macOS, `metame start` auto-registers with launchd (auto-restart on crash/reboot). On Windows, run `metame daemon install-task-scheduler`. Tasks fire on schedule even with the screen locked — as long as the machine is on.
 
 ### 5. Skills That Evolve Themselves
 
@@ -231,7 +231,7 @@ MetaMe is the orchestration layer. Claude Code and Codex are the engines. You in
 | 2. Genesis Interview | Just chat — MetaMe auto-starts a deep soul interview on first run → builds `~/.claude_profile.yaml` |
 | 3. Connect phone | Say "help me set up mobile access" → interactive Telegram/Feishu bot wizard |
 | 4. Start daemon | `metame start` → background daemon launches, bot goes online |
-| 5. Register with OS | macOS: `metame daemon install-launchd` · Windows: `metame daemon install-task-scheduler` |
+| 5. Register with OS | macOS: automatic (step 4 registers with launchd) · Windows: `metame daemon install-task-scheduler` |
 
 > **First time?** Just run `metame` and talk naturally. Everything is conversational.
 
@@ -257,7 +257,7 @@ rm -rf ~/.metame ~/.claude_profile.yaml
 ```
 
 Optional service cleanup:
-- macOS: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.metame.daemon.plist && rm -f ~/Library/LaunchAgents/com.metame.daemon.plist`
+- macOS: `launchctl bootout gui/$(id -u)/com.metame.npm-daemon && rm -f ~/Library/LaunchAgents/com.metame.npm-daemon.plist`
 - Windows: `schtasks /delete /tn "MetaMe-Daemon" /f`
 - Linux/WSL: `systemctl --user disable --now metame && rm -f ~/.config/systemd/user/metame.service`
 
@@ -625,7 +625,7 @@ For day-2 operations and troubleshooting (engine routing, codex login/rate-limit
 
 Install directly into Claude Code without npm: `claude plugin install github:Yaron9/MetaMe/plugin`
 
-All features included. Plugin auto-starts daemon on `SessionStart` (if `daemon.yaml` exists). Does **not** auto-register OS service — after reboot, open Claude once or start daemon manually.
+All features included. Plugin auto-starts daemon on `SessionStart` (if `daemon.yaml` exists). On macOS, `metame start` auto-registers with launchd — daemon auto-restarts on crash/reboot without opening Claude.
 
 ## Contributing
 

@@ -181,7 +181,7 @@ heartbeat:
 | `cwd` | 任务运行目录 |
 | `timeout` | 任务超时时间 |
 
-> **定时任务依赖系统托管**。macOS 运行 `metame daemon install-launchd`，Windows 运行 `metame daemon install-task-scheduler`，之后任务在息屏、锁屏状态下依然按时触发——只要电脑不关机。
+> **定时任务依赖 daemon 运行**。macOS 上 `metame start` 自动注册 launchd（崩溃/重启自动恢复）。Windows 运行 `metame daemon install-task-scheduler`。之后任务在息屏、锁屏状态下依然按时触发——只要电脑不关机。
 
 ### 5. 会自我进化的技能系统
 
@@ -227,7 +227,7 @@ MetaMe 是编排层，Claude Code 和 Codex 是引擎。一条命令装齐。
 | 2. 认知访谈 | 直接聊天 — 首次运行自动开始深度访谈 → 生成 `~/.claude_profile.yaml` |
 | 3. 连接手机 | 说”帮我设置手机访问” → 交互式 Telegram/飞书 Bot 配置向导 |
 | 4. 启动 daemon | `metame start` → 后台 daemon 上线，bot 开始工作 |
-| 5. 托管到系统 | macOS: `metame daemon install-launchd` · Windows: `metame daemon install-task-scheduler` |
+| 5. 托管到系统 | macOS: 自动完成（第 4 步已注册 launchd） · Windows: `metame daemon install-task-scheduler` |
 
 > **第一次用？** 只需运行 `metame` 然后自然聊天，全程对话式完成。
 
@@ -253,7 +253,7 @@ rm -rf ~/.metame ~/.claude_profile.yaml
 ```
 
 可选清理系统托管：
-- macOS：`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.metame.daemon.plist && rm -f ~/Library/LaunchAgents/com.metame.daemon.plist`
+- macOS：`launchctl bootout gui/$(id -u)/com.metame.npm-daemon && rm -f ~/Library/LaunchAgents/com.metame.npm-daemon.plist`
 - Windows：`schtasks /delete /tn “MetaMe-Daemon” /f`
 - Linux/WSL：`systemctl --user disable --now metame && rm -f ~/.config/systemd/user/metame.service`
 

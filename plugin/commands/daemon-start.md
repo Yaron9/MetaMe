@@ -10,17 +10,18 @@ Steps:
 2. Check if daemon is already running (check ~/.metame/daemon.pid)
    - If running, say "Daemon already running (PID: xxx)"
 
-3. Start the daemon:
+3. Start the daemon (macOS uses launchd for auto-restart):
    ```bash
+   # macOS — delegates to launchd (auto-restart on crash/reboot)
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.metame.npm-daemon.plist 2>/dev/null
+   launchctl kickstart gui/$(id -u)/com.metame.npm-daemon
+
+   # Other platforms — direct spawn
    node ~/.metame/daemon.js &
-   ```
-   Or if using the plugin's bundled version:
-   ```bash
-   node <plugin-path>/scripts/daemon.js &
    ```
 
 4. Wait 2 seconds, then verify it started by checking the PID file
 
-5. Report success: "✅ MetaMe daemon started (PID: xxx)"
+5. Report success: "Daemon started (PID: xxx)"
    - Mention: "Logs: ~/.metame/daemon.log"
    - Mention: "Stop: /metame:daemon-stop"
