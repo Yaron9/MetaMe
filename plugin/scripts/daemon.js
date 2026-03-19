@@ -48,6 +48,7 @@ const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const DISPATCH_DIR = path.join(METAME_DIR, 'dispatch');
 const DISPATCH_LOG = path.join(DISPATCH_DIR, 'dispatch-log.jsonl');
 const { sleepSync, socketPath, needsSocketCleanup } = require('./platform');
+const { handleReactiveOutput } = require('./daemon-reactive-lifecycle');
 const SOCK_PATH = socketPath(METAME_DIR);
 
 // Resolve claude binary path (daemon may not inherit user's full PATH)
@@ -1105,6 +1106,37 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
         },
         chain: [], // reset chain for callbacks
       }, config);
+    }
+
+    // ── Reactive lifecycle hook ──
+    try {
+      handleReactiveOutput(targetProject, outStr, loadConfig(), {
+        log,
+        loadState,
+        saveState,
+        checkBudget,
+        handleDispatchItem: (item, cfg) => {
+          dispatchTask(item.target, {
+            from: item.from || '_reactive',
+            type: 'reactive',
+            priority: 'normal',
+            new_session: !!item.new_session,
+            payload: { title: 'reactive dispatch', prompt: item.prompt },
+          }, cfg, null, null);
+        },
+        notifyUser: (msg) => {
+          try {
+            const cfg = loadConfig();
+            if (cfg.feishu && cfg.feishu.enabled && cfg.feishu.admin_chat_id) {
+              const { sendFeishuText } = require('./daemon-notify');
+              sendFeishuText(cfg.feishu.admin_chat_id, msg, cfg);
+            }
+          } catch (e) { log('WARN', `Reactive notify failed: ${e.message}`); }
+        },
+        metameDir: path.join(os.homedir(), '.metame'),
+      });
+    } catch (e) {
+      log('ERROR', `Reactive lifecycle error for ${targetProject}: ${e.message}`);
     }
   };
   // If streamOptions provided, use real bot so output appears in target's Feishu channel.

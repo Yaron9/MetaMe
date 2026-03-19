@@ -2,8 +2,11 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const { handleReactiveOutput, parseReactiveSignals, __test } = require('./daemon-reactive-lifecycle');
-const { runProjectVerifier, readPhaseFromState, resolveProjectCwd } = __test;
+const { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, replayEventLog, projectProgressTsv, loadProjectManifest, resolveProjectScripts, buildCompletionRegex, generateStateFile } = __test;
 
 // ── parseReactiveSignals ──────────────────────────────────────
 
@@ -37,7 +40,7 @@ describe('parseReactiveSignals', () => {
     assert.ok(result.directives[0].prompt.includes('run experiment'));
   });
 
-  it('detects RESEARCH_COMPLETE', () => {
+  it('detects RESEARCH_COMPLETE (default signal)', () => {
     const output = 'All phases done.\nRESEARCH_COMPLETE\n';
     const result = parseReactiveSignals(output);
     assert.equal(result.complete, true);
@@ -58,6 +61,16 @@ describe('parseReactiveSignals', () => {
     // directives still parsed — handler decides priority, but parser must find them
     assert.equal(result.directives.length, 1);
     assert.equal(result.directives[0].target, 'sci_scout');
+  });
+
+  it('uses custom completion signal', () => {
+    const result = parseReactiveSignals('done MISSION_COMPLETE end', 'MISSION_COMPLETE');
+    assert.equal(result.complete, true);
+  });
+
+  it('custom signal does not match different text', () => {
+    const result = parseReactiveSignals('RESEARCH_COMPLETE', 'MISSION_COMPLETE');
+    assert.equal(result.complete, false);
   });
 });
 
@@ -138,21 +151,21 @@ describe('handleReactiveOutput — reactive parent', () => {
     assert.ok(notifications.length > 0);
   });
 
-  it('handles RESEARCH_COMPLETE — resets depth, sets completed', () => {
+  it('handles MISSION_COMPLETE — resets depth, sets completed', () => {
     const { deps, dispatches, notifications, state } = makeDeps();
     state.reactive.scientist = { depth: 15, max_depth: 50, status: 'running', pause_reason: '', last_signal: '', updated_at: '' };
-    handleReactiveOutput('scientist', 'RESEARCH_COMPLETE', REACTIVE_CONFIG, deps);
+    handleReactiveOutput('scientist', 'MISSION_COMPLETE', REACTIVE_CONFIG, deps);
     assert.equal(dispatches.length, 0);
     assert.equal(state.reactive.scientist.depth, 0);
     assert.equal(state.reactive.scientist.status, 'completed');
     assert.ok(notifications.length > 0);
   });
 
-  it('RESEARCH_COMPLETE with budget exceeded skips auto-start but still completes', () => {
+  it('MISSION_COMPLETE with budget exceeded skips auto-start but still completes', () => {
     const { deps, dispatches, notifications, state } = makeDeps({
       checkBudget: () => false,
     });
-    handleReactiveOutput('scientist', 'RESEARCH_COMPLETE', REACTIVE_CONFIG, deps);
+    handleReactiveOutput('scientist', 'MISSION_COMPLETE', REACTIVE_CONFIG, deps);
     // Must still complete (budget gate does not block completion itself)
     assert.equal(state.reactive.scientist.status, 'completed');
     assert.equal(state.reactive.scientist.depth, 0);
@@ -160,9 +173,9 @@ describe('handleReactiveOutput — reactive parent', () => {
     assert.equal(dispatches.length, 0);
   });
 
-  it('RESEARCH_COMPLETE takes priority over NEXT_DISPATCH', () => {
+  it('MISSION_COMPLETE takes priority over NEXT_DISPATCH', () => {
     const { deps, dispatches, state } = makeDeps();
-    handleReactiveOutput('scientist', 'NEXT_DISPATCH: sci_scout "task"\nRESEARCH_COMPLETE', REACTIVE_CONFIG, deps);
+    handleReactiveOutput('scientist', 'NEXT_DISPATCH: sci_scout "task"\nMISSION_COMPLETE', REACTIVE_CONFIG, deps);
     assert.equal(dispatches.length, 0);
     assert.equal(state.reactive.scientist.status, 'completed');
   });
@@ -268,31 +281,30 @@ describe('handleReactiveOutput — verifier hook', () => {
     });
     handleReactiveOutput('sci_scout', 'Papers found', REACTIVE_CONFIG, deps);
     assert.equal(dispatches.length, 1);
-    assert.ok(dispatches[0].prompt.includes('[验证门结果]'));
+    assert.ok(dispatches[0].prompt.includes('[Verifier]'));
     assert.ok(dispatches[0].prompt.includes('phase=literature'));
     assert.ok(dispatches[0].prompt.includes('passed=true'));
     assert.ok(dispatches[0].prompt.includes('All checks passed'));
-    assert.ok(dispatches[0].prompt.includes('建议: Consider adding more sources'));
+    assert.ok(dispatches[0].prompt.includes('Hints: Consider adding more sources'));
   });
 
-  it('injects fallback failure block when deps.runVerifier returns null', () => {
+  it('injects fallback block when deps.runVerifier returns null', () => {
     const { deps, dispatches } = makeDeps({
       runVerifier: () => null,
     });
     handleReactiveOutput('sci_scout', 'Papers found', REACTIVE_CONFIG, deps);
     assert.equal(dispatches.length, 1);
-    assert.ok(dispatches[0].prompt.includes('[验证门结果]'));
-    assert.ok(dispatches[0].prompt.includes('passed=false'));
-    assert.ok(dispatches[0].prompt.includes('验证器未配置'));
+    assert.ok(dispatches[0].prompt.includes('[Verifier]'));
+    assert.ok(dispatches[0].prompt.includes('not configured'));
   });
 
-  it('injects fallback failure block when no verifier available', () => {
+  it('injects fallback block when no verifier available', () => {
     const { deps, dispatches } = makeDeps();
     handleReactiveOutput('sci_scout', 'Papers found', REACTIVE_CONFIG, deps);
     assert.equal(dispatches.length, 1);
-    // No cwd in config, runProjectVerifier returns error result → failure block injected
-    assert.ok(dispatches[0].prompt.includes('[验证门结果]'));
-    assert.ok(dispatches[0].prompt.includes('passed=false'));
+    // No cwd in config, runProjectVerifier returns null → fallback block injected
+    assert.ok(dispatches[0].prompt.includes('[Verifier]'));
+    assert.ok(dispatches[0].prompt.includes('not configured'));
   });
 
   it('verifier with failed result includes details in prompt', () => {
@@ -311,17 +323,211 @@ describe('handleReactiveOutput — verifier hook', () => {
     assert.ok(dispatches[0].prompt.includes('passed=false'));
     assert.ok(dispatches[0].prompt.includes('Missing control group'));
     // No hints line when hints array is empty
-    assert.ok(!dispatches[0].prompt.includes('建议:'));
+    assert.ok(!dispatches[0].prompt.includes('Hints:'));
   });
 
-  it('prompt includes new format elements (产出摘要, NEXT_DISPATCH instructions)', () => {
+  it('prompt includes expected format elements (Output summary, NEXT_DISPATCH, MISSION_COMPLETE)', () => {
     const { deps, dispatches } = makeDeps({
       runVerifier: () => null,
     });
     handleReactiveOutput('sci_scout', 'Done with work', REACTIVE_CONFIG, deps);
     assert.equal(dispatches.length, 1);
-    assert.ok(dispatches[0].prompt.includes('产出摘要'));
+    assert.ok(dispatches[0].prompt.includes('Output summary'));
     assert.ok(dispatches[0].prompt.includes('NEXT_DISPATCH'));
-    assert.ok(dispatches[0].prompt.includes('RESEARCH_COMPLETE'));
+    assert.ok(dispatches[0].prompt.includes('MISSION_COMPLETE'));
+  });
+});
+
+// ── Event Log ─────────────────────────────────────────────────
+
+describe('Event Log', () => {
+  let tmpDir;
+
+  it('appendEvent creates file and writes JSON line', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evtlog-test-'));
+    const origEventsDir = path.join(os.homedir(), '.metame', 'events');
+    // We need to test appendEvent but it writes to a hardcoded EVENTS_DIR.
+    // Instead, test via replayEventLog which reads from the same dir.
+    // Write directly to simulate appendEvent behavior for isolation.
+    const eventsDir = path.join(os.homedir(), '.metame', 'events');
+    fs.mkdirSync(eventsDir, { recursive: true });
+    const testKey = `_test_evt_${Date.now()}`;
+    const logPath = path.join(eventsDir, `${testKey}.jsonl`);
+    try {
+      appendEvent(testKey, { type: 'PHASE_GATE', phase: 'topic', passed: true });
+      assert.ok(fs.existsSync(logPath), 'Event log file should exist');
+      const content = fs.readFileSync(logPath, 'utf8');
+      const parsed = JSON.parse(content.trim());
+      assert.equal(parsed.type, 'PHASE_GATE');
+      assert.equal(parsed.phase, 'topic');
+      assert.ok(parsed.ts, 'Should have timestamp');
+    } finally {
+      try { fs.unlinkSync(logPath); } catch { /* ok */ }
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('replayEventLog derives phase from PHASE_GATE events', () => {
+    const testKey = `_test_replay_${Date.now()}`;
+    const eventsDir = path.join(os.homedir(), '.metame', 'events');
+    const logPath = path.join(eventsDir, `${testKey}.jsonl`);
+    try {
+      fs.mkdirSync(eventsDir, { recursive: true });
+      const events = [
+        { ts: '2026-01-01T00:00:00Z', type: 'PHASE_GATE', phase: 'topic', passed: true, artifacts: ['a.md'] },
+        { ts: '2026-01-02T00:00:00Z', type: 'PHASE_GATE', phase: 'literature', passed: true, artifacts: ['b.md'] },
+      ];
+      fs.writeFileSync(logPath, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+      const result = replayEventLog(testKey, { log: () => {} });
+      assert.equal(result.phase, 'literature');
+      assert.equal(result.history.length, 2);
+      assert.equal(result.history[0].phase, 'topic');
+      assert.equal(result.history[1].phase, 'literature');
+    } finally {
+      try { fs.unlinkSync(logPath); } catch { /* ok */ }
+    }
+  });
+
+  it('replayEventLog handles MISSION_COMPLETE reset', () => {
+    const testKey = `_test_replay_mc_${Date.now()}`;
+    const eventsDir = path.join(os.homedir(), '.metame', 'events');
+    const logPath = path.join(eventsDir, `${testKey}.jsonl`);
+    try {
+      fs.mkdirSync(eventsDir, { recursive: true });
+      const events = [
+        { ts: '2026-01-01T00:00:00Z', type: 'MISSION_START', mission_id: '1', mission_title: 'Test' },
+        { ts: '2026-01-02T00:00:00Z', type: 'PHASE_GATE', phase: 'topic', passed: true },
+        { ts: '2026-01-03T00:00:00Z', type: 'MISSION_COMPLETE' },
+      ];
+      fs.writeFileSync(logPath, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+      const result = replayEventLog(testKey, { log: () => {} });
+      assert.equal(result.phase, '');
+      assert.equal(result.mission, null);
+    } finally {
+      try { fs.unlinkSync(logPath); } catch { /* ok */ }
+    }
+  });
+
+  it('replayEventLog tolerates malformed lines (Tolerant Reader)', () => {
+    const testKey = `_test_replay_bad_${Date.now()}`;
+    const eventsDir = path.join(os.homedir(), '.metame', 'events');
+    const logPath = path.join(eventsDir, `${testKey}.jsonl`);
+    try {
+      fs.mkdirSync(eventsDir, { recursive: true });
+      const content = '{"ts":"2026-01-01T00:00:00Z","type":"PHASE_GATE","phase":"topic","passed":true}\n{BROKEN LINE\n{"ts":"2026-01-02T00:00:00Z","type":"PHASE_GATE","phase":"design","passed":true}\n';
+      fs.writeFileSync(logPath, content, 'utf8');
+      const warnings = [];
+      const result = replayEventLog(testKey, { log: (level, msg) => { if (level === 'WARN') warnings.push(msg); } });
+      assert.equal(result.phase, 'design');
+      assert.equal(result.history.length, 2);
+      assert.ok(warnings.length > 0, 'Should have logged a warning for malformed line');
+    } finally {
+      try { fs.unlinkSync(logPath); } catch { /* ok */ }
+    }
+  });
+
+  it('projectProgressTsv generates TSV from events', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tsv-test-'));
+    const testKey = `_test_tsv_${Date.now()}`;
+    const eventsDir = path.join(os.homedir(), '.metame', 'events');
+    const logPath = path.join(eventsDir, `${testKey}.jsonl`);
+    try {
+      fs.mkdirSync(eventsDir, { recursive: true });
+      const events = [
+        { ts: '2026-01-01T00:00:00Z', type: 'PHASE_GATE', phase: 'topic', passed: true, artifacts: ['topic.md'], details: 'ok' },
+      ];
+      fs.writeFileSync(logPath, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+      projectProgressTsv(tmpDir, testKey);
+      const tsvPath = path.join(tmpDir, 'workspace', 'progress.tsv');
+      assert.ok(fs.existsSync(tsvPath), 'TSV file should exist');
+      const content = fs.readFileSync(tsvPath, 'utf8');
+      assert.ok(content.includes('phase\tresult'), 'Should contain TSV header');
+      assert.ok(content.includes('topic\tdone\ttrue'), 'Should contain event row');
+    } finally {
+      try { fs.unlinkSync(logPath); } catch { /* ok */ }
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Manifest discovery ────────────────────────────────────────
+
+describe('Manifest discovery', () => {
+  let tmpDir;
+
+  it('loadProjectManifest returns parsed YAML', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manifest-test-'));
+    try {
+      fs.writeFileSync(path.join(tmpDir, 'perpetual.yaml'), 'completion_signal: DONE\nverifier: scripts/my-verifier.js\n', 'utf8');
+      const result = loadProjectManifest(tmpDir);
+      assert.ok(result !== null);
+      assert.equal(result.completion_signal, 'DONE');
+      assert.equal(result.verifier, 'scripts/my-verifier.js');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('loadProjectManifest returns null when no file', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manifest-test-'));
+    try {
+      const result = loadProjectManifest(tmpDir);
+      assert.equal(result, null);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolveProjectScripts uses manifest overrides', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manifest-test-'));
+    try {
+      const manifest = { verifier: 'custom/v.js', archiver: 'custom/a.js', mission_queue: 'custom/q.js' };
+      const scripts = resolveProjectScripts(tmpDir, manifest);
+      assert.equal(scripts.verifier, path.join(tmpDir, 'custom/v.js'));
+      assert.equal(scripts.archiver, path.join(tmpDir, 'custom/a.js'));
+      assert.equal(scripts.missionQueue, path.join(tmpDir, 'custom/q.js'));
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolveProjectScripts uses defaults when no manifest', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manifest-test-'));
+    try {
+      const scripts = resolveProjectScripts(tmpDir, null);
+      assert.equal(scripts.verifier, path.join(tmpDir, 'scripts/verifier.js'));
+      assert.equal(scripts.archiver, path.join(tmpDir, 'scripts/archiver.js'));
+      assert.equal(scripts.missionQueue, path.join(tmpDir, 'scripts/mission-queue.js'));
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('buildCompletionRegex uses manifest signal', () => {
+    const re = buildCompletionRegex({ completion_signal: 'ALL_DONE' });
+    assert.ok(re.test('ALL_DONE'));
+    assert.ok(!re.test('MISSION_COMPLETE'));
+  });
+
+  it('buildCompletionRegex defaults to MISSION_COMPLETE', () => {
+    const re = buildCompletionRegex(null);
+    assert.ok(re.test('MISSION_COMPLETE'));
+    assert.ok(!re.test('ALL_DONE'));
+  });
+});
+
+// ── Generalization ────────────────────────────────────────────
+
+describe('Generalization', () => {
+  it('source code contains no research-specific terms', () => {
+    const src = fs.readFileSync(path.join(__dirname, 'daemon-reactive-lifecycle.js'), 'utf8');
+    const codeLines = src.split('\n').filter(l => {
+      const t = l.trim();
+      return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('\'');
+    });
+    // RESEARCH_COMPLETE_RE is allowed (backward compat constant)
+    const filtered = codeLines.filter(l => !l.includes('RESEARCH_COMPLETE_RE'));
+    const bad = filtered.filter(l => /research|科研|课题|论文/i.test(l));
+    assert.equal(bad.length, 0, 'Found forbidden terms:\n' + bad.join('\n'));
   });
 });

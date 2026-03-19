@@ -4,17 +4,19 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { execSync } = require('child_process');
+const EVENTS_DIR = path.join(os.homedir(), '.metame', 'events');
 
 /**
  * daemon-reactive-lifecycle.js — Reactive Loop Lifecycle Module
  *
- * Extracts reactive dispatch logic from daemon.js into a testable,
- * self-contained module with four hard gates:
+ * Generic task chain engine for perpetual projects. Domain-agnostic.
+ * Hard gates:
  *   1. Budget gate   — pauses loop when daily budget exhausted
  *   2. Depth gate    — pauses loop when depth counter hits max
  *   3. Fresh session — every reactive dispatch uses new_session: true
- *   4. RESEARCH_COMPLETE — resets depth, marks completed, notifies user
+ *   4. Completion signal — configurable per project (default: MISSION_COMPLETE)
  *   5. Verifier hook — runs project verifier before waking parent
+ *   6. Event sourcing — all state changes logged to ~/.metame/events/
  */
 
 // ── Signal parsing ──────────────────────────────────────────────
@@ -34,7 +36,7 @@ const RESEARCH_COMPLETE_RE = /RESEARCH_COMPLETE/;
  * @param {string} output - Raw agent output text
  * @returns {{ directives: Array<{target: string, prompt: string}>, complete: boolean }}
  */
-function parseReactiveSignals(output) {
+function parseReactiveSignals(output, completionSignal) {
   const directives = [];
   let match;
   // Try quoted format first (preferred, documented in CLAUDE.md)
@@ -54,7 +56,10 @@ function parseReactiveSignals(output) {
       if (target && prompt) directives.push({ target, prompt });
     }
   }
-  const complete = RESEARCH_COMPLETE_RE.test(output);
+  const completionRe = completionSignal
+    ? new RegExp(completionSignal)
+    : RESEARCH_COMPLETE_RE;
+  const complete = completionRe.test(output);
   return { directives, complete };
 }
 
@@ -107,6 +112,59 @@ function isReactiveParent(projectKey, config) {
   return !!(proj && proj.reactive);
 }
 
+// ── Manifest discovery ──────────────────────────────────────────
+
+/**
+ * Load project manifest (perpetual.yaml / perpetual.yml) from project root.
+ * Returns parsed object or null if not found / parse error.
+ *
+ * @param {string} projectCwd - Absolute path to project root
+ * @returns {object|null}
+ */
+function loadProjectManifest(projectCwd) {
+  const yaml = require('js-yaml');
+  for (const name of ['perpetual.yaml', 'perpetual.yml']) {
+    const p = path.join(projectCwd, name);
+    if (fs.existsSync(p)) {
+      try {
+        const content = fs.readFileSync(p, 'utf8');
+        return yaml.load(content) || null;
+      } catch (e) {
+        process.stderr.write(`[reactive-lifecycle] WARN: failed to parse ${p}: ${e.message}\n`);
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve project script paths using convention-over-configuration.
+ * Manifest fields override defaults; all paths are absolute.
+ *
+ * @param {string} projectCwd - Absolute path to project root
+ * @param {object|null} manifest - Parsed perpetual.yaml or null
+ * @returns {{ verifier: string, archiver: string, missionQueue: string }}
+ */
+function resolveProjectScripts(projectCwd, manifest) {
+  const resolve = (override, fallback) => path.join(projectCwd, override || fallback);
+  return {
+    verifier:     resolve(manifest?.verifier, 'scripts/verifier.js'),
+    archiver:     resolve(manifest?.archiver, 'scripts/archiver.js'),
+    missionQueue: resolve(manifest?.mission_queue, 'scripts/mission-queue.js'),
+  };
+}
+
+/**
+ * Build completion signal regex from manifest or use default.
+ *
+ * @param {object|null} manifest - Parsed perpetual.yaml or null
+ * @returns {RegExp}
+ */
+function buildCompletionRegex(manifest) {
+  return new RegExp(manifest?.completion_signal || 'MISSION_COMPLETE');
+}
+
 // ── Verifier helpers ────────────────────────────────────────────
 
 function resolveProjectCwd(projectKey, config) {
@@ -131,17 +189,19 @@ function runProjectVerifier(projectKey, config, deps) {
   const projectCwd = resolveProjectCwd(projectKey, config);
   if (!projectCwd) return null;
 
-  const verifierPath = path.join(projectCwd, 'scripts', 'research-verifier.js');
-  if (!fs.existsSync(verifierPath)) return null;
+  const manifest = loadProjectManifest(projectCwd);
+  const scripts = resolveProjectScripts(projectCwd, manifest);
+  if (!fs.existsSync(scripts.verifier)) return null;
 
   const statePath = path.join(
     deps.metameDir || path.join(os.homedir(), '.metame'),
     'memory', 'now', `${projectKey}.md`
   );
   const phase = readPhaseFromState(statePath);
+  const relVerifier = path.relative(projectCwd, scripts.verifier);
 
   try {
-    const output = execSync('node scripts/research-verifier.js', {
+    const output = execSync(`node "${relVerifier}"`, {
       cwd: projectCwd,
       encoding: 'utf8',
       timeout: 15000,
@@ -155,7 +215,7 @@ function runProjectVerifier(projectKey, config, deps) {
     return JSON.parse(output);
   } catch (e) {
     deps.log('WARN', `Verifier failed for ${projectKey}: ${e.message}`);
-    return { passed: false, phase: phase || 'unknown', details: `verifier_error: ${e.message.slice(0, 200)}`, artifacts: [], hints: ['验证器执行失败，请检查 verifier 脚本'] };
+    return { passed: false, phase: phase || 'unknown', details: `verifier_error: ${e.message.slice(0, 200)}`, artifacts: [], hints: ['Verifier script failed — check scripts/'] };
   }
 }
 
@@ -165,13 +225,13 @@ function runProjectVerifier(projectKey, config, deps) {
  * @returns {{ archived: boolean, nextTopic: string|null, nextTopicPrompt: string|null }}
  */
 function runCompletionHooks(projectKey, projectCwd, deps) {
-  const result = { archived: false, nextTopic: null, nextTopicPrompt: null };
+  const manifest = loadProjectManifest(projectCwd);
+  const scripts = resolveProjectScripts(projectCwd, manifest);
+  const result = { archived: false, nextMission: null, nextMissionPrompt: null };
 
-  // 1. Archive
-  const archiveScript = path.join(projectCwd, 'scripts', 'research-archive.js');
-  if (fs.existsSync(archiveScript)) {
+  // 1. Archive (if script exists)
+  if (fs.existsSync(scripts.archiver)) {
     try {
-      // Read project name from state file
       const statePath = path.join(
         deps.metameDir || path.join(os.homedir(), '.metame'),
         'memory', 'now', `${projectKey}.md`
@@ -183,7 +243,8 @@ function runCompletionHooks(projectKey, projectCwd, deps) {
         if (m) projectName = m[1];
       } catch { /* use projectKey */ }
 
-      const archiveOut = execSync('node scripts/research-archive.js', {
+      const relArchiver = path.relative(projectCwd, scripts.archiver);
+      const archiveOut = execSync(`node "${relArchiver}"`, {
         cwd: projectCwd, encoding: 'utf8', timeout: 30000,
         env: { ...process.env, ARCHIVE_CWD: projectCwd, ARCHIVE_PROJECT_NAME: projectName, ARCHIVE_STATE_PATH: statePath },
       }).trim();
@@ -195,55 +256,186 @@ function runCompletionHooks(projectKey, projectCwd, deps) {
     }
   }
 
-  // 2. Topic pool — only proceed if archive succeeded
-  const topicScript = path.join(projectCwd, 'scripts', 'topic-pool.js');
-  if (result.archived && fs.existsSync(topicScript)) {
-    const topicEnv = { ...process.env, TOPICS_CWD: projectCwd };
-    // 2a. Complete current active topic first
+  // 2. Mission queue — only proceed if archive succeeded
+  if (result.archived && fs.existsSync(scripts.missionQueue)) {
+    const relQueue = path.relative(projectCwd, scripts.missionQueue);
+    const queueEnv = { ...process.env, MISSION_CWD: projectCwd, TOPICS_CWD: projectCwd };
+    // 2a. Complete current active mission
     try {
-      const listOut = execSync('node scripts/topic-pool.js list', {
-        cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: topicEnv,
+      const listOut = execSync(`node "${relQueue}" list`, {
+        cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: queueEnv,
       }).trim();
       const listResult = JSON.parse(listOut);
       if (listResult.success && Array.isArray(listResult.topics)) {
         const activeTopic = listResult.topics.find(t => t.status === 'active');
         if (activeTopic) {
-          execSync(`node scripts/topic-pool.js complete ${activeTopic.id}`, {
-            cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: topicEnv,
+          execSync(`node "${relQueue}" complete ${activeTopic.id}`, {
+            cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: queueEnv,
           });
-          deps.log('INFO', `Reactive: completed active topic ${activeTopic.id}: ${activeTopic.title}`);
+          deps.log('INFO', `Reactive: completed mission ${activeTopic.id}: ${activeTopic.title}`);
         }
       }
     } catch (e) {
-      deps.log('WARN', `Reactive: topic complete failed: ${e.message}`);
+      deps.log('WARN', `Reactive: mission complete failed: ${e.message}`);
     }
-    // 2b. Get next pending topic
+    // 2b. Get next pending mission
     try {
-      const nextOut = execSync('node scripts/topic-pool.js next', {
-        cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: topicEnv,
+      const nextOut = execSync(`node "${relQueue}" next`, {
+        cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: queueEnv,
       }).trim();
       const nextResult = JSON.parse(nextOut);
       if (nextResult.success && nextResult.topic) {
-        // Activate the next topic
         try {
-          execSync(`node scripts/topic-pool.js activate ${nextResult.topic.id}`, {
-            cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: topicEnv,
+          execSync(`node "${relQueue}" activate ${nextResult.topic.id}`, {
+            cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: queueEnv,
           });
         } catch (e) {
-          deps.log('WARN', `Reactive: topic activate failed: ${e.message}`);
+          deps.log('WARN', `Reactive: mission activate failed: ${e.message}`);
         }
-        result.nextTopic = nextResult.topic.title;
-        result.nextTopicPrompt = `新课题启动: "${nextResult.topic.title}"\n\n请开始研究这个课题。第一步：更新 now/${projectKey}.md 的 project 和 phase 字段，然后 NEXT_DISPATCH scout 进行文献调研。`;
-        deps.log('INFO', `Reactive: next topic for ${projectKey}: ${nextResult.topic.title}`);
+        result.nextMission = nextResult.topic.title;
+        result.nextMissionPrompt = `New mission: "${nextResult.topic.title}"\n\nStart this mission. Read your CLAUDE.md for instructions, then decide on the first step using NEXT_DISPATCH.`;
+        deps.log('INFO', `Reactive: next mission for ${projectKey}: ${nextResult.topic.title}`);
       }
     } catch (e) {
-      deps.log('WARN', `Reactive: topic pool query failed for ${projectKey}: ${e.message}`);
+      deps.log('WARN', `Reactive: mission queue query failed for ${projectKey}: ${e.message}`);
     }
-  } else if (!result.archived && fs.existsSync(topicScript)) {
-    deps.log('WARN', `Reactive: skipping topic pool for ${projectKey} — archive did not succeed`);
+  } else if (!result.archived && fs.existsSync(scripts.missionQueue)) {
+    deps.log('WARN', `Reactive: skipping mission queue for ${projectKey} — archive did not succeed`);
   }
 
   return result;
+}
+
+// ── Event Log (Event Sourcing) ──────────────────────────────────
+
+/**
+ * Append an event to the project's event log.
+ * Daemon-exclusive: agents cannot write to ~/.metame/events/.
+ */
+function appendEvent(projectKey, event) {
+  fs.mkdirSync(EVENTS_DIR, { recursive: true });
+  const logPath = path.join(EVENTS_DIR, `${projectKey}.jsonl`);
+  const line = JSON.stringify({ ts: new Date().toISOString(), ...event }) + '\n';
+  fs.appendFileSync(logPath, line, 'utf8');
+}
+
+/**
+ * Replay event log to derive current state.
+ * Returns { phase, mission, history[] }
+ *
+ * DESIGN CONTRACT (Tolerant Reader):
+ * Malformed lines (e.g. from crash/truncation) are skipped with a WARN log.
+ * This function NEVER throws.
+ */
+function replayEventLog(projectKey, deps) {
+  const logPath = path.join(EVENTS_DIR, `${projectKey}.jsonl`);
+  if (!fs.existsSync(logPath)) return { phase: '', mission: null, history: [] };
+
+  const lines = fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
+  let phase = '';
+  let mission = null;
+  const history = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    try {
+      const evt = JSON.parse(lines[i]);
+      if (evt.type === 'MISSION_START') {
+        mission = { id: evt.mission_id, title: evt.mission_title };
+      }
+      if (evt.type === 'PHASE_GATE' && evt.passed) {
+        phase = evt.phase;
+        history.push({ phase: evt.phase, date: evt.ts, artifacts: evt.artifacts });
+      }
+      if (evt.type === 'MISSION_COMPLETE') {
+        phase = '';
+        mission = null;
+      }
+    } catch {
+      // DESIGN CONTRACT: Tolerant Reader (尾行容错)
+      // 断电/Kernel Panic 可能导致最后一行残缺。
+      // 逐行 parse，损坏行静默丢弃 + log WARN，绝不 crash loop。
+      deps?.log?.('WARN', `Event log ${projectKey} line ${i + 1}: malformed JSON, skipped`);
+    }
+  }
+
+  return { phase, mission, history };
+}
+
+/**
+ * Generate progress.tsv as a human-readable projection of the event log.
+ * Not SoT — can be safely regenerated at any time.
+ */
+function projectProgressTsv(projectCwd, projectKey) {
+  const tsvPath = path.join(projectCwd, 'workspace', 'progress.tsv');
+  const header = 'phase\tresult\tverifier_passed\tartifact\ttimestamp\tnotes\n';
+
+  const logPath = path.join(EVENTS_DIR, `${projectKey}.jsonl`);
+  if (!fs.existsSync(logPath)) return;
+
+  const lines = fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
+  let rows = header;
+  for (const line of lines) {
+    try {
+      const evt = JSON.parse(line);
+      if (evt.type === 'PHASE_GATE') {
+        rows += [
+          evt.phase,
+          evt.passed ? 'done' : 'in_progress',
+          String(evt.passed),
+          (evt.artifacts || [])[0] || '',
+          evt.ts,
+          (evt.details || '').replace(/[\t\n]/g, ' '),
+        ].join('\t') + '\n';
+      }
+    } catch { /* skip */ }
+  }
+
+  fs.mkdirSync(path.dirname(tsvPath), { recursive: true });
+  fs.writeFileSync(tsvPath, rows, 'utf8');
+}
+
+/**
+ * Generate now/<key>.md state file by replaying the event log.
+ * This is the canonical way to (re)build the agent-visible state file
+ * from the append-only event log (event sourcing projection).
+ *
+ * @param {string} projectKey
+ * @param {object} config - Full daemon config
+ * @param {object} deps   - Injected dependencies (loadState, log, metameDir)
+ * @returns {string} statePath - Absolute path to the written file
+ */
+function generateStateFile(projectKey, config, deps) {
+  const metameDir = deps.metameDir || path.join(os.homedir(), '.metame');
+  const statePath = path.join(metameDir, 'memory', 'now', projectKey + '.md');
+
+  const { phase, mission, history } = replayEventLog(projectKey, deps);
+
+  const rs = deps.loadState().reactive?.[projectKey] || {};
+  const projectName = config.projects?.[projectKey]?.name || projectKey;
+
+  const round = Math.max(1, history.filter(h => h.phase === 'topic').length);
+
+  const lines = [
+    `# ${projectName} status`,
+    `project: "${mission?.title || 'unknown'}"`,
+    `phase: ${phase || 'topic'}`,
+    `status: ${rs.status || 'idle'}`,
+    'waiting_for: ""',
+    `round: ${round}`,
+    `last_update: "${new Date().toISOString()}"`,
+    '',
+    '# Phase history (from event log)',
+  ];
+
+  for (const h of history) {
+    lines.push(`  - phase: ${h.phase}`);
+    lines.push(`    date: "${h.date}"`);
+  }
+
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, lines.join('\n'), 'utf8');
+
+  return statePath;
 }
 
 // ── Main handler ────────────────────────────────────────────────
@@ -269,7 +461,14 @@ function runCompletionHooks(projectKey, projectCwd, deps) {
 function handleReactiveOutput(targetProject, output, config, deps) {
   if (!config || !config.projects) return;
 
-  const signals = parseReactiveSignals(output);
+  // Resolve manifest for completion signal
+  const projectCwd = isReactiveParent(targetProject, config)
+    ? resolveProjectCwd(targetProject, config)
+    : resolveProjectCwd(findReactiveParent(targetProject, config), config);
+  const manifest = projectCwd ? loadProjectManifest(projectCwd) : null;
+  const completionSignal = manifest?.completion_signal || 'MISSION_COMPLETE';
+
+  const signals = parseReactiveSignals(output, completionSignal);
   const hasSignals = signals.directives.length > 0 || signals.complete;
 
   // ── Case 1: targetProject is a reactive parent ──
@@ -277,39 +476,46 @@ function handleReactiveOutput(targetProject, output, config, deps) {
     if (!hasSignals) return;
 
     const projectKey = targetProject;
+    const pName = config.projects[projectKey]?.name || projectKey;
     const st = deps.loadState();
     const rs = getReactiveState(st, projectKey);
 
-    // RESEARCH_COMPLETE takes priority
+    // Mission complete takes priority
     if (signals.complete) {
-      deps.log('INFO', `Reactive: ${projectKey} research completed`);
+      deps.log('INFO', `Reactive: ${projectKey} mission completed`);
       setReactiveStatus(st, projectKey, 'completed', '');
       st.reactive[projectKey].depth = 0;
-      rs.last_signal = 'RESEARCH_COMPLETE';
+      rs.last_signal = 'MISSION_COMPLETE';
       deps.saveState(st);
+      appendEvent(projectKey, { type: 'MISSION_COMPLETE' });
 
-      // Run completion hooks (archive + next topic) if project has scripts/
-      const projectCwd = resolveProjectCwd(projectKey, config);
-      if (projectCwd) {
-        const completionResult = runCompletionHooks(projectKey, projectCwd, deps);
-        const notifyMsg = completionResult.nextTopic
-          ? `\u2705 科研课题已完成并归档。下一课题: ${completionResult.nextTopic}`
-          : '\u2705 科研课题已完成并归档。无待处理课题，系统进入等待。';
+      // Run completion hooks (archive + next mission)
+      const pCwd = resolveProjectCwd(projectKey, config);
+      if (pCwd) {
+        const completionResult = runCompletionHooks(projectKey, pCwd, deps);
+        if (completionResult.archived) {
+          appendEvent(projectKey, { type: 'ARCHIVE', path: pCwd });
+        }
+        const notifyMsg = completionResult.nextMission
+          ? `\u2705 ${pName} mission completed. Next: ${completionResult.nextMission}`
+          : `\u2705 ${pName} mission completed. No pending missions — entering idle.`;
         if (deps.notifyUser) deps.notifyUser(notifyMsg);
 
-        // Auto-start next topic if available — requires budget to be OK
-        if (completionResult.nextTopic && completionResult.nextTopicPrompt) {
+        // Auto-start next mission if available — requires budget to be OK
+        if (completionResult.nextMission && completionResult.nextMissionPrompt) {
           if (!deps.checkBudget(config, st)) {
-            deps.log('WARN', `Reactive: budget exceeded, skipping auto-start of next topic for ${projectKey}`);
-            if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f 下一课题 "${completionResult.nextTopic}" 已就绪但预算不足，暂不启动`);
+            deps.log('WARN', `Reactive: budget exceeded, skipping auto-start for ${projectKey}`);
+            appendEvent(projectKey, { type: 'BUDGET_LIMIT', action: 'skip_next_mission' });
+            if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f Next mission "${completionResult.nextMission}" ready but budget exceeded`);
           } else {
-            deps.log('INFO', `Reactive: auto-starting next topic for ${projectKey}: ${completionResult.nextTopic}`);
+            deps.log('INFO', `Reactive: auto-starting next mission for ${projectKey}: ${completionResult.nextMission}`);
+            appendEvent(projectKey, { type: 'MISSION_START', mission_title: completionResult.nextMission });
             setReactiveStatus(st, projectKey, 'running', '');
             st.reactive[projectKey].depth = 0;
             deps.saveState(st);
             deps.handleDispatchItem({
               target: projectKey,
-              prompt: completionResult.nextTopicPrompt,
+              prompt: completionResult.nextMissionPrompt,
               from: '_system',
               _reactive: true,
               new_session: true,
@@ -317,7 +523,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
           }
         }
       } else {
-        if (deps.notifyUser) deps.notifyUser('\u2705 科研课题已完成');
+        if (deps.notifyUser) deps.notifyUser(`\u2705 ${pName} mission completed`);
       }
       return;
     }
@@ -330,7 +536,8 @@ function handleReactiveOutput(targetProject, output, config, deps) {
       deps.log('WARN', `Reactive: budget exceeded, pausing ${projectKey}`);
       setReactiveStatus(st, projectKey, 'paused', 'budget_exceeded');
       deps.saveState(st);
-      if (deps.notifyUser) deps.notifyUser('\u26a0\ufe0f \u79d1\u7814\u5faa\u73af\u5df2\u6682\u505c\uff1a\u4eca\u65e5\u9884\u7b97\u5df2\u8017\u5c3d');
+      appendEvent(projectKey, { type: 'BUDGET_LIMIT', action: 'paused' });
+      if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f ${pName} paused: daily budget exceeded`);
       return;
     }
 
@@ -340,7 +547,8 @@ function handleReactiveOutput(targetProject, output, config, deps) {
       deps.log('WARN', `Reactive: depth ${rs.depth} >= ${maxDepth}, pausing ${projectKey}`);
       setReactiveStatus(st, projectKey, 'paused', 'depth_exceeded');
       deps.saveState(st);
-      if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f \u79d1\u7814\u5faa\u73af\u5df2\u6682\u505c\uff1a\u5faa\u73af\u6df1\u5ea6\u8fbe\u5230\u4e0a\u9650 ${maxDepth}`);
+      appendEvent(projectKey, { type: 'DEPTH_LIMIT', depth: rs.depth, action: 'paused' });
+      if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f ${pName} paused: depth limit ${maxDepth} reached`);
       return;
     }
 
@@ -351,6 +559,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
 
     // Dispatch each directive with fresh session
     for (const d of signals.directives) {
+      appendEvent(projectKey, { type: 'DISPATCH', target: d.target, prompt: d.prompt.slice(0, 200) });
       deps.handleDispatchItem({
         target: d.target,
         prompt: d.prompt,
@@ -366,6 +575,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
   const parentKey = findReactiveParent(targetProject, config);
   if (!parentKey || !isReactiveParent(parentKey, config)) return;
 
+  const pName = config.projects[parentKey]?.name || parentKey;
   const st = deps.loadState();
 
   // Budget gate
@@ -373,7 +583,8 @@ function handleReactiveOutput(targetProject, output, config, deps) {
     deps.log('WARN', `Reactive: budget exceeded, pausing ${parentKey} (via member ${targetProject})`);
     setReactiveStatus(st, parentKey, 'paused', 'budget_exceeded');
     deps.saveState(st);
-    if (deps.notifyUser) deps.notifyUser('\u26a0\ufe0f \u79d1\u7814\u5faa\u73af\u5df2\u6682\u505c\uff1a\u4eca\u65e5\u9884\u7b97\u5df2\u8017\u5c3d');
+    appendEvent(parentKey, { type: 'BUDGET_LIMIT', action: 'paused', trigger: targetProject });
+    if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f ${pName} paused: daily budget exceeded`);
     return;
   }
 
@@ -384,7 +595,8 @@ function handleReactiveOutput(targetProject, output, config, deps) {
     deps.log('WARN', `Reactive: depth ${rs.depth} >= ${maxDepth}, pausing ${parentKey} (via member ${targetProject})`);
     setReactiveStatus(st, parentKey, 'paused', 'depth_exceeded');
     deps.saveState(st);
-    if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f \u79d1\u7814\u5faa\u73af\u5df2\u6682\u505c\uff1a\u5faa\u73af\u6df1\u5ea6\u8fbe\u5230\u4e0a\u9650 ${maxDepth}`);
+    appendEvent(parentKey, { type: 'DEPTH_LIMIT', depth: rs.depth, action: 'paused' });
+    if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f ${pName} paused: depth limit ${maxDepth} reached`);
     return;
   }
 
@@ -393,21 +605,53 @@ function handleReactiveOutput(targetProject, output, config, deps) {
   rs.last_signal = 'MEMBER_COMPLETE';
   rs.updated_at = new Date().toISOString();
   deps.saveState(st);
+  appendEvent(parentKey, { type: 'MEMBER_COMPLETE', member: targetProject, summary_length: output.length });
 
   // Run verifier if available
   const verifyResult = deps.runVerifier
     ? deps.runVerifier(parentKey, config)
     : runProjectVerifier(parentKey, config, deps);
 
+  // Log verifier result as event
+  if (verifyResult) {
+    appendEvent(parentKey, {
+      type: 'PHASE_GATE',
+      phase: verifyResult.phase || '',
+      passed: !!verifyResult.passed,
+      details: (verifyResult.details || '').slice(0, 500),
+      artifacts: verifyResult.artifacts || [],
+    });
+  }
+
+  // DESIGN CONTRACT: Error Semantic Isolation
+  // If verifier reports infrastructure failure (_infraFailure),
+  // pause the project and notify user — do NOT blame the agent.
+  if (verifyResult?._infraFailure) {
+    deps.log('WARN', `Verifier infra failure for ${parentKey}: ${verifyResult.details}`);
+    setReactiveStatus(st, parentKey, 'paused', 'infra_failure');
+    deps.saveState(st);
+    appendEvent(parentKey, { type: 'INFRA_PAUSE', details: verifyResult.details });
+    if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f ${pName} paused: external API unavailable. Not an agent error.`);
+    return; // Do NOT wake agent
+  }
+
+  // Update progress.tsv projection
+  const parentCwd = resolveProjectCwd(parentKey, config);
+  if (parentCwd) {
+    try { projectProgressTsv(parentCwd, parentKey); } catch { /* non-critical */ }
+  }
+
   const verifierBlock = verifyResult
-    ? `\n\n[验证门结果] phase=${verifyResult.phase} passed=${verifyResult.passed}\n${verifyResult.details}${verifyResult.hints?.length ? '\n建议: ' + verifyResult.hints.join('; ') : ''}`
-    : '\n\n[验证门结果] passed=false\n验证器未配置或不可用，请谨慎推进阶段';
+    ? `\n\n[Verifier] phase=${verifyResult.phase} passed=${verifyResult.passed}\n${verifyResult.details}${verifyResult.hints?.length ? '\nHints: ' + verifyResult.hints.join('; ') : ''}`
+    : '\n\n[Verifier] not configured — proceed with caution';
 
   // Trigger parent with member's output summary
+  const parentManifest = parentCwd ? loadProjectManifest(parentCwd) : null;
+  const signal = parentManifest?.completion_signal || 'MISSION_COMPLETE';
   const summary = output.slice(0, 1200);
   deps.handleDispatchItem({
     target: parentKey,
-    prompt: `[团队成员交付] ${targetProject} 完成任务。\n\n产出摘要:\n${summary}${verifierBlock}\n\n请阅读产出，评估质量，更新 now/${parentKey}.md，然后决定下一步。\n如需派发新任务，在回复末尾使用 NEXT_DISPATCH 指令。如研究全部完成，输出 RESEARCH_COMPLETE。`,
+    prompt: `[Team delivery] ${targetProject} completed task.\n\nOutput summary:\n${summary}${verifierBlock}\n\nEvaluate quality and decide next step.\nTo dispatch tasks, use NEXT_DISPATCH.\nWhen all tasks are done, output ${signal}.`,
     from: targetProject,
     _reactive: true,
     new_session: true,
@@ -417,5 +661,5 @@ function handleReactiveOutput(targetProject, output, config, deps) {
 module.exports = {
   handleReactiveOutput,
   parseReactiveSignals,
-  __test: { runProjectVerifier, readPhaseFromState, resolveProjectCwd },
+  __test: { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, replayEventLog, projectProgressTsv, generateStateFile, loadProjectManifest, resolveProjectScripts, buildCompletionRegex },
 };
