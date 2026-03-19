@@ -5,8 +5,8 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { handleReactiveOutput, parseReactiveSignals, __test } = require('./daemon-reactive-lifecycle');
-const { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, replayEventLog, projectProgressTsv, loadProjectManifest, resolveProjectScripts, generateStateFile } = __test;
+const { handleReactiveOutput, parseReactiveSignals, replayEventLog, __test } = require('./daemon-reactive-lifecycle');
+const { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, loadProjectManifest, resolveProjectScripts, generateStateFile } = __test;
 
 // ── parseReactiveSignals ──────────────────────────────────────
 
@@ -369,7 +369,8 @@ describe('Event Log', () => {
 
   it('replayEventLog derives phase from PHASE_GATE events', () => {
     const testKey = `_test_replay_${Date.now()}`;
-    const eventsDir = path.join(os.homedir(), '.metame', 'events');
+    const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'evt-test-'));
+    const eventsDir = path.join(tmpMeta, 'events');
     const logPath = path.join(eventsDir, `${testKey}.jsonl`);
     try {
       fs.mkdirSync(eventsDir, { recursive: true });
@@ -378,19 +379,20 @@ describe('Event Log', () => {
         { ts: '2026-01-02T00:00:00Z', type: 'PHASE_GATE', phase: 'literature', passed: true, artifacts: ['b.md'] },
       ];
       fs.writeFileSync(logPath, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
-      const result = replayEventLog(testKey, { log: () => {} });
+      const result = replayEventLog(testKey, { log: () => {}, metameDir: tmpMeta });
       assert.equal(result.phase, 'literature');
       assert.equal(result.history.length, 2);
       assert.equal(result.history[0].phase, 'topic');
       assert.equal(result.history[1].phase, 'literature');
     } finally {
-      try { fs.unlinkSync(logPath); } catch { /* ok */ }
+      fs.rmSync(tmpMeta, { recursive: true, force: true });
     }
   });
 
   it('replayEventLog handles MISSION_COMPLETE reset', () => {
     const testKey = `_test_replay_mc_${Date.now()}`;
-    const eventsDir = path.join(os.homedir(), '.metame', 'events');
+    const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'evt-test-'));
+    const eventsDir = path.join(tmpMeta, 'events');
     const logPath = path.join(eventsDir, `${testKey}.jsonl`);
     try {
       fs.mkdirSync(eventsDir, { recursive: true });
@@ -400,36 +402,38 @@ describe('Event Log', () => {
         { ts: '2026-01-03T00:00:00Z', type: 'MISSION_COMPLETE' },
       ];
       fs.writeFileSync(logPath, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
-      const result = replayEventLog(testKey, { log: () => {} });
+      const result = replayEventLog(testKey, { log: () => {}, metameDir: tmpMeta });
       assert.equal(result.phase, '');
       assert.equal(result.mission, null);
     } finally {
-      try { fs.unlinkSync(logPath); } catch { /* ok */ }
+      fs.rmSync(tmpMeta, { recursive: true, force: true });
     }
   });
 
   it('replayEventLog tolerates malformed lines (Tolerant Reader)', () => {
     const testKey = `_test_replay_bad_${Date.now()}`;
-    const eventsDir = path.join(os.homedir(), '.metame', 'events');
+    const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'evt-test-'));
+    const eventsDir = path.join(tmpMeta, 'events');
     const logPath = path.join(eventsDir, `${testKey}.jsonl`);
     try {
       fs.mkdirSync(eventsDir, { recursive: true });
       const content = '{"ts":"2026-01-01T00:00:00Z","type":"PHASE_GATE","phase":"topic","passed":true}\n{BROKEN LINE\n{"ts":"2026-01-02T00:00:00Z","type":"PHASE_GATE","phase":"design","passed":true}\n';
       fs.writeFileSync(logPath, content, 'utf8');
       const warnings = [];
-      const result = replayEventLog(testKey, { log: (level, msg) => { if (level === 'WARN') warnings.push(msg); } });
+      const result = replayEventLog(testKey, { log: (level, msg) => { if (level === 'WARN') warnings.push(msg); }, metameDir: tmpMeta });
       assert.equal(result.phase, 'design');
       assert.equal(result.history.length, 2);
       assert.ok(warnings.length > 0, 'Should have logged a warning for malformed line');
     } finally {
-      try { fs.unlinkSync(logPath); } catch { /* ok */ }
+      fs.rmSync(tmpMeta, { recursive: true, force: true });
     }
   });
 
   it('projectProgressTsv generates TSV from events', () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tsv-test-'));
     const testKey = `_test_tsv_${Date.now()}`;
-    const eventsDir = path.join(os.homedir(), '.metame', 'events');
+    const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'evt-test-'));
+    const eventsDir = path.join(tmpMeta, 'events');
     const logPath = path.join(eventsDir, `${testKey}.jsonl`);
     try {
       fs.mkdirSync(eventsDir, { recursive: true });
@@ -437,7 +441,7 @@ describe('Event Log', () => {
         { ts: '2026-01-01T00:00:00Z', type: 'PHASE_GATE', phase: 'topic', passed: true, artifacts: ['topic.md'], details: 'ok' },
       ];
       fs.writeFileSync(logPath, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
-      projectProgressTsv(tmpDir, testKey);
+      projectProgressTsv(tmpDir, testKey, tmpMeta);
       const tsvPath = path.join(tmpDir, 'workspace', 'progress.tsv');
       assert.ok(fs.existsSync(tsvPath), 'TSV file should exist');
       const content = fs.readFileSync(tsvPath, 'utf8');

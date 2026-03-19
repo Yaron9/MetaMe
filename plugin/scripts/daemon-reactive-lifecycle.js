@@ -305,9 +305,10 @@ function runCompletionHooks(projectKey, projectCwd, deps) {
  * Append an event to the project's event log.
  * Daemon-exclusive: agents cannot write to ~/.metame/events/.
  */
-function appendEvent(projectKey, event) {
-  fs.mkdirSync(EVENTS_DIR, { recursive: true });
-  const logPath = path.join(EVENTS_DIR, `${projectKey}.jsonl`);
+function appendEvent(projectKey, event, metameDir) {
+  const evDir = metameDir ? path.join(metameDir, 'events') : EVENTS_DIR;
+  fs.mkdirSync(evDir, { recursive: true });
+  const logPath = path.join(evDir, `${projectKey}.jsonl`);
   const line = JSON.stringify({ ts: new Date().toISOString(), ...event }) + '\n';
   fs.appendFileSync(logPath, line, 'utf8');
 }
@@ -321,7 +322,8 @@ function appendEvent(projectKey, event) {
  * This function NEVER throws.
  */
 function replayEventLog(projectKey, deps) {
-  const logPath = path.join(EVENTS_DIR, `${projectKey}.jsonl`);
+  const evDir = deps?.metameDir ? path.join(deps.metameDir, 'events') : EVENTS_DIR;
+  const logPath = path.join(evDir, `${projectKey}.jsonl`);
   if (!fs.existsSync(logPath)) return { phase: '', mission: null, history: [] };
 
   const lines = fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
@@ -358,11 +360,12 @@ function replayEventLog(projectKey, deps) {
  * Generate progress.tsv as a human-readable projection of the event log.
  * Not SoT — can be safely regenerated at any time.
  */
-function projectProgressTsv(projectCwd, projectKey) {
+function projectProgressTsv(projectCwd, projectKey, metameDir) {
   const tsvPath = path.join(projectCwd, 'workspace', 'progress.tsv');
   const header = 'phase\tresult\tverifier_passed\tartifact\ttimestamp\tnotes\n';
 
-  const logPath = path.join(EVENTS_DIR, `${projectKey}.jsonl`);
+  const evDir = metameDir ? path.join(metameDir, 'events') : EVENTS_DIR;
+  const logPath = path.join(evDir, `${projectKey}.jsonl`);
   if (!fs.existsSync(logPath)) return;
 
   const lines = fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
@@ -445,6 +448,10 @@ function reconcilePerpetualProjects(config, deps) {
     if (!rs || rs.status !== 'running') continue;
 
     const lastUpdate = new Date(rs.updated_at).getTime();
+    if (!Number.isFinite(lastUpdate)) {
+      deps.log('WARN', `Reconcile: ${key} has invalid updated_at: ${rs.updated_at}`);
+      continue;
+    }
     const staleMinutes = proj.stale_timeout_minutes || 120;
     const staleThreshold = staleMinutes * 60 * 1000;
 
@@ -452,7 +459,7 @@ function reconcilePerpetualProjects(config, deps) {
       deps.log('WARN', `Reconcile: ${key} stuck since ${rs.updated_at}`);
       setReactiveStatus(st, key, 'stale', 'no_activity');
       deps.saveState(st);
-      appendEvent(key, { type: 'STALE', last_signal: rs.last_signal || '' });
+      appendEvent(key, { type: 'STALE', last_signal: rs.last_signal || '' }, deps.metameDir);
       if (deps.notifyUser) {
         const pName = proj.name || key;
         deps.notifyUser(`⚠️ ${pName} stale: no activity for ${staleMinutes}+ minutes (last signal: ${rs.last_signal || 'none'})`);
@@ -484,6 +491,9 @@ function reconcilePerpetualProjects(config, deps) {
 function handleReactiveOutput(targetProject, output, config, deps) {
   if (!config || !config.projects) return;
 
+  // Scoped event logger — uses deps.metameDir for test isolation
+  const logEvent = (key, event) => appendEvent(key, event, deps.metameDir);
+
   // Resolve manifest for completion signal
   const projectCwd = isReactiveParent(targetProject, config)
     ? resolveProjectCwd(targetProject, config)
@@ -510,14 +520,14 @@ function handleReactiveOutput(targetProject, output, config, deps) {
       st.reactive[projectKey].depth = 0;
       rs.last_signal = 'MISSION_COMPLETE';
       deps.saveState(st);
-      appendEvent(projectKey, { type: 'MISSION_COMPLETE' });
+      logEvent(projectKey, { type: 'MISSION_COMPLETE' });
 
       // Run completion hooks (archive + next mission)
       const pCwd = resolveProjectCwd(projectKey, config);
       if (pCwd) {
         const completionResult = runCompletionHooks(projectKey, pCwd, deps);
         if (completionResult.archived) {
-          appendEvent(projectKey, { type: 'ARCHIVE', path: pCwd });
+          logEvent(projectKey, { type: 'ARCHIVE', path: pCwd });
         }
         const notifyMsg = completionResult.nextMission
           ? `\u2705 ${pName} mission completed. Next: ${completionResult.nextMission}`
@@ -528,11 +538,11 @@ function handleReactiveOutput(targetProject, output, config, deps) {
         if (completionResult.nextMission && completionResult.nextMissionPrompt) {
           if (!deps.checkBudget(config, st)) {
             deps.log('WARN', `Reactive: budget exceeded, skipping auto-start for ${projectKey}`);
-            appendEvent(projectKey, { type: 'BUDGET_LIMIT', action: 'skip_next_mission' });
+            logEvent(projectKey, { type: 'BUDGET_LIMIT', action: 'skip_next_mission' });
             if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f Next mission "${completionResult.nextMission}" ready but budget exceeded`);
           } else {
             deps.log('INFO', `Reactive: auto-starting next mission for ${projectKey}: ${completionResult.nextMission}`);
-            appendEvent(projectKey, { type: 'MISSION_START', mission_id: completionResult.nextMissionId || '', mission_title: completionResult.nextMission });
+            logEvent(projectKey, { type: 'MISSION_START', mission_id: completionResult.nextMissionId || '', mission_title: completionResult.nextMission });
             setReactiveStatus(st, projectKey, 'running', '');
             st.reactive[projectKey].depth = 0;
             deps.saveState(st);
@@ -559,7 +569,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
       deps.log('WARN', `Reactive: budget exceeded, pausing ${projectKey}`);
       setReactiveStatus(st, projectKey, 'paused', 'budget_exceeded');
       deps.saveState(st);
-      appendEvent(projectKey, { type: 'BUDGET_LIMIT', action: 'paused' });
+      logEvent(projectKey, { type: 'BUDGET_LIMIT', action: 'paused' });
       if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f ${pName} paused: daily budget exceeded`);
       return;
     }
@@ -570,7 +580,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
       deps.log('WARN', `Reactive: depth ${rs.depth} >= ${maxDepth}, pausing ${projectKey}`);
       setReactiveStatus(st, projectKey, 'paused', 'depth_exceeded');
       deps.saveState(st);
-      appendEvent(projectKey, { type: 'DEPTH_LIMIT', depth: rs.depth, action: 'paused' });
+      logEvent(projectKey, { type: 'DEPTH_LIMIT', depth: rs.depth, action: 'paused' });
       if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f ${pName} paused: depth limit ${maxDepth} reached`);
       return;
     }
@@ -582,7 +592,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
 
     // Dispatch each directive with fresh session
     for (const d of signals.directives) {
-      appendEvent(projectKey, { type: 'DISPATCH', target: d.target, prompt: d.prompt.slice(0, 200) });
+      logEvent(projectKey, { type: 'DISPATCH', target: d.target, prompt: d.prompt.slice(0, 200) });
       deps.handleDispatchItem({
         target: d.target,
         prompt: d.prompt,
@@ -606,7 +616,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
     deps.log('WARN', `Reactive: budget exceeded, pausing ${parentKey} (via member ${targetProject})`);
     setReactiveStatus(st, parentKey, 'paused', 'budget_exceeded');
     deps.saveState(st);
-    appendEvent(parentKey, { type: 'BUDGET_LIMIT', action: 'paused', trigger: targetProject });
+    logEvent(parentKey, { type: 'BUDGET_LIMIT', action: 'paused', trigger: targetProject });
     if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f ${pName} paused: daily budget exceeded`);
     return;
   }
@@ -619,7 +629,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
     deps.log('WARN', `Reactive: depth ${rs.depth} >= ${maxDepth}, pausing ${parentKey} (via member ${targetProject})`);
     setReactiveStatus(st, parentKey, 'paused', 'depth_exceeded');
     deps.saveState(st);
-    appendEvent(parentKey, { type: 'DEPTH_LIMIT', depth: rs.depth, action: 'paused' });
+    logEvent(parentKey, { type: 'DEPTH_LIMIT', depth: rs.depth, action: 'paused' });
     if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f ${pName} paused: depth limit ${maxDepth} reached`);
     return;
   }
@@ -629,7 +639,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
   rs.last_signal = 'MEMBER_COMPLETE';
   rs.updated_at = new Date().toISOString();
   deps.saveState(st);
-  appendEvent(parentKey, { type: 'MEMBER_COMPLETE', member: targetProject, summary_length: output.length });
+  logEvent(parentKey, { type: 'MEMBER_COMPLETE', member: targetProject, summary_length: output.length });
 
   // Run verifier if available
   const verifyResult = deps.runVerifier
@@ -638,7 +648,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
 
   // Log verifier result as event
   if (verifyResult) {
-    appendEvent(parentKey, {
+    logEvent(parentKey, {
       type: 'PHASE_GATE',
       phase: verifyResult.phase || '',
       passed: !!verifyResult.passed,
@@ -654,7 +664,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
     deps.log('WARN', `Verifier infra failure for ${parentKey}: ${verifyResult.details}`);
     setReactiveStatus(st, parentKey, 'paused', 'infra_failure');
     deps.saveState(st);
-    appendEvent(parentKey, { type: 'INFRA_PAUSE', details: verifyResult.details });
+    logEvent(parentKey, { type: 'INFRA_PAUSE', details: verifyResult.details });
     if (deps.notifyUser) deps.notifyUser(`\u26a0\ufe0f ${pName} paused: external API unavailable. Not an agent error.`);
     return; // Do NOT wake agent
   }
@@ -662,7 +672,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
   // Update progress.tsv projection
   const parentCwd = resolveProjectCwd(parentKey, config);
   if (parentCwd) {
-    try { projectProgressTsv(parentCwd, parentKey); } catch { /* non-critical */ }
+    try { projectProgressTsv(parentCwd, parentKey, deps.metameDir); } catch { /* non-critical */ }
   }
 
   const verifierBlock = verifyResult
@@ -691,5 +701,6 @@ module.exports = {
   handleReactiveOutput,
   parseReactiveSignals,
   reconcilePerpetualProjects,
-  __test: { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, replayEventLog, projectProgressTsv, generateStateFile, loadProjectManifest, resolveProjectScripts },
+  replayEventLog,
+  __test: { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, generateStateFile, loadProjectManifest, resolveProjectScripts },
 };
