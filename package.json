@@ -11,16 +11,19 @@
         "scripts/",
         "!scripts/*.test.js",
         "!scripts/test_daemon.js",
-        "!scripts/hooks/test-*.js"
+        "!scripts/hooks/test-*.js",
+        "!scripts/daemon.yaml",
+        "!scripts/daemon.yaml.bak"
     ],
     "scripts": {
         "test": "node --test scripts/*.test.js",
         "test:daemon-status": "node --test scripts/daemon-restart-status.test.js",
         "start": "node index.js",
         "push": "bash scripts/bin/push-clean.sh",
-        "sync:plugin": "node -e \"const fs=require('fs'),path=require('path');const ex=new Set(['sync-readme.js','test_daemon.js']);const files=fs.readdirSync('scripts').filter(f=>!ex.has(f)&&!/\\.test\\.js$/.test(f)&&/\\.(js|yaml|sh)$/.test(f));files.forEach(f=>fs.copyFileSync('scripts/'+f,'plugin/scripts/'+f));\" && mkdir -p plugin/scripts/hooks && cp scripts/hooks/*.js plugin/scripts/hooks/ && echo 'Plugin scripts synced'",
+        "sync:plugin": "node -e \"const fs=require('fs'),path=require('path');const ex=new Set(['sync-readme.js','test_daemon.js','daemon.yaml']);const files=fs.readdirSync('scripts').filter(f=>!ex.has(f)&&!/\\.test\\.js$/.test(f)&&/\\.(js|yaml|sh)$/.test(f));files.forEach(f=>fs.copyFileSync('scripts/'+f,'plugin/scripts/'+f));\" && mkdir -p plugin/scripts/hooks && cp scripts/hooks/*.js plugin/scripts/hooks/ && echo 'Plugin scripts synced'",
         "sync:readme": "node scripts/sync-readme.js",
         "restart:daemon": "node index.js stop 2>/dev/null; sleep 1; node index.js start 2>/dev/null || echo '鈿狅笍  Daemon not running or restart failed'",
+        "prepublishOnly": "node -e \"const fs=require('fs');['scripts/daemon.yaml','plugin/scripts/daemon.yaml'].forEach(f=>{if(fs.existsSync(f)){const c=fs.readFileSync(f,'utf8');if(/bot_token:\\s*[^n]|app_secret:\\s*[^n]|enabled:\\s*true/.test(c)){console.error('ABORT: Real credentials found in '+f);process.exit(1)}}})\"",
         "precommit": "npm run sync:plugin && npm run restart:daemon"
     },
     "keywords": [

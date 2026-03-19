@@ -286,12 +286,28 @@ function restoreConfig() {
   if (!fs.existsSync(bak)) return false;
   try {
     const bakCfg = yaml.load(fs.readFileSync(bak, 'utf8')) || {};
-    // Preserve security-critical fields from current config (chat IDs, agent map)
-    // so a /fix never loses manually-added channels
+    // Preserve ALL user-critical fields from current config so /fix never
+    // loses secrets, chat IDs, or agent mappings
     let curCfg = {};
     try { curCfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {}; } catch { }
+    // Secret fields that must NEVER be reverted by a restore
+    const SECRET_FIELDS = ['app_id', 'app_secret', 'bot_token', 'operator_ids'];
     for (const adapter of ['feishu', 'telegram']) {
       if (curCfg[adapter] && bakCfg[adapter]) {
+        // Preserve secrets: current config always wins
+        for (const field of SECRET_FIELDS) {
+          if (curCfg[adapter][field] != null) {
+            bakCfg[adapter][field] = curCfg[adapter][field];
+          }
+        }
+        // Preserve remote_dispatch secrets
+        if (curCfg[adapter].remote_dispatch && bakCfg[adapter].remote_dispatch) {
+          if (curCfg[adapter].remote_dispatch.secret) {
+            bakCfg[adapter].remote_dispatch.secret = curCfg[adapter].remote_dispatch.secret;
+          }
+        } else if (curCfg[adapter].remote_dispatch) {
+          bakCfg[adapter].remote_dispatch = curCfg[adapter].remote_dispatch;
+        }
         const curIds = curCfg[adapter].allowed_chat_ids || [];
         const bakIds = bakCfg[adapter].allowed_chat_ids || [];
         // Union of both lists
@@ -301,7 +317,14 @@ function restoreConfig() {
         bakCfg[adapter].chat_agent_map = Object.assign(
           {}, bakCfg[adapter].chat_agent_map || {}, curCfg[adapter].chat_agent_map || {}
         );
+      } else if (curCfg[adapter] && !bakCfg[adapter]) {
+        // Backup doesn't have this adapter at all — keep current entirely
+        bakCfg[adapter] = curCfg[adapter];
       }
+    }
+    // Preserve projects (current takes precedence for each project key)
+    if (curCfg.projects) {
+      bakCfg.projects = Object.assign({}, bakCfg.projects || {}, curCfg.projects);
     }
     writeConfigSafe(bakCfg);
     config = loadConfig(); // eslint-disable-line no-undef -- config is declared in main() closure

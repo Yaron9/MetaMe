@@ -652,12 +652,29 @@ function createBridgeStarter(deps) {
   async function startFeishuBridge(config, executeTaskByName) {
     if (!config.feishu || !config.feishu.enabled) return null;
     if (!config.feishu.app_id || !config.feishu.app_secret) {
-      log('WARN', 'Feishu enabled but app_id/app_secret missing');
+      log('ERROR', 'Feishu enabled but app_id/app_secret missing — bridge will NOT start. Check ~/.metame/daemon.yaml');
       return null;
     }
 
     const { createBot } = require('./feishu-adapter.js');
     const bot = createBot(config.feishu);
+
+    // Validate credentials before starting WebSocket — fail loud, not silent
+    try {
+      const validation = await bot.validateCredentials();
+      if (!validation.ok) {
+        log('ERROR', `Feishu credential check FAILED: ${validation.error}`);
+        if (validation.isAuthError) {
+          log('ERROR', 'Feishu bridge will NOT start — fix app_id/app_secret in ~/.metame/daemon.yaml and restart daemon');
+          return null;
+        }
+        log('WARN', 'Feishu credential check failed (possibly network issue) — attempting to start anyway');
+      } else {
+        log('INFO', 'Feishu credentials validated OK');
+      }
+    } catch (e) {
+      log('WARN', `Feishu credential pre-check error: ${e.message} — attempting to start anyway`);
+    }
 
     try {
       const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo, senderId) => {

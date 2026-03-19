@@ -8,7 +8,10 @@ ROADMAP_PHASE_B.md
 METAME_MAINTENANCE.md
 package-lock.json
 # User private config — only daemon-default.yaml (template) is tracked
+# daemon.yaml is the SOLE user config, lives ONLY in ~/.metame/, NEVER in repo/plugin/npm
 scripts/daemon.yaml
+plugin/scripts/daemon.yaml
+*.daemon.yaml.bak
 feishu-login-qr.png
 
 # Personal/private files — never upload
