@@ -2338,6 +2338,7 @@ const { handleOpsCommand } = createOpsCommandHandler({
   path,
   spawn,
   execSync,
+  execFileSync,
   log,
   loadConfig,
   loadState,
