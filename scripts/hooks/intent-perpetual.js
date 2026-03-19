@@ -65,9 +65,21 @@ function getReactiveProjects(config) {
     .map(([key, proj]) => ({ key, name: proj.name || key, icon: proj.icon || '' }));
 }
 
+// Negative patterns: these look like perpetual intent but are actually
+// one-shot skills (deep-research, casual mention, etc.)
+const NEGATIVE_PATTERNS = [
+  /深度研究|深度调研|deep.?research|调研.{0,5}(一下|下|看看)/i,  // deep-research skill
+  /研究.{0,5}(一下|下|看看|这个|那个|怎么)/i,                     // casual "look into this" (Chinese)
+  /\bresearch\b.{0,5}\b(this|it|that|the|how|what|why)\b/i,    // casual "research this/how" (English)
+  /搜索|搜一下|查一下|google/i,                                  // web search (not English "search" alone)
+];
+
 module.exports = function detectPerpetual(prompt, config) {
   const text = String(prompt || '').trim();
   if (!text) return null;
+
+  // Bail early if text matches a negative pattern (one-shot, not perpetual)
+  if (NEGATIVE_PATTERNS.some(re => re.test(text))) return null;
 
   const hints = [];
   for (const intent of PERPETUAL_INTENTS) {
