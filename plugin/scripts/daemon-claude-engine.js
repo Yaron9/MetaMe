@@ -2,7 +2,6 @@
 
 const { classifyChatUsage } = require('./usage-classifier');
 const { deriveProjectInfo } = require('./utils');
-const { normalizeCodexSandboxMode, normalizeCodexApprovalPolicy, mergeAgentMaps } = require('./daemon-utils');
 const {
   createEngineRuntimeFactory,
   normalizeEngineName,
@@ -108,11 +107,6 @@ function createClaudeEngine(deps) {
   // Card reuse for merge-pause: when a task is paused for message merging,
   // save the statusMsgId so the next askClaude reuses the same card.
   const _pausedCards = new Map(); // chatId -> { statusMsgId, cardHeader }
-
-  // Session-level concurrency guard: prevents two pipeline chains (different chatIds)
-  // from running askClaude concurrently on the same sessionChatId.
-  // Key = sessionChatId, Value = Promise (the running askClaude)
-  const _sessionLocks = new Map();
 
   let mentorEngine = null;
   try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
@@ -274,30 +268,38 @@ function createClaudeEngine(deps) {
     return resolveCodexPermissionProfile({ readOnly, daemonCfg, session });
   }
 
-  function getSessionChatId(chatId, boundProjectKey, cfg, state) {
+  function getSessionChatId(chatId, boundProjectKey) {
     const rawChatId = String(chatId || '');
     if (rawChatId.startsWith('_agent_') || rawChatId.startsWith('_scope_')) return rawChatId;
-    // Must check team_sticky — same logic as handleCommand in command-router.
-    // Without this, handleCommand creates session at _agent_<key> (sticky path)
-    // but askClaude resolves _bound_<project>, causing two sessions on the same worktree.
-    if (boundProjectKey) {
-      try {
-        const _cfg = cfg || loadConfig();
-        const proj = _cfg.projects ? _cfg.projects[boundProjectKey] : null;
-        if (proj && Array.isArray(proj.team)) {
-          const _st = state || loadState();
-          const stickyKey = _st.team_sticky ? _st.team_sticky[rawChatId] : null;
-          if (stickyKey && proj.team.find(m => m && m.key === stickyKey)) {
-            return `_agent_${stickyKey}`;
-          }
-        }
-      } catch (e) { log('WARN', `getSessionChatId sticky lookup failed: ${e.message}`); }
-      return `_bound_${boundProjectKey}`;
-    }
+    if (boundProjectKey) return `_bound_${boundProjectKey}`;
     return rawChatId || chatId;
   }
 
-  // normalizeCodexSandboxMode and normalizeCodexApprovalPolicy imported from daemon-utils
+  function normalizeCodexSandboxMode(value, fallback = null) {
+    const text = String(value || '').trim().toLowerCase();
+    if (!text) return fallback;
+    if (text === 'read-only' || text === 'readonly') return 'read-only';
+    if (text === 'workspace-write' || text === 'workspace') return 'workspace-write';
+    if (
+      text === 'danger-full-access'
+      || text === 'dangerous'
+      || text === 'full-access'
+      || text === 'full'
+      || text === 'bypass'
+      || text === 'writable'
+    ) return 'danger-full-access';
+    return fallback;
+  }
+
+  function normalizeCodexApprovalPolicy(value, fallback = null) {
+    const text = String(value || '').trim().toLowerCase();
+    if (!text) return fallback;
+    if (text === 'never' || text === 'no' || text === 'none') return 'never';
+    if (text === 'on-failure' || text === 'on_failure' || text === 'failure') return 'on-failure';
+    if (text === 'on-request' || text === 'on_request' || text === 'request') return 'on-request';
+    if (text === 'untrusted') return 'untrusted';
+    return fallback;
+  }
 
   function normalizeComparableCodexPermissionProfile(profile) {
     if (!profile) return null;
@@ -417,17 +419,13 @@ function createClaudeEngine(deps) {
     if (!session || !session.started || !session.id) return result;
     try {
       const sessionFile = findSessionFile && findSessionFile(session.id);
-      if (!sessionFile) {
-        log('WARN', `[INSPECT] session=${session.id.slice(0, 8)} JSONL not found — will resume blind (configured: ${configuredModel})`);
-        return result;
-      }
+      if (!sessionFile) return result;
       const lines = fs.readFileSync(sessionFile, 'utf8').split('\n').filter(Boolean);
       for (const line of lines.slice(0, 30)) {
         const entry = JSON.parse(line);
         const sessionModel = entry && entry.message && entry.message.model;
         if (!sessionModel || sessionModel === '<synthetic>') continue;
         if (!sessionModel.startsWith('claude-')) {
-          log('INFO', `[INSPECT] session=${session.id.slice(0, 8)} has non-claude model "${sessionModel}" — will NOT resume`);
           return {
             shouldResume: false,
             modelPin: null,
@@ -854,7 +852,7 @@ function createClaudeEngine(deps) {
         const now = Date.now();
         if (!force && now - _lastStreamFlush < STREAM_THROTTLE) return;
         _lastStreamFlush = now;
-        onStatus('__STREAM_TEXT__' + _streamText).catch(() => { /* fire-and-forget: stream status update */ });
+        onStatus('__STREAM_TEXT__' + _streamText).catch(() => { });
       }
       const writtenFiles = [];
       const toolUsageLog = [];
@@ -908,7 +906,7 @@ function createClaudeEngine(deps) {
           if (onStatus) {
             const milestoneMsg = parts.join(' | ');
             const msg = _streamText ? `__TOOL_OVERLAY__${_streamText}\n\n> ${milestoneMsg}` : milestoneMsg;
-            onStatus(msg).catch(() => { /* fire-and-forget: milestone status update */ });
+            onStatus(msg).catch(() => { });
           }
         }
       }, 30000);
@@ -937,15 +935,9 @@ function createClaudeEngine(deps) {
           for (const event of events) {
             if (!event || !event.type) continue;
             if (event.type === 'session' && event.sessionId) {
-              const prevObserved = observedSessionId;
               observedSessionId = String(event.sessionId);
-              if (prevObserved && prevObserved !== observedSessionId) {
-                log('WARN', `[SESSION-SWITCH] ${chatId} session changed: ${prevObserved.slice(0, 8)} -> ${observedSessionId.slice(0, 8)} (cwd: ${cwd})`);
-              } else if (!prevObserved) {
-                log('INFO', `[SESSION-OBSERVED] ${chatId} session=${observedSessionId.slice(0, 8)} (cwd: ${cwd})`);
-              }
               if (typeof onSession === 'function') {
-                Promise.resolve(onSession(observedSessionId)).catch(() => { /* fire-and-forget: session observer callback */ });
+                Promise.resolve(onSession(observedSessionId)).catch(() => { });
               }
               continue;
             }
@@ -1073,7 +1065,7 @@ function createClaudeEngine(deps) {
             if (onStatus) {
               // Overlay tool status on top of streamed text (if any); else show plain status
               const msg = _streamText ? `__TOOL_OVERLAY__${_streamText}\n\n> ${status}` : status;
-              onStatus(msg).catch(() => { /* fire-and-forget: tool status update */ });
+              onStatus(msg).catch(() => { });
             }
           }
         }
@@ -1112,13 +1104,7 @@ function createClaudeEngine(deps) {
           for (const event of events) {
             if (event.type === 'text' && event.text) finalResult = String(event.text);
             if (event.type === 'done') finalUsage = event.usage || null;
-            if (event.type === 'session' && event.sessionId) {
-              const _prev = observedSessionId;
-              observedSessionId = String(event.sessionId);
-              if (_prev && _prev !== observedSessionId) {
-                log('WARN', `[SESSION-SWITCH] ${chatId} session changed in buffer: ${_prev.slice(0, 8)} -> ${observedSessionId.slice(0, 8)}`);
-              }
-            }
+            if (event.type === 'session' && event.sessionId) observedSessionId = String(event.sessionId);
             if (event.type === 'error') classifiedError = event;
           }
         }
@@ -1158,7 +1144,6 @@ function createClaudeEngine(deps) {
           const engineErr = classifiedError && classifiedError.message
             ? classifiedError.message
             : (stderr || `Exit code ${code}`);
-          log('WARN', `[SPAWN-ERR] ${chatId} code=${code} warm=${!!warmChild} err=${engineErr.slice(0, 200)} stderr=${stderr.slice(0, 200)} args=${JSON.stringify(streamArgs.slice(0, 6))}`);
           finalize({ output: finalResult || null, error: engineErr, errorCode: classifiedError ? classifiedError.code : undefined, files: writtenFiles, toolUsageLog, usage: finalUsage, sessionId: observedSessionId || '' });
           return;
         }
@@ -1246,40 +1231,12 @@ function createClaudeEngine(deps) {
     return loadConfig();
   }
 
-  // Session-level concurrency guard wrapper.
-  // Pipeline serializes per-chatId, but different chatIds can map to the same session
-  // (e.g., bound chat oc_xxx → _bound_proj AND team dispatch _agent_jiayibing → _agent_jiayibing
-  //  share the same worktree). This wrapper ensures only one askClaude runs per sessionChatId.
   async function askClaude(bot, chatId, prompt, config, readOnly = false, senderId = null) {
-    const _chatStr = String(chatId || '');
-    const _agentMapForLock = mergeAgentMaps(config);
-    const _boundKeyForLock = _agentMapForLock[_chatStr] || projectKeyFromVirtualChatId(_chatStr);
-    const _sessionLockKey = getSessionChatId(chatId, _boundKeyForLock, config);
-
-    // Chain-based lock: atomic — no TOCTOU gap between check and set.
-    // Each new call chains onto the previous promise for the same sessionChatId.
-    const prior = _sessionLocks.get(_sessionLockKey) || Promise.resolve();
-    if (_sessionLocks.has(_sessionLockKey)) {
-      log('INFO', `[SESSION-LOCK] ${chatId} queued — session ${_sessionLockKey} busy`);
-    }
-    const p = prior
-      .catch(() => {})  // ignore prior failure
-      .then(() => _askClaudeCore(bot, chatId, prompt, config, readOnly, senderId));
-    _sessionLocks.set(_sessionLockKey, p);  // atomic: set before any await
-    try {
-      return await p;
-    } finally {
-      if (_sessionLocks.get(_sessionLockKey) === p) _sessionLocks.delete(_sessionLockKey);
-    }
-  }
-
-  async function _askClaudeCore(bot, chatId, prompt, config, readOnly = false, senderId = null) {
     const _t0 = Date.now();
     log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
-    // Compute once — reused by all agent-map lookups in this call
-    const _cachedAgentMap = mergeAgentMaps(config);
 
-    // Per-chatId serialization: pipeline. Per-session serialization: askClaude wrapper above.
+    // Serialization is now guaranteed by daemon-message-pipeline (per-chatId Promise chain).
+    // No race guard needed here — pipeline ensures only one askClaude runs per chatId.
     // Defense-in-depth: if a stale entry exists with a live child, kill it first.
     const _existing = activeProcesses.get(chatId);
     if (_existing && _existing.child && !_existing.aborted) {
@@ -1311,7 +1268,11 @@ function createClaudeEngine(deps) {
     let _lastStatusCardContent = null; // tracks last clean text written to card (for final-reply dedup)
     // Early detect bound project for branded ack card (team members / dispatch agents)
     const _ackChatIdStr = String(chatId);
-    const _ackAgentMap = _cachedAgentMap;
+    const _ackAgentMap = {
+      ...(config.telegram ? config.telegram.chat_agent_map || {} : {}),
+      ...(config.feishu ? config.feishu.chat_agent_map || {} : {}),
+      ...(config.imessage ? config.imessage.chat_agent_map || {} : {}),
+    };
     const _ackBoundKey = _ackAgentMap[_ackChatIdStr] || projectKeyFromVirtualChatId(_ackChatIdStr);
     const _ackBoundProj = _ackBoundKey && config.projects ? config.projects[_ackBoundKey] : null;
     // _ackCardHeader: non-null for agents with icon/name (team members, dispatch); passed to editMessage to preserve header on streaming edits
@@ -1326,7 +1287,7 @@ function createClaudeEngine(deps) {
       const cardAge = _pausedCard.savedAt ? Date.now() - _pausedCard.savedAt : 0;
       if (cardAge > 30000) {
         log('INFO', `[askClaude] Discarding stale paused card for ${chatId} (${Math.round(cardAge / 1000)}s old)`);
-        if (_pausedCard.statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, _pausedCard.statusMsgId).catch(() => { /* cleanup: discard stale paused card */ });
+        if (_pausedCard.statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, _pausedCard.statusMsgId).catch(() => {});
       } else {
         statusMsgId = _pausedCard.statusMsgId;
         if (_pausedCard.cardHeader) _ackCardHeader = _pausedCard.cardHeader;
@@ -1336,7 +1297,7 @@ function createClaudeEngine(deps) {
     if (_pausedCard && statusMsgId) {
       // Update card to show "merging" state
       if (statusMsgId && bot.editMessage) {
-        bot.editMessage(chatId, statusMsgId, '🔄 合并处理中…', _ackCardHeader).catch(e => log('WARN', 'Failed to update merge status card: ' + e.message));
+        bot.editMessage(chatId, statusMsgId, '🔄 合并处理中…', _ackCardHeader).catch(() => {});
       }
     } else if (!bot.suppressAck) {
       // Fire-and-forget: don't await Telegram RTT before spawning the engine process.
@@ -1361,7 +1322,11 @@ function createClaudeEngine(deps) {
 
       // Agent nickname routing: "贾维斯" / "小美，帮我..." → switch project session
       // Strict chats (chat_agent_map bound groups) must NOT switch agents via nickname
-      const _strictAgentMap = _cachedAgentMap;
+      const _strictAgentMap = {
+        ...(config.telegram ? config.telegram.chat_agent_map : {}),
+        ...(config.feishu ? config.feishu.chat_agent_map : {}),
+        ...(config.imessage ? config.imessage.chat_agent_map : {}),
+      };
       const _isStrictChatSession = !!(_strictAgentMap[String(chatId)] || projectKeyFromVirtualChatId(String(chatId)));
       const agentMatch = _isStrictChatSession ? null : routeAgent(prompt, config);
       if (agentMatch) {
@@ -1386,13 +1351,17 @@ function createClaudeEngine(deps) {
       // BUT: skip skill routing if agent addressed by nickname OR chat already has an active session
       // (active conversation should never be hijacked by keyword-based skill matching)
       const chatIdStr = String(chatId);
-      const chatAgentMap = _cachedAgentMap;
+      const chatAgentMap = {
+        ...(config.telegram ? config.telegram.chat_agent_map : {}),
+        ...(config.feishu ? config.feishu.chat_agent_map : {}),
+        ...(config.imessage ? config.imessage.chat_agent_map : {}),
+      };
       const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
       const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
       const daemonCfg = (config && config.daemon) || {};
       // Keep real group chats on their own session key.
       // Only true virtual agents (_agent_*) should use the virtual namespace.
-      const sessionChatId = getSessionChatId(chatId, boundProjectKey, config);
+      const sessionChatId = getSessionChatId(chatId, boundProjectKey);
       const sessionRaw = getSession(sessionChatId);
       const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
       const boundEngineName = (boundProject && boundProject.engine) ? normalizeEngineName(boundProject.engine) : getDefaultEngine();
@@ -1421,27 +1390,16 @@ function createClaudeEngine(deps) {
         : null;
 
       if (!sessionRaw) {
-        // Virgin state: this chatId has never had a session in daemon_state.json.
-        // This is the ONLY path where auto-createSession is allowed — new user first message.
-        // All other "missing session" cases (validation failure, stale state) use __continue__ fallback
-        // at lines below (session.started && session.id check).
-        log('INFO', `[SESSION-NEW-USER] No session record for ${sessionChatId}; auto-creating first session (cwd: ${boundCwd || HOME})`);
-        const autoSession = createSession(
+        // No saved state for this chatId: start a fresh session.
+        // Note: daemon_state.json persists across restarts, so this only happens on truly first use
+        // or after an explicit /new command.
+        createSession(
           sessionChatId,
-          boundCwd || HOME,
+          boundCwd || undefined,
           boundProject && boundProject.name ? boundProject.name : '',
-          engineName
+          boundEngineName,
+          boundEngineName === 'codex' ? requestedCodexPermissionProfile : undefined
         );
-        const _initState = loadState();
-        if (!_initState.sessions[sessionChatId]) _initState.sessions[sessionChatId] = {};
-        _initState.sessions[sessionChatId].cwd = autoSession.cwd;
-        if (!_initState.sessions[sessionChatId].engines) _initState.sessions[sessionChatId].engines = {};
-        _initState.sessions[sessionChatId].engines[boundEngineName] = {
-          ...(_initState.sessions[sessionChatId].engines[boundEngineName] || {}),
-          id: autoSession.id,
-          started: false,
-        };
-        saveState(_initState);
       }
 
       // Resolve flat view for current engine (id + started are engine-specific; cwd is shared)
@@ -1452,14 +1410,7 @@ function createClaudeEngine(deps) {
       // Warm pool: check if a persistent process is available for this session (Claude only).
       // Declared early so downstream logic can skip expensive operations when reusing warm process.
       const _warmSessionKey = sessionChatId;
-      let _warmEntry = (warmPool && runtime.name === 'claude') ? warmPool.acquireWarm(_warmSessionKey) : null;
-      // Guard: if user switched session (e.g. /resume), the warm pool process still holds
-      // the old session. Discard it to avoid silent session reversion.
-      if (_warmEntry && session.id && session.id !== '__continue__' && _warmEntry.sessionId && _warmEntry.sessionId !== session.id) {
-        log('WARN', `[WarmPool] Session mismatch: pool=${_warmEntry.sessionId.slice(0, 8)} state=${session.id.slice(0, 8)} — discarding warm process`);
-        try { process.kill(-_warmEntry.child.pid, 'SIGTERM'); } catch { try { _warmEntry.child.kill('SIGTERM'); } catch { /* */ } }
-        _warmEntry = null;
-      }
+      const _warmEntry = (warmPool && runtime.name === 'claude') ? warmPool.acquireWarm(_warmSessionKey) : null;
 
       // Pre-spawn session validation: unified for all engines.
       // Claude checks JSONL file existence; Codex checks SQLite. Same interface, different backend.
@@ -1468,13 +1419,17 @@ function createClaudeEngine(deps) {
       if (session.started && session.id && session.id !== '__continue__' && session.cwd) {
         const valid = validateEngineSession(engineName, session.id, session.cwd);
         if (!valid) {
-          // Session file missing/invalid — try --continue to recover instead of creating new session.
-          // --continue will pick up the most recent session in the same cwd automatically.
-          log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${sessionChatId}; falling back to --continue (cwd: ${session.cwd})`);
-          session = { ...session, id: '__continue__', started: true };
+          log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${sessionChatId}; starting fresh ${engineName} session`);
           if (!isVirtualAgent) {
-            await bot.sendMessage(chatId, '⚠️ 上次 session 文件丢失，正在尝试恢复…').catch(e => log('WARN', 'Failed to notify user (session recovery): ' + e.message));
+            await bot.sendMessage(chatId, '⚠️ 上次 session 已失效，已自动开启新 session。').catch(() => { });
           }
+          session = createSession(
+            sessionChatId,
+            session.cwd,
+            boundProject && boundProject.name ? boundProject.name : '',
+            engineName,
+            engineName === 'codex' ? requestedCodexPermissionProfile : undefined
+          );
         }
       }
 
@@ -1518,7 +1473,7 @@ function createClaudeEngine(deps) {
           if (breaker && breaker.tripped) {
             mentorSuppressed = true;
             if (breaker.reason !== 'cooldown_active' && breaker.response) {
-              await bot.sendMessage(chatId, breaker.response).catch(e => log('WARN', 'Failed to send mentor breaker response: ' + e.message));
+              await bot.sendMessage(chatId, breaker.response).catch(() => { });
             }
           }
         } catch (e) {
@@ -1536,8 +1491,8 @@ function createClaudeEngine(deps) {
       if (runtime.name === 'claude' && session.started && session.id && !_warmEntry) {
         const resumeInspection = inspectClaudeResumeSession(session, model);
         if (resumeInspection.shouldResume === false) {
-          log('INFO', `[ModelPin] session ${session.id.slice(0, 8)} flagged as ${resumeInspection.reason}; falling back to --continue`);
-          session = { ...session, id: '__continue__', started: true };
+          log('INFO', `[ModelPin] session ${session.id.slice(0, 8)} flagged as ${resumeInspection.reason}; starting fresh Claude session`);
+          session = createSession(sessionChatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', runtime.name);
         } else if (resumeInspection.modelPin) {
           if (resumeInspection.modelPin !== model) {
             log('INFO', `[ModelPin] resuming ${session.id.slice(0, 8)} with original model ${resumeInspection.modelPin} (configured: ${model})`);
@@ -1581,7 +1536,12 @@ function createClaudeEngine(deps) {
 
       // projectKey must be declared outside the try block so the daemonHint template below can reference it.
       const _cid0 = String(chatId);
-      const projectKey = _cachedAgentMap[_cid0] || projectKeyFromVirtualChatId(_cid0);
+      const _agentMap0 = {
+        ...(config.telegram ? config.telegram.chat_agent_map : {}),
+        ...(config.feishu ? config.feishu.chat_agent_map : {}),
+        ...(config.imessage ? config.imessage.chat_agent_map : {}),
+      };
+      const projectKey = _agentMap0[_cid0] || projectKeyFromVirtualChatId(_cid0);
       try {
         const memory = require('./memory');
 
@@ -1858,7 +1818,7 @@ ${mentorRadarHint}
           // Do NOT pass prompt — conversation content must never enter git history
           const checkpointResult = (gitCheckpointAsync || gitCheckpoint)(session.cwd);
           if (checkpointResult && typeof checkpointResult.catch === 'function') {
-            checkpointResult.catch(() => { /* fire-and-forget: git checkpoint */ });
+            checkpointResult.catch(() => { });
           }
         } catch { /* non-critical */ }
       }
@@ -1962,9 +1922,9 @@ ${mentorRadarHint}
         if (_preReason === 'merge-pause' && statusMsgId) {
           // Save card for reuse by the merged flush
           _pausedCards.set(chatId, { statusMsgId, cardHeader: _ackCardHeader, savedAt: Date.now() });
-          if (bot.editMessage) bot.editMessage(chatId, statusMsgId, '⏸ 合并中…', _ackCardHeader).catch(e => log('WARN', 'Failed to update merge-pause card: ' + e.message));
+          if (bot.editMessage) bot.editMessage(chatId, statusMsgId, '⏸ 合并中…', _ackCardHeader).catch(() => {});
         } else if (statusMsgId && bot.deleteMessage) {
-          bot.deleteMessage(chatId, statusMsgId).catch(() => { /* cleanup: remove status card on pre-spawn abort */ });
+          bot.deleteMessage(chatId, statusMsgId).catch(() => {});
         }
         log('INFO', `[askClaude] Pre-spawn abort for ${chatId}: ${_preReason || 'user cancelled'}`);
         return { ok: false, error: _preReason === 'merge-pause' ? 'Paused for merge' : 'Stopped by user' };
@@ -2091,7 +2051,7 @@ ${mentorRadarHint}
             'WARN',
             `Codex resume failed for ${chatId}, retrying once with ${resumeFailure.kind === 'interrupted' ? 'native resume recovery' : 'fresh exec'}: ${String(error).slice(0, 120)}`
           );
-          await bot.sendMessage(chatId, resumeFailure.userMessage).catch(e => log('WARN', 'Failed to notify user (resume failure): ' + e.message));
+          await bot.sendMessage(chatId, resumeFailure.userMessage).catch(() => { });
           if (resumeFailure.kind !== 'interrupted') {
             session = createSession(
               sessionChatId,
@@ -2137,9 +2097,9 @@ ${mentorRadarHint}
         // Clean up pending sentinel if spawn never completed
         const _ps2 = activeProcesses.get(chatId);
         if (_ps2 && _ps2.child === null) { activeProcesses.delete(chatId); saveActivePids(); }
-        if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => { /* cleanup: remove status card on spawn crash */ });
+        if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => { });
         log('ERROR', `spawnClaudeStreaming crashed for ${chatId}: ${spawnErr.message}`);
-        await bot.sendMessage(chatId, `❌ 内部错误: ${spawnErr.message}`).catch(e => log('WARN', 'Failed to notify user (spawn error): ' + e.message));
+        await bot.sendMessage(chatId, `❌ 内部错误: ${spawnErr.message}`).catch(() => { });
         return { ok: false, error: spawnErr.message };
       }
       clearInterval(typingTimer);
@@ -2300,7 +2260,7 @@ ${mentorRadarHint}
             }
           } else if (_statusMsgIdForReply && bot.deleteMessage) {
             // No editMessage — delete the status card
-            await bot.deleteMessage(chatId, _statusMsgIdForReply).catch(() => { /* cleanup: remove status card after reply */ });
+            await bot.deleteMessage(chatId, _statusMsgIdForReply).catch(() => { });
           }
 
           if (!replyMsg) {
@@ -2357,7 +2317,7 @@ ${mentorRadarHint}
           const _agentLabel = (boundProject && boundProject.name)
             ? `[${boundProject.name}] `
             : (projectKey ? `[${projectKey}] ` : '');
-          autoNameSession(chatId, session.id, prompt, session.cwd, _agentLabel).catch(e => log('WARN', 'autoNameSession failed: ' + e.message));
+          autoNameSession(chatId, session.id, prompt, session.cwd, _agentLabel).catch(() => { });
         }
 
         // Auto-refresh memory-snapshot.md for this agent on first session message (fire-and-forget)
@@ -2384,87 +2344,62 @@ ${mentorRadarHint}
         const userErrMsg = (errorCode === 'AUTH_REQUIRED' || errorCode === 'RATE_LIMIT')
           ? errMsg
           : `Error: ${errMsg.slice(0, 200)}`;
-        log('ERROR', `ask${runtime.name === 'codex' ? 'Codex' : 'Claude'} failed for ${chatId}: ${errMsg.slice(0, 300)} (${errorCode || 'NO_CODE'}) model=${model} session=${session && session.id ? session.id.slice(0, 8) : 'none'}`);
+        log('ERROR', `ask${runtime.name === 'codex' ? 'Codex' : 'Claude'} failed for ${chatId}: ${errMsg.slice(0, 300)} (${errorCode || 'NO_CODE'})`);
 
         // Merge-pause: save card for reuse, don't show error to user
         if (errorCode === 'INTERRUPTED_MERGE_PAUSE') {
           if (statusMsgId) {
             _pausedCards.set(chatId, { statusMsgId, cardHeader: _ackCardHeader, savedAt: Date.now() });
             // Update card to show paused state
-            if (bot.editMessage) bot.editMessage(chatId, statusMsgId, '⏸ 合并中…', _ackCardHeader).catch(e => log('WARN', 'Failed to update merge-pause card (post-error): ' + e.message));
+            if (bot.editMessage) bot.editMessage(chatId, statusMsgId, '⏸ 合并中…', _ackCardHeader).catch(() => {});
             log('INFO', `[askClaude] Saved paused card ${statusMsgId} for ${chatId}`);
           }
           return { ok: false, error: errMsg, errorCode };
         }
 
-        // If session resume fails — try harder before giving up.
-        // Strategy: --resume → --continue (same cwd) → new session (last resort + notify user)
+        // If session not found / locked / thinking signature invalid — create new and retry once (Claude path)
         const _isThinkingSignatureError = isClaudeThinkingSignatureError(errMsg);
         const _isSessionResumeFail = errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use') || _isThinkingSignatureError;
         if (runtime.name === 'claude' && _isSessionResumeFail) {
           const _reason = errMsg.includes('already in use') ? 'locked' : _isThinkingSignatureError ? 'thinking-signature-invalid' : 'not found';
-          log('WARN', `[SESSION-RESUME-FAIL] ${chatId} session=${session.id.slice(0, 8)} reason=${_reason} model=${model} cwd=${session.cwd} err=${errMsg.slice(0, 150)}`);
+          log('WARN', `Session ${session.id} unusable (${_reason}), creating new`);
+          session = createSession(sessionChatId, session.cwd, '', runtime.name);
 
-          // ── Retry 1: --continue (picks up most recent session in same cwd automatically) ──
-          // This preserves conversation context when the specific session ID can't be found
-          // but the session JSONL still exists in the project directory.
-          if (_reason !== 'locked') {
-            log('INFO', `[SESSION-RECOVER] ${chatId} trying --continue fallback (cwd: ${session.cwd})`);
-            const continueSession = { ...session, id: '__continue__', started: true };
-            const continueArgs = runtime.buildArgs({
-              model, readOnly, daemonCfg,
-              session: continueSession,
-              cwd: session.cwd,
-            });
-            const cont = await spawnClaudeStreaming(
-              continueArgs, fullPrompt, session.cwd, onStatus, 600000,
-              chatId, boundProjectKey || '', normalizeSenderId(senderId), runtime, onSession,
-            );
-            if (cont.sessionId) {
-              // --continue found a session — adopt it as our active session
-              log('INFO', `[SESSION-RECOVER] ${chatId} --continue succeeded, adopted session ${cont.sessionId.slice(0, 8)}`);
-              await onSession(cont.sessionId);
-            }
-            if (cont.output || cont.sessionId) {
-              // Session recovered — even if output is empty (tool-only response), the session is alive
-              markSessionStarted(sessionChatId, runtime.name);
-              if (cont.output) {
-                const { markedFiles: contMarked, cleanOutput: contClean } = parseFileMarkers(cont.output);
-                await bot.sendMarkdown(chatId, contClean);
-                await sendFileButtons(bot, chatId, mergeFileCollections(contMarked, cont.files));
-              }
-              return { ok: true };
-            }
-            log('WARN', `[SESSION-RECOVER] ${chatId} --continue also failed: ${(cont.error || '').slice(0, 150)}`);
+          const retryArgs = runtime.buildArgs({
+            model,
+            readOnly,
+            daemonCfg,
+            session,
+            cwd: session.cwd,
+          });
+
+          const retry = await spawnClaudeStreaming(
+            retryArgs,
+            fullPrompt,
+            session.cwd,
+            onStatus,
+            600000,
+            chatId,
+            boundProjectKey || '',
+            normalizeSenderId(senderId),
+            runtime,
+            onSession,
+          );
+          if (retry.sessionId) await onSession(retry.sessionId);
+          if (retry.output) {
+            markSessionStarted(sessionChatId, runtime.name);
+            const { markedFiles: retryMarked, cleanOutput: retryClean } = parseFileMarkers(retry.output);
+            await bot.sendMarkdown(chatId, retryClean);
+            await sendFileButtons(bot, chatId, mergeFileCollections(retryMarked, retry.files));
+            return { ok: true };
+          } else {
+            log('ERROR', `askClaude retry failed: ${(retry.error || '').slice(0, 200)}`);
+            const retryUserMsg = _isThinkingSignatureError
+              ? formatClaudeResumeFallbackUserMessage(retry.error || errMsg)
+              : userErrMsg;
+            try { await bot.sendMessage(chatId, retryUserMsg); } catch { /* */ }
+            return { ok: false, error: retry.error || errMsg };
           }
-
-          // ── Retry 2 (locked): wait briefly and retry same --resume ──
-          if (_reason === 'locked') {
-            log('INFO', `[SESSION-RECOVER] ${chatId} session locked, waiting 3s before retry`);
-            await new Promise(r => setTimeout(r, 3000));
-            const lockRetry = await spawnClaudeStreaming(
-              args, fullPrompt, session.cwd, onStatus, 600000,
-              chatId, boundProjectKey || '', normalizeSenderId(senderId), runtime, onSession,
-            );
-            if (lockRetry.sessionId) await onSession(lockRetry.sessionId);
-            if (lockRetry.output || lockRetry.sessionId) {
-              markSessionStarted(sessionChatId, runtime.name);
-              if (lockRetry.output) {
-                const { markedFiles: lrMarked, cleanOutput: lrClean } = parseFileMarkers(lockRetry.output);
-                await bot.sendMarkdown(chatId, lrClean);
-                await sendFileButtons(bot, chatId, mergeFileCollections(lrMarked, lockRetry.files));
-              }
-              return { ok: true };
-            }
-            log('WARN', `[SESSION-RECOVER] ${chatId} locked retry also failed: ${(lockRetry.error || '').slice(0, 150)}`);
-          }
-
-          // ── Last resort: notify user, do NOT silently create new session ──
-          log('ERROR', `[SESSION-RECOVER-EXHAUSTED] ${chatId} all recovery failed — refusing to create new session`);
-          try {
-            await bot.sendMessage(chatId, '❌ 会话恢复失败（--resume 和 --continue 均失败）。\n请手动 /new 新建，或 /resume 选择其他会话。');
-          } catch { /* */ }
-          return { ok: false, error: errMsg };
         } else {
           // Auto-fallback: if custom provider/model fails, revert to anthropic + opus (Claude path only)
           if (runtime.name === 'claude') {
@@ -2479,11 +2414,9 @@ ${mentorRadarHint}
                 try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
               }
             } else {
-              log('WARN', `[USER-ERR] ${chatId} sending error to user: model=${model} err=${errMsg.slice(0, 150)} code=${errorCode || 'none'}`);
               try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
             }
           } else {
-            log('WARN', `[USER-ERR] ${chatId} sending error to user: model=${model} err=${errMsg.slice(0, 150)} code=${errorCode || 'none'}`);
             try { await bot.sendMessage(chatId, userErrMsg); } catch { /* */ }
           }
           return { ok: false, error: errMsg, errorCode };
@@ -2495,7 +2428,7 @@ ${mentorRadarHint}
       // Clean up pending sentinel if spawn never completed
       const _ps3 = activeProcesses.get(chatId);
       if (_ps3 && _ps3.child === null) { activeProcesses.delete(chatId); saveActivePids(); }
-      if (statusMsgId && bot.deleteMessage) await bot.deleteMessage(chatId, statusMsgId).catch(() => { /* cleanup: remove status card on fatal error */ });
+      if (statusMsgId && bot.deleteMessage) await bot.deleteMessage(chatId, statusMsgId).catch(() => { });
       log('FATAL', `[askClaude] Uncaught error for ${chatId}: ${fatalErr.message}\n${fatalErr.stack}`);
       try { await bot.sendMessage(chatId, `❌ 内部错误: ${fatalErr.message}`); } catch { /* */ }
       return { ok: false, error: fatalErr.message };

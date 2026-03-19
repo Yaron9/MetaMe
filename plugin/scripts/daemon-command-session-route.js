@@ -1,7 +1,5 @@
 'use strict';
 
-const { normalizeEngineName: _normalizeEngine } = require('./daemon-utils');
-
 function createCommandSessionResolver(deps) {
   const {
     path,
@@ -13,7 +11,7 @@ function createCommandSessionResolver(deps) {
   } = deps;
 
   function normalizeEngineName(name) {
-    return _normalizeEngine(name, getDefaultEngine);
+    return String(name || '').trim().toLowerCase() === 'codex' ? 'codex' : getDefaultEngine();
   }
 
   function inferStoredEngine(rawSession) {

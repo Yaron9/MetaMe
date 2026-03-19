@@ -45,7 +45,6 @@ function createMessagePipeline(deps) {
   const resumed = new Set();
 
   const DEBOUNCE_MS = 5000;
-  const MAX_COLLECT_LIFETIME_MS = 5 * 60 * 1000; // 5 minutes — flush if collecting state lives too long
 
   // Messages that must bypass everything and execute immediately
   const STOP_RE = /^\/stop(\s|$)/i;
@@ -139,11 +138,11 @@ function createMessagePipeline(deps) {
     _pauseActive(chatId);
     const originalText = activeTexts.get(chatId);
     const msgs = originalText ? [originalText, text] : [text];
-    const c = { messages: msgs, ctx, timer: null, chainDead: false, createdAt: Date.now() };
+    const c = { messages: msgs, ctx, timer: null, chainDead: false };
     collecting.set(chatId, c);
     // NO timer here — wait for chain to die
     log('INFO', `Pipeline: paused & collecting for ${chatId} (original: "${(originalText || '').slice(0, 30)}")`);
-    ctx.bot.sendMessage(chatId, '⏸ 已暂停，继续连发，我会合并后继续').catch(e => log('WARN', 'Failed to send pause notice: ' + e.message));
+    ctx.bot.sendMessage(chatId, '⏸ 已暂停，继续连发，我会合并后继续').catch(() => {});
     return Promise.resolve();
   }
 
@@ -152,7 +151,7 @@ function createMessagePipeline(deps) {
    */
   function _addToCollecting(chatId, text, ctx) {
     if (!collecting.has(chatId)) {
-      collecting.set(chatId, { messages: [text], ctx, timer: null, chainDead: false, createdAt: Date.now() });
+      collecting.set(chatId, { messages: [text], ctx, timer: null, chainDead: false });
     } else {
       collecting.get(chatId).messages.push(text);
     }
@@ -163,12 +162,6 @@ function createMessagePipeline(deps) {
    */
   function _resetDebounce(chatId, c) {
     if (c.timer) clearTimeout(c.timer);
-    // If collecting state has been alive longer than MAX_COLLECT_LIFETIME, flush immediately
-    if (c.createdAt && (Date.now() - c.createdAt) >= MAX_COLLECT_LIFETIME_MS) {
-      log('INFO', `Pipeline: max collect lifetime reached for ${chatId}, flushing immediately`);
-      c.timer = setTimeout(() => _flushCollected(chatId), 0);
-      return;
-    }
     c.timer = setTimeout(() => _flushCollected(chatId), DEBOUNCE_MS);
   }
 

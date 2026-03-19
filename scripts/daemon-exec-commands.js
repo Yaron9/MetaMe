@@ -53,8 +53,9 @@ function createExecCommandHandler(deps) {
   async function runCommand(bin, args, options = {}) {
     return new Promise((resolve) => {
       let settled = false;
-      let child;
+      const child = spawn(bin, args, options);
       let stdout = '';
+      let stderr = '';
 
       const finish = (code, errorText = '') => {
         if (settled) return;
@@ -67,14 +68,6 @@ function createExecCommandHandler(deps) {
           output: merged.trim(),
         });
       };
-
-      let stderr = '';
-      try {
-        child = spawn(bin, args, options);
-      } catch (err) {
-        finish(1, err.message);
-        return;
-      }
 
       child.stdout.on('data', d => { stdout += d; });
       child.stderr.on('data', d => { stderr += d; });

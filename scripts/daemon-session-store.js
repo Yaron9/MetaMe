@@ -1,7 +1,32 @@
 'use strict';
 
 const crypto = require('crypto');
-const { normalizeEngineName, normalizeCodexSandboxMode, normalizeCodexApprovalPolicy } = require('./daemon-utils');
+
+function normalizeCodexSandboxMode(value, fallback = null) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return fallback;
+  if (text === 'read-only' || text === 'readonly') return 'read-only';
+  if (text === 'workspace-write' || text === 'workspace') return 'workspace-write';
+  if (
+    text === 'danger-full-access'
+    || text === 'dangerous'
+    || text === 'full-access'
+    || text === 'full'
+    || text === 'bypass'
+    || text === 'writable'
+  ) return 'danger-full-access';
+  return fallback;
+}
+
+function normalizeCodexApprovalPolicy(value, fallback = null) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return fallback;
+  if (text === 'never' || text === 'no' || text === 'none') return 'never';
+  if (text === 'on-failure' || text === 'on_failure' || text === 'failure') return 'on-failure';
+  if (text === 'on-request' || text === 'on_request' || text === 'request') return 'on-request';
+  if (text === 'untrusted') return 'untrusted';
+  return fallback;
+}
 
 function normalizeCodexPermissionMeta(meta = {}) {
   const sandboxMode = normalizeCodexSandboxMode(
@@ -20,7 +45,9 @@ function normalizeCodexPermissionMeta(meta = {}) {
   };
 }
 
-// normalizeEngineName now imported from daemon-utils
+function normalizeEngineName(name) {
+  return String(name || 'claude').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+}
 
 function stripCodexInjectedHints(text) {
   return String(text || '')
@@ -62,78 +89,11 @@ function createSessionStore(deps) {
 
   const CLAUDE_PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
   const CODEX_DB = path.join(HOME, '.codex', 'state_5.sqlite');
-
-  // Decode Claude CLI project directory name back to filesystem path.
-  // Claude CLI encodes: / → -, _ → -, leading dot → - (so -- means /.).
-  // Hyphens in original names create ambiguity (e.g. "metame-desktop" ← "metame/desktop" or "metame-desktop").
-  // Strategy: first try naive decode; if not found, resolve segment by segment via filesystem,
-  // also trying underscore variants for each segment (since _ is encoded as -).
-  function decodeProjectDirName(dirName) {
-    if (!dirName || !dirName.startsWith('-')) return null;
-    // Step 1: naive decode
-    let decoded = dirName.replace(/-/g, '/');
-    decoded = decoded.replace(/\/\//g, '/.');
-    if (fs.existsSync(decoded)) return decoded;
-    // Step 2: greedy segment-by-segment resolution
-    const parts = dirName.slice(1).split('-'); // remove leading '-', split rest
-    if (parts.length === 0) return null;
-    let current = '';
-    let i = 0;
-    while (i < parts.length) {
-      // Handle leading-dot components: empty part means the next part starts with '.'
-      if (parts[i] === '' && i + 1 < parts.length) {
-        const dotSegment = '.' + parts[i + 1];
-        const candidate = current + '/' + dotSegment;
-        if (fs.existsSync(candidate)) {
-          current = candidate;
-          i += 2;
-          continue;
-        }
-      }
-      // Try longest possible segment first (greedy: prefer "metame-desktop" over "metame/desktop")
-      // For each candidate, also try replacing internal hyphens with underscores
-      let found = false;
-      for (let end = parts.length; end > i; end--) {
-        const segment = parts.slice(i, end).join('-');
-        const base = current || '';
-        const candidate = base + '/' + segment;
-        if (fs.existsSync(candidate)) {
-          current = candidate;
-          i = end;
-          found = true;
-          break;
-        }
-        // Try underscore variant: Claude CLI also encodes _ as -
-        if (end - i > 1) {
-          const underscored = parts.slice(i, end).join('_');
-          const underCandidate = base + '/' + underscored;
-          if (fs.existsSync(underCandidate)) {
-            current = underCandidate;
-            i = end;
-            found = true;
-            break;
-          }
-        }
-      }
-      if (!found) {
-        const segment = parts[i];
-        current = current ? current + '/' + segment : '/' + segment;
-        i++;
-      }
-    }
-    return current || null;
-  }
   const _sessionFileCache = new Map(); // sessionId -> { path, ts }
   const _codexRolloutCache = new Map(); // sessionId -> { path, ts }
   let _sessionCache = null;
   let _sessionCacheTime = 0;
   const SESSION_CACHE_TTL = 30000; // 30s — scan is expensive, 10s was too frequent
-
-  function logSessionScanError(scope, error, extra = '') {
-    const detail = error && error.message ? error.message : String(error || 'unknown error');
-    const suffix = extra ? ` ${extra}` : '';
-    log('WARN', `[session-store] ${scope} failed pid=${process.pid}${suffix}: ${detail}`);
-  }
 
   function findSessionFile(sessionId) {
     if (!sessionId || !fs.existsSync(CLAUDE_PROJECTS_DIR)) return null;
@@ -276,131 +236,118 @@ function createSessionStore(deps) {
   }
 
   function scanClaudeSessions() {
-    if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return [];
-    let projects = [];
     try {
-      projects = fs.readdirSync(CLAUDE_PROJECTS_DIR);
-    } catch (e) {
-      logSessionScanError('scanClaudeSessions readdir', e, `dir=${CLAUDE_PROJECTS_DIR}`);
+      if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return [];
+      const projects = fs.readdirSync(CLAUDE_PROJECTS_DIR);
+      const sessionMap = new Map();
+      const projPathCache = new Map();
+
+      for (const proj of projects) {
+        const projDir = path.join(CLAUDE_PROJECTS_DIR, proj);
+        const indexFile = path.join(projDir, 'sessions-index.json');
+        try {
+          if (fs.existsSync(indexFile)) {
+            const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+            if (data.entries && data.entries.length > 0) {
+              const realPath = data.entries[0].projectPath;
+              if (realPath) projPathCache.set(proj, realPath);
+              for (const entry of data.entries) {
+                if (entry.messageCount >= 1) sessionMap.set(entry.sessionId, entry);
+              }
+            }
+          }
+          // Fallback: decode projectPath from directory name (e.g. -Users-yaron-AGI-AChat → /Users/yaron/AGI/AChat)
+          if (!projPathCache.has(proj) && proj.startsWith('-')) {
+            const decoded = proj.replace(/-/g, '/');
+            if (fs.existsSync(decoded)) projPathCache.set(proj, decoded);
+          }
+        } catch { /* skip */ }
+
+        try {
+          const files = fs.readdirSync(projDir).filter(f => f.endsWith('.jsonl'));
+          for (const file of files) {
+            const sessionId = file.replace('.jsonl', '');
+            const filePath = path.join(projDir, file);
+            const stat = fs.statSync(filePath);
+            const fileMtime = stat.mtimeMs;
+            const existing = sessionMap.get(sessionId);
+            if (!existing || fileMtime > (existing.fileMtime || 0)) {
+              const projectPath = projPathCache.get(proj);
+              if (!projectPath) continue;
+              sessionMap.set(sessionId, {
+                sessionId, projectPath, fileMtime,
+                modified: new Date(fileMtime).toISOString(),
+                messageCount: 1,
+                ...(existing || {}),
+                fileMtime,
+              });
+            }
+          }
+        } catch { /* skip */ }
+      }
+
+      const all = Array.from(sessionMap.values()).map((entry) => ({ ...entry, engine: 'claude' }));
+      const ENRICH_LIMIT = 20;
+      for (let i = 0; i < Math.min(all.length, ENRICH_LIMIT); i++) {
+        const s = all[i];
+        // [M1] 用 _enriched 标志替代三字段联合判断
+        // customTitle 是可选的，无命名 session 合法值为 undefined，不能作为 skip 条件
+        if (s._enriched) continue;
+        try {
+          const sessionFile = findSessionFile(s.sessionId);
+          if (!sessionFile) continue;
+          const fd = fs.openSync(sessionFile, 'r');
+          try {
+            if (!s.firstPrompt) {
+              const headBuf = Buffer.alloc(8192);
+              const headBytes = fs.readSync(fd, headBuf, 0, 8192, 0);
+              const headStr = headBuf.toString('utf8', 0, headBytes);
+              for (const line of headStr.split('\n')) {
+                if (!line) continue;
+                try {
+                  const d = JSON.parse(line);
+                  if (d.type === 'user' && d.message && d.userType !== 'internal') {
+                    const content = d.message.content;
+                    let raw = '';
+                    if (typeof content === 'string') raw = content;
+                    else if (Array.isArray(content)) {
+                      const txt = content.find(c => c.type === 'text');
+                      if (txt) raw = txt.text;
+                    }
+                    raw = raw.replace(/\n?\[System hints[\s\S]*/i, '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+                    if (raw && raw.length > 2) { s.firstPrompt = raw.slice(0, 120); break; }
+                  }
+                } catch { /* skip line */ }
+              }
+            }
+            // 从尾部读取：customTitle + lastUser（256KB 覆盖 tool-heavy session）
+            const stat = fs.fstatSync(fd);
+            const tailSize = Math.min(262144, stat.size);
+            const tailBuf = Buffer.alloc(tailSize);
+            fs.readSync(fd, tailBuf, 0, tailSize, stat.size - tailSize);
+            const tailLines = tailBuf.toString('utf8').split('\n').reverse();
+            if (!s.customTitle) {
+              for (const line of tailLines) {
+                if (!line) continue;
+                try {
+                  const d = JSON.parse(line);
+                  if (d.type === 'custom-title' && d.customTitle) { s.customTitle = d.customTitle; break; }
+                } catch { /* skip */ }
+              }
+            }
+            if (!s.lastUser) {
+              s.lastUser = extractLastUserFromLines(tailLines);
+            }
+          } finally {
+            fs.closeSync(fd);
+          }
+          s._enriched = true; // [M1] 标记已完成富化，下次跳过
+        } catch { /* non-fatal */ }
+      }
+      return all;
+    } catch {
       return [];
     }
-
-    const sessionMap = new Map();
-    const projPathCache = new Map();
-    for (const proj of projects) {
-      const projDir = path.join(CLAUDE_PROJECTS_DIR, proj);
-      const indexFile = path.join(projDir, 'sessions-index.json');
-      try {
-        if (fs.existsSync(indexFile)) {
-          const data = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
-          if (data.entries && data.entries.length > 0) {
-            const realPath = data.entries[0].projectPath;
-            if (realPath) projPathCache.set(proj, realPath);
-            for (const entry of data.entries) {
-              if (entry.messageCount >= 1) sessionMap.set(entry.sessionId, { ...entry, _projDirName: proj });
-            }
-          }
-        }
-        // Fallback: decode projectPath from directory name (e.g. -Users-yaron-AGI-AChat → /Users/yaron/AGI/AChat)
-        // Uses smart decoding that handles hyphens in original path names
-        if (!projPathCache.has(proj) && proj.startsWith('-')) {
-          const decoded = decodeProjectDirName(proj);
-          if (decoded && fs.existsSync(decoded)) projPathCache.set(proj, decoded);
-        }
-      } catch (e) {
-        logSessionScanError('scanClaudeSessions index', e, `project=${proj}`);
-      }
-
-      try {
-        const files = fs.readdirSync(projDir).filter(f => f.endsWith('.jsonl'));
-        for (const file of files) {
-          const sessionId = file.replace('.jsonl', '');
-          const filePath = path.join(projDir, file);
-          const stat = fs.statSync(filePath);
-          const fileMtime = stat.mtimeMs;
-          const existing = sessionMap.get(sessionId);
-          if (!existing || fileMtime > (existing.fileMtime || 0)) {
-            const projectPath = projPathCache.get(proj);
-            // Don't skip sessions without projectPath — use smart-decoded dir name as fallback
-            // so they still appear in /resume (better to show with unknown path than hide)
-            const fallbackPath = !projectPath ? decodeProjectDirName(proj) : null;
-            if (!projectPath && !fallbackPath) continue;
-            sessionMap.set(sessionId, {
-              sessionId, projectPath: projectPath || fallbackPath, fileMtime,
-              modified: new Date(fileMtime).toISOString(),
-              messageCount: 1,
-              ...(existing || {}),
-              _projDirName: proj,
-              fileMtime,
-            });
-          }
-        }
-      } catch (e) {
-        logSessionScanError('scanClaudeSessions project', e, `project=${proj}`);
-      }
-    }
-
-    const all = Array.from(sessionMap.values()).map((entry) => ({ ...entry, engine: 'claude' }));
-    const ENRICH_LIMIT = 20;
-    for (let i = 0; i < Math.min(all.length, ENRICH_LIMIT); i++) {
-      const s = all[i];
-      // [M1] 用 _enriched 标志替代三字段联合判断
-      // customTitle 是可选的，无命名 session 合法值为 undefined，不能作为 skip 条件
-      if (s._enriched) continue;
-      try {
-        const sessionFile = findSessionFile(s.sessionId);
-        if (!sessionFile) continue;
-        const fd = fs.openSync(sessionFile, 'r');
-        try {
-          if (!s.firstPrompt) {
-            const headBuf = Buffer.alloc(8192);
-            const headBytes = fs.readSync(fd, headBuf, 0, 8192, 0);
-            const headStr = headBuf.toString('utf8', 0, headBytes);
-            for (const line of headStr.split('\n')) {
-              if (!line) continue;
-              try {
-                const d = JSON.parse(line);
-                if (d.type === 'user' && d.message && d.userType !== 'internal') {
-                  const content = d.message.content;
-                  let raw = '';
-                  if (typeof content === 'string') raw = content;
-                  else if (Array.isArray(content)) {
-                    const txt = content.find(c => c.type === 'text');
-                    if (txt) raw = txt.text;
-                  }
-                  raw = raw.replace(/\n?\[System hints[\s\S]*/i, '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
-                  if (raw && raw.length > 2) { s.firstPrompt = raw.slice(0, 120); break; }
-                }
-              } catch { /* skip line */ }
-            }
-          }
-          // 从尾部读取：customTitle + lastUser（256KB 覆盖 tool-heavy session）
-          const stat = fs.fstatSync(fd);
-          const tailSize = Math.min(262144, stat.size);
-          const tailBuf = Buffer.alloc(tailSize);
-          fs.readSync(fd, tailBuf, 0, tailSize, stat.size - tailSize);
-          const tailLines = tailBuf.toString('utf8').split('\n').reverse();
-          if (!s.customTitle) {
-            for (const line of tailLines) {
-              if (!line) continue;
-              try {
-                const d = JSON.parse(line);
-                if (d.type === 'custom-title' && d.customTitle) { s.customTitle = d.customTitle; break; }
-              } catch { /* skip */ }
-            }
-          }
-          if (!s.lastUser) {
-            s.lastUser = extractLastUserFromLines(tailLines);
-          }
-        } finally {
-          fs.closeSync(fd);
-        }
-        s._enriched = true; // [M1] 标记已完成富化，下次跳过
-      } catch (e) {
-        logSessionScanError('scanClaudeSessions enrich', e, `session=${s.sessionId}`);
-      }
-    }
-    return all;
   }
 
   function scanCodexSessions() {
@@ -457,8 +404,7 @@ function createSessionStore(deps) {
           };
         })
         .map((session) => enrichCodexSession(session));
-    } catch (e) {
-      logSessionScanError('scanCodexSessions', e, `db=${CODEX_DB}`);
+    } catch {
       if (db) { try { db.close(); } catch { /* ignore */ } }
       return [];
     }
@@ -558,65 +504,25 @@ function createSessionStore(deps) {
 
   function scanAllSessions() {
     if (_sessionCache && (Date.now() - _sessionCacheTime < SESSION_CACHE_TTL)) return _sessionCache;
-    const all = [];
     try {
-      all.push(...scanClaudeSessions());
-    } catch (e) {
-      logSessionScanError('scanAllSessions claude', e);
-    }
-    try {
-      all.push(...scanCodexSessions());
-    } catch (e) {
-      logSessionScanError('scanAllSessions codex', e);
-    }
-    try {
+      const all = [...scanClaudeSessions(), ...scanCodexSessions()];
       all.sort((a, b) => {
         const aTime = a.fileMtime || new Date(a.modified).getTime();
         const bTime = b.fileMtime || new Date(b.modified).getTime();
         return bTime - aTime;
       });
-    } catch (e) {
-      logSessionScanError('scanAllSessions sort', e, `count=${all.length}`);
+      _sessionCache = all;
+      _sessionCacheTime = Date.now();
+      return all;
+    } catch {
+      return [];
     }
-    _sessionCache = all;
-    _sessionCacheTime = Date.now();
-    return all;
   }
 
-  // Encode a filesystem path the same way Claude CLI does for project directory names.
-  // This allows matching sessions whose projectPath couldn't be decoded back correctly.
-  function encodeCwdToDirName(cwdPath) {
-    if (!cwdPath) return null;
-    // Claude CLI: replace / with -, leading dots become just - (dot stripped)
-    return cwdPath.replace(/\//g, '-').replace(/-\./g, '--');
-  }
-
-  function listRecentSessions(limit, cwd, engine, agentKey) {
+  function listRecentSessions(limit, cwd, engine) {
     let all = scanAllSessions();
-    if (agentKey) {
-      // Filter by agent key: match any project directory containing the agent key
-      // This catches sessions across all historical directory layouts (worktrees, .worktree, agents/)
-      const keyPattern = new RegExp(`[-/]${agentKey}(?:$|/)`);
-      all = all.filter(s => s.projectPath && keyPattern.test(s.projectPath));
-    } else if (cwd) {
-      // Match exact cwd OR worktree children (~/.metame/worktrees/<basename>/<actor>/)
-      const worktreePrefix = path.join(HOME, '.metame', 'worktrees', path.basename(cwd)) + path.sep;
-      // Also match sessions whose Claude project dir name matches the encoded cwd
-      // This handles cases where the dir name couldn't be decoded back due to hyphen ambiguity
-      // Skip this for HOME-level cwd (too broad — would match everything)
-      const encodedPrefix = (cwd !== HOME) ? encodeCwdToDirName(cwd) : null;
-      // Require exact match or a path-boundary after the prefix (the next char must be '-' for a subdir)
-      const encodedExact = encodedPrefix ? encodedPrefix + '-' : null;
-      all = all.filter(s => {
-        if (!s.projectPath) return false;
-        if (s.projectPath === cwd) return true;
-        if (s.projectPath.startsWith(worktreePrefix)) return true;
-        // Fallback: check if the session's project dir name matches the encoded cwd exactly
-        // (or is a subdirectory of it). Only use this when projectPath doesn't already match.
-        if (encodedPrefix && s._projDirName
-          && (s._projDirName === encodedPrefix || (encodedExact && s._projDirName.startsWith(encodedExact)))) return true;
-        return false;
-      });
+    if (cwd) {
+      all = all.filter(s => s.projectPath === cwd);
     }
     if (engine) {
       const safeEngine = String(engine).trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
@@ -733,7 +639,6 @@ function createSessionStore(deps) {
 
   function buildSessionCardElements(sessions) {
     const sessionTags = loadSessionTags();
-    const escapeMd = (t) => t.replace(/[_*`\\]/g, '\\$&');
     const elements = [];
     sessions.forEach((s, i) => {
       if (i > 0) elements.push({ tag: 'hr' });
@@ -743,21 +648,14 @@ function createSessionStore(deps) {
       const shortId = s.sessionId.slice(0, 6);
       const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 4);
       const engineLabel = (s.engine || 'claude') === 'codex' ? 'codex' : 'claude';
-      // Fetch recent context for richer display (👤 user / 🤖 assistant)
-      const ctx = getSessionRecentContext(s.sessionId);
-      const lastUser = (ctx && ctx.lastUser) || s.lastUser || '';
-      const lastAI = (ctx && ctx.lastAssistant) || '';
+      // [M2] 转义 markdown 特殊字符；[M4] title 已有 sessionId 兜底
+      const escapeMd = (t) => t.replace(/[_*`\\]/g, '\\$&');
+      const snippetRaw = s.lastUser || (s.firstPrompt || '').replace(/<[^>]+>/g, '').replace(/\[System hints[\s\S]*/i, '').trim().slice(0, 80);
       let desc = `**${i + 1}. ${title}**\n📁${proj} · ${ago} · ${engineLabel}`;
       if (tags.length) desc += `\n${tags.map(t => `\`${t}\``).join(' ')}`;
-      if (lastUser) desc += `\n👤 ${escapeMd(lastUser.replace(/\n/g, ' ').slice(0, 80))}`;
-      if (lastAI) desc += `\n🤖 ${escapeMd(lastAI.replace(/\n/g, ' ').slice(0, 80))}`;
-      if (!lastUser && !lastAI) {
-        // Fallback: show first prompt snippet if no recent context
-        const snippetRaw = (s.firstPrompt || '').replace(/<[^>]+>/g, '').replace(/\[System hints[\s\S]*/i, '').trim().slice(0, 80);
-        if (snippetRaw && snippetRaw.length > 2) {
-          const snippet = escapeMd(snippetRaw.replace(/\n/g, ' ').slice(0, 60));
-          desc += `\n💬 ${snippet}${snippetRaw.length > 60 ? '…' : ''}`;
-        }
+      if (snippetRaw && snippetRaw.length > 2) {
+        const snippet = escapeMd(snippetRaw.replace(/\n/g, ' ').slice(0, 60));
+        desc += `\n💬 ${snippet}${snippetRaw.length > 60 ? '…' : ''}`;
       }
       elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
       elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Switch #${shortId}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });

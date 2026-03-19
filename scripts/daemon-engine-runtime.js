@@ -4,7 +4,6 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
-const { normalizeEngineName, normalizeCodexSandboxMode, normalizeCodexApprovalPolicy } = require('./daemon-utils');
 
 const CODEX_TOOL_MAP = Object.freeze({
   command_execution: 'Bash',
@@ -15,7 +14,10 @@ const CODEX_TOOL_MAP = Object.freeze({
   web_fetch: 'WebFetch',
 });
 
-// normalizeEngineName imported from daemon-utils
+function normalizeEngineName(name) {
+  const text = String(name || '').trim().toLowerCase();
+  return text === 'codex' ? 'codex' : 'claude';
+}
 
 function resolveBinary(engineName, deps = {}) {
   const engine = normalizeEngineName(engineName);
@@ -265,9 +267,31 @@ function buildClaudeArgs(options = {}) {
   return args;
 }
 
-// normalizeCodexSandboxMode and normalizeCodexApprovalPolicy imported from daemon-utils
-// NOTE: this module previously defaulted to 'danger-full-access' / 'never';
-// callers now pass explicit fallbacks where needed.
+function normalizeCodexSandboxMode(value, fallback = 'danger-full-access') {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return fallback;
+  if (text === 'read-only' || text === 'readonly') return 'read-only';
+  if (text === 'workspace-write' || text === 'workspace') return 'workspace-write';
+  if (
+    text === 'danger-full-access'
+    || text === 'dangerous'
+    || text === 'full-access'
+    || text === 'full'
+    || text === 'bypass'
+    || text === 'writable'
+  ) return 'danger-full-access';
+  return fallback;
+}
+
+function normalizeCodexApprovalPolicy(value, fallback = 'never') {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return fallback;
+  if (text === 'never' || text === 'no' || text === 'none') return 'never';
+  if (text === 'on-failure' || text === 'on_failure' || text === 'failure') return 'on-failure';
+  if (text === 'on-request' || text === 'on_request' || text === 'request') return 'on-request';
+  if (text === 'untrusted') return 'untrusted';
+  return fallback;
+}
 
 function resolveCodexPermissionProfile(options = {}) {
   const { readOnly = false, daemonCfg = {}, session = {} } = options;

@@ -31,18 +31,6 @@ Stop (每轮结束)
 | `file_transfer` | `intent-file-transfer.js` | "发给我/发过来/导出" 等文件传输语境 | `[[FILE:...]]` 协议 + 收发规则 |
 | `memory_recall` | `intent-memory-recall.js` | "上次/之前/还记得" 等跨会话回忆语境 | `memory-search.js` 命令用法 |
 | `doc_router` | `intent-doc-router.js` | "创建/绑定 Agent"、"代码结构/脚本入口"、"hook/intent 配置" 等文档导向语境 | 统一 doc-router 文档指引 |
-| `auto_rules` | `intent-auto-rules.js` | 始终触发（有规则文件时） | 夜间蒸馏的防御性规则（~200 tokens） |
-### auto_rules 工作流
-
-1. `memory-nightly-reflect.js` 每晚从 memory.db 提取高频事实（搜索 ≥3 次，近 7 天）
-2. Haiku 蒸馏出 ≤5 条防御性规则（key 格式 `category.tag`，如 `harden.await`、`ops.pnpm`）
-3. `writeAutoRules()` 写入 `~/.metame/auto-rules.md`（去重 + 上限 20 条，超出淘汰最旧）
-4. `intent-auto-rules.js` 每轮加载（缓存 60 秒），有规则时注入，无规则时零输出
-
-性能：auto-rules 缓存命中 <1ms；整个 intent 检测链总计 ~17-32ms/轮。
-
-运行时数据：`~/.metame/auto-rules.md`
-
 ---
 
 ## 开关控制

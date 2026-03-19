@@ -12,18 +12,9 @@ function createPidManager(deps) {
       const oldPid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
       if (oldPid && oldPid !== process.pid) {
         process.kill(oldPid, 'SIGTERM');
-        log('INFO', `Killing existing daemon (PID: ${oldPid}) with SIGTERM`);
-        let alive = true;
+        log('INFO', `Killed existing daemon (PID: ${oldPid})`);
         for (let i = 0; i < 10; i++) {
-          try { process.kill(oldPid, 0); } catch { alive = false; break; }
-          sleepSync(500);
-        }
-        // Escalate to SIGKILL if SIGTERM didn't work within 5s
-        if (alive) {
-          try {
-            process.kill(oldPid, 'SIGKILL');
-            log('WARN', `Old daemon (PID: ${oldPid}) did not respond to SIGTERM — sent SIGKILL`);
-          } catch { /* already dead */ }
+          try { process.kill(oldPid, 0); } catch { break; }
           sleepSync(500);
         }
       }
@@ -178,17 +169,13 @@ function setupRuntimeWatchers(deps) {
     if (curr.mtimeMs === prev.mtimeMs) return;
     if (reloadDebounce) clearTimeout(reloadDebounce);
     reloadDebounce = setTimeout(() => {
-      try {
-        log('INFO', 'daemon.yaml changed on disk — auto-reloading config');
-        const r = reloadConfig();
-        if (r.success) {
-          log('INFO', `Auto-reload OK: ${r.tasks} tasks`);
-          adminNotifyFn(`🔄 Config auto-reloaded. ${r.tasks} heartbeat tasks active.`).catch(e => log('WARN', 'Failed to send config-reload notification: ' + e.message));
-        } else {
-          log('ERROR', `Auto-reload failed: ${r.error}`);
-        }
-      } catch (e) {
-        log('ERROR', `Auto-reload crashed: ${e.message}`);
+      log('INFO', 'daemon.yaml changed on disk — auto-reloading config');
+      const r = reloadConfig();
+      if (r.success) {
+        log('INFO', `Auto-reload OK: ${r.tasks} tasks`);
+        adminNotifyFn(`🔄 Config auto-reloaded. ${r.tasks} heartbeat tasks active.`).catch(() => { });
+      } else {
+        log('ERROR', `Auto-reload failed: ${r.error}`);
       }
     }, 1000);
   });
@@ -285,7 +272,7 @@ function setupRuntimeWatchers(deps) {
             log('FATAL', `[CRASH-LOOP] ${crashCount} consecutive fast crashes — restoring from .last-good`);
             const restored = restoreFromLastGood();
             if (restored) {
-              adminNotifyFn('⚠️ 检测到 daemon 连续崩溃，已从上一个正常版本恢复。请检查最近的代码改动。').catch(e => log('WARN', 'Failed to send crash-loop admin notification: ' + e.message));
+              adminNotifyFn('⚠️ 检测到 daemon 连续崩溃，已从上一个正常版本恢复。请检查最近的代码改动。').catch(() => {});
               try { fs.writeFileSync(crashCountFile, '0', 'utf8'); } catch { /* non-fatal */ }
             }
           }
@@ -301,26 +288,14 @@ function setupRuntimeWatchers(deps) {
 
   // ── Safe restart: validate then proceed ──────────────────────────────────
   function safeRestart() {
-    // Guard: if a new task started during the deferred-restart grace period,
-    // re-defer instead of killing active processes (fixes team-agent concurrency bug).
-    if (activeProcesses.size > 0) {
-      log('INFO', `[RESTART] Re-deferred — ${activeProcesses.size} active task(s) started during grace period`);
-      deferredRestartTimer = null;
-      // pendingRestart stays true → next activeProcesses.delete will re-trigger
-      return;
-    }
     const validation = validateScriptsSyntax();
     if (!validation.ok) {
       const errSummary = validation.errors.slice(0, 3).join('\n');
       log('ERROR', `[RESTART BLOCKED] Syntax errors detected:\n${errSummary}`);
-      adminNotifyFn(`🚫 Daemon 热重载已阻止 — 新代码有语法错误:\n${errSummary}\n\n当前 daemon 继续运行。`).catch(e => log('WARN', 'Failed to send syntax-error admin notification: ' + e.message));
+      adminNotifyFn(`🚫 Daemon 热重载已阻止 — 新代码有语法错误:\n${errSummary}\n\n当前 daemon 继续运行。`).catch(() => {});
       pendingRestart = false;
       return;
     }
-    // Stop watching files BEFORE backup/exit to prevent backup writes
-    // from triggering another watchFile callback → restart loop
-    fs.unwatchFile(daemonScript);
-    fs.unwatchFile(CONFIG_FILE);
     // Backup current known-good set before restarting with new code
     backupLastGood();
     onRestartRequested();
@@ -334,7 +309,7 @@ function setupRuntimeWatchers(deps) {
 
   fs.watchFile(daemonScript, { interval: 3000 }, (curr, prev) => {
     if (curr.mtimeMs === prev.mtimeMs) return;
-    if (Date.now() - startTime < 20000) return;
+    if (Date.now() - startTime < 10000) return;
     if (restartDebounce) clearTimeout(restartDebounce);
     restartDebounce = setTimeout(() => {
       if (activeProcesses.size > 0) {
