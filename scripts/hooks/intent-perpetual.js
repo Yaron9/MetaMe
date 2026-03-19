@@ -25,6 +25,22 @@ const os = require('os');
 
 const PERPETUAL_INTENTS = [
   {
+    // Direct "永续任务" / "perpetual task" / "长期任务" — highest confidence, no verb needed
+    pattern: /永续任务|永续.{0,5}(研究|课题|项目)|perpetual.{0,5}task|长期任务|long.?term.{0,5}(task|mission)/i,
+    hint: (config) => {
+      const bin = path.join(os.homedir(), '.metame', 'bin', 'dispatch_to');
+      const reactive = getReactiveProjects(config);
+      if (reactive.length === 0) return '[永续任务] 暂无 reactive 项目。在 daemon.yaml 中添加 `reactive: true` 配置。';
+      const targets = reactive.map(r => `  ${r.icon} **${r.name}** → \`${bin} ${r.key} "你的任务描述"\``).join('\n');
+      return [
+        '[永续任务系统]',
+        `可用项目:\n${targets}`,
+        '命令: `/status perpetual` 查看进度 | `dispatch_to <key> "任务"` 启动',
+        'Agent 内部用 NEXT_DISPATCH 派发子任务，MISSION_COMPLETE 结束任务。',
+      ].join('\n');
+    },
+  },
+  {
     // User wants to start/launch a perpetual research mission
     // Requires action verb + research/mission target
     pattern: /(开始|启动|开启|launch|start|kick off).{0,15}(研究|课题|实验|mission|research|调研)/i,
