@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { handleReactiveOutput, parseReactiveSignals, replayEventLog, __test } = require('./daemon-reactive-lifecycle');
-const { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, loadProjectManifest, resolveProjectScripts, generateStateFile } = __test;
+const { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, loadProjectManifest, resolveProjectScripts, generateStateFile, buildRunningMemory, scanRelevantArtifacts, buildWorkingMemory, persistMemoryFiles, extractInlineFacts, extractOutputSummary } = __test;
 
 // ── parseReactiveSignals ──────────────────────────────────────
 
@@ -326,13 +326,13 @@ describe('handleReactiveOutput — verifier hook', () => {
     assert.ok(!dispatches[0].prompt.includes('Hints:'));
   });
 
-  it('prompt includes expected format elements (Output summary, NEXT_DISPATCH, MISSION_COMPLETE)', () => {
+  it('prompt includes expected format elements (delivery tag, NEXT_DISPATCH, MISSION_COMPLETE)', () => {
     const { deps, dispatches } = makeDeps({
       runVerifier: () => null,
     });
     handleReactiveOutput('sci_scout', 'Done with work', REACTIVE_CONFIG, deps);
     assert.equal(dispatches.length, 1);
-    assert.ok(dispatches[0].prompt.includes('Output summary'));
+    assert.ok(dispatches[0].prompt.includes('sci_scout delivery'), 'Should identify delivering member');
     assert.ok(dispatches[0].prompt.includes('NEXT_DISPATCH'));
     assert.ok(dispatches[0].prompt.includes('MISSION_COMPLETE'));
   });
@@ -522,5 +522,224 @@ describe('Generalization', () => {
     const filtered = codeLines.filter(l => !l.includes('RESEARCH_COMPLETE_RE'));
     const bad = filtered.filter(l => /research|科研|课题|论文/i.test(l));
     assert.equal(bad.length, 0, 'Found forbidden terms:\n' + bad.join('\n'));
+  });
+});
+
+// ── Memory System (L1/L2) ─────────────────────────────────────
+
+describe('buildRunningMemory', () => {
+  it('returns decisions/lessons/trail from event log', () => {
+    const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-l1-'));
+    const eventsDir = path.join(tmpMeta, 'events');
+    fs.mkdirSync(eventsDir, { recursive: true });
+    try {
+      const events = [
+        { ts: '2026-01-01T00:00:00Z', type: 'MISSION_START', mission_id: '1', mission_title: 'Test Mission' },
+        { ts: '2026-01-01T01:00:00Z', type: 'MEMBER_COMPLETE', member: 'scout' },
+        { ts: '2026-01-01T02:00:00Z', type: 'DISPATCH', target: 'thinker', prompt: 'We chose structured pruning over unstructured because it preserves layer structure and is more efficient for inference' },
+        { ts: '2026-01-01T03:00:00Z', type: 'MEMBER_COMPLETE', member: 'thinker' },
+        { ts: '2026-01-01T04:00:00Z', type: 'PHASE_GATE', phase: 'topic', passed: true },
+        { ts: '2026-01-01T05:00:00Z', type: 'PHASE_GATE', phase: 'literature', passed: false, details: 'Missing references for section 3' },
+        { ts: '2026-01-01T06:00:00Z', type: 'MEMBER_COMPLETE', member: 'scout' },
+        { ts: '2026-01-01T07:00:00Z', type: 'PHASE_GATE', phase: 'literature', passed: true },
+      ];
+      fs.writeFileSync(path.join(eventsDir, 'testproj.jsonl'), events.map(e => JSON.stringify(e)).join('\n') + '\n');
+
+      const result = buildRunningMemory('testproj', {}, { metameDir: tmpMeta, log: () => {} });
+      assert.ok(result.includes('Recent Decisions'), 'Should have decisions section');
+      assert.ok(result.includes('chose structured pruning'), 'Should include decision text');
+      assert.ok(result.includes('Lessons Learned'), 'Should have lessons section');
+      assert.ok(result.includes('Missing references'), 'Should include lesson text');
+      assert.ok(result.includes('Phase Trail'), 'Should have phase trail');
+      assert.ok(result.includes('topic'), 'Trail includes topic');
+      assert.ok(result.includes('literature'), 'Trail includes literature');
+    } finally {
+      fs.rmSync(tmpMeta, { recursive: true, force: true });
+    }
+  });
+
+  it('returns empty string for empty event log', () => {
+    const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-l1-empty-'));
+    const eventsDir = path.join(tmpMeta, 'events');
+    fs.mkdirSync(eventsDir, { recursive: true });
+    try {
+      const result = buildRunningMemory('noproject', {}, { metameDir: tmpMeta, log: () => {} });
+      assert.equal(result, '');
+    } finally {
+      fs.rmSync(tmpMeta, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('scanRelevantArtifacts', () => {
+  it('finds workspace files sorted by mtime', () => {
+    const tmpCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'scan-art-'));
+    const wsDir = path.join(tmpCwd, 'workspace');
+    fs.mkdirSync(path.join(wsDir, 'notes'), { recursive: true });
+    try {
+      // Create files with slight delay to ensure mtime order
+      fs.writeFileSync(path.join(wsDir, 'progress.tsv'), 'data', 'utf8');
+      fs.writeFileSync(path.join(wsDir, 'notes', 'proposal.md'), '# Proposal', 'utf8');
+      // Touch proposal.md to make it newer
+      const futureTime = Date.now() / 1000 + 10;
+      fs.utimesSync(path.join(wsDir, 'notes', 'proposal.md'), futureTime, futureTime);
+
+      const config = { projects: { testproj: { cwd: tmpCwd } } };
+      const result = scanRelevantArtifacts('testproj', config, {});
+      assert.ok(result.length >= 2, 'Should find at least 2 files');
+      // proposal.md should be first (newer mtime)
+      assert.equal(result[0].path, 'workspace/notes/proposal.md');
+      assert.ok(result[0].desc.length > 0, 'Should have a description');
+    } finally {
+      fs.rmSync(tmpCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('returns empty for project without cwd', () => {
+    const result = scanRelevantArtifacts('nope', REACTIVE_CONFIG, {});
+    assert.deepEqual(result, []);
+  });
+});
+
+describe('persistMemoryFiles', () => {
+  it('creates _memory.md with merged content', () => {
+    const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'persist-mem-'));
+    const eventsDir = path.join(tmpMeta, 'events');
+    fs.mkdirSync(eventsDir, { recursive: true });
+    try {
+      const events = [
+        { ts: '2026-01-01T00:00:00Z', type: 'MISSION_START', mission_id: '1', mission_title: 'Pruning Study' },
+        { ts: '2026-01-01T01:00:00Z', type: 'MEMBER_COMPLETE', member: 'scout' },
+        { ts: '2026-01-01T02:00:00Z', type: 'PHASE_GATE', phase: 'topic', passed: true },
+      ];
+      fs.writeFileSync(path.join(eventsDir, 'testproj.jsonl'), events.map(e => JSON.stringify(e)).join('\n') + '\n');
+
+      const state = { reactive: { testproj: { depth: 5, max_depth: 50, status: 'running' } } };
+      const deps = { metameDir: tmpMeta, log: () => {}, loadState: () => state };
+      const config = { projects: { testproj: {} } };
+      const resultPath = persistMemoryFiles('testproj', config, deps);
+
+      assert.ok(fs.existsSync(resultPath), 'Memory file should exist');
+      const content = fs.readFileSync(resultPath, 'utf8');
+      assert.ok(content.includes('# Memory Context: Pruning Study'), 'Should have header with mission title');
+      assert.ok(content.includes('round 1/'), 'Should have round counter');
+      assert.ok(content.includes('Phase Trail'), 'Should have phase trail from L1');
+    } finally {
+      fs.rmSync(tmpMeta, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('extractInlineFacts', () => {
+  it('matches OOM/error patterns', () => {
+    const output = 'Training failed with OOM at batch_size=64, reducing to 32';
+    const facts = extractInlineFacts('proj', output);
+    assert.ok(facts.length > 0, 'Should extract at least one fact');
+    assert.equal(facts[0].relation, 'bug_lesson');
+    assert.ok(facts[0].value.includes('OOM'));
+  });
+
+  it('matches decision verbs', () => {
+    const output = 'After analysis, we decided to use structured pruning for better inference speed and chose Taylor-FO as the criterion.';
+    const facts = extractInlineFacts('proj', output);
+    assert.ok(facts.length > 0, 'Should extract at least one fact');
+    assert.ok(facts.some(f => f.relation === 'tech_decision'), 'Should have tech_decision');
+  });
+
+  it('returns [] for clean output (no dirty data)', () => {
+    const output = 'The literature review is complete. All papers have been categorized and summarized in the notes directory.';
+    const facts = extractInlineFacts('proj', output);
+    assert.deepEqual(facts, []);
+  });
+
+  it('caps at 3 facts', () => {
+    const output = [
+      'Error: connection timeout during training step 42',
+      'Exception: invalid configuration for pruning module',
+      'Failed: missing dependency in experiment pipeline',
+      'OOM at layer 5 during forward pass with batch 64',
+    ].join('\n');
+    const facts = extractInlineFacts('proj', output);
+    assert.equal(facts.length, 3, 'Should cap at 3');
+  });
+
+  it('returns [] for null/empty input', () => {
+    assert.deepEqual(extractInlineFacts('proj', null), []);
+    assert.deepEqual(extractInlineFacts('proj', ''), []);
+  });
+});
+
+// ── extractOutputSummary ──────────────────────────────────────
+
+describe('extractOutputSummary', () => {
+  it('returns short output unchanged', () => {
+    const short = 'This is a short output.';
+    assert.equal(extractOutputSummary(short), short);
+  });
+
+  it('returns empty string for null/empty', () => {
+    assert.equal(extractOutputSummary(null), '');
+    assert.equal(extractOutputSummary(''), '');
+  });
+
+  it('preserves tail for long output (conclusions usually at end)', () => {
+    const head = 'A'.repeat(300);
+    const middle = 'B'.repeat(2000);
+    const tail = 'CONCLUSION: The experiment shows significant results with p<0.01';
+    const output = head + middle + tail;
+    const summary = extractOutputSummary(output, 1200);
+    assert.ok(summary.length <= 1200, `Summary should be <= 1200 chars, got ${summary.length}`);
+    assert.ok(summary.includes('CONCLUSION'), 'Should preserve tail containing conclusion');
+  });
+
+  it('extracts key signal lines from middle', () => {
+    const head = 'Starting analysis of the data...\n'.repeat(10); // ~300 chars
+    const middle = 'Processing step 1...\n'.repeat(50) +
+      'Key finding: the model achieves 94% accuracy on the test set\n' +
+      'Processing step 2...\n'.repeat(50);
+    const tail = 'Done processing all steps.\n'.repeat(30); // ~600+ chars
+    const output = head + middle + tail;
+    const summary = extractOutputSummary(output, 1200);
+    // Should have found the key finding line
+    assert.ok(summary.includes('key finding') || summary.includes('Key finding'),
+      'Should extract signal lines from middle');
+  });
+
+  it('caps at maxLen', () => {
+    const output = 'X'.repeat(5000);
+    const summary = extractOutputSummary(output, 800);
+    assert.ok(summary.length <= 800, `Should cap at 800, got ${summary.length}`);
+  });
+
+  it('handles maxLen smaller than default HEAD+TAIL budget', () => {
+    const output = 'X'.repeat(5000);
+    // maxLen=400 is much smaller than HEAD(200)+TAIL(600) defaults
+    // Adaptive sizing should scale down without negative budget
+    const summary = extractOutputSummary(output, 400);
+    assert.ok(summary.length <= 400, `Should cap at 400, got ${summary.length}`);
+    assert.ok(summary.length > 0, 'Should produce non-empty output');
+  });
+
+  it('handles output just over maxLen (tiny middle zone)', () => {
+    const output = 'A'.repeat(1300);
+    const summary = extractOutputSummary(output, 1200);
+    assert.ok(summary.length <= 1200, `Should cap at 1200, got ${summary.length}`);
+  });
+
+  it('delivery prompt uses extractOutputSummary format', () => {
+    // Verify the slimmed delivery prompt structure
+    const { deps, dispatches } = makeDeps({
+      runVerifier: () => ({ passed: true, phase: 'literature', details: 'ok', artifacts: [], hints: [] }),
+    });
+    const longOutput = 'A'.repeat(500) + '\nKey finding: important result\n' + 'B'.repeat(500) + '\nFinal conclusion: the approach works well and should be adopted.\n';
+    handleReactiveOutput('sci_scout', longOutput, REACTIVE_CONFIG, deps);
+    assert.equal(dispatches.length, 1);
+    const prompt = dispatches[0].prompt;
+    // Slim format: no "Evaluate quality" boilerplate
+    assert.ok(!prompt.includes('Evaluate quality'), 'Should not have verbose boilerplate');
+    // Has signal and verifier
+    assert.ok(prompt.includes('MISSION_COMPLETE'), 'Should mention completion signal');
+    assert.ok(prompt.includes('[Verifier]'), 'Should include verifier');
+    assert.ok(prompt.includes('sci_scout'), 'Should identify the delivering member');
   });
 });

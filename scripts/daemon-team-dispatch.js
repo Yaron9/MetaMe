@@ -274,14 +274,30 @@ function buildEnrichedPrompt(target, rawPrompt, metameDir, opts = {}) {
     } catch { /* non-critical */ }
   }
 
-  // 3. Target's last output
+  // 3+5. Structured memory (L1+L2) OR legacy _latest.md fallback
+  //       Single stat — structured memory supersedes raw last output
+  let hasStructuredMemory = false;
   try {
-    const latestFile = path.join(base, 'memory', 'agents', `${target}_latest.md`);
-    if (fs.existsSync(latestFile)) {
-      const content = fs.readFileSync(latestFile, 'utf8').trim();
-      if (content) ctx += `[${target} 上次产出]\n${content}\n\n`;
+    const memFile = path.join(base, 'memory', 'now', `${target}_memory.md`);
+    if (fs.existsSync(memFile)) {
+      const content = fs.readFileSync(memFile, 'utf8').trim();
+      if (content) {
+        ctx += `[Memory Context]\n${content}\n\n`;
+        hasStructuredMemory = true;
+      }
     }
   } catch { /* non-critical */ }
+
+  if (!hasStructuredMemory) {
+    // Fallback: raw last output (for non-reactive projects without memory system)
+    try {
+      const latestFile = path.join(base, 'memory', 'agents', `${target}_latest.md`);
+      if (fs.existsSync(latestFile)) {
+        const content = fs.readFileSync(latestFile, 'utf8').trim();
+        if (content) ctx += `[${target} 上次产出]\n${content}\n\n`;
+      }
+    } catch { /* non-critical */ }
+  }
 
   // 4. Inbox unread messages (archive after reading)
   try {
