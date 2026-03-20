@@ -469,6 +469,379 @@ function reconcilePerpetualProjects(config, deps) {
   }
 }
 
+// ── Memory System (L1/L2) ───────────────────────────────────────
+
+/**
+ * Parse event log file into an array of event objects.
+ * Single read — callers share the result to avoid redundant I/O.
+ *
+ * @param {string} projectKey
+ * @param {object} deps
+ * @returns {Array<object>} Parsed events (malformed lines silently skipped)
+ */
+function parseEventLog(projectKey, deps) {
+  const metameDir = deps.metameDir || path.join(os.homedir(), '.metame');
+  const evDir = path.join(metameDir, 'events');
+  const logPath = path.join(evDir, `${projectKey}.jsonl`);
+  if (!fs.existsSync(logPath)) return [];
+
+  const raw = fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
+  const events = [];
+  for (const line of raw) {
+    try { events.push(JSON.parse(line)); } catch { /* skip malformed */ }
+  }
+  return events;
+}
+
+/**
+ * Build L1 running memory from parsed events.
+ * Extracts key decisions, lessons, phase trail, and round count
+ * from the current mission (since last MISSION_START).
+ *
+ * @param {string} projectKey
+ * @param {object} config
+ * @param {object} deps
+ * @param {Array<object>} [parsedEvents] - Pre-parsed events (avoids re-read)
+ * @returns {string} Markdown string (~600-800 tokens)
+ */
+function buildRunningMemory(projectKey, config, deps, parsedEvents) {
+  const events = parsedEvents || parseEventLog(projectKey, deps);
+  if (events.length === 0) return '';
+
+  // Find last MISSION_START to scope to current mission
+  let missionStartIdx = 0;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].type === 'MISSION_START') {
+      missionStartIdx = i;
+      break;
+    }
+  }
+
+  const decisions = [];
+  const lessons = [];
+  const phaseTrail = [];
+  let roundCount = 0;
+
+  const decisionVerbs = /(?:chose|decided|switched|because|instead|using|adopted|rejected)/i;
+
+  for (let i = missionStartIdx; i < events.length; i++) {
+    const evt = events[i];
+
+    if (evt.type === 'MEMBER_COMPLETE') roundCount++;
+
+    if (evt.type === 'DISPATCH' && evt.prompt && evt.prompt.length > 80 && decisionVerbs.test(evt.prompt)) {
+      decisions.push({ round: roundCount, text: evt.prompt.slice(0, 150) });
+    }
+
+    if (evt.type === 'PHASE_GATE' && !evt.passed && evt.details) {
+      lessons.push({ round: roundCount, text: evt.details.slice(0, 120) });
+    }
+
+    if (evt.type === 'PHASE_GATE' && evt.passed) {
+      phaseTrail.push({ phase: evt.phase, round: roundCount });
+    }
+  }
+
+  const recentDecisions = decisions.slice(-5);
+  const recentLessons = lessons.slice(-5);
+
+  const parts = [];
+
+  if (recentDecisions.length > 0) {
+    if (parts.length > 0) parts.push('');
+    parts.push('## Recent Decisions');
+    for (const d of recentDecisions) {
+      parts.push(`- [R${d.round}] ${d.text}`);
+    }
+  }
+
+  if (recentLessons.length > 0) {
+    if (parts.length > 0) parts.push('');
+    parts.push('## Lessons Learned');
+    for (const l of recentLessons) {
+      parts.push(`- [R${l.round}] ${l.text}`);
+    }
+  }
+
+  if (phaseTrail.length > 0) {
+    if (parts.length > 0) parts.push('');
+    parts.push('## Phase Trail');
+    parts.push(phaseTrail.map(p => `${p.phase}(R${p.round})`).join(' → '));
+  }
+
+  if (parts.length === 0) return '';
+  return parts.join('\n');
+}
+
+/**
+ * Scan workspace for relevant artifacts (files sorted by mtime).
+ *
+ * @param {string} projectKey
+ * @param {object} config
+ * @param {object} deps
+ * @returns {Array<{ path: string, desc: string }>} Top 5 artifacts
+ */
+function scanRelevantArtifacts(projectKey, config, deps) {
+  const projectCwd = resolveProjectCwd(projectKey, config);
+  if (!projectCwd) return [];
+
+  const wsDir = path.join(projectCwd, 'workspace');
+  if (!fs.existsSync(wsDir)) return [];
+
+  const validExts = new Set(['.md', '.json', '.tsv', '.py', '.csv']);
+  const files = [];
+
+  // Walk max depth 2
+  try {
+    const d1Entries = fs.readdirSync(wsDir, { withFileTypes: true });
+    for (const e1 of d1Entries) {
+      const p1 = path.join(wsDir, e1.name);
+      if (e1.isFile() && validExts.has(path.extname(e1.name))) {
+        try { files.push({ abs: p1, rel: `workspace/${e1.name}`, mtime: fs.statSync(p1).mtimeMs }); } catch { /* skip */ }
+      } else if (e1.isDirectory()) {
+        try {
+          const d2Entries = fs.readdirSync(p1, { withFileTypes: true });
+          for (const e2 of d2Entries) {
+            if (e2.isFile() && validExts.has(path.extname(e2.name))) {
+              const p2 = path.join(p1, e2.name);
+              try { files.push({ abs: p2, rel: `workspace/${e1.name}/${e2.name}`, mtime: fs.statSync(p2).mtimeMs }); } catch { /* skip */ }
+            }
+          }
+        } catch { /* skip unreadable dirs */ }
+      }
+    }
+  } catch { return []; }
+
+  // Sort by mtime descending, take top 5
+  files.sort((a, b) => b.mtime - a.mtime);
+  const top = files.slice(0, 5);
+
+  // Heuristic descriptions based on path/name
+  const descMap = {
+    'progress.tsv': 'phase progress tracker',
+    'results': 'experiment results',
+    'proposal': 'research proposal',
+    'draft': 'paper draft',
+    'notes': 'research notes',
+    'config': 'configuration',
+    'data': 'dataset',
+  };
+
+  return top.map(f => {
+    let desc = path.extname(f.rel).slice(1) + ' file';
+    for (const [key, label] of Object.entries(descMap)) {
+      if (f.rel.toLowerCase().includes(key)) { desc = label; break; }
+    }
+    return { path: f.rel, desc };
+  });
+}
+
+/**
+ * Build L2 working memory from event log replay + memory.db FTS5.
+ *
+ * @param {string} projectKey
+ * @param {object} config
+ * @param {object} deps
+ * @returns {string} Markdown string (~300-500 tokens)
+ */
+function buildWorkingMemory(projectKey, config, deps) {
+  const parts = [];
+
+  // Phase history as causal chain from event replay
+  const { phase, mission, history } = replayEventLog(projectKey, deps);
+
+  // FTS5 query: mission title + current phase (fixed rule, no smart inference)
+  const query = ((mission?.title || '') + ' ' + (phase || '')).trim();
+  if (!query) return '';
+
+  let facts = [];
+  try {
+    const memory = require('./memory');
+    memory.acquire();
+    try {
+      facts = memory.searchFacts(query, { limit: 5, project: projectKey });
+    } finally {
+      memory.release();
+    }
+  } catch { /* memory.db unavailable — graceful degradation */ }
+
+  if (facts.length > 0) {
+    parts.push('## Long-term Context');
+    for (const f of facts) {
+      const tag = f.relation || f.entity || 'fact';
+      parts.push(`- [${tag}] ${f.value}`);
+    }
+  }
+
+  if (parts.length === 0) return '';
+  return parts.join('\n');
+}
+
+/**
+ * Persist unified memory file (L1 + L2 merged).
+ * L1 rebuilds every round; L2 refreshes every 5 rounds or on phase change.
+ *
+ * @param {string} projectKey
+ * @param {object} config
+ * @param {object} deps
+ * @param {object} [opts]
+ * @param {boolean} [opts.phaseChanged]
+ */
+function persistMemoryFiles(projectKey, config, deps, opts = {}) {
+  const metameDir = deps.metameDir || path.join(os.homedir(), '.metame');
+  const memDir = path.join(metameDir, 'memory', 'now');
+  fs.mkdirSync(memDir, { recursive: true });
+  const memPath = path.join(memDir, `${projectKey}_memory.md`);
+
+  // Single parse of event log — shared across L1 and round counting
+  const events = parseEventLog(projectKey, deps);
+
+  // Derive round count and mission title from parsed events
+  let roundCount = 0;
+  let missionTitle = 'unknown';
+  let maxDepth = 50;
+  for (const evt of events) {
+    if (evt.type === 'MEMBER_COMPLETE') roundCount++;
+    if (evt.type === 'MISSION_START') { missionTitle = evt.mission_title || 'unknown'; roundCount = 0; }
+    if (evt.type === 'MISSION_COMPLETE') roundCount = 0;
+  }
+
+  // Read manifest for max_depth
+  const projectCwd = resolveProjectCwd(projectKey, config);
+  if (projectCwd) {
+    const manifest = loadProjectManifest(projectCwd);
+    if (manifest?.max_depth) maxDepth = manifest.max_depth;
+  }
+
+  // Always rebuild L1 (pass pre-parsed events to avoid re-read)
+  const l1 = buildRunningMemory(projectKey, config, deps, events);
+  const artifacts = scanRelevantArtifacts(projectKey, config, deps);
+
+  // Conditionally rebuild L2 (every 5 rounds or phase change)
+  const shouldRefreshL2 = opts.phaseChanged || (roundCount % 5 === 0);
+  let l2 = '';
+  if (shouldRefreshL2) {
+    l2 = buildWorkingMemory(projectKey, config, deps);
+    // Stash L2 for next time
+    try {
+      const l2CachePath = path.join(memDir, `${projectKey}_l2cache.md`);
+      fs.writeFileSync(l2CachePath, l2, 'utf8');
+    } catch { /* non-critical */ }
+  } else {
+    // Read stale L2 from cache
+    try {
+      const l2CachePath = path.join(memDir, `${projectKey}_l2cache.md`);
+      if (fs.existsSync(l2CachePath)) {
+        l2 = fs.readFileSync(l2CachePath, 'utf8').trim();
+      }
+    } catch { /* non-critical */ }
+  }
+
+  // Build merged document
+  const parts = [`# Memory Context: ${missionTitle} (round ${roundCount}/${maxDepth})`];
+
+  if (l1) parts.push('', l1);
+
+  if (artifacts.length > 0) {
+    parts.push('', '## Current Artifacts');
+    for (const a of artifacts) {
+      parts.push(`- ${a.path} — ${a.desc}`);
+    }
+  }
+
+  if (l2) parts.push('', l2);
+
+  const content = parts.join('\n') + '\n';
+  fs.writeFileSync(memPath, content, 'utf8');
+  return memPath;
+}
+
+/**
+ * Pattern-based inline fact extraction from agent output.
+ * Zero LLM, zero agent format dependency.
+ *
+ * @param {string} projectKey
+ * @param {string} memberOutput
+ * @param {string} [phase]
+ * @returns {Array<{ entity: string, relation: string, value: string, confidence: string }>}
+ */
+function extractInlineFacts(projectKey, memberOutput, phase) {
+  if (!memberOutput || typeof memberOutput !== 'string') return [];
+
+  const facts = [];
+  const CAP = 3;
+
+  // Pattern 1: Error/OOM patterns → bug_lesson
+  const errorRe = /(?:OOM|out of memory|CUDA error|killed|Error:|Exception:|Failed:)\s*(.{15,150})/gi;
+  let match;
+  while ((match = errorRe.exec(memberOutput)) !== null && facts.length < CAP) {
+    facts.push({
+      entity: projectKey,
+      relation: 'bug_lesson',
+      value: match[0].trim().slice(0, 150),
+      confidence: 'medium',
+    });
+  }
+
+  // Pattern 2: Decision verbs → tech_decision
+  const decisionRe = /(?:decided|chose|selected|switched to|rejected|using|adopted)\s+(.{20,150})/gi;
+  while ((match = decisionRe.exec(memberOutput)) !== null && facts.length < CAP) {
+    facts.push({
+      entity: projectKey,
+      relation: 'tech_decision',
+      value: match[0].trim().slice(0, 150),
+      confidence: 'low',
+    });
+  }
+
+  return facts.slice(0, CAP);
+}
+
+/**
+ * Extract a high-density summary from agent output.
+ * Tail-biased: conclusions and results are usually at the end.
+ * Zero LLM — pure heuristic.
+ *
+ * Strategy:
+ *   - Head (~200 chars): who's speaking, opening context
+ *   - Key lines: lines containing signal words (conclusions, decisions, errors)
+ *   - Tail (~600 chars): final output, conclusions, recommendations
+ *
+ * @param {string} output - Raw agent output
+ * @param {number} [maxLen=1200] - Max total length
+ * @returns {string}
+ */
+function extractOutputSummary(output, maxLen = 1200) {
+  if (!output || output.length <= maxLen) return output || '';
+
+  // Adaptive head/tail sizes — scale down for small maxLen
+  const HEAD_LEN = Math.min(200, Math.floor(maxLen * 0.25));
+  const TAIL_LEN = Math.min(600, Math.floor(maxLen * 0.6));
+  const KEY_BUDGET = Math.max(0, maxLen - HEAD_LEN - TAIL_LEN - 40);
+
+  const head = output.slice(0, HEAD_LEN);
+  const tail = output.slice(-TAIL_LEN);
+
+  // Extract key signal lines from the middle (skip head/tail zones)
+  let keyLines = '';
+  if (KEY_BUDGET > 0 && output.length > HEAD_LEN + TAIL_LEN) {
+    const middleZone = output.slice(HEAD_LEN, -TAIL_LEN);
+    const signalRe = /(?:结论|conclusion|found that|result|决定|recommend|建议|发现|关键|key finding|error|OOM|failed|chose|decided|switched|important|注意|warning)/i;
+    keyLines = middleZone.split('\n')
+      .filter(line => line.trim().length > 15 && signalRe.test(line))
+      .slice(0, 5)
+      .join('\n')
+      .slice(0, KEY_BUDGET);
+  }
+
+  const parts = [head.trimEnd()];
+  if (keyLines) parts.push('[...key findings...]', keyLines);
+  else parts.push('[...]');
+  parts.push(tail.trimStart());
+
+  return parts.join('\n').slice(0, maxLen);
+}
+
 // ── Main handler ────────────────────────────────────────────────
 
 /**
@@ -602,6 +975,10 @@ function handleReactiveOutput(targetProject, output, config, deps) {
         new_session: true,
       }, config);
     }
+
+    // Point B: Persist memory after parent dispatches
+    try { persistMemoryFiles(projectKey, config, deps); } catch { /* non-critical */ }
+
     return;
   }
 
@@ -685,13 +1062,31 @@ function handleReactiveOutput(targetProject, output, config, deps) {
     try { generateStateFile(parentKey, config, deps); } catch { /* non-critical */ }
   }
 
-  // Trigger parent with member's output summary
+  // Point A: Persist memory + extract inline facts after verifier, before waking parent
+  const phaseChanged = verifyResult?.passed && !!verifyResult?.phase;
+  try { persistMemoryFiles(parentKey, config, deps, { phaseChanged }); } catch { /* non-critical */ }
+
+  // Inline fact extraction from member output
+  try {
+    const inlineFacts = extractInlineFacts(parentKey, output, verifyResult?.phase);
+    if (inlineFacts.length > 0) {
+      const memory = require('./memory');
+      memory.acquire();
+      try {
+        memory.saveFacts(`reactive-${parentKey}-${Date.now()}`, parentKey, inlineFacts);
+      } finally {
+        memory.release();
+      }
+    }
+  } catch { /* non-critical */ }
+
+  // Trigger parent with member's output summary (tail-biased extraction)
   const parentManifest = parentCwd ? loadProjectManifest(parentCwd) : null;
   const signal = parentManifest?.completion_signal || 'MISSION_COMPLETE';
-  const summary = output.slice(0, 1200);
+  const summary = extractOutputSummary(output);
   deps.handleDispatchItem({
     target: parentKey,
-    prompt: `[Team delivery] ${targetProject} completed task.\n\nOutput summary:\n${summary}${verifierBlock}\n\nEvaluate quality and decide next step.\nTo dispatch tasks, use NEXT_DISPATCH.\nWhen all tasks are done, output ${signal}.`,
+    prompt: `[${targetProject} delivery]${verifierBlock}\n\n${summary}\n\nDecide next step. Use NEXT_DISPATCH or ${signal}.`,
     from: targetProject,
     _reactive: true,
     new_session: true,
@@ -703,5 +1098,5 @@ module.exports = {
   parseReactiveSignals,
   reconcilePerpetualProjects,
   replayEventLog,
-  __test: { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, generateStateFile, loadProjectManifest, resolveProjectScripts },
+  __test: { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, generateStateFile, loadProjectManifest, resolveProjectScripts, parseEventLog, buildRunningMemory, scanRelevantArtifacts, buildWorkingMemory, persistMemoryFiles, extractInlineFacts, extractOutputSummary },
 };

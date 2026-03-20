@@ -1648,10 +1648,16 @@ function createClaudeEngine(deps) {
             brainDoc = brain;
             const cmap = brain && brain.user_competence_map;
             if (cmap && typeof cmap === 'object' && Object.keys(cmap).length > 0) {
-              const lines = Object.entries(cmap)
-                .map(([domain, level]) => `  ${domain}: ${level}`)
-                .join('\n');
-              zdpHint = `\n- User competence map (adjust explanation depth accordingly):\n${lines}\n  Rule: expert→skip basics; intermediate→brief rationale; beginner→one-line analogy.`;
+              const entries = Object.entries(cmap);
+              const allExpert = entries.every(([, level]) => String(level).toLowerCase() === 'expert');
+              if (allExpert) {
+                zdpHint = `\n- User is expert-level across all domains. Skip basics, no analogies needed.`;
+              } else {
+                const lines = entries
+                  .map(([domain, level]) => `  ${domain}: ${level}`)
+                  .join('\n');
+                zdpHint = `\n- User competence map (adjust explanation depth accordingly):\n${lines}\n  Rule: expert→skip basics; intermediate→brief rationale; beginner→one-line analogy.`;
+              }
             }
           }
         } catch { /* non-critical */ }
