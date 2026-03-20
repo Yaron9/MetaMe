@@ -1546,6 +1546,8 @@ function createClaudeEngine(deps) {
         const memory = require('./memory');
 
         // L1: NOW.md per-agent whiteboard injection（按 projectKey 隔离，防并发冲突）
+        // One-shot: inject once then clear, same pattern as compactContext.
+        // Prevents re-injection on daemon restart or new session for the same chat.
         if (!session.started) {
           try {
             const nowDir = path.join(HOME, '.metame', 'memory', 'now');
@@ -1555,6 +1557,8 @@ function createClaudeEngine(deps) {
               const nowContent = fs.readFileSync(nowPath, 'utf8').trim();
               if (nowContent) {
                 memoryHint += `\n\n[Current task context:\n${nowContent}]`;
+                // Clear after injection to prevent re-triggering on next session start
+                try { fs.writeFileSync(nowPath, '', 'utf8'); } catch { /* non-critical */ }
               }
             }
           } catch { /* non-critical */ }
@@ -1797,20 +1801,19 @@ ${mentorRadarHint}
       const langGuard = session.started
         ? ''
         : '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
+      // Intent hints are dynamic (per-prompt, semantic match), so compute for all runtimes.
       let intentHint = '';
-      if (runtime.name === 'codex') {
-        try {
-          const block = buildIntentHintBlock(prompt, config, boundProjectKey || projectKey || '');
-          if (block) intentHint = `\n\n${block}`;
-        } catch (e) {
-          log('WARN', `Intent registry injection failed: ${e.message}`);
-        }
+      try {
+        const block = buildIntentHintBlock(prompt, config, boundProjectKey || projectKey || '');
+        if (block) intentHint = `\n\n${block}`;
+      } catch (e) {
+        log('WARN', `Intent registry injection failed: ${e.message}`);
       }
-      // For warm process reuse: context is already in the persistent process,
-      // so only send the user's actual prompt — skip all hint injection.
-      // This saves ~500-1500 tokens per turn and avoids context duplication.
+      // For warm process reuse: static context (daemonHint, memoryHint, etc.) is already
+      // in the persistent process — skip those to save tokens. intentHint is dynamic
+      // (varies per prompt), so include it even on warm reuse.
       const fullPrompt = _warmEntry
-        ? routedPrompt
+        ? routedPrompt + intentHint
         : routedPrompt + daemonHint + intentHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
       if (runtime.name === 'codex' && session.started && session.id && requestedCodexPermissionProfile) {
         const actualPermissionProfile = getActualCodexPermissionProfile(session);
