@@ -15,6 +15,7 @@ const DEFAULTS = Object.freeze({
   memory_recall: true,
   doc_router: true,
   perpetual: true,
+  research: true,
 });
 
 const INTENT_MODULES = Object.freeze({
@@ -25,6 +26,7 @@ const INTENT_MODULES = Object.freeze({
   memory_recall: require('./hooks/intent-memory-recall'),
   doc_router: require('./hooks/intent-doc-router'),
   perpetual: require('./hooks/intent-perpetual'),
+  research: require('./hooks/intent-research'),
 });
 
 function resolveEnabledIntents(config = {}) {
