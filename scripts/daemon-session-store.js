@@ -256,10 +256,29 @@ function createSessionStore(deps) {
               }
             }
           }
-          // Fallback: decode projectPath from directory name (e.g. -Users-yaron-AGI-AChat → /Users/yaron/AGI/AChat)
+          // Fallback: decode projectPath from directory name (macOS: -Users-foo → /Users/foo)
           if (!projPathCache.has(proj) && proj.startsWith('-')) {
             const decoded = proj.replace(/-/g, '/');
             if (fs.existsSync(decoded)) projPathCache.set(proj, decoded);
+          }
+          // Fallback 2: read cwd from first JSONL entry (works on all platforms,
+          // handles directory names that can't be reliably decoded, e.g. Windows paths
+          // with drive letters or filenames containing hyphens)
+          if (!projPathCache.has(proj)) {
+            try {
+              const _jsonls = fs.readdirSync(projDir).filter(f => f.endsWith('.jsonl'));
+              if (_jsonls.length > 0) {
+                const _fd = fs.openSync(path.join(projDir, _jsonls[0]), 'r');
+                try {
+                  const _buf = Buffer.alloc(4096);
+                  const _bytes = fs.readSync(_fd, _buf, 0, 4096, 0);
+                  for (const _line of _buf.toString('utf8', 0, _bytes).split('\n')) {
+                    if (!_line) continue;
+                    try { const _d = JSON.parse(_line); if (_d.cwd) { projPathCache.set(proj, path.resolve(_d.cwd)); break; } } catch {}
+                  }
+                } finally { fs.closeSync(_fd); }
+              }
+            } catch {}
           }
         } catch { /* skip */ }
 
