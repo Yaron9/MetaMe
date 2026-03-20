@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { normalizeEngineName } = require('./daemon-utils');
 
 function normalizeCodexSandboxMode(value, fallback = null) {
   const text = String(value || '').trim().toLowerCase();
@@ -43,10 +44,6 @@ function normalizeCodexPermissionMeta(meta = {}) {
     approvalPolicy: approvalPolicy || 'never',
     permissionMode: sandboxMode || 'danger-full-access',
   };
-}
-
-function normalizeEngineName(name) {
-  return String(name || 'claude').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
 }
 
 function stripCodexInjectedHints(text) {
@@ -217,17 +214,36 @@ function createSessionStore(deps) {
   }
 
   // [M3] 共享辅助：从 reversed JSONL 行数组中提取最后一条外部用户消息（统一规则）
+  function _extractMessageText(d) {
+    const content = d.message && d.message.content;
+    let raw = typeof content === 'string' ? content
+      : Array.isArray(content) ? (content.find(c => c.type === 'text') || {}).text || '' : '';
+    raw = raw.replace(/\[System hints[\s\S]*/i, '')
+      .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+    return raw;
+  }
+
   function extractLastUserFromLines(lines) {
     for (const line of lines) {
       if (!line) continue;
       try {
         const d = JSON.parse(line);
         if (d.type === 'user' && d.message && d.userType !== 'internal') {
-          const content = d.message.content;
-          let raw = typeof content === 'string' ? content
-            : Array.isArray(content) ? (content.find(c => c.type === 'text') || {}).text || '' : '';
-          raw = raw.replace(/\[System hints[\s\S]*/i, '')
-            .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+          const raw = _extractMessageText(d);
+          if (raw.length > 2) return raw.slice(0, 80);
+        }
+      } catch { /* skip */ }
+    }
+    return '';
+  }
+
+  function extractLastAssistantFromLines(lines) {
+    for (const line of lines) {
+      if (!line) continue;
+      try {
+        const d = JSON.parse(line);
+        if (d.type === 'assistant' && d.message) {
+          const raw = _extractMessageText(d);
           if (raw.length > 2) return raw.slice(0, 80);
         }
       } catch { /* skip */ }
@@ -256,10 +272,29 @@ function createSessionStore(deps) {
               }
             }
           }
-          // Fallback: decode projectPath from directory name (e.g. -Users-yaron-AGI-AChat → /Users/yaron/AGI/AChat)
+          // Fallback: decode projectPath from directory name (macOS: -Users-foo → /Users/foo)
           if (!projPathCache.has(proj) && proj.startsWith('-')) {
             const decoded = proj.replace(/-/g, '/');
             if (fs.existsSync(decoded)) projPathCache.set(proj, decoded);
+          }
+          // Fallback 2: read cwd from first JSONL entry (works on all platforms,
+          // handles directory names that can't be reliably decoded, e.g. Windows paths
+          // with drive letters or filenames containing hyphens)
+          if (!projPathCache.has(proj)) {
+            try {
+              const _jsonls = fs.readdirSync(projDir).filter(f => f.endsWith('.jsonl'));
+              if (_jsonls.length > 0) {
+                const _fd = fs.openSync(path.join(projDir, _jsonls[0]), 'r');
+                try {
+                  const _buf = Buffer.alloc(4096);
+                  const _bytes = fs.readSync(_fd, _buf, 0, 4096, 0);
+                  for (const _line of _buf.toString('utf8', 0, _bytes).split('\n')) {
+                    if (!_line) continue;
+                    try { const _d = JSON.parse(_line); if (_d.cwd) { projPathCache.set(proj, path.resolve(_d.cwd)); break; } } catch {}
+                  }
+                } finally { fs.closeSync(_fd); }
+              }
+            } catch {}
           }
         } catch { /* skip */ }
 
@@ -287,6 +322,8 @@ function createSessionStore(deps) {
       }
 
       const all = Array.from(sessionMap.values()).map((entry) => ({ ...entry, engine: 'claude' }));
+      // Sort by recency BEFORE enrichment so we enrich the most recent sessions first
+      all.sort((a, b) => (b.fileMtime || 0) - (a.fileMtime || 0));
       const ENRICH_LIMIT = 20;
       for (let i = 0; i < Math.min(all.length, ENRICH_LIMIT); i++) {
         const s = all[i];
@@ -337,6 +374,9 @@ function createSessionStore(deps) {
             }
             if (!s.lastUser) {
               s.lastUser = extractLastUserFromLines(tailLines);
+            }
+            if (!s.lastAssistant) {
+              s.lastAssistant = extractLastAssistantFromLines(tailLines);
             }
           } finally {
             fs.closeSync(fd);
@@ -613,6 +653,13 @@ function createSessionStore(deps) {
     return s.sessionId ? s.sessionId.slice(0, 8) : '';
   }
 
+  // ── Display helpers (shared by sessionRichLabel & buildSessionCardElements) ──
+  const _escapeMd = (t) => t.replace(/[_*`\\]/g, '\\$&');
+  function _cleanSnippet(raw, maxLen) {
+    if (!raw || raw.length <= 2) return '';
+    return _escapeMd(raw.replace(/\n/g, ' ').slice(0, maxLen)) + (raw.length > maxLen ? '…' : '');
+  }
+
   function sessionRichLabel(s, index, sessionTags) {
     sessionTags = sessionTags || loadSessionTags();
     const title = sessionDisplayTitle(s, 50, sessionTags);
@@ -622,17 +669,15 @@ function createSessionStore(deps) {
     const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 3);
     const engineLabel = (s.engine || 'claude') === 'codex' ? 'codex' : 'claude';
 
-    // [M2] 转义 markdown 特殊字符，防止用户历史消息破坏渲染
-    const escapeMd = (t) => t.replace(/[_*`\\]/g, '\\$&');
-    // fallback to firstPrompt when lastUser not found in tail
-    const snippetRaw = s.lastUser || (s.firstPrompt || '').replace(/<[^>]+>/g, '').replace(/\[System hints[\s\S]*/i, '').trim().slice(0, 80);
-    let line = `${index}. ${title}${title.length >= 50 ? '..' : ''}`;  // [M4] title 已有 sessionId 兜底，不会为空
+    let line = `${index}. ${title}${title.length >= 50 ? '..' : ''}`;
     if (tags.length) line += `  ${tags.map(t => `#${t}`).join(' ')}`;
     line += `\n   📁${proj} · ${ago} · ${engineLabel}`;
-    if (snippetRaw && snippetRaw.length > 2) {
-      const snippet = escapeMd(snippetRaw.replace(/\n/g, ' ').slice(0, 60));
-      line += `\n   💬 ${snippet}${snippetRaw.length > 60 ? '…' : ''}`;
-    }
+    const firstSnippet = _cleanSnippet(s.firstPrompt, 50);
+    const lastUserSnippet = _cleanSnippet(s.lastUser, 50);
+    const lastAiSnippet = _cleanSnippet(s.lastAssistant, 50);
+    if (firstSnippet) line += `\n   📝 ${firstSnippet}`;
+    if (lastUserSnippet && lastUserSnippet !== firstSnippet) line += `\n   💬 ${lastUserSnippet}`;
+    if (lastAiSnippet) line += `\n   🤖 ${lastAiSnippet}`;
     line += `\n   /resume ${shortId}`;
     return line;
   }
@@ -648,15 +693,16 @@ function createSessionStore(deps) {
       const shortId = s.sessionId.slice(0, 6);
       const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 4);
       const engineLabel = (s.engine || 'claude') === 'codex' ? 'codex' : 'claude';
-      // [M2] 转义 markdown 特殊字符；[M4] title 已有 sessionId 兜底
-      const escapeMd = (t) => t.replace(/[_*`\\]/g, '\\$&');
-      const snippetRaw = s.lastUser || (s.firstPrompt || '').replace(/<[^>]+>/g, '').replace(/\[System hints[\s\S]*/i, '').trim().slice(0, 80);
+
       let desc = `**${i + 1}. ${title}**\n📁${proj} · ${ago} · ${engineLabel}`;
       if (tags.length) desc += `\n${tags.map(t => `\`${t}\``).join(' ')}`;
-      if (snippetRaw && snippetRaw.length > 2) {
-        const snippet = escapeMd(snippetRaw.replace(/\n/g, ' ').slice(0, 60));
-        desc += `\n💬 ${snippet}${snippetRaw.length > 60 ? '…' : ''}`;
-      }
+      // Show first prompt, last user message, and last assistant reply
+      const firstSnippet = _cleanSnippet(s.firstPrompt, 50);
+      const lastUserSnippet = _cleanSnippet(s.lastUser, 50);
+      const lastAiSnippet = _cleanSnippet(s.lastAssistant, 50);
+      if (firstSnippet) desc += `\n📝 ${firstSnippet}`;
+      if (lastUserSnippet && lastUserSnippet !== firstSnippet) desc += `\n💬 ${lastUserSnippet}`;
+      if (lastAiSnippet) desc += `\n🤖 ${lastAiSnippet}`;
       elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
       elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Switch #${shortId}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
     });
@@ -924,6 +970,9 @@ function createSessionStore(deps) {
       }
       slot.started = true;
       s.last_active = Date.now();
+      // Clear stale findSessionFile cache: the JSONL/SQLite file now exists
+      // but may have been cached as null during createSession (before CLI created it).
+      if (slot.id) clearSessionFileCache(slot.id);
     } else {
       s.started = true; // old flat format
       s.last_active = Date.now();
@@ -970,7 +1019,13 @@ function createSessionStore(deps) {
   // Best approach: read cwd directly from session file content (not from dir name)
   function _isClaudeSessionValid(sessionId, normCwd) {
     try {
-      const sessionFile = findSessionFile(sessionId);
+      let sessionFile = findSessionFile(sessionId);
+      if (!sessionFile) {
+        // Cache may hold a stale null from createSession (before CLI wrote the JSONL).
+        // Clear and retry once to avoid false invalidation.
+        clearSessionFileCache(sessionId);
+        sessionFile = findSessionFile(sessionId);
+      }
       if (!sessionFile) {
         log('WARN', `[SessionValid] ${sessionId.slice(0, 8)}: JSONL file not found`);
         return false;

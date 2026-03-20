@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
+const { normalizeEngineName } = require('./daemon-utils');
 
 const CODEX_TOOL_MAP = Object.freeze({
   command_execution: 'Bash',
@@ -13,11 +14,6 @@ const CODEX_TOOL_MAP = Object.freeze({
   web_search: 'WebSearch',
   web_fetch: 'WebFetch',
 });
-
-function normalizeEngineName(name) {
-  const text = String(name || '').trim().toLowerCase();
-  return text === 'codex' ? 'codex' : 'claude';
-}
 
 function resolveBinary(engineName, deps = {}) {
   const engine = normalizeEngineName(engineName);

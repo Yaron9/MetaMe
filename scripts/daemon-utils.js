@@ -9,7 +9,9 @@
 
 function normalizeEngineName(name, defaultEngine = 'claude') {
   const n = String(name || '').trim().toLowerCase();
-  return n === 'codex' ? 'codex' : (typeof defaultEngine === 'function' ? defaultEngine() : defaultEngine);
+  if (n === 'codex') return 'codex';
+  if (n === 'claude') return 'claude';
+  return typeof defaultEngine === 'function' ? defaultEngine() : defaultEngine;
 }
 
 function normalizeCodexSandboxMode(value, fallback = null) {

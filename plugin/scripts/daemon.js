@@ -2352,6 +2352,7 @@ const { handleAgentCommand } = createAgentCommandHandler({
   writeConfigSafe,
   backupConfig,
   execSync,
+  log,
 });
 
 // Caffeinate process for /nosleep toggle (macOS only)

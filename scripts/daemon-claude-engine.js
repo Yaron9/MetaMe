@@ -106,7 +106,15 @@ function createClaudeEngine(deps) {
   }
   // Card reuse for merge-pause: when a task is paused for message merging,
   // save the statusMsgId so the next askClaude reuses the same card.
-  const _pausedCards = new Map(); // chatId -> { statusMsgId, cardHeader }
+  // Entries auto-expire via periodic sweep (60s) to prevent unbounded growth.
+  const _pausedCards = new Map(); // chatId -> { statusMsgId, cardHeader, savedAt }
+  const _PAUSED_CARD_TTL = 60000;
+  setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of _pausedCards) {
+      if (now - (v.savedAt || 0) > _PAUSED_CARD_TTL) _pausedCards.delete(k);
+    }
+  }, _PAUSED_CARD_TTL).unref();
 
   let mentorEngine = null;
   try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
@@ -239,6 +247,7 @@ function createClaudeEngine(deps) {
       && !!error
       && (!output || !!errorCode)
       && failureKind !== 'user-stop'
+      && failureKind !== 'merge-pause'
       && !!canRetry;
   }
 
@@ -478,6 +487,13 @@ function createClaudeEngine(deps) {
       return {
         kind: 'user-stop',
         userMessage: '⚠️ 当前执行已按你的停止动作中断，本轮不会自动续跑。',
+        retryPromptPrefix: '',
+      };
+    }
+    if (code === 'INTERRUPTED_MERGE_PAUSE' || lowered.includes('paused for merge')) {
+      return {
+        kind: 'merge-pause',
+        userMessage: '',
         retryPromptPrefix: '',
       };
     }
@@ -1275,9 +1291,9 @@ function createClaudeEngine(deps) {
     };
     const _ackBoundKey = _ackAgentMap[_ackChatIdStr] || projectKeyFromVirtualChatId(_ackChatIdStr);
     const _ackBoundProj = _ackBoundKey && config.projects ? config.projects[_ackBoundKey] : null;
-    // _ackCardHeader: non-null for agents with icon/name (team members, dispatch); passed to editMessage to preserve header on streaming edits
-    let _ackCardHeader = (_ackBoundProj && _ackBoundProj.icon && _ackBoundProj.name)
-      ? { title: `${_ackBoundProj.icon} ${_ackBoundProj.name}`, color: _ackBoundProj.color || 'blue' }
+    // _ackCardHeader: non-null for bound projects with a name; passed to editMessage to preserve header on streaming edits
+    let _ackCardHeader = (_ackBoundProj && _ackBoundProj.name)
+      ? { title: `${_ackBoundProj.icon || '🤖'} ${_ackBoundProj.name}`, color: _ackBoundProj.color || 'blue' }
       : null;
     // Reuse card from a paused merge (same card, no new push)
     const _pausedCard = _pausedCards.get(chatId);
@@ -1287,7 +1303,6 @@ function createClaudeEngine(deps) {
       const cardAge = _pausedCard.savedAt ? Date.now() - _pausedCard.savedAt : 0;
       if (cardAge > 30000) {
         log('INFO', `[askClaude] Discarding stale paused card for ${chatId} (${Math.round(cardAge / 1000)}s old)`);
-        if (_pausedCard.statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, _pausedCard.statusMsgId).catch(() => {});
       } else {
         statusMsgId = _pausedCard.statusMsgId;
         if (_pausedCard.cardHeader) _ackCardHeader = _pausedCard.cardHeader;
@@ -1365,6 +1380,10 @@ function createClaudeEngine(deps) {
       const sessionRaw = getSession(sessionChatId);
       const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
       const boundEngineName = (boundProject && boundProject.engine) ? normalizeEngineName(boundProject.engine) : getDefaultEngine();
+      // effectiveCwd: single source of truth for this request's working directory.
+      // For bound projects, config always wins over stored session cwd.
+      // Resolved once here; all downstream createSession/spawn calls use this.
+      let effectiveCwd = boundCwd || null;
 
       // Engine is determined from config only — bound agent config wins, then global default.
       const engineName = normalizeEngineName(
@@ -1406,6 +1425,14 @@ function createClaudeEngine(deps) {
       let session = resolveSessionForEngine(sessionChatId, engineName) || { cwd: boundCwd || HOME, engine: engineName, id: null, started: false };
       session.engine = engineName; // keep local copy for Codex resume detection below
       session.logicalChatId = sessionChatId;
+      // Finalize effectiveCwd: bound config > stored session > HOME
+      if (!effectiveCwd) effectiveCwd = (session && session.cwd) || HOME;
+      // Correct stored cwd if it drifted from config (e.g., stale state from prior bug)
+      if (session.cwd !== effectiveCwd) {
+        log('WARN', `[SessionCwd] correcting session cwd for ${sessionChatId}: ${session.cwd || 'unknown'} -> ${effectiveCwd}`);
+        session = { ...session, cwd: effectiveCwd };
+        await patchSessionSerialized(sessionChatId, (cur) => ({ ...cur, cwd: effectiveCwd }));
+      }
 
       // Warm pool: check if a persistent process is available for this session (Claude only).
       // Declared early so downstream logic can skip expensive operations when reusing warm process.
@@ -1425,7 +1452,7 @@ function createClaudeEngine(deps) {
           }
           session = createSession(
             sessionChatId,
-            session.cwd,
+            effectiveCwd,
             boundProject && boundProject.name ? boundProject.name : '',
             engineName,
             engineName === 'codex' ? requestedCodexPermissionProfile : undefined
@@ -1492,7 +1519,7 @@ function createClaudeEngine(deps) {
         const resumeInspection = inspectClaudeResumeSession(session, model);
         if (resumeInspection.shouldResume === false) {
           log('INFO', `[ModelPin] session ${session.id.slice(0, 8)} flagged as ${resumeInspection.reason}; starting fresh Claude session`);
-          session = createSession(sessionChatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', runtime.name);
+          session = createSession(sessionChatId, effectiveCwd, boundProject && boundProject.name ? boundProject.name : '', runtime.name);
         } else if (resumeInspection.modelPin) {
           if (resumeInspection.modelPin !== model) {
             log('INFO', `[ModelPin] resuming ${session.id.slice(0, 8)} with original model ${resumeInspection.modelPin} (configured: ${model})`);
@@ -1950,17 +1977,24 @@ ${mentorRadarHint}
             ...(runtime.name === 'codex' ? { runtimeSessionObserved: true } : {}),
             ...(runtime.name === 'codex' ? actualPermissionProfile : {}),
           };
-          return { ...cur, cwd: session.cwd || cur.cwd || HOME, engines };
+          return { ...cur, cwd: effectiveCwd || cur.cwd || HOME, engines };
         });
         if (runtime.name === 'codex' && wasStarted && prevSessionId && prevSessionId !== safeNextId && prevSessionId !== '__continue__') {
           log('WARN', `Codex thread migrated for ${chatId}: ${prevSessionId.slice(0, 8)} -> ${safeNextId.slice(0, 8)}`);
+        }
+        // Keep card header in sync with the real session ID reported by the engine
+        if (_ackCardHeader && _ackCardHeader._baseTitle) {
+          _ackCardHeader = { ..._ackCardHeader, title: `${_ackCardHeader._baseTitle}（${safeNextId.slice(0, 8)}）` };
         }
       };
 
       // Check if user cancelled during pre-spawn phase (sentinel was marked aborted)
       // Stamp session ID on card header so user can track session continuity
+      if (_ackCardHeader) {
+        _ackCardHeader._baseTitle = _ackCardHeader.title; // preserve original title for onSession updates
+      }
       if (session && session.id && _ackCardHeader) {
-        _ackCardHeader = { ..._ackCardHeader, title: `${_ackCardHeader.title}（${session.id.slice(0, 8)}）` };
+        _ackCardHeader = { ..._ackCardHeader, title: `${_ackCardHeader._baseTitle}（${session.id.slice(0, 8)}）` };
       }
 
       const _preSentinel = activeProcesses.get(chatId);
@@ -2027,7 +2061,7 @@ ${mentorRadarHint}
             );
             session = createSession(
               sessionChatId,
-              session.cwd,
+              effectiveCwd,
               boundProject && boundProject.name ? boundProject.name : '',
               'codex',
               requestedCodexPermissionProfile
@@ -2104,7 +2138,7 @@ ${mentorRadarHint}
           if (resumeFailure.kind !== 'interrupted') {
             session = createSession(
               sessionChatId,
-              session.cwd,
+              effectiveCwd,
               boundProject && boundProject.name ? boundProject.name : '',
               'codex',
               requestedCodexPermissionProfile
@@ -2210,6 +2244,16 @@ ${mentorRadarHint}
         const wasNew = !session.started;
         if (wasNew) markSessionStarted(sessionChatId, engineName);
         return { ok: true };
+      }
+
+      // Merge-pause with partial output: save card for reuse, discard partial output
+      if (output && errorCode === 'INTERRUPTED_MERGE_PAUSE') {
+        if (statusMsgId) {
+          _pausedCards.set(chatId, { statusMsgId, cardHeader: _ackCardHeader, savedAt: Date.now() });
+          if (bot.editMessage) bot.editMessage(chatId, statusMsgId, '⏸ 合并中…', _ackCardHeader).catch(() => {});
+          log('INFO', `[askClaude] Merge-pause with partial output, saved card ${statusMsgId} for ${chatId}`);
+        }
+        return { ok: false, error: 'Paused for merge', errorCode };
       }
 
       if (output) {
@@ -2387,6 +2431,12 @@ ${mentorRadarHint}
             } catch { /* non-critical — memory module may not be available */ }
           });
         }
+        // Speculatively save card for pipeline post-resume flush reuse.
+        // If no follow-up arrives, the card expires (30s TTL in _pausedCards consumer).
+        const _replyMsgId = replyMsg && replyMsg.message_id;
+        if (_replyMsgId && _ackCardHeader) {
+          _pausedCards.set(chatId, { statusMsgId: _replyMsgId, cardHeader: _ackCardHeader, savedAt: Date.now() });
+        }
         return { ok: !timedOut };
       } else {
         const errMsg = error || 'Unknown error';
@@ -2412,7 +2462,7 @@ ${mentorRadarHint}
         if (runtime.name === 'claude' && _isSessionResumeFail) {
           const _reason = errMsg.includes('already in use') ? 'locked' : _isThinkingSignatureError ? 'thinking-signature-invalid' : 'not found';
           log('WARN', `Session ${session.id} unusable (${_reason}), creating new`);
-          session = createSession(sessionChatId, session.cwd, '', runtime.name);
+          session = createSession(sessionChatId, effectiveCwd, '', runtime.name);
 
           const retryArgs = runtime.buildArgs({
             model,
