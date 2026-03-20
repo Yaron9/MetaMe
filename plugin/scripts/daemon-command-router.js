@@ -643,6 +643,19 @@ function createCommandRouter(deps) {
       return;
     }
 
+    // /btw — quick side question (read-only, concise, bypasses cooldown)
+    if (/^\/btw(\s|$)/i.test(text)) {
+      const btwQuestion = text.replace(/^\/btw\s*/i, '').trim();
+      if (!btwQuestion) {
+        await bot.sendMessage(chatId, '用法: /btw <问题>\n快速提问，不影响主会话节奏');
+        return;
+      }
+      const btwPrompt = `[Side question — answer concisely from existing context, no need for tools]\n\n${btwQuestion}`;
+      resetCooldown(chatId);
+      await askClaude(bot, chatId, btwPrompt, config, true, senderId);
+      return;
+    }
+
     if (text.startsWith('/')) {
       const currentModel = (config.daemon && config.daemon.model) || 'opus';
       const currentProvider = providerMod ? providerMod.getActiveName() : 'anthropic';
@@ -663,6 +676,9 @@ function createCommandRouter(deps) {
         '/agent unbind — 解绑当前群',
         '/agent reset — 重置当前 Agent 角色',
         '/agent soul [repair] — 查看/修复 Agent Soul 身份层',
+        '',
+        '💬 快捷:',
+        '/btw <问题> — 快速旁白提问（只读，不打断主任务）',
         '',
         '📂 Session 管理:',
         '/new [path] [name] — 新建会话',

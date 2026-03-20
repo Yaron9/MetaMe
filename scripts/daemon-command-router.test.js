@@ -63,6 +63,69 @@ function createConfig(overrides = {}) {
 // NOTE: follow-up merge tests removed — that logic moved to daemon-message-pipeline.js
 // See daemon-message-pipeline tests for coverage.
 
+describe('/btw side question command', () => {
+  it('should call askClaude with readOnly=true and prefixed prompt', async () => {
+    let claudeArgs = null;
+    const deps = createDeps({
+      askClaude: async (bot, chatId, prompt, config, readOnly, senderId) => {
+        claudeArgs = { chatId, prompt, readOnly, senderId };
+        return { ok: true };
+      },
+      resetCooldown: () => {},
+    });
+    const { handleCommand } = createCommandRouter(deps);
+    const sent = [];
+    const config = createConfig();
+
+    await handleCommand(createBot(sent), 'chat1', '/btw what is this function', config, null, 'user-1', false);
+    assert.ok(claudeArgs, 'askClaude should be called');
+    assert.equal(claudeArgs.readOnly, true, 'should pass readOnly=true');
+    assert.ok(claudeArgs.prompt.includes('what is this function'), 'should include original question');
+    assert.ok(claudeArgs.prompt.includes('Side question'), 'should include concise hint prefix');
+  });
+
+  it('should show usage hint for bare /btw with no question', async () => {
+    let claudeCalled = false;
+    const deps = createDeps({
+      askClaude: async () => { claudeCalled = true; return { ok: true }; },
+    });
+    const { handleCommand } = createCommandRouter(deps);
+    const sent = [];
+    const config = createConfig();
+
+    await handleCommand(createBot(sent), 'chat1', '/btw', config, null, 'user-1', false);
+    assert.equal(claudeCalled, false, 'should NOT call askClaude');
+    assert.ok(sent.some((m) => m.includes('/btw')), 'should show usage hint');
+  });
+
+  it('should show usage hint for /btw with whitespace only', async () => {
+    let claudeCalled = false;
+    const deps = createDeps({
+      askClaude: async () => { claudeCalled = true; return { ok: true }; },
+    });
+    const { handleCommand } = createCommandRouter(deps);
+    const sent = [];
+    const config = createConfig();
+
+    await handleCommand(createBot(sent), 'chat1', '/btw   ', config, null, 'user-1', false);
+    assert.equal(claudeCalled, false, 'should NOT call askClaude for whitespace-only');
+  });
+
+  it('should call resetCooldown before askClaude', async () => {
+    const callOrder = [];
+    const deps = createDeps({
+      resetCooldown: () => { callOrder.push('resetCooldown'); },
+      askClaude: async () => { callOrder.push('askClaude'); return { ok: true }; },
+    });
+    const { handleCommand } = createCommandRouter(deps);
+    const sent = [];
+    const config = createConfig();
+
+    await handleCommand(createBot(sent), 'chat1', '/btw test', config, null, 'user-1', false);
+    assert.deepEqual(callOrder, ['resetCooldown', 'askClaude'], 'resetCooldown should be called before askClaude');
+  });
+});
+
 describe('chat_agent_map session reuse (multi-engine format)', () => {
   it('should NOT recreate session when multi-engine session already has the correct engine slot', async () => {
     let attachCalls = 0;
