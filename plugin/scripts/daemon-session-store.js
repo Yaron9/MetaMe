@@ -924,6 +924,9 @@ function createSessionStore(deps) {
       }
       slot.started = true;
       s.last_active = Date.now();
+      // Clear stale findSessionFile cache: the JSONL/SQLite file now exists
+      // but may have been cached as null during createSession (before CLI created it).
+      if (slot.id) clearSessionFileCache(slot.id);
     } else {
       s.started = true; // old flat format
       s.last_active = Date.now();
@@ -970,7 +973,13 @@ function createSessionStore(deps) {
   // Best approach: read cwd directly from session file content (not from dir name)
   function _isClaudeSessionValid(sessionId, normCwd) {
     try {
-      const sessionFile = findSessionFile(sessionId);
+      let sessionFile = findSessionFile(sessionId);
+      if (!sessionFile) {
+        // Cache may hold a stale null from createSession (before CLI wrote the JSONL).
+        // Clear and retry once to avoid false invalidation.
+        clearSessionFileCache(sessionId);
+        sessionFile = findSessionFile(sessionId);
+      }
       if (!sessionFile) {
         log('WARN', `[SessionValid] ${sessionId.slice(0, 8)}: JSONL file not found`);
         return false;

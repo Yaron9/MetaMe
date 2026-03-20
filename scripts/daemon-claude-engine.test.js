@@ -241,6 +241,152 @@ describe('daemon-claude-engine private helpers', () => {
     });
   });
 
+  it('forces bound chats back to configured cwd even when stored session cwd is polluted', async () => {
+    const state = {
+      sessions: {
+        _bound_paper_rev: {
+          cwd: 'D:\\MetaMe',
+          engines: {
+            claude: {
+              id: 'sid-paper-old',
+              started: true,
+            },
+          },
+        },
+      },
+    };
+    const validateCalls = [];
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: () => {
+        const stdout = new PassThrough();
+        const stderr = new PassThrough();
+        const stdin = new PassThrough();
+        const proc = {
+          stdout,
+          stderr,
+          stdin,
+          pid: 43210,
+          kill: () => {},
+          on(event, handler) {
+            if (event === 'close') setImmediate(() => handler(0));
+            return proc;
+          },
+        };
+        setImmediate(() => {
+          stdout.write('{"kind":"session","id":"sid-paper-new"}\n');
+          stdout.write('{"kind":"assistant","text":"paper ok"}\n');
+          stdout.end();
+          stderr.end();
+        });
+        return proc;
+      },
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses: new Map(),
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({
+        feishu: {
+          chat_agent_map: {
+            oc_paper: 'paper_rev',
+          },
+        },
+        projects: {
+          paper_rev: {
+            cwd: 'E:\\paper\\paper30-reloading',
+            name: '小W-研究生',
+            engine: 'claude',
+          },
+        },
+      }),
+      loadState: () => state,
+      saveState: (next) => {
+        Object.assign(state, next);
+        state.sessions = next.sessions;
+        state.msg_sessions = next.msg_sessions;
+      },
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: (chatId) => state.sessions[chatId] || null,
+      getSessionForEngine: (chatId, engineName) => {
+        const raw = state.sessions[chatId];
+        if (!raw) return null;
+        const slot = raw.engines && raw.engines[engineName];
+        return slot ? { cwd: raw.cwd, engine: engineName, logicalChatId: chatId, ...slot } : null;
+      },
+      createSession: () => ({ id: 'sid-paper-fresh', cwd: 'E:\\paper\\paper30-reloading', started: false, engine: 'claude', logicalChatId: '_bound_paper_rev' }),
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: (engineName, sessionId, cwd) => {
+        validateCalls.push({ engineName, sessionId, cwd });
+        return true;
+      },
+      getCodexSessionSandboxProfile: () => null,
+      getCodexSessionPermissionMode: () => null,
+      getSessionRecentContext: () => null,
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getDefaultEngine: () => 'claude',
+      getEngineRuntime: () => ({
+        name: 'claude',
+        binary: 'claude',
+        buildArgs: () => ['-p'],
+        buildEnv: () => ({ ...process.env }),
+        parseStreamEvent: (line) => {
+          const raw = JSON.parse(line);
+          if (raw.kind === 'session') return [{ type: 'session', sessionId: raw.id }];
+          if (raw.kind === 'assistant') return [{ type: 'assistant', text: raw.text }];
+          return [];
+        },
+        classifyError: () => null,
+        killSignal: 'SIGTERM',
+        timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: 2000 },
+      }),
+    });
+
+    const bot = {
+      sendTyping: async () => {},
+      sendMessage: async () => ({ message_id: 'msg-paper' }),
+      sendMarkdown: async () => ({ message_id: 'msg-paper-md' }),
+      sendCard: async () => ({ message_id: 'msg-paper-card' }),
+      editMessage: async () => true,
+      deleteMessage: async () => true,
+    };
+
+    const result = await engine.askClaude(bot, 'oc_paper', '继续', {
+      feishu: { chat_agent_map: { oc_paper: 'paper_rev' } },
+      projects: {
+        paper_rev: { cwd: 'E:\\paper\\paper30-reloading', name: '小W-研究生', engine: 'claude' },
+      },
+    }, false, 'ou_admin');
+
+    assert.equal(result.ok, true);
+    assert.equal(validateCalls[0].cwd, path.resolve('E:\\paper\\paper30-reloading'));
+    assert.equal(state.sessions._bound_paper_rev.cwd, path.resolve('E:\\paper\\paper30-reloading'));
+    const tracked = Object.values(state.msg_sessions || {}).find(entry =>
+      entry && entry.logicalChatId === '_bound_paper_rev' && entry.cwd === path.resolve('E:\\paper\\paper30-reloading')
+    );
+    assert.ok(tracked);
+  });
+
   it('decides codex resume fallback retry correctly', () => {
     const state = { sessions: {} };
     const engine = createEngineWithState(state);

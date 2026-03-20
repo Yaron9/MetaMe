@@ -1406,6 +1406,11 @@ function createClaudeEngine(deps) {
       let session = resolveSessionForEngine(sessionChatId, engineName) || { cwd: boundCwd || HOME, engine: engineName, id: null, started: false };
       session.engine = engineName; // keep local copy for Codex resume detection below
       session.logicalChatId = sessionChatId;
+      if (boundCwd && String(sessionChatId).startsWith('_bound_') && session.cwd !== boundCwd) {
+        log('WARN', `[SessionCwd] correcting bound session cwd for ${sessionChatId}: ${session.cwd || 'unknown'} -> ${boundCwd}`);
+        session = { ...session, cwd: boundCwd };
+        await patchSessionSerialized(sessionChatId, (cur) => ({ ...cur, cwd: boundCwd }));
+      }
 
       // Warm pool: check if a persistent process is available for this session (Claude only).
       // Declared early so downstream logic can skip expensive operations when reusing warm process.
