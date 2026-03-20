@@ -1,0 +1,5 @@
+# Perpetual project manifest for MetaMe Ops (self-maintenance)
+completion_signal: MAINT_COMPLETE
+verifier: scripts/ops-verifier.js
+mission_queue: scripts/ops-mission-queue.js
+max_depth: 15
