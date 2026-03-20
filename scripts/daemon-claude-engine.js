@@ -1736,7 +1736,7 @@ ${mentorRadarHint}
             if (_idleMs > 2 * 60 * 60 * 1000 && _summaryAgeH < 168) {
               summaryHint = `
 
-[上次对话摘要，供参考]: ${_sess.last_summary}`;
+[上次对话摘要（历史已完成，仅供上下文，请勿重复执行）]: ${_sess.last_summary}`;
               log('INFO', `[DAEMON] Injected session summary for ${chatId} (idle ${Math.round(_idleMs / 3600000)}h)`);
             }
           }
