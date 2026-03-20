@@ -91,27 +91,6 @@ function createBot(config) {
     appSecret: app_secret,
   });
 
-  /**
-   * Validate credentials by attempting a lightweight API call.
-   * Returns { ok: true } or { ok: false, error: string }.
-   */
-  async function validateCredentials() {
-    try {
-      await withTimeout(client.im.chat.list({ params: { page_size: 1 } }), 15000);
-      return { ok: true };
-    } catch (err) {
-      const msg = err && err.message || String(err);
-      const isAuthError = /invalid|unauthorized|forbidden|token|credential|app_id|app_secret|permission|99991663|99991664|99991665/i.test(msg);
-      return {
-        ok: false,
-        error: isAuthError
-          ? `Feishu credential validation failed (app_id/app_secret may be incorrect): ${msg}`
-          : `Feishu API probe failed (network or config issue): ${msg}`,
-        isAuthError,
-      };
-    }
-  }
-
   // Private: send an interactive card JSON; returns { message_id } or null.
   // All card functions funnel through here to avoid repeating the SDK call.
   async function _sendInteractive(chatId, card) {
@@ -127,7 +106,6 @@ function createBot(config) {
   let _editBrokenAt = 0;        // timestamp when broken; auto-resets after 10min
 
   return {
-    validateCredentials,
     /**
      * Send a plain text message
      */
@@ -548,9 +526,6 @@ function createBot(config) {
         reconnect() {
           _log('INFO', 'Feishu manual reconnect triggered');
           reconnectDelay = 5000;
-          clearTimeout(reconnectTimer);
-          try { currentWs?.stop?.(); } catch { /* ignore */ }
-          currentWs = null;
           connect();
         },
         isAlive() {

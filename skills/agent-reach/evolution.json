@@ -1,0 +1,13 @@
+{
+  "last_updated": "2026-03-17T13:41:59.591Z",
+  "fixes": [
+    "Repeatedly failing on Twitter/X links (signals #7, #15, #30 all tool_failure); improve X.com social media parsing robustness or add fallback extraction method for social platforms"
+  ],
+  "insights_stats": {
+    "Repeatedly failing on Twitter/X links (signals #7, #15, #30 all tool_failure); improve X.com social media parsing robustness or add fallback extraction method for social platforms": {
+      "success_count": 3,
+      "fail_count": 0,
+      "last_applied_at": "2026-03-20T00:11:44.684Z"
+    }
+  }
+}

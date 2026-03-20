@@ -48,7 +48,6 @@ const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const DISPATCH_DIR = path.join(METAME_DIR, 'dispatch');
 const DISPATCH_LOG = path.join(DISPATCH_DIR, 'dispatch-log.jsonl');
 const { sleepSync, socketPath, needsSocketCleanup } = require('./platform');
-const { handleReactiveOutput } = require('./daemon-reactive-lifecycle');
 const SOCK_PATH = socketPath(METAME_DIR);
 
 // Resolve claude binary path (daemon may not inherit user's full PATH)
@@ -287,28 +286,12 @@ function restoreConfig() {
   if (!fs.existsSync(bak)) return false;
   try {
     const bakCfg = yaml.load(fs.readFileSync(bak, 'utf8')) || {};
-    // Preserve ALL user-critical fields from current config so /fix never
-    // loses secrets, chat IDs, or agent mappings
+    // Preserve security-critical fields from current config (chat IDs, agent map)
+    // so a /fix never loses manually-added channels
     let curCfg = {};
     try { curCfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {}; } catch { }
-    // Secret fields that must NEVER be reverted by a restore
-    const SECRET_FIELDS = ['app_id', 'app_secret', 'bot_token', 'operator_ids'];
     for (const adapter of ['feishu', 'telegram']) {
       if (curCfg[adapter] && bakCfg[adapter]) {
-        // Preserve secrets: current config always wins
-        for (const field of SECRET_FIELDS) {
-          if (curCfg[adapter][field] != null) {
-            bakCfg[adapter][field] = curCfg[adapter][field];
-          }
-        }
-        // Preserve remote_dispatch secrets
-        if (curCfg[adapter].remote_dispatch && bakCfg[adapter].remote_dispatch) {
-          if (curCfg[adapter].remote_dispatch.secret) {
-            bakCfg[adapter].remote_dispatch.secret = curCfg[adapter].remote_dispatch.secret;
-          }
-        } else if (curCfg[adapter].remote_dispatch) {
-          bakCfg[adapter].remote_dispatch = curCfg[adapter].remote_dispatch;
-        }
         const curIds = curCfg[adapter].allowed_chat_ids || [];
         const bakIds = bakCfg[adapter].allowed_chat_ids || [];
         // Union of both lists
@@ -318,14 +301,7 @@ function restoreConfig() {
         bakCfg[adapter].chat_agent_map = Object.assign(
           {}, bakCfg[adapter].chat_agent_map || {}, curCfg[adapter].chat_agent_map || {}
         );
-      } else if (curCfg[adapter] && !bakCfg[adapter]) {
-        // Backup doesn't have this adapter at all — keep current entirely
-        bakCfg[adapter] = curCfg[adapter];
       }
-    }
-    // Preserve projects (current takes precedence for each project key)
-    if (curCfg.projects) {
-      bakCfg.projects = Object.assign({}, bakCfg.projects || {}, curCfg.projects);
     }
     writeConfigSafe(bakCfg);
     config = loadConfig(); // eslint-disable-line no-undef -- config is declared in main() closure
@@ -1107,37 +1083,6 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
         chain: [], // reset chain for callbacks
       }, config);
     }
-
-    // ── Reactive lifecycle hook ──
-    try {
-      handleReactiveOutput(targetProject, outStr, loadConfig(), {
-        log,
-        loadState,
-        saveState,
-        checkBudget,
-        handleDispatchItem: (item, cfg) => {
-          dispatchTask(item.target, {
-            from: item.from || '_reactive',
-            type: 'reactive',
-            priority: 'normal',
-            new_session: !!item.new_session,
-            payload: { title: 'reactive dispatch', prompt: item.prompt },
-          }, cfg, null, null);
-        },
-        notifyUser: (msg) => {
-          try {
-            const cfg = loadConfig();
-            if (cfg.feishu && cfg.feishu.enabled && cfg.feishu.admin_chat_id) {
-              const { sendFeishuText } = require('./daemon-notify');
-              sendFeishuText(cfg.feishu.admin_chat_id, msg, cfg);
-            }
-          } catch (e) { log('WARN', `Reactive notify failed: ${e.message}`); }
-        },
-        metameDir: path.join(os.homedir(), '.metame'),
-      });
-    } catch (e) {
-      log('ERROR', `Reactive lifecycle error for ${targetProject}: ${e.message}`);
-    }
   };
   // If streamOptions provided, use real bot so output appears in target's Feishu channel.
   // Otherwise fall back to nullBot which captures output for replyFn.
@@ -1751,27 +1696,6 @@ function physiologicalHeartbeat(config) {
     }
   } catch (e) {
     log('WARN', `Dispatch log rotation failed: ${e.message}`);
-  }
-
-  // 4. Reconcile perpetual projects — detect stale reactive loops
-  try {
-    const { reconcilePerpetualProjects } = require('./daemon-reactive-lifecycle');
-    reconcilePerpetualProjects(config, {
-      log,
-      loadState,
-      saveState,
-      notifyUser: (msg) => {
-        try {
-          const cfg = loadConfig();
-          if (cfg.feishu && cfg.feishu.enabled && cfg.feishu.admin_chat_id) {
-            const { sendFeishuText } = require('./daemon-notify');
-            sendFeishuText(cfg.feishu.admin_chat_id, msg, cfg);
-          }
-        } catch (e) { log('WARN', `Reconcile notify failed: ${e.message}`); }
-      },
-    });
-  } catch (e) {
-    log('WARN', `Reconcile check failed: ${e.message}`);
   }
 }
 
@@ -2391,7 +2315,6 @@ const { handleOpsCommand } = createOpsCommandHandler({
   path,
   spawn,
   execSync,
-  execFileSync,
   log,
   loadConfig,
   loadState,

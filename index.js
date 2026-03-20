@@ -696,6 +696,58 @@ function ensureHookInstalled() {
 ensureHookInstalled();
 
 // ---------------------------------------------------------
+// 1.6a AUTO-ENABLE BUNDLED PLUGINS
+// ---------------------------------------------------------
+function ensurePluginsEnabled() {
+  try {
+    let settings = {};
+    if (fs.existsSync(CLAUDE_SETTINGS)) {
+      settings = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf8'));
+    }
+
+    if (!settings.enabledPlugins) settings.enabledPlugins = {};
+    if (!settings.extraKnownMarketplaces) settings.extraKnownMarketplaces = {};
+
+    const bundledPlugins = {
+      'example-skills@anthropic-agent-skills': true,
+      'ralph-loop@claude-plugins-official': true,
+      'planning-with-files@planning-with-files': true,
+    };
+
+    const bundledMarketplaces = {
+      'planning-with-files': {
+        source: { source: 'github', repo: 'OthmanAdi/planning-with-files' },
+      },
+    };
+
+    let modified = false;
+
+    for (const [key, val] of Object.entries(bundledPlugins)) {
+      if (!(key in settings.enabledPlugins)) {
+        settings.enabledPlugins[key] = val;
+        modified = true;
+      }
+    }
+
+    for (const [key, val] of Object.entries(bundledMarketplaces)) {
+      if (!(key in settings.extraKnownMarketplaces)) {
+        settings.extraKnownMarketplaces[key] = val;
+        modified = true;
+      }
+    }
+
+    if (modified) {
+      fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2), 'utf8');
+      console.log(`${icon("brain")} MetaMe: Bundled plugins enabled.`);
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
+ensurePluginsEnabled();
+
+// ---------------------------------------------------------
 // 1.6b LOCAL ACTIVITY HEARTBEAT
 // ---------------------------------------------------------
 // Touch ~/.metame/local_active so the daemon knows the user is active on desktop.

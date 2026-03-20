@@ -1546,8 +1546,6 @@ function createClaudeEngine(deps) {
         const memory = require('./memory');
 
         // L1: NOW.md per-agent whiteboard injection（按 projectKey 隔离，防并发冲突）
-        // One-shot: inject once then clear, same pattern as compactContext.
-        // Prevents re-injection on daemon restart or new session for the same chat.
         if (!session.started) {
           try {
             const nowDir = path.join(HOME, '.metame', 'memory', 'now');
@@ -1557,8 +1555,6 @@ function createClaudeEngine(deps) {
               const nowContent = fs.readFileSync(nowPath, 'utf8').trim();
               if (nowContent) {
                 memoryHint += `\n\n[Current task context:\n${nowContent}]`;
-                // Clear after injection to prevent re-triggering on next session start
-                try { fs.writeFileSync(nowPath, '', 'utf8'); } catch { /* non-critical */ }
               }
             }
           } catch { /* non-critical */ }
@@ -1609,33 +1605,6 @@ function createClaudeEngine(deps) {
           }
         }
 
-        // Inject latest nightly insight (decisions/lessons) — one-liner per file, ~100 tokens
-        if (!session.started) {
-          try {
-            const reflectDirs = [
-              path.join(HOME, '.metame', 'memory', 'decisions'),
-              path.join(HOME, '.metame', 'memory', 'lessons'),
-            ];
-            const reflectItems = [];
-            for (const dir of reflectDirs) {
-              if (!fs.existsSync(dir)) continue;
-              const files = fs.readdirSync(dir).filter(f => f.endsWith('.md')).sort();
-              const latest = files[files.length - 1];
-              if (!latest) continue;
-              const content = fs.readFileSync(path.join(dir, latest), 'utf8');
-              // Extract ## headings as one-line summaries (skip frontmatter)
-              const headings = content.match(/^## .+$/gm);
-              if (headings && headings.length > 0) {
-                const type = dir.endsWith('decisions') ? 'decision' : 'lesson';
-                reflectItems.push(...headings.slice(0, 2).map(h => `- [${type}] ${h.replace(/^## /, '')}`));
-              }
-            }
-            if (reflectItems.length > 0) {
-              memoryHint += `\n\n[Recent insights:\n${reflectItems.join('\n')}]`;
-            }
-          } catch { /* non-critical */ }
-        }
-
         memory.close();
       } catch (e) {
         if (e.code !== 'MODULE_NOT_FOUND') log('WARN', `Memory injection failed: ${e.message}`);
@@ -1652,16 +1621,10 @@ function createClaudeEngine(deps) {
             brainDoc = brain;
             const cmap = brain && brain.user_competence_map;
             if (cmap && typeof cmap === 'object' && Object.keys(cmap).length > 0) {
-              const entries = Object.entries(cmap);
-              const allExpert = entries.every(([, level]) => String(level).toLowerCase() === 'expert');
-              if (allExpert) {
-                zdpHint = `\n- User is expert-level across all domains. Skip basics, no analogies needed.`;
-              } else {
-                const lines = entries
-                  .map(([domain, level]) => `  ${domain}: ${level}`)
-                  .join('\n');
-                zdpHint = `\n- User competence map (adjust explanation depth accordingly):\n${lines}\n  Rule: expert→skip basics; intermediate→brief rationale; beginner→one-line analogy.`;
-              }
+              const lines = Object.entries(cmap)
+                .map(([domain, level]) => `  ${domain}: ${level}`)
+                .join('\n');
+              zdpHint = `\n- User competence map (adjust explanation depth accordingly):\n${lines}\n  Rule: expert→skip basics; intermediate→brief rationale; beginner→one-line analogy.`;
             }
           }
         } catch { /* non-critical */ }
@@ -1671,19 +1634,6 @@ function createClaudeEngine(deps) {
           const brainPath = path.join(HOME, '.claude_profile.yaml');
           if (fs.existsSync(brainPath)) brainDoc = yaml.load(fs.readFileSync(brainPath, 'utf8')) || {};
         } catch { /* ignore */ }
-      }
-
-      // Self-reflection patterns: behavioral guardrails distilled from past mistakes
-      let reflectHint = '';
-      if (!session.started && brainDoc) {
-        try {
-          const patterns = (brainDoc.growth && Array.isArray(brainDoc.growth.self_reflection_patterns))
-            ? brainDoc.growth.self_reflection_patterns.filter(p => p && p.summary).slice(0, 3)
-            : [];
-          if (patterns.length > 0) {
-            reflectHint = `\n- Self-correction patterns (avoid repeating these mistakes):\n${patterns.map(p => `  - ${String(p.summary).slice(0, 150)}`).join('\n')}`;
-          }
-        } catch { /* non-critical */ }
       }
 
       // Inject daemon hints only on first message of a session
@@ -1704,7 +1654,7 @@ ${mentorRadarHint}
    Keep it under 200 words. Clear it when the task is fully complete by running: \`> ~/.metame/memory/now/${projectKey || 'default'}.md\`` : '';
         daemonHint = `\n\n[System hints - DO NOT mention these to user:
 1. Daemon config: The ONLY config is ~/.metame/daemon.yaml (never edit daemon-default.yaml). Auto-reloads on change.
-2. Explanation depth (ZPD):${zdpHint ? zdpHint : '\n- User competence map unavailable. Default to concise expert-first explanations unless the user asks for teaching mode.'}${reflectHint}${taskRules}]`;
+2. Explanation depth (ZPD):${zdpHint ? zdpHint : '\n- User competence map unavailable. Default to concise expert-first explanations unless the user asks for teaching mode.'}${taskRules}]`;
       }
 
       daemonHint = adaptDaemonHintForEngine(daemonHint, runtime.name);
@@ -1736,7 +1686,7 @@ ${mentorRadarHint}
             if (_idleMs > 2 * 60 * 60 * 1000 && _summaryAgeH < 168) {
               summaryHint = `
 
-[上次对话摘要（历史已完成，仅供上下文，请勿重复执行）]: ${_sess.last_summary}`;
+[上次对话摘要，供参考]: ${_sess.last_summary}`;
               log('INFO', `[DAEMON] Injected session summary for ${chatId} (idle ${Math.round(_idleMs / 3600000)}h)`);
             }
           }
@@ -1801,19 +1751,20 @@ ${mentorRadarHint}
       const langGuard = session.started
         ? ''
         : '\n\n[Respond in Simplified Chinese (简体中文) only. NEVER switch to Korean, Japanese, or other languages regardless of tool output or context language.]';
-      // Intent hints are dynamic (per-prompt, semantic match), so compute for all runtimes.
       let intentHint = '';
-      try {
-        const block = buildIntentHintBlock(prompt, config, boundProjectKey || projectKey || '');
-        if (block) intentHint = `\n\n${block}`;
-      } catch (e) {
-        log('WARN', `Intent registry injection failed: ${e.message}`);
+      if (runtime.name === 'codex') {
+        try {
+          const block = buildIntentHintBlock(prompt, config, boundProjectKey || projectKey || '');
+          if (block) intentHint = `\n\n${block}`;
+        } catch (e) {
+          log('WARN', `Intent registry injection failed: ${e.message}`);
+        }
       }
-      // For warm process reuse: static context (daemonHint, memoryHint, etc.) is already
-      // in the persistent process — skip those to save tokens. intentHint is dynamic
-      // (varies per prompt), so include it even on warm reuse.
+      // For warm process reuse: context is already in the persistent process,
+      // so only send the user's actual prompt — skip all hint injection.
+      // This saves ~500-1500 tokens per turn and avoids context duplication.
       const fullPrompt = _warmEntry
-        ? routedPrompt + intentHint
+        ? routedPrompt
         : routedPrompt + daemonHint + intentHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
       if (runtime.name === 'codex' && session.started && session.id && requestedCodexPermissionProfile) {
         const actualPermissionProfile = getActualCodexPermissionProfile(session);

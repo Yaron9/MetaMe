@@ -13,7 +13,8 @@
         "!scripts/test_daemon.js",
         "!scripts/hooks/test-*.js",
         "!scripts/daemon.yaml",
-        "!scripts/daemon.yaml.bak"
+        "!scripts/daemon.yaml.bak",
+        "skills/"
     ],
     "scripts": {
         "test": "node --test scripts/*.test.js",

@@ -45,7 +45,6 @@ heartbeat:
       type: script
       command: node ~/.metame/distill.js
       interval: 4h
-      timeout: 5m
       precondition: "test -s ~/.metame/raw_signals.jsonl"
       require_idle: true
       notify: false
@@ -75,7 +74,6 @@ heartbeat:
       type: script
       command: node ~/.metame/skill-evolution.js
       interval: 12h
-      timeout: 5m
       precondition: "test -s ~/.metame/skill_signals.jsonl"
       require_idle: true
       notify: false
@@ -106,7 +104,7 @@ heartbeat:
       at: "01:30"
       require_idle: true
       notify: false
-      enabled: false
+      enabled: true
 
     # Legacy flat tasks (no project isolation). New tasks should go under projects: above.
     # Examples — uncomment or add your own:

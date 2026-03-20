@@ -14,7 +14,6 @@ const DEFAULTS = Object.freeze({
   file_transfer: true,
   memory_recall: true,
   doc_router: true,
-  perpetual: true,
 });
 
 const INTENT_MODULES = Object.freeze({
@@ -24,7 +23,6 @@ const INTENT_MODULES = Object.freeze({
   file_transfer: require('./hooks/intent-file-transfer'),
   memory_recall: require('./hooks/intent-memory-recall'),
   doc_router: require('./hooks/intent-doc-router'),
-  perpetual: require('./hooks/intent-perpetual'),
 });
 
 function resolveEnabledIntents(config = {}) {

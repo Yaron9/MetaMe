@@ -1,0 +1,6 @@
+{
+  "last_updated": "2026-03-16T12:51:35.102Z",
+  "preferences": [
+    "Add template for semantic trigger hooks to prevent accidental skill invocation (Signal 23), and enforce pointer-style one-line descriptions instead of full skill content reads to reduce TOKEN bloat. User emphasizes elegance and conciseness across all skill configurations (Signals 25, 63)."
+  ]
+}

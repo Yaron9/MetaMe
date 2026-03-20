@@ -28,7 +28,7 @@ def stitch_skill(skill_dir):
     # Prepare the Markdown content block
     evolution_section = []
     evolution_section.append("\n\n## User-Learned Best Practices & Constraints")
-    evolution_section.append("\n> **Auto-Generated Section**: This section is maintained by `skill-evolution-manager`. Do not edit manually.")
+    evolution_section.append("\n> **Auto-Generated Section**: This section is maintained by `skill-creator`. Do not edit manually.")
     
     if data.get("preferences"):
         evolution_section.append("\n### User Preferences")
