@@ -239,6 +239,7 @@ function createClaudeEngine(deps) {
       && !!error
       && (!output || !!errorCode)
       && failureKind !== 'user-stop'
+      && failureKind !== 'merge-pause'
       && !!canRetry;
   }
 
@@ -478,6 +479,13 @@ function createClaudeEngine(deps) {
       return {
         kind: 'user-stop',
         userMessage: '⚠️ 当前执行已按你的停止动作中断，本轮不会自动续跑。',
+        retryPromptPrefix: '',
+      };
+    }
+    if (code === 'INTERRUPTED_MERGE_PAUSE' || lowered.includes('paused for merge')) {
+      return {
+        kind: 'merge-pause',
+        userMessage: '',
         retryPromptPrefix: '',
       };
     }
@@ -1275,9 +1283,9 @@ function createClaudeEngine(deps) {
     };
     const _ackBoundKey = _ackAgentMap[_ackChatIdStr] || projectKeyFromVirtualChatId(_ackChatIdStr);
     const _ackBoundProj = _ackBoundKey && config.projects ? config.projects[_ackBoundKey] : null;
-    // _ackCardHeader: non-null for agents with icon/name (team members, dispatch); passed to editMessage to preserve header on streaming edits
-    let _ackCardHeader = (_ackBoundProj && _ackBoundProj.icon && _ackBoundProj.name)
-      ? { title: `${_ackBoundProj.icon} ${_ackBoundProj.name}`, color: _ackBoundProj.color || 'blue' }
+    // _ackCardHeader: non-null for bound projects with a name; passed to editMessage to preserve header on streaming edits
+    let _ackCardHeader = (_ackBoundProj && _ackBoundProj.name)
+      ? { title: `${_ackBoundProj.icon || '🤖'} ${_ackBoundProj.name}`, color: _ackBoundProj.color || 'blue' }
       : null;
     // Reuse card from a paused merge (same card, no new push)
     const _pausedCard = _pausedCards.get(chatId);
@@ -1960,12 +1968,19 @@ ${mentorRadarHint}
         if (runtime.name === 'codex' && wasStarted && prevSessionId && prevSessionId !== safeNextId && prevSessionId !== '__continue__') {
           log('WARN', `Codex thread migrated for ${chatId}: ${prevSessionId.slice(0, 8)} -> ${safeNextId.slice(0, 8)}`);
         }
+        // Keep card header in sync with the real session ID reported by the engine
+        if (_ackCardHeader && _ackCardHeader._baseTitle) {
+          _ackCardHeader = { ..._ackCardHeader, title: `${_ackCardHeader._baseTitle}（${safeNextId.slice(0, 8)}）` };
+        }
       };
 
       // Check if user cancelled during pre-spawn phase (sentinel was marked aborted)
       // Stamp session ID on card header so user can track session continuity
+      if (_ackCardHeader) {
+        _ackCardHeader._baseTitle = _ackCardHeader.title; // preserve original title for onSession updates
+      }
       if (session && session.id && _ackCardHeader) {
-        _ackCardHeader = { ..._ackCardHeader, title: `${_ackCardHeader.title}（${session.id.slice(0, 8)}）` };
+        _ackCardHeader = { ..._ackCardHeader, title: `${_ackCardHeader._baseTitle}（${session.id.slice(0, 8)}）` };
       }
 
       const _preSentinel = activeProcesses.get(chatId);
@@ -2215,6 +2230,16 @@ ${mentorRadarHint}
         const wasNew = !session.started;
         if (wasNew) markSessionStarted(sessionChatId, engineName);
         return { ok: true };
+      }
+
+      // Merge-pause with partial output: save card for reuse, discard partial output
+      if (output && errorCode === 'INTERRUPTED_MERGE_PAUSE') {
+        if (statusMsgId) {
+          _pausedCards.set(chatId, { statusMsgId, cardHeader: _ackCardHeader, savedAt: Date.now() });
+          if (bot.editMessage) bot.editMessage(chatId, statusMsgId, '⏸ 合并中…', _ackCardHeader).catch(() => {});
+          log('INFO', `[askClaude] Merge-pause with partial output, saved card ${statusMsgId} for ${chatId}`);
+        }
+        return { ok: false, error: 'Paused for merge', errorCode };
       }
 
       if (output) {
