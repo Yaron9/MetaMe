@@ -412,16 +412,21 @@ try {
   }
 } catch { /* non-fatal */ }
 
-// Worktree guard: team members running in worktrees must NEVER deploy to ~/.metame/
-// Their worktree is an isolated sandbox — deploying would overwrite production symlinks.
-// Detect any .worktrees/ parent in the path (covers both ~/.metame/worktrees/ and repo-local .worktrees/).
-const _isInWorktree = __dirname.split(path.sep).includes('.worktrees') ||
-  __dirname.startsWith(path.join(HOME_DIR, '.metame', 'worktrees'));
+// Worktree guard: worktrees must NEVER deploy to ~/.metame/ — they are isolated sandboxes.
+// Detection: git worktrees have a .git FILE (pointing to main repo), not a .git DIRECTORY.
+// This is reliable regardless of worktree path conventions.
+const _dotGitPath = path.join(__dirname, '.git');
+const _isInWorktree = (() => {
+  try {
+    const stat = fs.statSync(_dotGitPath);
+    return stat.isFile(); // .git is a file → worktree; directory → main repo; missing → npm install
+  } catch { return false; }
+})();
 if (_isInWorktree) {
   console.error(`\n${icon("stop")} ACTION BLOCKED: Worktree Deploy Prevented`);
-  console.error(`   You are running from a worktree (${path.basename(__dirname)}).`);
+  console.error(`   You are running from a git worktree (${path.basename(__dirname)}).`);
   console.error('   Deploying from a worktree would overwrite production daemon code.');
-  console.error('   Use \x1b[36mtouch ~/.metame/daemon.js\x1b[0m to hot-reload instead.\n');
+  console.error('   Commit your changes, then deploy from the main repo.\n');
   process.exit(1);
 }
 

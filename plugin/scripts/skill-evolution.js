@@ -75,6 +75,7 @@ const DEFAULT_POLICY = {
   min_evidence_for_gap: 3,
   max_updates_per_analysis: 3,
   max_gaps_per_analysis: 2,
+  max_signals_per_analysis: 30,  // cap signals sent to Haiku per run
 
   // Workflow discovery
   workflow_discovery_interval: 2,   // every N cold-path cycles
@@ -200,6 +201,7 @@ function sanitizePolicy(input) {
     min_evidence_for_gap: clampInt(merged.min_evidence_for_gap, DEFAULT_POLICY.min_evidence_for_gap, 1, 20),
     max_updates_per_analysis: clampInt(merged.max_updates_per_analysis, DEFAULT_POLICY.max_updates_per_analysis, 1, 20),
     max_gaps_per_analysis: clampInt(merged.max_gaps_per_analysis, DEFAULT_POLICY.max_gaps_per_analysis, 1, 20),
+    max_signals_per_analysis: clampInt(merged.max_signals_per_analysis, DEFAULT_POLICY.max_signals_per_analysis, 5, 100),
     workflow_discovery_interval: clampInt(merged.workflow_discovery_interval, DEFAULT_POLICY.workflow_discovery_interval, 1, 100),
     min_signals_for_workflow: clampInt(merged.min_signals_for_workflow, DEFAULT_POLICY.min_signals_for_workflow, 1, 100),
     workflow_proposal_threshold: clampInt(merged.workflow_proposal_threshold, DEFAULT_POLICY.workflow_proposal_threshold, 2, 50),
@@ -610,8 +612,15 @@ async function distillSkills() {
   if (!content) return null;
 
   const lines = content.split('\n');
-  const signals = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-  if (signals.length < policy.min_signals_for_distill) return null;
+  const allSignals = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  if (allSignals.length < policy.min_signals_for_distill) return null;
+
+  // Cap signals sent to Haiku to avoid prompt bloat / timeout.
+  // Keep most recent signals (higher relevance); overflow is still cleared.
+  const maxSignals = policy.max_signals_per_analysis || 30;
+  const signals = allSignals.length > maxSignals
+    ? allSignals.slice(-maxSignals)
+    : allSignals;
 
   // Get installed skills list
   const installedSkills = listInstalledSkills();

@@ -652,12 +652,29 @@ function createBridgeStarter(deps) {
   async function startFeishuBridge(config, executeTaskByName) {
     if (!config.feishu || !config.feishu.enabled) return null;
     if (!config.feishu.app_id || !config.feishu.app_secret) {
-      log('WARN', 'Feishu enabled but app_id/app_secret missing');
+      log('ERROR', 'Feishu enabled but app_id/app_secret missing — bridge will NOT start. Check ~/.metame/daemon.yaml');
       return null;
     }
 
     const { createBot } = require('./feishu-adapter.js');
     const bot = createBot(config.feishu);
+
+    // Validate credentials before starting WebSocket — fail loud, not silent
+    try {
+      const validation = await bot.validateCredentials();
+      if (!validation.ok) {
+        log('ERROR', `Feishu credential check FAILED: ${validation.error}`);
+        if (validation.isAuthError) {
+          log('ERROR', 'Feishu bridge will NOT start — fix app_id/app_secret in ~/.metame/daemon.yaml and restart daemon');
+          return null;
+        }
+        log('WARN', 'Feishu credential check failed (possibly network issue) — attempting to start anyway');
+      } else {
+        log('INFO', 'Feishu credentials validated OK');
+      }
+    } catch (e) {
+      log('WARN', `Feishu credential pre-check error: ${e.message} — attempting to start anyway`);
+    }
 
     try {
       const receiver = await bot.startReceiving(async (chatId, text, event, fileInfo, senderId) => {
@@ -750,6 +767,7 @@ function createBridgeStarter(deps) {
           log('INFO', `Feishu message from ${chatId}: ${text.slice(0, 50)}`);
           const parentId = extractFeishuReplyMessageId(event);
           let _replyAgentKey = null;
+          let _replyMappingFound = false; // true = mapping exists (agentKey may be null = main)
           // Load state once for the entire routing block
           const _st = loadState();
           if (parentId) {
@@ -758,6 +776,7 @@ function createBridgeStarter(deps) {
           if (parentId) {
             const mapped = _st.msg_sessions && _st.msg_sessions[parentId];
             if (mapped) {
+              _replyMappingFound = true;
               if (typeof restoreSessionFromReply === 'function') {
                 restoreSessionFromReply(chatId, mapped);
               } else {
@@ -835,16 +854,28 @@ function createBridgeStarter(deps) {
               // Bare /stop, no sticky set → fall through to handleCommand
             }
 
-            // 0. Quoted reply → force route + set sticky
-            if (_replyAgentKey) {
-              const member = _boundProj.team.find(m => m.key === _replyAgentKey);
-              if (member) {
-                _setSticky(member.key);
-                log('INFO', `Quoted reply → force route to ${_replyAgentKey} (sticky set)`);
-                _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
-                return;
+            // 0. Quoted reply → force route based on which agent sent the parent message.
+            // Cases:
+            //   a) agentKey = known team member → route to that member (set sticky)
+            //   b) agentKey = null, mapping found → user replied to main; clear sticky, route to main
+            //   c) parentId present, no mapping  → intent is explicit, avoid sticky; clear sticky, route to main
+            if (parentId) {
+              if (_replyAgentKey) {
+                const member = _boundProj.team.find(m => m.key === _replyAgentKey);
+                if (member) {
+                  _setSticky(member.key);
+                  log('INFO', `Quoted reply → force route to ${_replyAgentKey} (sticky set)`);
+                  _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+                  return;
+                }
+                // agentKey set but not a current team member → fall through to main
+                log('INFO', `Quoted reply agentKey=${_replyAgentKey} not in team, routing to main`);
               }
-              log('INFO', `Quoted reply agentKey=${_replyAgentKey} not in team, falling through`);
+              // Cases b & c: no agentKey (main agent) or stale/unknown agentKey
+              _clearSticky();
+              log('INFO', `Quoted reply → route to main (agentKey=${_replyAgentKey} mappingFound=${_replyMappingFound})`);
+              await pipeline.processMessage(chatId, trimmedText, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
+              return;
             }
             // 1. Explicit nickname → route + set sticky
             const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
