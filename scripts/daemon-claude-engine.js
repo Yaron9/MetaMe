@@ -106,7 +106,15 @@ function createClaudeEngine(deps) {
   }
   // Card reuse for merge-pause: when a task is paused for message merging,
   // save the statusMsgId so the next askClaude reuses the same card.
-  const _pausedCards = new Map(); // chatId -> { statusMsgId, cardHeader }
+  // Entries auto-expire via periodic sweep (60s) to prevent unbounded growth.
+  const _pausedCards = new Map(); // chatId -> { statusMsgId, cardHeader, savedAt }
+  const _PAUSED_CARD_TTL = 60000;
+  setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of _pausedCards) {
+      if (now - (v.savedAt || 0) > _PAUSED_CARD_TTL) _pausedCards.delete(k);
+    }
+  }, _PAUSED_CARD_TTL).unref();
 
   let mentorEngine = null;
   try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }

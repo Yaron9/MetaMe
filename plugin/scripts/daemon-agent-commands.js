@@ -1,5 +1,7 @@
 'use strict';
 
+const { normalizeEngineName: _normalizeEngine } = require('./daemon-utils');
+
 function createAgentCommandHandler(deps) {
   const {
     fs,
@@ -34,11 +36,11 @@ function createAgentCommandHandler(deps) {
     agentFlowTtlMs,
     agentBindTtlMs,
     getDefaultEngine = () => 'claude',
+    log = () => {},
   } = deps;
 
   function normalizeEngineName(name) {
-    const n = String(name || '').trim().toLowerCase();
-    return n === 'codex' ? 'codex' : getDefaultEngine();
+    return _normalizeEngine(name, getDefaultEngine);
   }
 
   function inferStoredEngine(rawSession) {
@@ -358,7 +360,9 @@ function createAgentCommandHandler(deps) {
       const curSession = getSession(route.sessionChatId) || getSession(chatId);
       const curCwd = route.cwd || (curSession ? curSession.cwd : null);
       const currentEngine = getCurrentEngine(chatId);
+      log('DEBUG', `[/resume] chatId=${chatId} curCwd=${curCwd} engine=${currentEngine} route.sessionChatId=${route.sessionChatId}`);
       const recentSessions = listRecentSessions(5, curCwd, currentEngine);
+      log('DEBUG', `[/resume] recentSessions=${recentSessions.length} ids=[${recentSessions.map(s=>s.sessionId.slice(0,8)).join(',')}]`);
       const resumeChoices = buildResumeChoices({
         recentSessions,
         currentLogical,

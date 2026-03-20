@@ -7,21 +7,22 @@
  *
  * Behavior:
  *   1. First message → process immediately
- *   2. Follow-up while busy → SIGINT pause, start collecting
- *   3. More follow-ups → keep collecting (no timer yet)
- *   4. Paused task dies → start debounce timer (3s)
- *   5. Each new message resets the 3s debounce
- *   6. Debounce fires → flush ALL collected messages as ONE prompt → ONE reply
- *   7. Messages during flush processing → collect again, repeat cycle
+ *   2. Follow-up within merge window (15s) → SIGINT pause, start collecting
+ *   3. Follow-up outside merge window → queue for independent processing
+ *   4. More follow-ups while collecting → keep collecting (no timer yet)
+ *   5. Paused task dies → start debounce timer (5s)
+ *   6. Each new message resets the 5s debounce
+ *   7. Debounce fires → flush ALL collected messages as ONE prompt → ONE reply
+ *   8. Messages during flush → queue individually (each gets own card)
  *
- * Priority messages (/stop, /quit, 停) bypass everything and execute immediately.
+ * Priority messages (/stop, /quit) bypass everything and execute immediately.
  *
  * Public API:
  *   processMessage(chatId, text, ctx)  — enqueue & serialize
  *   isActive(chatId)                   — check if a message is being processed
  *   interruptActive(chatId)            — abort the active process
- *   clearQueue(chatId)                 — drop pending messages + cancel collecting
- *   getQueueLength(chatId)             — number of pending messages
+ *   clearQueue(chatId)                 — drop ALL pending state
+ *   getQueueLength(chatId)             — number of pending messages (all queues)
  */
 
 function createMessagePipeline(deps) {
@@ -35,16 +36,26 @@ function createMessagePipeline(deps) {
   // Per-chatId Promise chain tail — ensures serial execution
   const chains = new Map();    // chatId -> Promise
 
-  // Track the original message text being processed (for merge context)
-  const activeTexts = new Map(); // chatId -> string
+  // Track the original message text and start time (for merge window)
+  const activeTexts = new Map();      // chatId -> string
+  const activeStartTimes = new Map(); // chatId -> timestamp (ms)
 
-  // Per-chatId burst collection state
+  // Per-chatId burst collection state (first-round merge only)
   const collecting = new Map(); // chatId -> { messages: string[], ctx, timer, chainDead: boolean }
 
-  // chatIds where flush is processing — new messages go to collecting, not interrupt
+  // chatIds where flush is processing — new messages go to pendingQueue
   const resumed = new Set();
 
+  // Individual message queue — each item processed independently with its own card.
+  // Used for: post-resume messages, messages outside merge window.
+  const pendingQueue = new Map(); // chatId -> [{text, ctx}]
+
+  // chatIds currently being drained — prevents new messages from interrupting drain items
+  const draining = new Set();
+
   const DEBOUNCE_MS = 5000;
+  const MERGE_WINDOW_MS = 15000;
+  const SIGINT_ESCALATE_MS = 2000;
 
   // Messages that must bypass everything and execute immediately
   const STOP_RE = /^\/stop(\s|$)/i;
@@ -52,10 +63,21 @@ function createMessagePipeline(deps) {
 
   function _isPriorityMessage(text) {
     const trimmed = (text || '').trim();
-    // Only hard-stop commands bypass. Natural language interrupts (等一下/hold on)
-    // are handled by command-router and should NOT bypass collecting — they would
-    // silently drop collected messages.
     return STOP_RE.test(trimmed) || QUIT_RE.test(trimmed);
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────
+
+  function _enqueue(chatId, text, ctx) {
+    if (!pendingQueue.has(chatId)) pendingQueue.set(chatId, []);
+    pendingQueue.get(chatId).push({ text, ctx });
+  }
+
+  function _clearAll(chatId) {
+    _cancelCollecting(chatId);
+    resumed.delete(chatId);
+    pendingQueue.delete(chatId);
+    draining.delete(chatId);
   }
 
   // ── Core: process / collect / flush ──────────────────────────────
@@ -64,15 +86,14 @@ function createMessagePipeline(deps) {
     // Priority messages bypass everything
     if ((chains.has(chatId) || collecting.has(chatId)) && _isPriorityMessage(text)) {
       log('INFO', `Pipeline: priority bypass "${text.trim()}" for ${chatId}`);
-      _cancelCollecting(chatId);
+      _clearAll(chatId);
       return _processOne(chatId, text, ctx);
     }
 
-    // Currently collecting → accumulate
+    // Currently collecting (first-round merge) → accumulate
     if (collecting.has(chatId)) {
       const c = collecting.get(chatId);
       c.messages.push(text);
-      // Only reset debounce if chain is already dead (timer active)
       if (c.chainDead) _resetDebounce(chatId, c);
       log('INFO', `Pipeline: collecting follow-up for ${chatId} (${c.messages.length} pending)`);
       return Promise.resolve();
@@ -81,45 +102,83 @@ function createMessagePipeline(deps) {
     // Pipeline idle → start processing
     if (!chains.has(chatId)) {
       activeTexts.set(chatId, text);
+      activeStartTimes.set(chatId, Date.now());
       const p = _processOne(chatId, text, ctx)
         .finally(() => {
           activeTexts.delete(chatId);
+          activeStartTimes.delete(chatId);
           chains.delete(chatId);
           resumed.delete(chatId);
-          // If messages were collected during processing, start debounce now
+          // First-round merge: collected messages → debounce → flush
           if (collecting.has(chatId)) {
             const c = collecting.get(chatId);
             c.chainDead = true;
             _resetDebounce(chatId, c);
             log('INFO', `Pipeline: chain ended, starting debounce for ${chatId} (${c.messages.length} collected)`);
+            return; // let debounce handle the rest; don't drain yet
           }
+          // Drain individually queued messages
+          _drainNext(chatId);
         });
       chains.set(chatId, p);
       return p;
     }
 
-    // Pipeline busy + already flushed once → keep collecting (don't interrupt again)
-    if (resumed.has(chatId)) {
-      _addToCollecting(chatId, text, ctx);
-      log('INFO', `Pipeline: collecting (post-resume) for ${chatId}`);
+    // Pipeline busy + post-flush or draining → queue individually
+    if (resumed.has(chatId) || draining.has(chatId)) {
+      _enqueue(chatId, text, ctx);
+      log('INFO', `Pipeline: queued independently for ${chatId} (${pendingQueue.get(chatId).length} queued)`);
       return Promise.resolve();
     }
 
-    // Pipeline busy, first follow-up → interrupt and start collecting
+    // Pipeline busy, first follow-up — check merge window
+    const elapsed = Date.now() - (activeStartTimes.get(chatId) || 0);
+    if (elapsed > MERGE_WINDOW_MS) {
+      _enqueue(chatId, text, ctx);
+      log('INFO', `Pipeline: outside merge window (${Math.round(elapsed / 1000)}s) for ${chatId}, queued independently`);
+      return Promise.resolve();
+    }
+
+    // Within merge window → interrupt and start collecting
     return _startCollecting(chatId, text, ctx);
   }
 
   // ── Interrupt-Collect-Flush ────────────────────────────────────
 
   /**
+   * Send SIGINT with escalation: SIGINT → SIGTERM → SIGKILL.
+   * Works cross-platform — on macOS SIGINT is enough; on Windows claude
+   * ignores SIGINT so we escalate after SIGINT_ESCALATE_MS.
+   */
+  function _killWithEscalation(child, chatId) {
+    try { process.kill(-child.pid, 'SIGINT'); } catch { try { child.kill('SIGINT'); } catch { /* */ } }
+    let sigkillTimer = null;
+    const escalateTimer = setTimeout(() => {
+      if (child.exitCode !== null || child.killed) return;
+      log('WARN', `Pipeline: SIGINT ineffective for ${chatId}, escalating to SIGTERM`);
+      try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch { /* */ } }
+      sigkillTimer = setTimeout(() => {
+        if (child.exitCode !== null || child.killed) return;
+        log('WARN', `Pipeline: SIGTERM ineffective for ${chatId}, escalating to SIGKILL`);
+        try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* */ } }
+      }, SIGINT_ESCALATE_MS);
+    }, SIGINT_ESCALATE_MS);
+    child.once('close', () => {
+      clearTimeout(escalateTimer);
+      if (sigkillTimer) clearTimeout(sigkillTimer);
+    });
+  }
+
+  /**
    * Gracefully pause the running task (SIGINT = ESC equivalent).
+   * Escalates to SIGTERM/SIGKILL if SIGINT is ineffective (e.g. claude on Windows).
    */
   function _pauseActive(chatId) {
     const proc = activeProcesses.get(chatId);
     if (proc && proc.child) {
       proc.aborted = true;
       proc.abortReason = 'merge-pause';
-      try { process.kill(-proc.child.pid, 'SIGINT'); } catch { try { proc.child.kill('SIGINT'); } catch { /* */ } }
+      _killWithEscalation(proc.child, chatId);
       return true;
     }
     if (proc && proc.child === null) {
@@ -132,7 +191,6 @@ function createMessagePipeline(deps) {
 
   /**
    * Pause the running task and start collecting.
-   * No debounce timer — timer starts only after chain dies (.finally).
    */
   function _startCollecting(chatId, text, ctx) {
     _pauseActive(chatId);
@@ -140,21 +198,9 @@ function createMessagePipeline(deps) {
     const msgs = originalText ? [originalText, text] : [text];
     const c = { messages: msgs, ctx, timer: null, chainDead: false };
     collecting.set(chatId, c);
-    // NO timer here — wait for chain to die
     log('INFO', `Pipeline: paused & collecting for ${chatId} (original: "${(originalText || '').slice(0, 30)}")`);
     ctx.bot.sendMessage(chatId, '⏸ 已暂停，继续连发，我会合并后继续').catch(() => {});
     return Promise.resolve();
-  }
-
-  /**
-   * Add a message to collecting (create if needed).
-   */
-  function _addToCollecting(chatId, text, ctx) {
-    if (!collecting.has(chatId)) {
-      collecting.set(chatId, { messages: [text], ctx, timer: null, chainDead: false });
-    } else {
-      collecting.get(chatId).messages.push(text);
-    }
   }
 
   /**
@@ -206,6 +252,30 @@ function createMessagePipeline(deps) {
     }
   }
 
+  /**
+   * Drain the next queued message for chatId. Each gets its own card.
+   * Uses the normal pipeline path — serialization is guaranteed because
+   * we only call this from .finally() when the chain is already cleared.
+   */
+  function _drainNext(chatId) {
+    const queue = pendingQueue.get(chatId);
+    if (!queue || queue.length === 0) {
+      pendingQueue.delete(chatId);
+      draining.delete(chatId);
+      return;
+    }
+    draining.add(chatId);
+    const { text, ctx } = queue.shift();
+    if (queue.length === 0) pendingQueue.delete(chatId);
+    log('INFO', `Pipeline: draining queued message for ${chatId} (${queue.length} remaining)`);
+    // processMessage will take the "idle" path and set up a new chain.
+    // That chain's .finally() will call _drainNext again for the next item.
+    const p = processMessage(chatId, text, ctx);
+    if (p && typeof p.catch === 'function') {
+      p.catch(err => log('ERROR', `Pipeline: drain error for ${chatId}: ${err.message}`));
+    }
+  }
+
   // ── Process one message ────────────────────────────────────────
 
   /**
@@ -232,8 +302,7 @@ function createMessagePipeline(deps) {
     const proc = activeProcesses.get(chatId);
     if (proc && proc.child) {
       proc.aborted = true;
-      // SIGINT = graceful stop (like ESC), preserves session context for --resume
-      try { process.kill(-proc.child.pid, 'SIGINT'); } catch { try { proc.child.kill('SIGINT'); } catch { /* */ } }
+      _killWithEscalation(proc.child, chatId);
       return true;
     }
     if (proc && proc.child === null) {
@@ -244,13 +313,13 @@ function createMessagePipeline(deps) {
   }
 
   function clearQueue(chatId) {
-    _cancelCollecting(chatId);
-    resumed.delete(chatId);
+    _clearAll(chatId);
   }
 
   function getQueueLength(chatId) {
     const c = collecting.get(chatId);
-    return c ? c.messages.length : 0;
+    const q = pendingQueue.get(chatId);
+    return (c ? c.messages.length : 0) + (q ? q.length : 0);
   }
 
   return {
