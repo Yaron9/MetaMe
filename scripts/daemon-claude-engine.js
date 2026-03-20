@@ -1295,7 +1295,6 @@ function createClaudeEngine(deps) {
       const cardAge = _pausedCard.savedAt ? Date.now() - _pausedCard.savedAt : 0;
       if (cardAge > 30000) {
         log('INFO', `[askClaude] Discarding stale paused card for ${chatId} (${Math.round(cardAge / 1000)}s old)`);
-        if (_pausedCard.statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, _pausedCard.statusMsgId).catch(() => {});
       } else {
         statusMsgId = _pausedCard.statusMsgId;
         if (_pausedCard.cardHeader) _ackCardHeader = _pausedCard.cardHeader;
@@ -2416,6 +2415,12 @@ ${mentorRadarHint}
               }
             } catch { /* non-critical — memory module may not be available */ }
           });
+        }
+        // Speculatively save card for pipeline post-resume flush reuse.
+        // If no follow-up arrives, the card expires (30s TTL in _pausedCards consumer).
+        const _replyMsgId = replyMsg && replyMsg.message_id;
+        if (_replyMsgId && _ackCardHeader) {
+          _pausedCards.set(chatId, { statusMsgId: _replyMsgId, cardHeader: _ackCardHeader, savedAt: Date.now() });
         }
         return { ok: !timedOut };
       } else {
