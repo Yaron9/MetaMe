@@ -1372,6 +1372,10 @@ function createClaudeEngine(deps) {
       const sessionRaw = getSession(sessionChatId);
       const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
       const boundEngineName = (boundProject && boundProject.engine) ? normalizeEngineName(boundProject.engine) : getDefaultEngine();
+      // effectiveCwd: single source of truth for this request's working directory.
+      // For bound projects, config always wins over stored session cwd.
+      // Resolved once here; all downstream createSession/spawn calls use this.
+      let effectiveCwd = boundCwd || null;
 
       // Engine is determined from config only — bound agent config wins, then global default.
       const engineName = normalizeEngineName(
@@ -1413,10 +1417,13 @@ function createClaudeEngine(deps) {
       let session = resolveSessionForEngine(sessionChatId, engineName) || { cwd: boundCwd || HOME, engine: engineName, id: null, started: false };
       session.engine = engineName; // keep local copy for Codex resume detection below
       session.logicalChatId = sessionChatId;
-      if (boundCwd && String(sessionChatId).startsWith('_bound_') && session.cwd !== boundCwd) {
-        log('WARN', `[SessionCwd] correcting bound session cwd for ${sessionChatId}: ${session.cwd || 'unknown'} -> ${boundCwd}`);
-        session = { ...session, cwd: boundCwd };
-        await patchSessionSerialized(sessionChatId, (cur) => ({ ...cur, cwd: boundCwd }));
+      // Finalize effectiveCwd: bound config > stored session > HOME
+      if (!effectiveCwd) effectiveCwd = (session && session.cwd) || HOME;
+      // Correct stored cwd if it drifted from config (e.g., stale state from prior bug)
+      if (session.cwd !== effectiveCwd) {
+        log('WARN', `[SessionCwd] correcting session cwd for ${sessionChatId}: ${session.cwd || 'unknown'} -> ${effectiveCwd}`);
+        session = { ...session, cwd: effectiveCwd };
+        await patchSessionSerialized(sessionChatId, (cur) => ({ ...cur, cwd: effectiveCwd }));
       }
 
       // Warm pool: check if a persistent process is available for this session (Claude only).
@@ -1437,7 +1444,7 @@ function createClaudeEngine(deps) {
           }
           session = createSession(
             sessionChatId,
-            session.cwd,
+            effectiveCwd,
             boundProject && boundProject.name ? boundProject.name : '',
             engineName,
             engineName === 'codex' ? requestedCodexPermissionProfile : undefined
@@ -1504,7 +1511,7 @@ function createClaudeEngine(deps) {
         const resumeInspection = inspectClaudeResumeSession(session, model);
         if (resumeInspection.shouldResume === false) {
           log('INFO', `[ModelPin] session ${session.id.slice(0, 8)} flagged as ${resumeInspection.reason}; starting fresh Claude session`);
-          session = createSession(sessionChatId, session.cwd, boundProject && boundProject.name ? boundProject.name : '', runtime.name);
+          session = createSession(sessionChatId, effectiveCwd, boundProject && boundProject.name ? boundProject.name : '', runtime.name);
         } else if (resumeInspection.modelPin) {
           if (resumeInspection.modelPin !== model) {
             log('INFO', `[ModelPin] resuming ${session.id.slice(0, 8)} with original model ${resumeInspection.modelPin} (configured: ${model})`);
@@ -1962,7 +1969,7 @@ ${mentorRadarHint}
             ...(runtime.name === 'codex' ? { runtimeSessionObserved: true } : {}),
             ...(runtime.name === 'codex' ? actualPermissionProfile : {}),
           };
-          return { ...cur, cwd: session.cwd || cur.cwd || HOME, engines };
+          return { ...cur, cwd: effectiveCwd || cur.cwd || HOME, engines };
         });
         if (runtime.name === 'codex' && wasStarted && prevSessionId && prevSessionId !== safeNextId && prevSessionId !== '__continue__') {
           log('WARN', `Codex thread migrated for ${chatId}: ${prevSessionId.slice(0, 8)} -> ${safeNextId.slice(0, 8)}`);
@@ -2046,7 +2053,7 @@ ${mentorRadarHint}
             );
             session = createSession(
               sessionChatId,
-              session.cwd,
+              effectiveCwd,
               boundProject && boundProject.name ? boundProject.name : '',
               'codex',
               requestedCodexPermissionProfile
@@ -2123,7 +2130,7 @@ ${mentorRadarHint}
           if (resumeFailure.kind !== 'interrupted') {
             session = createSession(
               sessionChatId,
-              session.cwd,
+              effectiveCwd,
               boundProject && boundProject.name ? boundProject.name : '',
               'codex',
               requestedCodexPermissionProfile
@@ -2447,7 +2454,7 @@ ${mentorRadarHint}
         if (runtime.name === 'claude' && _isSessionResumeFail) {
           const _reason = errMsg.includes('already in use') ? 'locked' : _isThinkingSignatureError ? 'thinking-signature-invalid' : 'not found';
           log('WARN', `Session ${session.id} unusable (${_reason}), creating new`);
-          session = createSession(sessionChatId, session.cwd, '', runtime.name);
+          session = createSession(sessionChatId, effectiveCwd, '', runtime.name);
 
           const retryArgs = runtime.buildArgs({
             model,
