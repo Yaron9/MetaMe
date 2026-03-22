@@ -58,4 +58,60 @@ describe('providers distill model config', () => {
     const providers = loadProvidersWithHome(tmpHome);
     assert.throws(() => providers.setDistillModel('gpt@5mini'), /无效蒸馏模型/);
   });
+
+  it('inherits Claude Code env mapping from ~/.claude/settings.json', () => {
+    const providers = loadProvidersWithHome(tmpHome);
+    const claudeDir = path.join(tmpHome, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: 'https://api.minimaxi.com/anthropic',
+        ANTHROPIC_AUTH_TOKEN: 'token-1',
+        ANTHROPIC_DEFAULT_OPUS_MODEL: 'MiniMax-M2.1',
+        ANTHROPIC_DEFAULT_SONNET_MODEL: 'MiniMax-M2.1',
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'MiniMax-M2.1',
+      },
+    }), 'utf8');
+
+    assert.deepEqual(providers.readClaudeSettingsEnv(), {
+      ANTHROPIC_BASE_URL: 'https://api.minimaxi.com/anthropic',
+      ANTHROPIC_AUTH_TOKEN: 'token-1',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'MiniMax-M2.1',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'MiniMax-M2.1',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'MiniMax-M2.1',
+    });
+
+    const env = providers.buildEnv('anthropic');
+    assert.equal(env.ANTHROPIC_BASE_URL, 'https://api.minimaxi.com/anthropic');
+    assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'token-1');
+    assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'MiniMax-M2.1');
+  });
+
+  it('overrides Claude Code auth endpoint with custom provider while keeping slot mapping env', () => {
+    const providers = loadProvidersWithHome(tmpHome);
+    const claudeDir = path.join(tmpHome, '.claude');
+    const metameDir = path.join(tmpHome, '.metame');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.mkdirSync(metameDir, { recursive: true });
+    fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: 'https://api.minimaxi.com/anthropic',
+        ANTHROPIC_AUTH_TOKEN: 'token-1',
+        ANTHROPIC_DEFAULT_OPUS_MODEL: 'MiniMax-M2.1',
+      },
+    }), 'utf8');
+    fs.writeFileSync(path.join(metameDir, 'providers.yaml'), yaml.dump({
+      active: 'relay',
+      providers: {
+        anthropic: { label: 'Anthropic (Official)' },
+        relay: { label: 'relay', base_url: 'https://relay.example.com/anthropic', api_key: 'relay-key' },
+      },
+    }), 'utf8');
+
+    const env = providers.buildEnv('relay');
+    assert.equal(env.ANTHROPIC_BASE_URL, 'https://relay.example.com/anthropic');
+    assert.equal(env.ANTHROPIC_API_KEY, 'relay-key');
+    assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'relay-key');
+    assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'MiniMax-M2.1');
+  });
 });

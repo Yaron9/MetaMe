@@ -2431,12 +2431,6 @@ ${mentorRadarHint}
             } catch { /* non-critical — memory module may not be available */ }
           });
         }
-        // Speculatively save card for pipeline post-resume flush reuse.
-        // If no follow-up arrives, the card expires (30s TTL in _pausedCards consumer).
-        const _replyMsgId = replyMsg && replyMsg.message_id;
-        if (_replyMsgId && _ackCardHeader) {
-          _pausedCards.set(chatId, { statusMsgId: _replyMsgId, cardHeader: _ackCardHeader, savedAt: Date.now() });
-        }
         return { ok: !timedOut };
       } else {
         const errMsg = error || 'Unknown error';

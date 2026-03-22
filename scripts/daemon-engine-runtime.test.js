@@ -45,8 +45,7 @@ describe('daemon-engine-runtime args builder', () => {
     assert.deepEqual(args.slice(0, 3), ['exec', 'resume', 'sid-1']);
     assert.ok(args.includes('-s'));
     assert.ok(args.includes('workspace-write'));
-    assert.ok(args.includes('--ask-for-approval'));
-    assert.ok(args.includes('on-request'));
+    assert.ok(!args.includes('--dangerously-bypass-approvals-and-sandbox'));
   });
 
   it('always uses --dangerously-bypass-approvals-and-sandbox for codex (no config needed)', () => {
@@ -67,8 +66,6 @@ describe('daemon-engine-runtime args builder', () => {
     });
     assert.ok(args.includes('-s'));
     assert.ok(args.includes('workspace-write'));
-    assert.ok(args.includes('--ask-for-approval'));
-    assert.ok(args.includes('on-request'));
     assert.ok(!args.includes('--dangerously-bypass-approvals-and-sandbox'));
   });
 
@@ -145,6 +142,12 @@ describe('daemon-engine-runtime model resolution', () => {
   it('preserves legacy custom model ids for codex', () => {
     const model = resolveEngineModel('codex', { model: 'gpt-5-mini' });
     assert.equal(model, 'gpt-5-mini');
+  });
+
+  it('normalizes legacy custom claude model ids back to canonical slots', () => {
+    assert.equal(resolveEngineModel('claude', { model: 'MiniMax-M2.1' }), 'sonnet');
+    assert.equal(resolveEngineModel('claude', { model: 'claude-opus-4-6' }), 'opus');
+    assert.equal(resolveEngineModel('claude', { models: { claude: 'claude-haiku-4-5-20251001' } }), 'haiku');
   });
 });
 

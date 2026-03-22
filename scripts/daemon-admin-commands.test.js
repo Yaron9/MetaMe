@@ -741,7 +741,7 @@ describe('daemon-admin-commands /doctor', () => {
     assert.doesNotMatch(sent[0], /默认引擎是 codex，但 Codex CLI 不可用/);
   });
 
-  it('accepts custom model names when using custom provider', async (t) => {
+  it('normalizes legacy custom claude model names to canonical slots in /doctor', async (t) => {
     const sent = [];
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-doctor-cfg-'));
     t.after(() => {
@@ -749,7 +749,7 @@ describe('daemon-admin-commands /doctor', () => {
     });
     const configFile = path.join(tmpDir, 'daemon.yaml');
     const yaml = require('js-yaml');
-    fs.writeFileSync(configFile, yaml.dump({ daemon: { model: 'gpt-5-mini' } }), 'utf8');
+    fs.writeFileSync(configFile, yaml.dump({ daemon: { model: 'MiniMax-M2.1' } }), 'utf8');
     const providerStub = {
       getActiveName: () => 'relay',
       getDistillModel: () => 'gpt-5.1-codex-mini',
@@ -774,9 +774,47 @@ describe('daemon-admin-commands /doctor', () => {
 
     assert.equal(res.handled, true);
     assert.equal(sent.length, 1);
-    assert.match(sent[0], /✅ 模型: gpt-5-mini/);
+    assert.match(sent[0], /✅ 模型: sonnet/);
     assert.match(sent[0], /✅ Provider: relay \(custom\)/);
-    assert.doesNotMatch(sent[0], /模型: gpt-5-mini \(无效\)/);
+    assert.doesNotMatch(sent[0], /模型: MiniMax-M2\.1 \(无效\)/);
+  });
+
+  it('rejects raw backend model names for claude even on custom provider', async (t) => {
+    const sent = [];
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-model-cfg-'));
+    t.after(() => {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    });
+    const configFile = path.join(tmpDir, 'daemon.yaml');
+    const yaml = require('js-yaml');
+    fs.writeFileSync(configFile, yaml.dump({ daemon: { models: { claude: 'sonnet' } } }), 'utf8');
+    const providerStub = {
+      getActiveName: () => 'relay',
+    };
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        CONFIG_FILE: configFile,
+        providerMod: providerStub,
+        yaml,
+        loadConfig: () => yaml.load(fs.readFileSync(configFile, 'utf8')) || {},
+        writeConfigSafe: (cfg) => fs.writeFileSync(configFile, yaml.dump(cfg), 'utf8'),
+      }
+    );
+    const bot = { sendMessage: async (_chatId, text) => { sent.push(String(text)); } };
+
+    const res = await handleAdminCommand({
+      bot,
+      chatId: 'mobile-user-model-raw',
+      text: '/model MiniMax-M2.1',
+      config: { daemon: { models: { claude: 'sonnet' } } },
+      state: { tasks: {}, budget: { tokens_used: 0 } },
+    });
+
+    assert.equal(res.handled, true);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0], /❌ 无效模型: MiniMax-M2\.1/);
+    assert.match(sent[0], /Claude 后端模型由 Claude Code \/ CCwitch 自动映射/);
   });
 });
 

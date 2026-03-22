@@ -387,6 +387,124 @@ describe('daemon-claude-engine private helpers', () => {
     assert.ok(tracked);
   });
 
+  it('does not reuse the previous reply card for a fresh idle turn', async () => {
+    const state = {
+      sessions: {
+        _bound_digital_me: {
+          cwd: '/tmp/digital-me',
+          engines: {
+            codex: {
+              id: 'thread-dm-1',
+              started: true,
+              runtimeSessionObserved: true,
+              sandboxMode: 'danger-full-access',
+              approvalPolicy: 'never',
+              permissionMode: 'danger-full-access',
+            },
+          },
+        },
+      },
+    };
+    const logs = [];
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: () => createFakeCodexProcess([
+        { type: 'item.completed', item: { type: 'agent_message', text: '在。' } },
+        { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } },
+      ]),
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses: new Map(),
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: (level, msg) => logs.push({ level, msg: String(msg) }),
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({
+        projects: {
+          digital_me: { cwd: '/tmp/digital-me', name: 'Digital Me', engine: 'codex' },
+        },
+        feishu: {
+          chat_agent_map: {
+            oc_digital_me: 'digital_me',
+          },
+        },
+      }),
+      loadState: () => state,
+      saveState: (next) => {
+        Object.assign(state, next);
+        state.sessions = next.sessions;
+      },
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: (chatId) => state.sessions[chatId] || null,
+      getSessionForEngine: (chatId, engineName) => {
+        const raw = state.sessions[chatId];
+        if (!raw) return null;
+        const slot = raw.engines && raw.engines[engineName];
+        return slot ? { cwd: raw.cwd, engine: engineName, logicalChatId: chatId, ...slot } : null;
+      },
+      createSession: () => ({ id: 'thread-dm-1', cwd: '/tmp/digital-me', engine: 'codex', logicalChatId: '_bound_digital_me', started: false, runtimeSessionObserved: true }),
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: () => ({ sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' }),
+      getCodexSessionPermissionMode: () => 'danger-full-access',
+      getSessionRecentContext: () => null,
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getDefaultEngine: () => 'codex',
+    });
+
+    let cardSeq = 0;
+    const sendCardIds = [];
+    const bot = {
+      sendTyping: async () => {},
+      sendMessage: async () => ({ message_id: `msg-${++cardSeq}` }),
+      sendMarkdown: async () => ({ message_id: `md-${++cardSeq}` }),
+      sendCard: async () => {
+        const id = `card-${++cardSeq}`;
+        sendCardIds.push(id);
+        return { message_id: id };
+      },
+      editMessage: async () => true,
+      deleteMessage: async () => true,
+    };
+
+    const config = {
+      projects: {
+        digital_me: { cwd: '/tmp/digital-me', name: 'Digital Me', engine: 'codex' },
+      },
+      feishu: {
+        chat_agent_map: {
+          oc_digital_me: 'digital_me',
+        },
+      },
+    };
+
+    const first = await engine.askClaude(bot, 'oc_digital_me', '哈咯', config, false, 'ou_admin');
+    const second = await engine.askClaude(bot, 'oc_digital_me', '帮帮忙', config, false, 'ou_admin');
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(sendCardIds.length, 2);
+    assert.ok(!logs.some(entry => entry.msg.includes('Reusing paused card')), 'fresh idle turn should not reuse paused card');
+  });
+
   it('decides codex resume fallback retry correctly', () => {
     const state = { sessions: {} };
     const engine = createEngineWithState(state);
