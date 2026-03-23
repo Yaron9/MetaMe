@@ -592,14 +592,12 @@ weixin:
 4. Scan and confirm with Weixin, then run `/weixin login wait --session <key>`.
 5. Run `/weixin` or `/weixin status` to verify the account is linked.
 
-Natural-language setup is available through the intent hook. If you want the model to expose the setup flow on demand, enable this in `~/.metame/daemon.yaml`:
+Natural-language setup is enabled by default. Prompts like “帮我配置微信桥接” or “开始微信扫码登录” will inject the enable-and-bind workflow for the model. If you ever want to turn it off, set this in `~/.metame/daemon.yaml`:
 
 ```yaml
 hooks:
-  weixin_bridge: true
+  weixin_bridge: false
 ```
-
-Then prompts like “帮我配置微信桥接” or “开始微信扫码登录” will inject the enable-and-bind workflow for the model.
 
 ## Mentor Mode (Why + How)
 

@@ -12,7 +12,7 @@ const DEFAULTS = Object.freeze({
   ops_assist: true,
   task_create: true,
   file_transfer: true,
-  weixin_bridge: false,
+  weixin_bridge: true,
   memory_recall: true,
   doc_router: true,
   perpetual: true,

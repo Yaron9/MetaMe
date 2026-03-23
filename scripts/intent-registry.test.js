@@ -35,18 +35,18 @@ describe('intent-registry', () => {
     assert.match(block, /builder/);
   });
 
-  it('injects weixin bridge hints for explicit weixin setup prompts when enabled', () => {
-    const block = buildIntentHintBlock('帮我配置微信桥接并开始绑定账号', {
-      hooks: { weixin_bridge: true },
-    }, '');
+  it('injects weixin bridge hints by default for explicit weixin setup prompts', () => {
+    const block = buildIntentHintBlock('帮我配置微信桥接并开始绑定账号', {}, '');
     assert.match(block, /\[微信桥接提示\]/);
     assert.match(block, /weixin\.enabled=true/);
     assert.match(block, /\/weixin login start/);
     assert.match(block, /text-only/);
   });
 
-  it('keeps weixin bridge hints disabled by default', () => {
-    const block = buildIntentHintBlock('帮我配置微信桥接并开始绑定账号', {}, '');
+  it('allows disabling weixin bridge hints explicitly', () => {
+    const block = buildIntentHintBlock('帮我配置微信桥接并开始绑定账号', {
+      hooks: { weixin_bridge: false },
+    }, '');
     assert.doesNotMatch(block, /\[微信桥接提示\]/);
   });
 

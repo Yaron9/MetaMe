@@ -43,7 +43,7 @@ hooks:
   team_dispatch: true   # 改为 false 可禁用
   ops_assist: true
   task_create: false    # 禁用任务调度提示
-  weixin_bridge: false  # 默认关闭；命中明确微信配置语境时再按需开启
+  weixin_bridge: true   # 默认开启；只匹配明确的微信配置/绑定语境
 ```
 
 改完立即生效（intent-engine 每次运行时读取）。
