@@ -358,7 +358,7 @@ systemctl --user start metame
 | **Mobile Bridge** | Full Claude/Codex via Telegram/Feishu. Stateful sessions, file transfer both ways, real-time streaming status. |
 | **Skill Evolution** | Queue-driven skill evolution: captures task signals, generates workflow proposals, and supports explicit approval/resolve via `/skill-evo` commands. |
 | **Token Budget** | Daily token usage tracking with per-category breakdown. Configurable daily limit, automatic 80% warning threshold, usage history with rollover. |
-| **Auto-Provisioning** | First run deploys default CLAUDE.md, documentation, and `dispatch_to` to `~/.metame/`. Subsequent runs sync scripts without overwriting user config. |
+| **Auto-Provisioning** | First run deploys default CLAUDE.md, documentation, and runtime copies under `~/.metame/`. Subsequent runs redeploy generated runtime files without overwriting user config in `~/.metame/daemon.yaml`. |
 | **Heartbeat System** | Three-layer programmable nervous system. Layer 0 kernel always-on (zero config). Layer 1 system evolution built-in (5 tasks: distill + memory + skills + nightly reflection + memory index). Layer 2 your custom scheduled tasks with `require_idle`, `precondition`, `notify`, workflows. |
 | **Multi-Agent** | Multiple projects with dedicated chat groups. `/agent bind` for one-tap setup. True parallel execution. |
 | **Team Routing** | Project-level team clones: multiple AI agents work in parallel within a single chat group. Nickname routing, sticky follow, `/stop` per member, broadcast visibility. |
@@ -679,10 +679,12 @@ MetaMe is early-stage and evolving fast. Every issue and PR directly shapes the 
 
 **Submit a PR:**
 1. Fork the repo and create a branch from `main`
-2. All source edits go in `scripts/` — run `npm run sync:plugin` to sync to `plugin/scripts/`
+2. All source edits go in `scripts/`. `~/.metame/` is a generated runtime copy, not a source directory. Run `node index.js` to redeploy local runtime files after edits, and use `npm run sync:plugin` only when you need to refresh `plugin/scripts/`
 3. Run `npx eslint scripts/daemon*.js` — zero errors required
 4. Run `npm test` — all tests must pass
 5. Open a PR against `main` with a clear description
+
+Source checkouts and `npm link` installs default `metame-cli` auto-update to off. Published npm installs keep auto-update on. Override with `METAME_AUTO_UPDATE=on|off`.
 
 **Good first contributions:** Windows edge cases, new `/commands`, documentation improvements, test coverage.
 

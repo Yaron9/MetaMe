@@ -195,5 +195,8 @@
 
 ## 同步提示
 
-- 每次改 `scripts/` 后执行：`npm run sync:plugin`
+- `scripts/` 是唯一源码目录；`~/.metame/` 是运行副本，不直接编辑
+- 每次改 `scripts/` 后先执行：`node index.js`，把最新运行文件 copy 到 `~/.metame/`
+- 只有在需要刷新分发镜像时才执行：`npm run sync:plugin`
 - plugin 镜像路径：`plugin/scripts/*`
+- 本地源码 checkout / `npm link` 默认关闭 auto-update；发布版 npm 安装默认开启，可用 `METAME_AUTO_UPDATE=on|off` 覆盖

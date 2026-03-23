@@ -83,6 +83,8 @@ feishu:
 
 ## 6. 运行时文件与状态
 
+- 源码目录：`scripts/`
+- 运行副本目录：`~/.metame/`（由 `node index.js` 部署生成，只读看状态，不直接改）
 - 配置：`~/.metame/daemon.yaml`
 - daemon 状态：`~/.metame/daemon_state.json`
 - 活跃子进程：`~/.metame/active_agent_pids.json`
@@ -91,10 +93,11 @@ feishu:
 - Dispatch 队列：`~/.metame/dispatch/pending.jsonl`（本地 socket 降级）
 - 远端 Dispatch 队列：`~/.metame/dispatch/remote-pending.jsonl`（跨设备中继）
 - Dispatch 签名密钥：`~/.metame/.dispatch_secret`（自动创建）
+- 自动更新策略：发布版 npm 安装默认开启；源码 checkout / `npm link` 默认关闭，可用 `METAME_AUTO_UPDATE=on|off` 覆盖
 
 ## 7. 热重载安全机制（三层防护）
 
-1. **部署前预检**（`index.js`）：`node -c` 语法检查所有 `.js`，不通过则拒绝部署到 `~/.metame/`
+1. **部署前预检**（`index.js`）：`node -c` 语法检查所有 `.js`，不通过则拒绝以 copy 模式部署到 `~/.metame/`
 2. **重启前预检**（`daemon-runtime-lifecycle.js`）：daemon.js 变更触发重启前再次语法校验，不通过则阻止重启并通知 admin
 3. **崩溃循环自愈**：连续 2 次在 30s 内崩溃 → 自动从 `.last-good/` 恢复 → 通知 admin
 
