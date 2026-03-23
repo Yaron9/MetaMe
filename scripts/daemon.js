@@ -293,7 +293,7 @@ function restoreConfig() {
     try { curCfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {}; } catch { }
     // Secret fields that must NEVER be reverted by a restore
     const SECRET_FIELDS = ['app_id', 'app_secret', 'bot_token', 'operator_ids'];
-    for (const adapter of ['feishu', 'telegram']) {
+    for (const adapter of ['feishu', 'telegram', 'weixin']) {
       if (curCfg[adapter] && bakCfg[adapter]) {
         // Preserve secrets: current config always wins
         for (const field of SECRET_FIELDS) {
@@ -2456,7 +2456,7 @@ _pipelineRef.current = pipeline;
 // ---------------------------------------------------------
 // BOT BRIDGES
 // ---------------------------------------------------------
-const { startTelegramBridge, startFeishuBridge, startImessageBridge, startSiriBridge } = createBridgeStarter({
+const { startTelegramBridge, startFeishuBridge, startWeixinBridge, startImessageBridge, startSiriBridge } = createBridgeStarter({
   fs,
   path,
   HOME,
@@ -2593,7 +2593,7 @@ async function main() {
   }
 
   // Config validation: warn on unknown/suspect fields
-  const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'heartbeat', 'budget', 'projects', 'imessage', 'siri_bridge'];
+  const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'weixin', 'heartbeat', 'budget', 'projects', 'imessage', 'siri_bridge'];
   const KNOWN_DAEMON = [
     'model',          // legacy (still valid as fallback)
     'models',         // per-engine model map: { claude, codex }
@@ -2684,12 +2684,13 @@ async function main() {
   // Bridges
   let telegramBridge = null;
   let feishuBridge = null;
+  let weixinBridge = null;
   let lastWakeBridgeRecoveryAt = 0;
 
   const notifier = createNotifier({
     log,
     getConfig: () => config,
-    getBridges: () => ({ telegramBridge, feishuBridge }),
+    getBridges: () => ({ telegramBridge, feishuBridge, weixinBridge }),
   });
   const notifyFn = notifier.notify;
   const adminNotifyFn = notifier.notifyAdmin;
@@ -2713,6 +2714,10 @@ async function main() {
     if (feishuBridge && typeof feishuBridge.reconnect === 'function') {
       log('INFO', `[WAKE-DETECT] reconnecting Feishu bridge after ${sleepSeconds}s sleep`);
       tasks.push(Promise.resolve().then(() => feishuBridge.reconnect()));
+    }
+    if (weixinBridge && typeof weixinBridge.reconnect === 'function') {
+      log('INFO', `[WAKE-DETECT] reconnecting Weixin bridge after ${sleepSeconds}s sleep`);
+      tasks.push(Promise.resolve().then(() => weixinBridge.reconnect()));
     }
     await Promise.allSettled(tasks);
   };
@@ -2781,6 +2786,7 @@ async function main() {
   // Start bridges (both can run simultaneously)
   telegramBridge = await startTelegramBridge(config, executeTaskByName);
   feishuBridge = await startFeishuBridge(config, executeTaskByName);
+  weixinBridge = await startWeixinBridge(config, executeTaskByName);
   await startImessageBridge(config, executeTaskByName);
   await startSiriBridge(config, executeTaskByName);
   if (feishuBridge) _dispatchBridgeRef = feishuBridge; // store bridge, not bot, so .bot stays live after reconnects
@@ -2795,6 +2801,7 @@ async function main() {
     const bots = [];
     if (feishuBridge && feishuBridge.bot) bots.push(feishuBridge.bot);
     if (telegramBridge && telegramBridge.bot) bots.push(telegramBridge.bot);
+    if (weixinBridge && weixinBridge.bot) bots.push(weixinBridge.bot);
     if (bots.length === 0) return;
     const notifs = [];
     for (const [cid] of activeProcesses) {
@@ -2825,6 +2832,7 @@ async function main() {
     try { fs.unlinkSync(SOCK_PATH); } catch { }
     if (telegramBridge) telegramBridge.stop();
     if (feishuBridge) feishuBridge.stop();
+    if (weixinBridge) weixinBridge.stop();
     // Stop QMD semantic search daemon if it was started
     try { require('./qmd-client').stopDaemon(); } catch { /* ignore */ }
     // Release warm pool processes before killing active ones

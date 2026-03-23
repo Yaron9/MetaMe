@@ -32,6 +32,12 @@ function createHandler(getAllTasksImpl, overrides = {}) {
   });
 }
 
+function createBot(sent) {
+  return {
+    sendMessage: async (_chatId, text) => { sent.push(String(text)); },
+  };
+}
+
 describe('daemon-admin-commands /tasks', () => {
   it('renders interval and fixed-time schedules for mobile task list', async () => {
     const sent = [];
@@ -50,9 +56,7 @@ describe('daemon-admin-commands /tasks', () => {
       ],
     }));
 
-    const bot = {
-      sendMessage: async (_chatId, text) => { sent.push(String(text)); },
-    };
+    const bot = createBot(sent);
 
     const res = await handleAdminCommand({
       bot,
@@ -72,6 +76,114 @@ describe('daemon-admin-commands /tasks', () => {
     const body = sent[0];
     assert.match(body, /memory-extract \(every 4h\) success/);
     assert.match(body, /morning-brief \(at 09:00 weekdays\) never_run/);
+  });
+});
+
+describe('daemon-admin-commands /weixin', () => {
+  it('shows weixin status from config and auth store', async () => {
+    const sent = [];
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        weixinAuthStore: {
+          listAccounts: () => ['bot@im.bot'],
+          loadAccount: () => ({
+            userId: 'user@im.wechat',
+            linkedAt: '2026-03-23T00:00:00.000Z',
+          }),
+        },
+      }
+    );
+
+    const res = await handleAdminCommand({
+      bot: createBot(sent),
+      chatId: 'mobile-user-weixin',
+      text: '/weixin',
+      config: {
+        weixin: {
+          enabled: true,
+          base_url: 'https://ilinkai.weixin.qq.com',
+          bot_type: '3',
+          account_id: 'bot@im.bot',
+        },
+      },
+      state: {},
+    });
+
+    assert.equal(res.handled, true);
+    assert.match(sent[0], /Weixin/);
+    assert.match(sent[0], /enabled: yes/);
+    assert.match(sent[0], /linked_accounts: 1/);
+    assert.match(sent[0], /bot@im\.bot \(active\)/);
+  });
+
+  it('starts weixin qr login and prints qrcode url', async () => {
+    const sent = [];
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        weixinAuthStore: {
+          listAccounts: () => [],
+          loadAccount: () => null,
+          startQrLogin: async ({ sessionKey, botType }) => ({
+            sessionKey,
+            botType,
+            qrcodeUrl: 'https://liteapp.weixin.qq.com/q/demo',
+          }),
+        },
+      }
+    );
+
+    const res = await handleAdminCommand({
+      bot: createBot(sent),
+      chatId: 'mobile-user-weixin',
+      text: '/weixin login start --bot-type 3 --session wx-test',
+      config: { weixin: { bot_type: '3' } },
+      state: {},
+    });
+
+    assert.equal(res.handled, true);
+    assert.match(sent[0], /二维码已生成/);
+    assert.match(sent[0], /session: wx-test/);
+    assert.match(sent[0], /liteapp\.weixin\.qq\.com/);
+    assert.match(sent[0], /\/weixin login wait --session wx-test/);
+  });
+
+  it('waits for weixin qr login confirmation', async () => {
+    const sent = [];
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        weixinAuthStore: {
+          listAccounts: () => [],
+          loadAccount: () => null,
+          waitForQrLogin: async ({ sessionKey }) => {
+            assert.equal(sessionKey, 'wx-test');
+            return {
+              connected: true,
+              account: {
+                accountId: 'bot@im.bot',
+                userId: 'user@im.wechat',
+                baseUrl: 'https://ilinkai.weixin.qq.com',
+              },
+            };
+          },
+        },
+      }
+    );
+
+    const res = await handleAdminCommand({
+      bot: createBot(sent),
+      chatId: 'mobile-user-weixin',
+      text: '/weixin login wait --session wx-test',
+      config: { weixin: {} },
+      state: {},
+    });
+
+    assert.equal(res.handled, true);
+    assert.match(sent[0], /账号已绑定/);
+    assert.match(sent[0], /bot@im\.bot/);
+    assert.match(sent[0], /user@im\.wechat/);
   });
 });
 

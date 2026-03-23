@@ -17,6 +17,10 @@ const {
 } = require('./daemon-remote-dispatch');
 let mentorEngine = null;
 try { mentorEngine = require('./mentor-engine'); } catch { /* optional */ }
+let weixinApiMod = null;
+let weixinAuthMod = null;
+try { weixinApiMod = require('./daemon-weixin-api'); } catch { /* optional */ }
+try { weixinAuthMod = require('./daemon-weixin-auth'); } catch { /* optional */ }
 
 function createAdminCommandHandler(deps) {
   const {
@@ -45,6 +49,7 @@ function createAdminCommandHandler(deps) {
     getDefaultEngine = () => 'claude',
     setDefaultEngine = () => {},
     getDistillModel = () => 'haiku',
+    weixinAuthStore = null,
   } = deps;
 
   // resolveProjectKey: imported from daemon-team-dispatch.js (shared with dispatch_to and daemon.js)
@@ -262,6 +267,48 @@ function createAdminCommandHandler(deps) {
     }
   }
 
+  function getWeixinStore() {
+    if (weixinAuthStore) return weixinAuthStore;
+    if (!weixinApiMod || !weixinAuthMod) return null;
+    try {
+      const apiClient = weixinApiMod.createWeixinApiClient({ log });
+      return weixinAuthMod.createWeixinAuthStore({ apiClient, log });
+    } catch {
+      return null;
+    }
+  }
+
+  function parseWeixinCommand(raw) {
+    const src = String(raw || '').trim();
+    const tail = src.replace(/^\/weixin\b/i, '').trim();
+    if (!tail) return { action: 'status' };
+    const parts = tail.split(/\s+/).filter(Boolean);
+    const main = String(parts[0] || '').toLowerCase();
+    const sub = String(parts[1] || '').toLowerCase();
+    const rest = parts.slice(2);
+    const flags = {};
+    for (let i = 0; i < rest.length; i += 1) {
+      const token = rest[i];
+      if (!token.startsWith('--')) continue;
+      const key = token.slice(2);
+      const next = rest[i + 1];
+      if (!next || next.startsWith('--')) {
+        flags[key] = true;
+      } else {
+        flags[key] = next;
+        i += 1;
+      }
+    }
+    if (main === 'status') return { action: 'status' };
+    if (main === 'login' && (sub === 'start' || sub === 'wait')) {
+      return { action: `login:${sub}`, flags };
+    }
+    if (main === 'login' && !sub) {
+      return { action: 'usage' };
+    }
+    return { action: 'usage' };
+  }
+
   async function sendLocalDispatchReceipt(bot, chatId, targetKey, projInfo, result, preview) {
     if (!result || !result.success) return;
     const icon = projInfo && projInfo.icon ? projInfo.icon : '🤖';
@@ -343,6 +390,108 @@ function createAdminCommandHandler(deps) {
       } catch { /* ignore */ }
       await bot.sendMessage(chatId, msg);
       return { handled: true, config };
+    }
+
+    if (text === '/weixin' || text.startsWith('/weixin ')) {
+      const store = getWeixinStore();
+      if (!store) {
+        await bot.sendMessage(chatId, '❌ weixin 模块不可用');
+        return { handled: true, config };
+      }
+
+      const parsed = parseWeixinCommand(text);
+      const weixinCfg = (config && config.weixin) || {};
+
+      if (parsed.action === 'usage') {
+        await bot.sendMessage(chatId, [
+          '用法:',
+          '/weixin',
+          '/weixin status',
+          '/weixin login start [--bot-type 3] [--session <key>]',
+          '/weixin login wait --session <key>',
+        ].join('\n'));
+        return { handled: true, config };
+      }
+
+      if (parsed.action === 'status') {
+        const accountIds = store.listAccounts();
+        const activeAccountId = String(weixinCfg.account_id || accountIds[0] || '').trim();
+        const lines = [
+          '💬 Weixin',
+          `enabled: ${weixinCfg.enabled ? 'yes' : 'no'}`,
+          `base_url: ${weixinCfg.base_url || (weixinApiMod && weixinApiMod.DEFAULT_BASE_URL) || 'https://ilinkai.weixin.qq.com'}`,
+          `bot_type: ${weixinCfg.bot_type || '3'}`,
+          `linked_accounts: ${accountIds.length}`,
+          `active_account: ${activeAccountId || '(none)'}`,
+        ];
+        if (accountIds.length > 0) {
+          for (const id of accountIds.slice(0, 5)) {
+            const account = store.loadAccount(id) || {};
+            const label = id === activeAccountId ? ' (active)' : '';
+            lines.push(`- ${id}${label} user=${account.userId || '-'} linked=${account.linkedAt || account.savedAt || '-'}`);
+          }
+        } else {
+          lines.push('- no linked account');
+        }
+        await bot.sendMessage(chatId, lines.join('\n'));
+        return { handled: true, config };
+      }
+
+      if (parsed.action === 'login:start') {
+        const flags = parsed.flags || {};
+        const botType = String(flags['bot-type'] || weixinCfg.bot_type || '3').trim();
+        const sessionKey = String(flags.session || `${Date.now()}-${botType}`).trim();
+        try {
+          const session = await store.startQrLogin({
+            sessionKey,
+            botType,
+            baseUrl: weixinCfg.base_url || undefined,
+            routeTag: weixinCfg.route_tag || undefined,
+          });
+          const lines = [
+            '✅ 微信登录二维码已生成',
+            `session: ${session.sessionKey}`,
+            `bot_type: ${session.botType}`,
+            '',
+            `${session.qrcodeUrl || '(no qrcode url returned)'}`,
+            '',
+            `下一步: /weixin login wait --session ${session.sessionKey}`,
+          ];
+          await bot.sendMessage(chatId, lines.join('\n'));
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ 微信登录启动失败: ${e.message}`);
+        }
+        return { handled: true, config };
+      }
+
+      if (parsed.action === 'login:wait') {
+        const flags = parsed.flags || {};
+        const sessionKey = String(flags.session || '').trim();
+        if (!sessionKey) {
+          await bot.sendMessage(chatId, '❌ 缺少 session\n用法: /weixin login wait --session <key>');
+          return { handled: true, config };
+        }
+        try {
+          const result = await store.waitForQrLogin({ sessionKey });
+          if (result.connected) {
+            await bot.sendMessage(chatId, [
+              '✅ 微信账号已绑定',
+              `account: ${result.account.accountId}`,
+              `user: ${result.account.userId || '-'}`,
+              `base_url: ${result.account.baseUrl || '-'}`,
+            ].join('\n'));
+          } else if (result.expired) {
+            await bot.sendMessage(chatId, '⚠️ 二维码已过期，请重新执行 /weixin login start');
+          } else if (result.timeout) {
+            await bot.sendMessage(chatId, '⏳ 仍在等待扫码确认，可稍后再次执行 /weixin login wait --session <key>');
+          } else {
+            await bot.sendMessage(chatId, '⚠️ 登录未完成');
+          }
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ 微信登录等待失败: ${e.message}`);
+        }
+        return { handled: true, config };
+      }
     }
 
     // /skill-evo — inspect and resolve skill evolution queue

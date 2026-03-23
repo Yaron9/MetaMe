@@ -34,4 +34,23 @@ describe('intent-registry', () => {
     assert.match(block, /dispatch_to/);
     assert.match(block, /builder/);
   });
+
+  it('injects weixin bridge hints only for weixin-specific prompts', () => {
+    const block = buildIntentHintBlock('微信接入怎么测试，扫码登录怎么弄？', {
+      hooks: { weixin_bridge: true },
+    }, '');
+    assert.match(block, /\[微信桥接提示\]/);
+    assert.match(block, /\/weixin login start/);
+    assert.match(block, /text-only/);
+  });
+
+  it('does not inject weixin bridge hints for generic wechat mentions', () => {
+    const block = buildIntentHintBlock('我想研究微信生态的商业模式', {}, '');
+    assert.doesNotMatch(block, /\[微信桥接提示\]/);
+  });
+
+  it('does not inject weixin bridge hints for generic no-response complaints without weixin context', () => {
+    const block = buildIntentHintBlock('为什么没回，用户那边一直没收到回复', {}, '');
+    assert.doesNotMatch(block, /\[微信桥接提示\]/);
+  });
 });

@@ -19,6 +19,16 @@ feishu:
     chat_id: ""
     secret: ""
 
+weixin:
+  enabled: false
+  base_url: "https://ilinkai.weixin.qq.com"
+  bot_type: "3"
+  account_id: ""
+  route_tag: null
+  allowed_chat_ids: []
+  chat_agent_map: {}
+  poll_timeout_ms: 35000
+
 projects:
   # Per-project heartbeat tasks. Each project's tasks are isolated and
   # notifications arrive as colored Feishu cards (visually distinct).

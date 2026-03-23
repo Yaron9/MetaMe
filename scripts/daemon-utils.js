@@ -44,6 +44,7 @@ function mergeAgentMaps(cfg) {
   return {
     ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}),
     ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}),
+    ...(cfg.weixin ? cfg.weixin.chat_agent_map : {}),
     ...(cfg.imessage ? cfg.imessage.chat_agent_map : {}),
     ...(cfg.siri_bridge ? cfg.siri_bridge.chat_agent_map : {}),
   };

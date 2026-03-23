@@ -6,6 +6,7 @@ const { findTeamMember: _findTeamMember } = require('./daemon-team-dispatch');
 const { isRemoteMember } = require('./daemon-remote-dispatch');
 const imessageIO = (() => { try { return require('./daemon-siri-imessage'); } catch { return null; } })();
 const siriBridgeMod = (() => { try { return require('./daemon-siri-bridge'); } catch { return null; } })();
+const weixinBridgeMod = (() => { try { return require('./daemon-weixin-bridge'); } catch { return null; } })();
 
 function createBridgeStarter(deps) {
   const {
@@ -159,6 +160,7 @@ function createBridgeStarter(deps) {
     const map = {
       ...(cfg.telegram  ? cfg.telegram.chat_agent_map  || {} : {}),
       ...(cfg.feishu    ? cfg.feishu.chat_agent_map    || {} : {}),
+      ...(cfg.weixin    ? cfg.weixin.chat_agent_map    || {} : {}),
       ...(cfg.imessage  ? cfg.imessage.chat_agent_map  || {} : {}),
     };
     const key = map[String(chatId)];
@@ -1177,7 +1179,19 @@ function createBridgeStarter(deps) {
     return bridge.startSiriBridge(config, executeTaskByName);
   }
 
-  return { startTelegramBridge, startFeishuBridge, startImessageBridge, startSiriBridge };
+  function startWeixinBridge(config, executeTaskByName) {
+    if (!weixinBridgeMod) { log('WARN', '[WEIXIN] daemon-weixin-bridge module not found'); return null; }
+    const bridge = weixinBridgeMod.createWeixinBridge({
+      HOME,
+      log,
+      sleep,
+      loadConfig,
+      pipeline,
+    });
+    return bridge.startWeixinBridge(config, executeTaskByName);
+  }
+
+  return { startTelegramBridge, startFeishuBridge, startWeixinBridge, startImessageBridge, startSiriBridge };
 }
 
 module.exports = { createBridgeStarter };

@@ -100,14 +100,16 @@ describe('mergeAgentMaps', () => {
     assert.equal(mergeAgentMaps(cfg).same, 'fs');
   });
 
-  it('includes imessage and siri_bridge maps', () => {
+  it('includes weixin, imessage and siri_bridge maps', () => {
     const cfg = {
       telegram: { chat_agent_map: { tg1: 'a' } },
+      weixin: { chat_agent_map: { wx1: 'w' } },
       imessage: { chat_agent_map: { im1: 'b' } },
       siri_bridge: { chat_agent_map: { siri1: 'c' } },
     };
     const result = mergeAgentMaps(cfg);
     assert.equal(result.tg1, 'a');
+    assert.equal(result.wx1, 'w');
     assert.equal(result.im1, 'b');
     assert.equal(result.siri1, 'c');
   });
