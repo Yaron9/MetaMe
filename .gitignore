@@ -13,6 +13,9 @@ scripts/daemon.yaml
 plugin/scripts/daemon.yaml
 *.daemon.yaml.bak
 feishu-login-qr.png
+workspace/weixin-openclaw-probe/.sessions/
+workspace/weixin-openclaw-probe/*.png
+workspace/
 
 # Personal/private files — never upload
 MEMORY.md
