@@ -35,17 +35,32 @@ describe('intent-registry', () => {
     assert.match(block, /builder/);
   });
 
-  it('injects weixin bridge hints only for weixin-specific prompts', () => {
-    const block = buildIntentHintBlock('微信接入怎么测试，扫码登录怎么弄？', {
+  it('injects weixin bridge hints for explicit weixin setup prompts when enabled', () => {
+    const block = buildIntentHintBlock('帮我配置微信桥接并开始绑定账号', {
       hooks: { weixin_bridge: true },
     }, '');
     assert.match(block, /\[微信桥接提示\]/);
+    assert.match(block, /weixin\.enabled=true/);
     assert.match(block, /\/weixin login start/);
     assert.match(block, /text-only/);
   });
 
+  it('keeps weixin bridge hints disabled by default', () => {
+    const block = buildIntentHintBlock('帮我配置微信桥接并开始绑定账号', {}, '');
+    assert.doesNotMatch(block, /\[微信桥接提示\]/);
+  });
+
   it('does not inject weixin bridge hints for generic wechat mentions', () => {
-    const block = buildIntentHintBlock('我想研究微信生态的商业模式', {}, '');
+    const block = buildIntentHintBlock('我想研究微信生态的商业模式', {
+      hooks: { weixin_bridge: true },
+    }, '');
+    assert.doesNotMatch(block, /\[微信桥接提示\]/);
+  });
+
+  it('does not inject weixin bridge hints for generic wechat complaints without bind/setup intent', () => {
+    const block = buildIntentHintBlock('微信用户说怎么还没回他，你帮我排查下模型链路', {
+      hooks: { weixin_bridge: true },
+    }, '');
     assert.doesNotMatch(block, /\[微信桥接提示\]/);
   });
 

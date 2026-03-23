@@ -567,6 +567,40 @@ Use from mobile: `/dispatch to windows:hunter research competitors` or just ment
 | `/teamtask <task_id>` | View task detail |
 | `/teamtask resume <task_id>` | Resume a task |
 
+## Weixin Direct Bridge
+
+MetaMe also supports a direct Weixin bridge. It is separate from WeCom and currently optimized for text-only request/response flows.
+
+### Enable and bind
+
+1. Edit `~/.metame/daemon.yaml` and enable the bridge:
+
+```yaml
+weixin:
+  enabled: true
+  base_url: "https://ilinkai.weixin.qq.com"
+  bot_type: "3"
+  account_id: ""
+  route_tag: null
+  allowed_chat_ids: []
+  chat_agent_map: {}
+  poll_timeout_ms: 35000
+```
+
+2. Redeploy or restart MetaMe so the runtime picks up the new config.
+3. In your admin chat, run `/weixin login start` to generate the login QR/link.
+4. Scan and confirm with Weixin, then run `/weixin login wait --session <key>`.
+5. Run `/weixin` or `/weixin status` to verify the account is linked.
+
+Natural-language setup is available through the intent hook. If you want the model to expose the setup flow on demand, enable this in `~/.metame/daemon.yaml`:
+
+```yaml
+hooks:
+  weixin_bridge: true
+```
+
+Then prompts like “帮我配置微信桥接” or “开始微信扫码登录” will inject the enable-and-bind workflow for the model.
+
 ## Mentor Mode (Why + How)
 
 Mentor Mode is designed for users who want MetaMe to actively improve decision quality, not just execute commands.
