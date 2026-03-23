@@ -162,6 +162,25 @@ const DAEMON_CONFIG_FILE = path.join(METAME_DIR, 'daemon.yaml');
 const METAME_START = '<!-- METAME:START -->';
 const METAME_END = '<!-- METAME:END -->';
 
+function resolveAutoUpdateBehavior() {
+  const mode = String(process.env.METAME_AUTO_UPDATE || '').trim().toLowerCase();
+  if (['0', 'false', 'off', 'disable', 'disabled'].includes(mode)) {
+    return { enabled: false, reason: 'env-disabled' };
+  }
+  if (['1', 'true', 'on', 'enable', 'enabled', 'force'].includes(mode)) {
+    return { enabled: true, reason: 'env-forced' };
+  }
+
+  // Linked/source checkouts contain a .git entry (directory in main repo,
+  // file in worktrees). Published npm packages do not.
+  const dotGit = path.join(__dirname, '.git');
+  if (fs.existsSync(dotGit)) {
+    return { enabled: false, reason: 'source-checkout' };
+  }
+
+  return { enabled: true, reason: 'installed-package' };
+}
+
 // ---------------------------------------------------------
 // 1.5 ENSURE METAME DIRECTORY + DEPLOY SCRIPTS
 // ---------------------------------------------------------
@@ -173,23 +192,10 @@ if (!fs.existsSync(METAME_DIR)) {
 // DEPLOY PHASE: sync scripts, docs, bin to ~/.metame/
 // ---------------------------------------------------------
 
-// Dev mode: when running from the real git repo, symlink instead of copy.
-// This ensures source files and runtime files are always the same,
-// preventing agents from accidentally editing copies instead of source.
-// IMPORTANT: git worktrees have a `.git` FILE (not directory) pointing to the main repo.
-// They must NOT be treated as dev mode — deploying from a worktree would overwrite
-// production symlinks with stale code. Only a real .git directory qualifies.
-const IS_DEV_MODE = (() => {
-  const dotGit = path.join(__dirname, '.git');
-  try {
-    return fs.statSync(dotGit).isDirectory();
-  } catch { return false; }
-})();
-
 /**
  * Sync files from srcDir to destDir.
- * - Dev mode (git repo): creates symlinks so source === runtime.
- * - Production (npm install): copies files, only writes when content differs.
+ * Always copies from source to runtime. Runtime files under ~/.metame are
+ * deploy artifacts, never editable sources.
  * @param {string} srcDir - source directory
  * @param {string} destDir - destination directory
  * @param {object} [opts]
@@ -207,35 +213,18 @@ function syncDirFiles(srcDir, destDir, { fileList, chmod } = {}) {
     const dest = path.join(destDir, f);
     try {
       if (!fs.existsSync(src)) continue;
-
-      if (IS_DEV_MODE) {
-        // Dev mode: symlink dest → src (replace copy/stale symlink if needed)
-        const srcReal = fs.realpathSync(src);
-        let needLink = true;
-        try {
-          const existing = fs.lstatSync(dest);
-          if (existing.isSymbolicLink()) {
-            if (fs.realpathSync(dest) === srcReal) needLink = false;
-            else fs.unlinkSync(dest);
-          } else {
-            // Replace regular file with symlink
-            fs.unlinkSync(dest);
-          }
-        } catch { /* dest doesn't exist */ }
-        if (needLink) {
-          fs.symlinkSync(srcReal, dest);
-          if (chmod) try { fs.chmodSync(dest, chmod); } catch { /* Windows */ }
-          updated = true;
-        }
-      } else {
-        // Production: copy when content differs
-        const srcContent = fs.readFileSync(src, 'utf8');
-        const destContent = fs.existsSync(dest) ? fs.readFileSync(dest, 'utf8') : '';
-        if (srcContent !== destContent) {
-          fs.writeFileSync(dest, srcContent, 'utf8');
-          if (chmod) try { fs.chmodSync(dest, chmod); } catch { /* Windows */ }
-          updated = true;
-        }
+      // Runtime deploy is always copy-based. Replace any legacy symlink with
+      // a regular file so ~/.metame never masquerades as the source of truth.
+      try {
+        const existing = fs.lstatSync(dest);
+        if (existing.isSymbolicLink()) fs.unlinkSync(dest);
+      } catch { /* dest doesn't exist */ }
+      const srcContent = fs.readFileSync(src, 'utf8');
+      const destContent = fs.existsSync(dest) ? fs.readFileSync(dest, 'utf8') : '';
+      if (srcContent !== destContent) {
+        fs.writeFileSync(dest, srcContent, 'utf8');
+        if (chmod) try { fs.chmodSync(dest, chmod); } catch { /* Windows */ }
+        updated = true;
       }
     } catch { /* non-fatal per file */ }
   }
@@ -454,7 +443,7 @@ if (syntaxErrors.length > 0) {
 } else {
   scriptsUpdated = syncDirFiles(scriptsDir, METAME_DIR, { fileList: BUNDLED_SCRIPTS });
   if (scriptsUpdated) {
-    console.log(`${icon("pkg")} Scripts ${IS_DEV_MODE ? 'symlinked' : 'synced'} to ~/.metame/.`);
+    console.log(`${icon("pkg")} Scripts synced to ~/.metame/.`);
   }
 }
 
@@ -1400,38 +1389,43 @@ try {
 // 4.9 AUTO-UPDATE CHECK (non-blocking)
 // ---------------------------------------------------------
 const CURRENT_VERSION = pkgVersion;
+const AUTO_UPDATE = resolveAutoUpdateBehavior();
 
-// Fire-and-forget: check npm for newer version and auto-update
-(async () => {
-  try {
-    const https = require('https');
-    const latest = await new Promise((resolve, reject) => {
-      https.get('https://registry.npmjs.org/metame-cli/latest', { timeout: 5000 }, res => {
-        let data = '';
-        res.on('data', c => data += c);
-        res.on('end', () => {
-          try { resolve(JSON.parse(data).version); } catch { reject(); }
-        });
-      }).on('error', reject).on('timeout', function () { this.destroy(); reject(); });
-    });
+// Fire-and-forget: check npm for newer version and auto-update.
+// Only enabled for published npm installs; source checkouts and npm-link
+// development setups are opt-out by default to avoid overwriting local work.
+if (AUTO_UPDATE.enabled) {
+  (async () => {
+    try {
+      const https = require('https');
+      const latest = await new Promise((resolve, reject) => {
+        https.get('https://registry.npmjs.org/metame-cli/latest', { timeout: 5000 }, res => {
+          let data = '';
+          res.on('data', c => data += c);
+          res.on('end', () => {
+            try { resolve(JSON.parse(data).version); } catch { reject(); }
+          });
+        }).on('error', reject).on('timeout', function () { this.destroy(); reject(); });
+      });
 
-    if (latest && latest !== CURRENT_VERSION) {
-      console.log(`${icon("pkg")} MetaMe ${latest} available (current ${CURRENT_VERSION}), updating...`);
-      const { execSync } = require('child_process');
-      try {
-        execSync('npm install -g metame-cli@latest', {
-          stdio: 'pipe',
-          timeout: 60000,
-          ...(process.platform === 'win32' ? { shell: process.env.COMSPEC || true } : {}),
-        });
-        console.log(`${icon("ok")} Updated to ${latest}. Restart metame to use the new version.`);
-      } catch (e) {
-        const msg = e.stderr ? e.stderr.toString().trim().split('\n').pop() : '';
-        console.log(`${icon("warn")} Auto-update failed${msg ? ': ' + msg : ''}. Run manually: npm install -g metame-cli`);
+      if (latest && latest !== CURRENT_VERSION) {
+        console.log(`${icon("pkg")} MetaMe ${latest} available (current ${CURRENT_VERSION}), updating...`);
+        const { execSync } = require('child_process');
+        try {
+          execSync('npm install -g metame-cli@latest', {
+            stdio: 'pipe',
+            timeout: 60000,
+            ...(process.platform === 'win32' ? { shell: process.env.COMSPEC || true } : {}),
+          });
+          console.log(`${icon("ok")} Updated to ${latest}. Restart metame to use the new version.`);
+        } catch (e) {
+          const msg = e.stderr ? e.stderr.toString().trim().split('\n').pop() : '';
+          console.log(`${icon("warn")} Auto-update failed${msg ? ': ' + msg : ''}. Run manually: npm install -g metame-cli`);
+        }
       }
-    }
-  } catch { /* network unavailable, skip silently */ }
-})();
+    } catch { /* network unavailable, skip silently */ }
+  })();
+}
 
 // ---------------------------------------------------------
 // 4.95 QMD OPTIONAL INSTALL PROMPT (one-time)
@@ -2574,8 +2568,8 @@ if (isSync) {
 if (process.env.METAME_ACTIVE_SESSION === 'true') {
   console.error(`\n${icon("stop")} ACTION BLOCKED: Nested Session Detected`);
   console.error("   You are actively running inside a MetaMe session.");
-  console.error("   To hot-reload daemon code from this session, run: \x1b[36mtouch ~/.metame/daemon.js\x1b[0m");
-  console.error("   In this dev workspace, \x1b[36mtouch scripts/daemon.js\x1b[0m works too because ~/.metame/daemon.js is symlinked.\n");
+  console.error("   Edit source files under \x1b[36mscripts/\x1b[0m only, then redeploy with \x1b[36mnode index.js\x1b[0m.");
+  console.error("   Do not edit \x1b[36m~/.metame/\x1b[0m directly; it is a generated runtime copy.\n");
   process.exit(1);
 }
 

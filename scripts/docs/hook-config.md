@@ -1,6 +1,6 @@
 # MetaMe Hook / Intent Engine 配置手册
 
-> 自动部署到 `~/.metame/docs/hook-config.md`。源文件：`scripts/docs/hook-config.md`。
+> 自动部署到 `~/.metame/docs/hook-config.md`。源文件：`scripts/docs/hook-config.md`。只编辑 `scripts/`，不要直接改 `~/.metame/`。
 
 ---
 
@@ -29,7 +29,7 @@ Stop (每轮结束)
 | `ops_assist` | `intent-ops-assist.js` | 回退/日志/重启/gc/状态 相关语境 | `/undo` `/restart` `/logs` `/gc` `/status` 命令提示 |
 | `task_create` | `intent-task-create.js` | 定时/提醒/每天X点 等调度语境 | `/task-add` 命令用法提示 |
 | `file_transfer` | `intent-file-transfer.js` | "发给我/发过来/导出" 等文件传输语境 | `[[FILE:...]]` 协议 + 收发规则 |
-| `weixin_bridge` | `intent-weixin-bridge.js` | "微信接入/扫码登录/怎么测试/为什么没回" 等微信桥接语境 | `/weixin` 登录与测试命令提示 |
+| `weixin_bridge` | `intent-weixin-bridge.js` | "微信接入/扫码登录/怎么测试/为什么微信没回" 等微信桥接语境 | `/weixin` 登录与测试命令提示 |
 | `memory_recall` | `intent-memory-recall.js` | "上次/之前/还记得" 等跨会话回忆语境 | `memory-search.js` 命令用法 |
 | `doc_router` | `intent-doc-router.js` | "创建/绑定 Agent"、"代码结构/脚本入口"、"hook/intent 配置" 等文档导向语境 | 统一 doc-router 文档指引 |
 ---
@@ -43,7 +43,7 @@ hooks:
   team_dispatch: true   # 改为 false 可禁用
   ops_assist: true
   task_create: false    # 禁用任务调度提示
-  weixin_bridge: true
+  weixin_bridge: false  # 默认关闭，避免误触发
 ```
 
 改完立即生效（intent-engine 每次运行时读取）。
@@ -130,7 +130,7 @@ for k, v in s.get('hooks', {}).items():
 |------|------|
 | `scripts/intent-registry.js` | 共享意图注册表（Claude hook / Codex runtime 共用） |
 | `scripts/hooks/intent-engine.js` | Claude hook adapter（源文件） |
-| `~/.metame/hooks/intent-engine.js` | 部署副本（symlink） |
+| `~/.metame/hooks/intent-engine.js` | 部署副本（copy） |
 | `scripts/hooks/intent-*.js` | 各意图模块（源文件） |
 | `~/.metame/daemon.yaml` | 用户配置（包含 `hooks:` 开关） |
 | `~/.claude/settings.json` | Claude Code hook 注册表 |
