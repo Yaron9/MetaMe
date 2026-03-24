@@ -1752,25 +1752,6 @@ ${mentorRadarHint}
 6. Before executing high-risk or non-obvious Bash commands (rm, kill, git reset, overwrite configs), prepend a single-line [Why] explanation. Skip for routine commands (ls, cat, grep).]`;
       }
 
-      // P2-B: inject session summary when resuming after a 2h+ gap
-      let summaryHint = '';
-      if (session.started) {
-        try {
-          const _stSum = loadState();
-          const _sess = _stSum.sessions && _stSum.sessions[chatId];
-          if (_sess && _sess.last_summary && _sess.last_summary_at) {
-            const _idleMs = Date.now() - (_sess.last_active || 0);
-            const _summaryAgeH = (Date.now() - _sess.last_summary_at) / 3600000;
-            if (_idleMs > 2 * 60 * 60 * 1000 && _summaryAgeH < 168) {
-              summaryHint = `
-
-[上次对话摘要（历史已完成，仅供上下文，请勿重复执行）]: ${_sess.last_summary}`;
-              log('INFO', `[DAEMON] Injected session summary for ${chatId} (idle ${Math.round(_idleMs / 3600000)}h)`);
-            }
-          }
-        } catch { /* non-critical */ }
-      }
-
       // Mentor context hook: inject after memoryHint, before langGuard.
       let mentorHint = '';
       if (mentorEnabled && !mentorExcluded && !mentorSuppressed) {
@@ -1842,7 +1823,7 @@ ${mentorRadarHint}
       // (varies per prompt), so include it even on warm reuse.
       const fullPrompt = _warmEntry
         ? routedPrompt + intentHint
-        : routedPrompt + daemonHint + intentHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
+        : routedPrompt + daemonHint + intentHint + agentHint + macAutomationHint + memoryHint + mentorHint + langGuard;
       if (runtime.name === 'codex' && session.started && session.id && requestedCodexPermissionProfile) {
         const actualPermissionProfile = getActualCodexPermissionProfile(session);
         if (codexNeedsFallbackForRequestedPermissions(actualPermissionProfile, requestedCodexPermissionProfile)) {

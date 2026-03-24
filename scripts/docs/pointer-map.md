@@ -28,6 +28,7 @@
 - 会话与引擎选择：
   - `scripts/daemon-claude-engine.js`
   - 关键点：`askClaude()` 按 `project.engine`/session 选择 runtime；`patchSessionSerialized()` 串行回写 session
+  - 说明：同一底层 session 续聊不再注入会话恢复摘要；额外上下文仅来自显式 compact / memory / intent 链路
   - Codex 规则：`exec`/`resume`、10 分钟窗口内一次自动重试、`thread_id` 迁移回写
 
 - Agent Soul 身份层（新）：

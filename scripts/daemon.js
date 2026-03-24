@@ -1181,67 +1181,6 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
 }
 
 /**
- * Spawn memory-extract.js as a detached background process.
- * Called on sleep mode entry to consolidate session facts.
- */
-/**
- * Spawn session-summarize.js for sessions that have been idle 2-24 hours.
- * Called on sleep mode entry. Skips sessions that already have a fresh summary.
- */
-const MAX_CONCURRENT_SUMMARIES = 3;
-
-function spawnSessionSummaries() {
-  const scriptPath = path.join(__dirname, 'session-summarize.js');
-  if (!fs.existsSync(scriptPath)) return;
-  const state = loadState();
-  const now = Date.now();
-  const TWO_HOURS = 2 * 60 * 60 * 1000;
-  const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
-  // Collect eligible sessions, sort by most recently active first
-  const eligible = [];
-  for (const [cid, sess] of Object.entries(state.sessions || {})) {
-    // Support both old flat format and new per-engine format
-    let sessionId, started;
-    if (sess.engines) {
-      const active = Object.values(sess.engines).find(s => s.id && s.started);
-      if (!active) continue;
-      sessionId = active.id;
-      started = true;
-    } else {
-      sessionId = sess.id;
-      started = sess.started;
-    }
-    if (!sessionId || !started) continue;
-    const lastActive = sess.last_active || 0;
-    const idleMs = now - lastActive;
-    if (idleMs < TWO_HOURS || idleMs > SEVEN_DAYS) continue;
-    if ((sess.last_summary_at || 0) > lastActive) continue;
-    eligible.push({ cid, sess: { ...sess, id: sessionId, started }, lastActive });
-  }
-  eligible.sort((a, b) => b.lastActive - a.lastActive);
-
-  let spawned = 0;
-  for (const { cid, sess } of eligible) {
-    if (spawned >= MAX_CONCURRENT_SUMMARIES) {
-      log('INFO', `[DAEMON] Session summary concurrency limit (${MAX_CONCURRENT_SUMMARIES}) reached, deferring remaining`);
-      break;
-    }
-    const idleMs = now - (sess.last_active || 0);
-    try {
-      const child = spawn(process.execPath, [scriptPath, cid, sess.id], {
-        detached: true, stdio: 'ignore',
-        ...(process.platform === 'win32' ? { windowsHide: true } : {}),
-      });
-      child.unref();
-      spawned++;
-      log('INFO', `[DAEMON] Session summary spawned for ${cid} (idle ${Math.round(idleMs / 3600000)}h)`);
-    } catch (e) {
-      log('WARN', `[DAEMON] Failed to spawn session summary: ${e.message}`);
-    }
-  }
-}
-
-/**
  * Physiological heartbeat: zero-token awareness check.
  * Runs every tick unconditionally.
  */
@@ -2137,7 +2076,6 @@ const {
   isUserIdle,
   isInSleepMode: () => _inSleepMode,
   setSleepMode: (next) => { _inSleepMode = !!next; },
-  spawnSessionSummaries,
   getWakeRecoveryHook: () => wakeRecoveryHook,
   skillEvolution,
 });

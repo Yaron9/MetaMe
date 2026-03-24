@@ -79,21 +79,16 @@ Start on your laptop, continue on the train. `/stop` to interrupt, `/undo` to ro
 
 ### 3. Layered Memory That Works While You Sleep
 
-MetaMe's memory system runs automatically in the background — no prompts, no manual saves. Five layers, fully autonomous.
+MetaMe's memory system runs automatically in the background — no prompts, no manual saves. Three layers, fully autonomous.
 
 **Layer 1 — Long-term Facts**
 When you go idle, MetaMe runs memory consolidation: extracts key decisions, patterns, and knowledge from your sessions into a persistent facts store. Facts can also carry concept labels (`fact_labels`) for faster cross-domain retrieval.
 
-**Layer 2 — Session Continuity**
-Resuming a conversation after 2+ hours? MetaMe injects a brief summary of what you were working on last time — so you pick up where you left off without re-explaining context.
+**Layer 2 — History Retrieval**
+When you refer to "that thing we worked on last week", MetaMe uses session routing, topic tags, and memory recall to find the right thread, files, and facts. Same-session continuation stays native — no synthetic resume summary is injected.
 
-**Layer 3 — Session Index**
-Every session gets tagged with topics and intent. This powers future session routing: when you reference "that thing we worked on last week", MetaMe knows where to look.
-
-**Layer 4 — Nightly Reflection**
+**Layer 3 — Higher-order Memory**
 Every night at 01:00, MetaMe reviews your most-accessed facts from the past week and distills them into high-level decision logs and operational lessons. Distilled outputs are also written back to `memory.db` as `synthesized_insight`, enabling retrieval in future sessions.
-
-**Layer 5 — Memory Index**
 At 01:30, an auto-generated global index (`INDEX.md`) maps every memory document across all categories (including capsules and postmortems). This serves as a fast lookup table so MetaMe always knows where to find relevant context.
 
 ```
@@ -101,14 +96,13 @@ At 01:30, an auto-generated global index (`INDEX.md`) maps every memory document
 idle 30min → memory consolidation triggered
   → session_tags.json updated (topics indexed)
   → facts extracted → ~/.metame/memory.db
-  → session summary cached → daemon_state.json
 01:00 → nightly reflection: hot facts → decisions + lessons
 01:30 → memory index regenerated
 
 [Next morning, when you resume]
 "continue from yesterday" →
-  [上次对话摘要] Auth refactor, decided on JWT with
-  refresh token rotation. Token expiry set to 15min.
+  session lookup + memory recall point to the right thread/files
+  without auto-injecting a synthetic conversation summary.
 ```
 
 ### 4. Heartbeat — A Programmable Nervous System
@@ -121,7 +115,7 @@ The heartbeat system is three-layered:
 Built into the daemon. Runs every 60 seconds regardless of what's in your config:
 - Drains the dispatch queue (IPC messages from other agents)
 - Tracks daemon aliveness and rotates logs
-- Detects when you go idle → generates session continuity summaries
+- Detects when you go idle and enters sleep mode for gated background work
 
 **Layer 1 — System Evolution (built-in defaults)**
 Five tasks shipped out of the box. They are precondition-gated and run only when useful:

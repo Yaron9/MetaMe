@@ -11,7 +11,7 @@
 
 | 文件 | 引用方 | 说明 |
 |------|--------|------|
-| `session-analytics.js` | daemon-claude-engine, distill, memory-extract, session-summarize | 会话分析核心库 |
+| `session-analytics.js` | daemon-claude-engine, distill, memory-extract | 会话分析核心库 |
 | `mentor-engine.js` | daemon-claude-engine, daemon-admin-commands | AI 导师引擎 |
 | `intent-registry.js` | daemon-claude-engine, hooks/intent-engine | 意图识别注册表 |
 | `daemon-command-session-route.js` | daemon-exec-commands, daemon-ops-commands | 会话路由解析 |
@@ -19,7 +19,6 @@
 | `daemon-siri-imessage.js` | daemon-siri-bridge.js | iMessage 数据库读取 |
 | `telegram-adapter.js` | daemon-bridges.js | Telegram 适配器 |
 | `feishu-adapter.js` | daemon-bridges.js | 飞书适配器 |
-| `session-summarize.js` | daemon.js (spawn) | 会话总结，由 daemon.js 第1158行 spawn 调用 |
 
 ### HEARTBEAT — daemon.yaml 心跳任务调用（无需处理）
 

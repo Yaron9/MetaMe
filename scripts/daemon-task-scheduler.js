@@ -194,7 +194,6 @@ function createTaskScheduler(deps) {
     isUserIdle,
     isInSleepMode,
     setSleepMode,
-    spawnSessionSummaries,
     getWakeRecoveryHook,
     skillEvolution,
   } = deps;
@@ -744,8 +743,6 @@ function createTaskScheduler(deps) {
       if (idle && !isInSleepMode()) {
         setSleepMode(true);
         log('INFO', '[DAEMON] Entering Sleep Mode');
-        // Generate summaries for sessions idle 2-24h
-        spawnSessionSummaries();
       } else if (!idle && isInSleepMode()) {
         setSleepMode(false);
         log('INFO', '[DAEMON] Exiting Sleep Mode — local activity detected');

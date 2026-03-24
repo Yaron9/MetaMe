@@ -46,6 +46,8 @@ feishu:
 - 引擎 runtime 工厂：`scripts/daemon-engine-runtime.js`
 - 会话执行入口：`scripts/daemon-claude-engine.js`（Claude/Codex 共用）
 - Session 回写：`patchSessionSerialized()` 串行化，避免 thread.started 竞态覆盖
+- 同一个底层 session 不做自动“恢复摘要”注入；续聊直接依赖引擎原生上下文
+- 额外上下文只在显式链路进入时注入，例如 `/compact` 产物、`NOW.md`、memory facts / capsules、intent hints
 
 ### Codex 会话策略
 
@@ -94,6 +96,10 @@ feishu:
 - 远端 Dispatch 队列：`~/.metame/dispatch/remote-pending.jsonl`（跨设备中继）
 - Dispatch 签名密钥：`~/.metame/.dispatch_secret`（自动创建）
 - 自动更新策略：发布版 npm 安装默认开启；源码 checkout / `npm link` 默认关闭，可用 `METAME_AUTO_UPDATE=on|off` 覆盖
+
+说明：
+- `daemon_state.json` 仍保存 session 元数据（如 `last_active`），用于路由、恢复和状态判断。
+- 不再缓存或注入“闲置后恢复摘要”；如果需要压缩上下文，只走显式 `/compact`。
 
 ## 7. 热重载安全机制（三层防护）
 
