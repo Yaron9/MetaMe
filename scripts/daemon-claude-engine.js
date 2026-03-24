@@ -504,6 +504,24 @@ function createClaudeEngine(deps) {
         retryPromptPrefix: '[Note: the previous Codex execution was interrupted by a daemon restart or user stop signal. Continue the same conversation if possible. User message follows:]',
       };
     }
+    const transportInterrupted = (
+      lowered.includes('stream disconnected')
+      || lowered.includes('connection reset')
+      || lowered.includes('connection aborted')
+      || lowered.includes('broken pipe')
+      || lowered.includes('timed out')
+      || lowered.includes('timeout')
+      || lowered.includes('temporarily unavailable')
+      || lowered.includes('error sending request')
+      || lowered.includes('http2')
+    );
+    if (transportInterrupted) {
+      return {
+        kind: 'transport',
+        userMessage: '⚠️ Codex 续接时网络/传输中断。系统正在优先重试同一条会话，不按 session 过期处理。',
+        retryPromptPrefix: '[Note: the previous Codex resume attempt was interrupted by a transient transport error. Continue the same conversation if possible. User message follows:]',
+      };
+    }
     return {
       kind: 'expired',
       userMessage: '⚠️ Codex session 已过期，上下文可能丢失。正在以全新 session 重试，请在回复后补充必要背景。',
@@ -1194,8 +1212,30 @@ function createClaudeEngine(deps) {
     });
   }
 
+  const MSG_SESSION_MAX_ENTRIES = 5000;
+  const MSG_SESSION_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+  function pruneMsgSessionMappings(msgSessions) {
+    const now = Date.now();
+    const entries = Object.entries(msgSessions || {});
+    if (entries.length === 0) return {};
+
+    const freshEntries = entries.filter(([, value]) => {
+      const touchedAt = Number(value && value.touchedAt || 0);
+      return !touchedAt || (now - touchedAt) <= MSG_SESSION_MAX_AGE_MS;
+    });
+
+    const boundedEntries = freshEntries.length > MSG_SESSION_MAX_ENTRIES
+      ? freshEntries
+        .sort((a, b) => Number((a[1] && a[1].touchedAt) || 0) - Number((b[1] && b[1].touchedAt) || 0))
+        .slice(freshEntries.length - MSG_SESSION_MAX_ENTRIES)
+      : freshEntries;
+    return Object.fromEntries(boundedEntries);
+  }
+
   // Track outbound message_id → session for reply-based session restoration.
-  // Keeps last 200 entries to avoid unbounded growth.
+  // Keep a larger, time-bounded mapping pool so active chats do not lose
+  // reply continuity after a few hundred messages across all groups.
   function trackMsgSession(messageId, session, agentKey, options = {}) {
     if (!messageId || !session) return;
     const forceRouteOnly = !!(options && options.routeOnly);
@@ -1211,11 +1251,9 @@ function createClaudeEngine(deps) {
       ...(session.sandboxMode ? { sandboxMode: session.sandboxMode } : {}),
       ...(session.approvalPolicy ? { approvalPolicy: session.approvalPolicy } : {}),
       ...(session.permissionMode ? { permissionMode: session.permissionMode } : {}),
+      touchedAt: Date.now(),
     };
-    const keys = Object.keys(st.msg_sessions);
-    if (keys.length > 200) {
-      for (const k of keys.slice(0, keys.length - 200)) delete st.msg_sessions[k];
-    }
+    st.msg_sessions = pruneMsgSessionMappings(st.msg_sessions);
     saveState(st);
   }
 
@@ -2125,10 +2163,10 @@ ${mentorRadarHint}
           markCodexResumeRetried(chatId, resumeFailure.kind);
           log(
             'WARN',
-            `Codex resume failed for ${chatId}, retrying once with ${resumeFailure.kind === 'interrupted' ? 'native resume recovery' : 'fresh exec'}: ${String(error).slice(0, 120)}`
+            `Codex resume failed for ${chatId}, retrying once with ${(resumeFailure.kind === 'interrupted' || resumeFailure.kind === 'transport') ? 'native resume recovery' : 'fresh exec'}: ${String(error).slice(0, 120)}`
           );
           await bot.sendMessage(chatId, resumeFailure.userMessage).catch(() => { });
-          if (resumeFailure.kind !== 'interrupted') {
+          if (resumeFailure.kind !== 'interrupted' && resumeFailure.kind !== 'transport') {
             session = createSession(
               sessionChatId,
               effectiveCwd,

@@ -7,6 +7,8 @@ const { isRemoteMember } = require('./daemon-remote-dispatch');
 const imessageIO = (() => { try { return require('./daemon-siri-imessage'); } catch { return null; } })();
 const siriBridgeMod = (() => { try { return require('./daemon-siri-bridge'); } catch { return null; } })();
 const weixinBridgeMod = (() => { try { return require('./daemon-weixin-bridge'); } catch { return null; } })();
+const MSG_SESSION_MAX_ENTRIES = 5000;
+const MSG_SESSION_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 
 function createBridgeStarter(deps) {
   const {
@@ -122,7 +124,20 @@ function createBridgeStarter(deps) {
     state.msg_sessions[safeMessageId] = {
       ...(state.msg_sessions[safeMessageId] || {}),
       ...payload,
+      touchedAt: Date.now(),
     };
+    const now = Date.now();
+    const entries = Object.entries(state.msg_sessions).filter(([, value]) => {
+      const touchedAt = Number(value && value.touchedAt || 0);
+      return !touchedAt || (now - touchedAt) <= MSG_SESSION_MAX_AGE_MS;
+    });
+    state.msg_sessions = Object.fromEntries(
+      (entries.length > MSG_SESSION_MAX_ENTRIES
+        ? entries
+          .sort((a, b) => Number((a[1] && a[1].touchedAt) || 0) - Number((b[1] && b[1].touchedAt) || 0))
+          .slice(entries.length - MSG_SESSION_MAX_ENTRIES)
+        : entries)
+    );
     saveState(state);
   }
 

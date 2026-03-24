@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawn, execSync } = require('child_process');
-const { sleepSync, findProcessesByPattern, icon } = require('./scripts/platform');
+const { sleepSync, findProcessesByPattern, killProcessTree, icon } = require('./scripts/platform');
 
 // On Windows, resolve .cmd wrapper → actual Node.js entry and spawn node directly.
 // Completely bypasses cmd.exe, eliminating terminal flash.
@@ -254,6 +254,16 @@ function readRunningDaemonPid({ pidFile, lockFile }) {
   return null;
 }
 
+function isPidAlive(pid) {
+  if (!pid || Number.isNaN(pid) || pid === process.pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // --- macOS launchd integration ---
 const LAUNCHD_LABEL = 'com.metame.npm-daemon';
 const LAUNCHD_PLIST = path.join(HOME_DIR, 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist`);
@@ -316,6 +326,99 @@ function launchdIsRunning() {
     const m = out.match(/"PID"\s*=\s*(\d+)/);
     return m ? parseInt(m[1], 10) : null;
   } catch { return null; }
+}
+
+function cleanDaemonRuntimeState({ pidFile, lockFile }) {
+  try {
+    if (fs.existsSync(pidFile)) {
+      const pid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+      if (!isPidAlive(pid)) fs.unlinkSync(pidFile);
+    }
+  } catch {
+    try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
+  }
+  try {
+    if (fs.existsSync(lockFile)) {
+      const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+      const pid = parseInt(lock && lock.pid, 10);
+      if (!isPidAlive(pid)) fs.unlinkSync(lockFile);
+    }
+  } catch {
+    try { fs.unlinkSync(lockFile); } catch { /* ignore */ }
+  }
+}
+
+function terminateDaemonProcesses({
+  pidFile,
+  lockFile,
+  preservePid = null,
+}) {
+  const targets = new Set();
+  for (const pid of findProcessesByPattern('node.*daemon\\.js')) {
+    if (pid && pid !== process.pid && pid !== preservePid) targets.add(pid);
+  }
+  for (const file of [pidFile, lockFile]) {
+    if (!fs.existsSync(file)) continue;
+    try {
+      const raw = fs.readFileSync(file, 'utf8').trim();
+      const pid = file === pidFile
+        ? parseInt(raw, 10)
+        : parseInt((JSON.parse(raw || '{}') || {}).pid, 10);
+      if (pid && pid !== process.pid && pid !== preservePid && isPidAlive(pid)) targets.add(pid);
+    } catch { /* ignore invalid metadata */ }
+  }
+
+  if (!targets.size) {
+    cleanDaemonRuntimeState({ pidFile, lockFile });
+    return [];
+  }
+
+  for (const pid of targets) killProcessTree(pid, 'SIGTERM');
+  sleepSync(1500);
+  for (const pid of targets) {
+    if (isPidAlive(pid)) killProcessTree(pid, 'SIGKILL');
+  }
+  sleepSync(500);
+  cleanDaemonRuntimeState({ pidFile, lockFile });
+  return [...targets];
+}
+
+function ensureLaunchdDaemonRunning({
+  daemonScript,
+  daemonLog,
+  pidFile,
+  lockFile,
+  restart = false,
+}) {
+  ensureLaunchdPlist({ daemonScript, daemonLog });
+  let launchdPid = launchdIsRunning();
+
+  if (launchdPid) {
+    terminateDaemonProcesses({ pidFile, lockFile, preservePid: launchdPid });
+  } else {
+    terminateDaemonProcesses({ pidFile, lockFile });
+  }
+
+  try {
+    execSync(`launchctl bootstrap gui/$(id -u) ${LAUNCHD_PLIST} 2>/dev/null`);
+  } catch { /* already bootstrapped */ }
+
+  try {
+    execSync(`launchctl kickstart ${restart ? '-k ' : ''}gui/$(id -u)/${LAUNCHD_LABEL}`);
+  } catch {
+    // Recover from a stale/removed launchd service entry.
+    try { execSync(`launchctl bootout gui/$(id -u)/${LAUNCHD_LABEL} 2>/dev/null`); } catch { /* ignore */ }
+    terminateDaemonProcesses({ pidFile, lockFile });
+    execSync(`launchctl bootstrap gui/$(id -u) ${LAUNCHD_PLIST}`);
+    execSync(`launchctl kickstart gui/$(id -u)/${LAUNCHD_LABEL}`);
+  }
+
+  sleepSync(1500);
+  launchdPid = launchdIsRunning();
+  if (!launchdPid) {
+    launchdPid = readRunningDaemonPid({ pidFile, lockFile });
+  }
+  return launchdPid || null;
 }
 
 function requestDaemonRestart({
@@ -2164,39 +2267,12 @@ WantedBy=default.target
     }
 
     if (process.platform === 'darwin') {
-      // macOS: delegate to launchd for auto-restart and boot persistence
-      // Kill any orphan daemon processes NOT managed by launchd
-      try {
-        const pids = findProcessesByPattern('node.*daemon\\.js');
-        const launchdPid = launchdIsRunning();
-        for (const n of pids) {
-          if (n !== launchdPid) {
-            try { process.kill(n, 'SIGTERM'); } catch { /* */ }
-          }
-        }
-      } catch { /* ignore */ }
-      // Clean stale lock/pid from orphan processes
-      if (fs.existsSync(DAEMON_LOCK)) {
-        try {
-          const lock = JSON.parse(fs.readFileSync(DAEMON_LOCK, 'utf8'));
-          const pid = parseInt(lock && lock.pid, 10);
-          if (pid) { process.kill(pid, 0); } // throws if dead
-        } catch {
-          // Owner is dead — clean stale files
-          try { fs.unlinkSync(DAEMON_PID); } catch { /* */ }
-          try { fs.unlinkSync(DAEMON_LOCK); } catch { /* */ }
-        }
-      }
-      ensureLaunchdPlist({ daemonScript: DAEMON_SCRIPT, daemonLog: DAEMON_LOG });
-      try {
-        execSync(`launchctl bootstrap gui/$(id -u) ${LAUNCHD_PLIST} 2>/dev/null`);
-      } catch { /* already bootstrapped */ }
-      // kickstart ensures the process is actually running now
-      try {
-        execSync(`launchctl kickstart gui/$(id -u)/${LAUNCHD_LABEL}`);
-      } catch { /* already running */ }
-      sleepSync(1500);
-      const pid = launchdIsRunning();
+      const pid = ensureLaunchdDaemonRunning({
+        daemonScript: DAEMON_SCRIPT,
+        daemonLog: DAEMON_LOG,
+        pidFile: DAEMON_PID,
+        lockFile: DAEMON_LOCK,
+      });
       if (pid) {
         console.log(`${icon("ok")} MetaMe daemon started via launchd (PID: ${pid})`);
       } else {
@@ -2241,17 +2317,7 @@ WantedBy=default.target
       try {
         execSync(`launchctl bootout gui/$(id -u)/${LAUNCHD_LABEL} 2>/dev/null`);
       } catch { /* not loaded */ }
-      // Also kill any orphan daemon processes not managed by launchd
-      try {
-        const pids = findProcessesByPattern('node.*daemon\\.js');
-        for (const n of pids) {
-          try { process.kill(n, 'SIGTERM'); } catch { /* */ }
-        }
-        if (pids.length) sleepSync(2000);
-        for (const n of pids) {
-          try { process.kill(n, 'SIGKILL'); } catch { /* already gone */ }
-        }
-      } catch { /* */ }
+      terminateDaemonProcesses({ pidFile: DAEMON_PID, lockFile: DAEMON_LOCK });
       try { fs.unlinkSync(DAEMON_PID); } catch { /* */ }
       try { fs.unlinkSync(DAEMON_LOCK); } catch { /* */ }
       console.log(`${icon("ok")} Daemon stopped. launchd auto-restart disabled.`);
@@ -2295,23 +2361,17 @@ WantedBy=default.target
     }
 
     if (process.platform === 'darwin') {
-      // macOS: use launchctl kickstart -k (kills + restarts in one atomic op)
-      ensureLaunchdPlist({ daemonScript: DAEMON_SCRIPT, daemonLog: DAEMON_LOG });
-      try {
-        execSync(`launchctl bootstrap gui/$(id -u) ${LAUNCHD_PLIST} 2>/dev/null`);
-      } catch { /* already bootstrapped */ }
-      try {
-        execSync(`launchctl kickstart -k gui/$(id -u)/${LAUNCHD_LABEL}`);
-        sleepSync(1500);
-        const pid = launchdIsRunning();
-        if (pid) {
-          console.log(`${icon("ok")} Daemon restarted via launchd (PID: ${pid})`);
-        } else {
-          console.log(`${icon("ok")} Daemon restart requested via launchd...`);
-        }
-      } catch (e) {
-        console.error(`${icon("fail")} launchctl kickstart failed: ${e.message}`);
-        process.exit(1);
+      const pid = ensureLaunchdDaemonRunning({
+        daemonScript: DAEMON_SCRIPT,
+        daemonLog: DAEMON_LOG,
+        pidFile: DAEMON_PID,
+        lockFile: DAEMON_LOCK,
+        restart: true,
+      });
+      if (pid) {
+        console.log(`${icon("ok")} Daemon restarted via launchd (PID: ${pid})`);
+      } else {
+        console.log(`${icon("ok")} Daemon restart requested via launchd...`);
       }
       process.exit(0);
     }
@@ -2368,6 +2428,13 @@ WantedBy=default.target
           runningPid = pid;
         }
       } catch { /* lock stale or invalid */ }
+    }
+    if (!isRunning && process.platform === 'darwin' && fs.existsSync(LAUNCHD_PLIST)) {
+      const pid = launchdIsRunning();
+      if (pid) {
+        isRunning = true;
+        runningPid = pid;
+      }
     }
 
     console.log(`${icon("bot")} MetaMe Daemon: ${isRunning ? icon("green") + ' Running' : icon("red") + ' Stopped'}`);

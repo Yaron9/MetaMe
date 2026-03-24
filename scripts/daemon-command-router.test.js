@@ -232,3 +232,110 @@ describe('chat_agent_map session reuse (multi-engine format)', () => {
     assert.equal(attachCalls, 0, 'should NOT recreate session when legacy format engine matches');
   });
 });
+
+describe('natural language continue routing', () => {
+  it('reuses the current bound session instead of forcing /last', async () => {
+    const sessionState = {
+      sessions: {
+        _bound_metame: {
+          cwd: '/repo/metame',
+          engines: {
+            codex: { id: 'reply-restored-thread', started: true, runtimeSessionObserved: true },
+          },
+          last_active: Date.now(),
+        },
+      },
+    };
+    const sessionCommands = [];
+    const askCalls = [];
+    const deps = createDeps({
+      loadState: () => sessionState,
+      getDefaultEngine: () => 'codex',
+      handleSessionCommand: async ({ text }) => {
+        sessionCommands.push(text);
+        return false;
+      },
+      askClaude: async (_bot, chatId, prompt) => {
+        askCalls.push({ chatId, prompt });
+        return { ok: true };
+      },
+    });
+    const { handleCommand } = createCommandRouter(deps);
+    const sent = [];
+    const config = createConfig({
+      feishu: { chat_agent_map: { chat1: 'metame' } },
+      projects: { metame: { cwd: '/repo/metame', engine: 'codex', name: 'MetaMe' } },
+    });
+
+    await handleCommand(createBot(sent), 'chat1', '继续', config, null, 'user-1', false);
+
+    assert.equal(sessionCommands.includes('/last'), false, 'should not call /last when current chat already has a session');
+    assert.equal(askCalls.length, 1, 'should continue the current session directly');
+    assert.equal(askCalls[0].prompt, '继续上面的工作');
+  });
+
+  it('falls back to /last when the chat has no current session', async () => {
+    const sessionCommands = [];
+    const askCalls = [];
+    const deps = createDeps({
+      loadState: () => ({ sessions: {} }),
+      handleSessionCommand: async ({ text }) => {
+        sessionCommands.push(text);
+        return text === '/last';
+      },
+      askClaude: async (_bot, chatId, prompt) => {
+        askCalls.push({ chatId, prompt });
+        return { ok: true };
+      },
+    });
+    const { handleCommand } = createCommandRouter(deps);
+    const sent = [];
+    const config = createConfig();
+
+    await handleCommand(createBot(sent), 'chat1', '继续', config, null, 'user-1', false);
+
+    assert.deepEqual(sessionCommands, ['继续', '/last']);
+    assert.equal(askCalls.length, 1);
+    assert.equal(askCalls[0].prompt, '继续上面的工作');
+  });
+
+  it('reuses an existing non-preferred engine slot before falling back to /last', async () => {
+    const sessionState = {
+      sessions: {
+        _bound_metame: {
+          cwd: '/repo/metame',
+          engines: {
+            claude: { id: 'claude-current-thread', started: true },
+          },
+          last_active: Date.now(),
+        },
+      },
+    };
+    const sessionCommands = [];
+    const askCalls = [];
+    const deps = createDeps({
+      loadState: () => sessionState,
+      getDefaultEngine: () => 'claude',
+      handleSessionCommand: async ({ text }) => {
+        sessionCommands.push(text);
+        return false;
+      },
+      askClaude: async (_bot, chatId, prompt) => {
+        askCalls.push({ chatId, prompt });
+        return { ok: true };
+      },
+    });
+    const { handleCommand } = createCommandRouter(deps);
+    const sent = [];
+    const config = createConfig({
+      feishu: { chat_agent_map: { chat1: 'metame' } },
+      projects: { metame: { cwd: '/repo/metame', engine: 'codex', name: 'MetaMe' } },
+    });
+
+    await handleCommand(createBot(sent), 'chat1', '继续', config, null, 'user-1', false);
+
+    assert.equal(sessionCommands.includes('/last'), false);
+    assert.equal(askCalls.length, 1);
+    assert.equal(askCalls[0].prompt, '继续上面的工作');
+  });
+});

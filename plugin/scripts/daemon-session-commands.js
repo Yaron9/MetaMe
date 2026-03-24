@@ -28,6 +28,7 @@ function createSessionCommandHandler(deps) {
     loadSessionTags,
     sessionRichLabel,
     buildSessionCardElements,
+    getSessionRecentContext,
     getDefaultEngine = () => 'claude',
   } = deps;
 
@@ -169,6 +170,14 @@ function createSessionCommandHandler(deps) {
       pendingState: false,
       label: target && (target.customTitle || target.summary || target.sessionId) ? (target.customTitle || target.summary || target.sessionId) : 'Session',
     };
+  }
+
+  function listResumeCandidates(chatId, limit = 15) {
+    const boundCwd = getBoundCwd(chatId);
+    const currentEngine = getCurrentEngine(chatId);
+    const local = listRecentSessions(limit, boundCwd, currentEngine);
+    if (local && local.length > 0) return local;
+    return listRecentSessions(limit, null, currentEngine);
   }
 
   async function handleSessionCommand(ctx) {
@@ -380,6 +389,52 @@ function createSessionCommandHandler(deps) {
         });
         await bot.sendMessage(chatId, msg);
       }
+      return true;
+    }
+
+    // /resume [id] — show recent sessions or attach a selected one
+    if (text === '/resume' || text.startsWith('/resume ')) {
+      const arg = text.slice(7).trim();
+      const allSessions = listResumeCandidates(chatId, arg ? 50 : 15);
+
+      if (!arg) {
+        if (allSessions.length === 0) {
+          await bot.sendMessage(chatId, 'No sessions found. Try /new first.');
+          return true;
+        }
+        if (bot.sendRawCard && (bot.sendButtons || bot.sendCard)) {
+          await bot.sendRawCard(chatId, '📋 Resume Session', buildSessionCardElements(allSessions));
+        } else {
+          const sessionTags = loadSessionTags();
+          let msg = '📋 Resume Session\n\n';
+          allSessions.forEach((s, i) => {
+            msg += sessionRichLabel(s, i + 1, sessionTags) + '\n';
+          });
+          await bot.sendMessage(chatId, msg.trim());
+        }
+        return true;
+      }
+
+      const target = allSessions.find((s) => s.sessionId === arg || s.sessionId.startsWith(arg));
+      if (!target) {
+        await bot.sendMessage(chatId, `Session not found: ${arg.slice(0, 8)}`);
+        return true;
+      }
+
+      const state2 = loadState();
+      const targetEngine = normalizeEngineName(target.engine) || getCurrentEngine(chatId);
+      const attached = attachResolvedTarget(state2, chatId, targetEngine, target, target.projectPath || HOME);
+      saveState(state2);
+
+      const recentCtx = typeof getSessionRecentContext === 'function'
+        ? getSessionRecentContext(target.sessionId)
+        : null;
+      const title = target.customTitle || target.summary || target.sessionId.slice(0, 8);
+      const lines = [`▶️ Resumed: ${title}`];
+      if (attached.cwd) lines.push(`📁 ${path.basename(attached.cwd)}`);
+      if (recentCtx && recentCtx.lastUser) lines.push(`👤 ${String(recentCtx.lastUser).replace(/\n/g, ' ').slice(0, 80)}`);
+      if (recentCtx && recentCtx.lastAssistant) lines.push(`🤖 ${String(recentCtx.lastAssistant).replace(/\n/g, ' ').slice(0, 80)}`);
+      await bot.sendMessage(chatId, lines.join('\n'));
       return true;
     }
 

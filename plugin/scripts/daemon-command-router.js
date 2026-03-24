@@ -224,6 +224,49 @@ function createCommandRouter(deps) {
     return inferredKey ? `_bound_${inferredKey}` : rawChatId;
   }
 
+  function resolveCurrentSessionContext(chatId, config) {
+    const chatIdStr = String(chatId || '');
+    const chatAgentMap = {
+      ...(config && config.telegram ? config.telegram.chat_agent_map : {}),
+      ...(config && config.feishu ? config.feishu.chat_agent_map : {}),
+      ...(config && config.imessage ? config.imessage.chat_agent_map : {}),
+      ...(config && config.siri_bridge ? config.siri_bridge.chat_agent_map : {}),
+    };
+    const mappedKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
+    const mappedProject = mappedKey && config && config.projects ? config.projects[mappedKey] : null;
+    const preferredEngine = String((mappedProject && mappedProject.engine) || getDefaultEngine()).toLowerCase();
+    const state = loadState() || {};
+    const sessions = state.sessions || {};
+    const candidateIds = [
+      mappedKey ? buildSessionChatId(chatIdStr, mappedKey) : null,
+      buildSessionChatId(chatIdStr),
+      chatIdStr,
+    ].filter(Boolean);
+
+    for (const candidateId of candidateIds) {
+      const record = sessions[candidateId];
+      if (!record) continue;
+      const candidateSlots = [];
+      if (record.engines && typeof record.engines === 'object') {
+        if (record.engines[preferredEngine]) candidateSlots.push([preferredEngine, record.engines[preferredEngine]]);
+        for (const [engineName, slot] of Object.entries(record.engines)) {
+          if (engineName === preferredEngine) continue;
+          candidateSlots.push([engineName, slot]);
+        }
+      } else if (record.engine) {
+        candidateSlots.push([String(record.engine).toLowerCase(), record]);
+      }
+
+      for (const [engineName, slot] of candidateSlots) {
+        if (!slot) continue;
+        if (slot.id || record.cwd || slot.runtimeSessionObserved === false) {
+          return { record, slot, sessionChatId: candidateId, engine: engineName || preferredEngine };
+        }
+      }
+    }
+    return null;
+  }
+
   function getBoundProjectForChat(chatId, cfg) {
     const map = {
       ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}),
@@ -610,14 +653,28 @@ function createCommandRouter(deps) {
       const proj = config.projects[mappedKey];
       const projCwd = normalizeCwd(proj.cwd);
       const sessionChatId = buildSessionChatId(chatId, mappedKey);
-      const cur = loadState().sessions?.[sessionChatId];
+      const sessions = loadState().sessions || {};
+      const cur = sessions[sessionChatId];
+      const rawSession = sessions[String(chatId)];
       const projEngine = String((proj && proj.engine) || getDefaultEngine()).toLowerCase();
       // Multi-engine format stores engines in cur.engines object; legacy format uses cur.engine string.
       // Check whether the session already has a slot for the project's configured engine.
       const curHasEngine = cur && (
         cur.engines ? !!cur.engines[projEngine] : String(cur.engine || '').toLowerCase() === projEngine
       );
-      if (!cur || cur.cwd !== projCwd || !curHasEngine) {
+      const rawHasEngine = rawSession && (
+        rawSession.engines ? !!rawSession.engines[projEngine] : String(rawSession.engine || '').toLowerCase() === projEngine
+      );
+      const isVirtualSession = _chatIdStr.startsWith('_agent_') || _chatIdStr.startsWith('_scope_');
+      const shouldReattachForCwdChange =
+        !isVirtualSession &&
+        !!cur &&
+        !!curHasEngine &&
+        cur.cwd !== projCwd &&
+        !rawHasEngine;
+      if (!cur || !curHasEngine || shouldReattachForCwdChange) {
+        const initReason = !cur ? 'no-session' : (!curHasEngine ? 'engine-missing' : 'cwd-changed');
+        log('INFO', `SESSION-INIT [${String(sessionChatId).slice(-32)}] ${initReason}`);
         attachOrCreateSession(sessionChatId, projCwd, proj.name || mappedKey, proj.engine || getDefaultEngine());
       }
     }
@@ -722,10 +779,15 @@ function createCommandRouter(deps) {
     // "继续" when no task running → resume most recent session via /last, then send prompt
     const CONTINUE_RE = /^(继续|接着|go\s*on|continue)$/i;
     if (!activeProcesses.has(chatId) && CONTINUE_RE.test(text.trim())) {
-      // Delegate to /last which attaches the most recent session
+      const currentSession = resolveCurrentSessionContext(chatId, config);
+      if (currentSession) {
+        resetCooldown(chatId);
+        await askClaude(bot, chatId, '继续上面的工作', config, readOnly, senderId, meta);
+        return;
+      }
+      // No current session bound to this chat — delegate to /last as a fallback.
       const handled = await handleSessionCommand({ bot, chatId, text: '/last' });
       if (handled) {
-        // /last attached the session — now send "继续" to actually resume the conversation
         resetCooldown(chatId);
         await askClaude(bot, chatId, '继续上面的工作', config, readOnly, senderId, meta);
         return;

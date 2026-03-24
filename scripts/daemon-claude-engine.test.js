@@ -129,6 +129,50 @@ describe('daemon-claude-engine private helpers', () => {
     assert.equal(state.msg_sessions['msg-file-1'].approvalPolicy, 'never');
   });
 
+  it('keeps reply mappings beyond the old 200-entry cap', () => {
+    const state = { sessions: {} };
+    const engine = createEngineWithState(state);
+    const session = {
+      id: 'sid-file',
+      cwd: '/tmp/agent-jia',
+      engine: 'codex',
+      sandboxMode: 'danger-full-access',
+      approvalPolicy: 'never',
+      permissionMode: 'danger-full-access',
+    };
+
+    for (let i = 0; i < 260; i++) {
+      engine.trackMsgSession(`msg-${i}`, session, 'jia');
+    }
+
+    assert.equal(Object.keys(state.msg_sessions).length, 260);
+    assert.equal(state.msg_sessions['msg-0'].agentKey, 'jia');
+    assert.ok(state.msg_sessions['msg-0'].touchedAt > 0);
+  });
+
+  it('retains recently touched old reply mappings when pruning', () => {
+    const state = { sessions: {} };
+    const engine = createEngineWithState(state);
+    const session = {
+      id: 'sid-file',
+      cwd: '/tmp/agent-jia',
+      engine: 'codex',
+      sandboxMode: 'danger-full-access',
+      approvalPolicy: 'never',
+      permissionMode: 'danger-full-access',
+    };
+
+    for (let i = 0; i < 5000; i++) {
+      engine.trackMsgSession(`msg-${i}`, session, 'jia');
+    }
+    engine.trackMsgSession('msg-0', session, 'jia');
+    engine.trackMsgSession('msg-overflow', session, 'jia');
+
+    assert.ok(state.msg_sessions['msg-0'], 'recently touched old mapping should survive pruning');
+    assert.ok(!state.msg_sessions['msg-1'], 'least recently touched mapping should be evicted first');
+    assert.ok(state.msg_sessions['msg-overflow']);
+  });
+
   it('stores route-only reply mapping for fresh codex virtual-agent replies before thread observation stabilizes', async () => {
     const state = {
       sessions: {
@@ -230,15 +274,14 @@ describe('daemon-claude-engine private helpers', () => {
     const tracked = Object.values(state.msg_sessions || {}).find(entry =>
       entry && entry.logicalChatId === '_agent_jia' && entry.agentKey === 'jia'
     );
-    assert.deepEqual(tracked, {
-      cwd: '/tmp/agent-jia',
-      engine: 'codex',
-      logicalChatId: '_agent_jia',
-      agentKey: 'jia',
-      sandboxMode: 'danger-full-access',
-      approvalPolicy: 'never',
-      permissionMode: 'danger-full-access',
-    });
+    assert.equal(tracked.cwd, '/tmp/agent-jia');
+    assert.equal(tracked.engine, 'codex');
+    assert.equal(tracked.logicalChatId, '_agent_jia');
+    assert.equal(tracked.agentKey, 'jia');
+    assert.equal(tracked.sandboxMode, 'danger-full-access');
+    assert.equal(tracked.approvalPolicy, 'never');
+    assert.equal(tracked.permissionMode, 'danger-full-access');
+    assert.ok(tracked.touchedAt > 0);
   });
 
   it('forces bound chats back to configured cwd even when stored session cwd is polluted', async () => {
@@ -556,6 +599,14 @@ describe('daemon-claude-engine private helpers', () => {
     const shutdown = engine._private.classifyCodexResumeFailure('Stopped by user', 'INTERRUPTED_RESTART');
     assert.equal(shutdown.kind, 'interrupted');
     assert.match(shutdown.userMessage, /自动恢复到同一条会话/);
+
+    const transport = engine._private.classifyCodexResumeFailure(
+      'stream disconnected before completion: error sending request for url',
+      'EXEC_FAILURE'
+    );
+    assert.equal(transport.kind, 'transport');
+    assert.match(transport.userMessage, /网络\/传输中断|优先重试同一条会话/);
+    assert.match(transport.retryPromptPrefix, /transient transport error/i);
 
     const expired = engine._private.classifyCodexResumeFailure('resume failed: thread not found', 'EXEC_FAILURE');
     assert.equal(expired.kind, 'expired');
