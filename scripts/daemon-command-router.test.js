@@ -179,7 +179,7 @@ describe('chat_agent_map session reuse (multi-engine format)', () => {
     assert.equal(attachCalls, 1, 'should call attachOrCreateSession when codex slot is missing');
   });
 
-  it('should NOT recreate session when cwd changed — only /new creates sessions', async () => {
+  it('should reattach session when bound project cwd changed in config', async () => {
     let attachCalls = 0;
     const deps = createDeps({
       loadState: () => ({
@@ -202,7 +202,7 @@ describe('chat_agent_map session reuse (multi-engine format)', () => {
     });
 
     await handleCommand(createBot(sent), 'oc_test123', '你好', config, null, 'user-1', false);
-    assert.equal(attachCalls, 0, 'should NOT call attachOrCreateSession when cwd changed — session sticks');
+    assert.equal(attachCalls, 1, 'should call attachOrCreateSession when bound project cwd changes');
   });
 
   it('should handle legacy flat session format gracefully', async () => {

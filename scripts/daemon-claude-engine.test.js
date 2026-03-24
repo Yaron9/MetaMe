@@ -807,7 +807,7 @@ describe('daemon-claude-engine private helpers', () => {
     );
   });
 
-  it('skips claude resume when session JSONL was created by non-claude model', () => {
+  it('keeps claude resume enabled for custom-provider session models', () => {
     const state = { sessions: {} };
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-engine-'));
     const sessionFile = path.join(tempDir, 'session.jsonl');
@@ -864,7 +864,7 @@ describe('daemon-claude-engine private helpers', () => {
 
     assert.deepEqual(
       engine._private.inspectClaudeResumeSession({ started: true, id: 'sid-1' }),
-      { shouldResume: false, modelPin: null, reason: 'non-claude-session' }
+      { shouldResume: true, modelPin: null, reason: '' }
     );
   });
 

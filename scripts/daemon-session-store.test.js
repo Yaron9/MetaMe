@@ -307,7 +307,7 @@ describe('daemon-session-store codex metadata', () => {
     assert.equal(afterObserved.runtimeSessionObserved, true);
   });
 
-  it('treats non-claude JSONL sessions as invalid for claude resume', () => {
+  it('treats custom-provider JSONL sessions as valid for claude resume', () => {
     const state = { sessions: {} };
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
     const projectDir = path.join(tempHome, '.claude', 'projects', 'project-a');
@@ -332,7 +332,7 @@ describe('daemon-session-store codex metadata', () => {
       cpExtractTimestamp: () => null,
     });
 
-    assert.equal(store.isEngineSessionValid('claude', sessionId, tempHome), false);
+    assert.equal(store.isEngineSessionValid('claude', sessionId, tempHome), true);
   });
 
   it('lists codex sessions and filters by engine', () => {

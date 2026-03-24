@@ -296,7 +296,9 @@ function createSessionStore(deps) {
               }
             } catch {}
           }
-        } catch { /* skip */ }
+        } catch (err) {
+          log('WARN', `scanClaudeSessions project ${proj}: ${err.message}`);
+        }
 
         try {
           const files = fs.readdirSync(projDir).filter(f => f.endsWith('.jsonl'));
@@ -318,7 +320,9 @@ function createSessionStore(deps) {
               });
             }
           }
-        } catch { /* skip */ }
+        } catch (err) {
+          log('WARN', `scanClaudeSessions project ${proj}: ${err.message}`);
+        }
       }
 
       const all = Array.from(sessionMap.values()).map((entry) => ({ ...entry, engine: 'claude' }));
@@ -385,7 +389,8 @@ function createSessionStore(deps) {
         } catch { /* non-fatal */ }
       }
       return all;
-    } catch {
+    } catch (err) {
+      log('WARN', `scanClaudeSessions: ${err.message}`);
       return [];
     }
   }
@@ -444,8 +449,9 @@ function createSessionStore(deps) {
           };
         })
         .map((session) => enrichCodexSession(session));
-    } catch {
+    } catch (err) {
       if (db) { try { db.close(); } catch { /* ignore */ } }
+      log('WARN', `scanCodexSessions ${CODEX_DB}: ${err.message}`);
       return [];
     }
   }
@@ -544,19 +550,15 @@ function createSessionStore(deps) {
 
   function scanAllSessions() {
     if (_sessionCache && (Date.now() - _sessionCacheTime < SESSION_CACHE_TTL)) return _sessionCache;
-    try {
-      const all = [...scanClaudeSessions(), ...scanCodexSessions()];
-      all.sort((a, b) => {
-        const aTime = a.fileMtime || new Date(a.modified).getTime();
-        const bTime = b.fileMtime || new Date(b.modified).getTime();
-        return bTime - aTime;
-      });
-      _sessionCache = all;
-      _sessionCacheTime = Date.now();
-      return all;
-    } catch {
-      return [];
-    }
+    const all = [...scanClaudeSessions(), ...scanCodexSessions()];
+    all.sort((a, b) => {
+      const aTime = a.fileMtime || new Date(a.modified).getTime();
+      const bTime = b.fileMtime || new Date(b.modified).getTime();
+      return bTime - aTime;
+    });
+    _sessionCache = all;
+    _sessionCacheTime = Date.now();
+    return all;
   }
 
   function listRecentSessions(limit, cwd, engine) {
@@ -1033,10 +1035,6 @@ function createSessionStore(deps) {
 
       // Try to read cwd/model from session JSONL file content (most reliable)
       const metadata = _readClaudeSessionMetadata(sessionFile);
-      if (metadata.model && !metadata.model.startsWith('claude-')) {
-        log('WARN', `[SessionValid] ${sessionId.slice(0, 8)}: non-claude model "${metadata.model}"`);
-        return false;
-      }
       if (metadata.cwd && path.resolve(metadata.cwd) === normCwd) return true;
       if (metadata.cwd) {
         // CWD mismatch: the session was created for a different directory.
