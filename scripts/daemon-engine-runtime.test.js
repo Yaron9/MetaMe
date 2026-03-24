@@ -227,3 +227,19 @@ describe('daemon-engine-runtime factory', () => {
     assert.equal(codex.defaultModel, 'gpt-5.4');
   });
 });
+
+describe('daemon-engine-runtime timeout resolution', () => {
+  it('keeps hard ceiling for normal routes', () => {
+    const timeouts = _private.resolveEngineTimeouts('codex');
+    assert.equal(timeouts.idleMs, 10 * 60 * 1000);
+    assert.equal(timeouts.toolMs, 25 * 60 * 1000);
+    assert.equal(timeouts.ceilingMs, 60 * 60 * 1000);
+  });
+
+  it('disables hard ceiling for reactive routes', () => {
+    const timeouts = _private.resolveEngineTimeouts('claude', { reactive: true });
+    assert.equal(timeouts.idleMs, 5 * 60 * 1000);
+    assert.equal(timeouts.toolMs, 25 * 60 * 1000);
+    assert.equal(timeouts.ceilingMs, null);
+  });
+});

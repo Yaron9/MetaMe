@@ -87,6 +87,33 @@ function setReactiveStatus(state, projectKey, status, reason) {
   rs.updated_at = new Date().toISOString();
 }
 
+function isReactiveExecutionActive(projectKey, config, deps) {
+  const active = deps && deps.activeProcesses;
+  if (!active || typeof active.values !== 'function') return false;
+  const key = String(projectKey || '').trim();
+  if (!key) return false;
+  const parent = config && config.projects ? config.projects[key] : null;
+  const memberKeys = new Set(
+    Array.isArray(parent && parent.team)
+      ? parent.team.map(member => String(member && member.key || '').trim()).filter(Boolean)
+      : []
+  );
+  for (const proc of active.values()) {
+    if (!proc || proc.aborted) continue;
+    const reactiveProjectKey = String(proc.reactiveProjectKey || '').trim();
+    if (reactiveProjectKey && reactiveProjectKey === key) return true;
+    const procChatId = String(proc.chatId || proc.logicalChatId || '').trim();
+    if (!procChatId) continue;
+    if (procChatId === `_agent_${key}`) return true;
+    if (procChatId.startsWith('_scope_') && procChatId.endsWith(`__${key}`)) return true;
+    for (const memberKey of memberKeys) {
+      if (procChatId === `_agent_${memberKey}`) return true;
+      if (procChatId.startsWith('_scope_') && procChatId.endsWith(`__${memberKey}`)) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Find the reactive parent project key for a given team member.
  * Returns the parent key string, or null if not found.
@@ -457,6 +484,10 @@ function reconcilePerpetualProjects(config, deps) {
     const staleThreshold = staleMinutes * 60 * 1000;
 
     if (Date.now() - lastUpdate > staleThreshold) {
+      if (isReactiveExecutionActive(key, config, deps)) {
+        deps.log('INFO', `Reconcile: ${key} exceeds stale threshold but reactive execution is still active`);
+        continue;
+      }
       deps.log('WARN', `Reconcile: ${key} stuck since ${rs.updated_at}`);
       setReactiveStatus(st, key, 'stale', 'no_activity');
       deps.saveState(st);
@@ -925,6 +956,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
               prompt: completionResult.nextMissionPrompt,
               from: '_system',
               _reactive: true,
+              _reactive_project: projectKey,
               new_session: true,
             }, config);
           }
@@ -972,6 +1004,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
         prompt: d.prompt,
         from: projectKey,
         _reactive: true,
+        _reactive_project: projectKey,
         new_session: true,
       }, config);
     }
@@ -1089,6 +1122,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
     prompt: `[${targetProject} delivery]${verifierBlock}\n\n${summary}\n\nDecide next step. Use NEXT_DISPATCH or ${signal}.`,
     from: targetProject,
     _reactive: true,
+    _reactive_project: parentKey,
     new_session: true,
   }, config);
 }
@@ -1098,5 +1132,5 @@ module.exports = {
   parseReactiveSignals,
   reconcilePerpetualProjects,
   replayEventLog,
-  __test: { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, generateStateFile, loadProjectManifest, resolveProjectScripts, parseEventLog, buildRunningMemory, scanRelevantArtifacts, buildWorkingMemory, persistMemoryFiles, extractInlineFacts, extractOutputSummary },
+  __test: { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, generateStateFile, loadProjectManifest, resolveProjectScripts, parseEventLog, buildRunningMemory, scanRelevantArtifacts, buildWorkingMemory, persistMemoryFiles, extractInlineFacts, extractOutputSummary, isReactiveExecutionActive },
 };

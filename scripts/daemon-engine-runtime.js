@@ -15,6 +15,19 @@ const CODEX_TOOL_MAP = Object.freeze({
   web_fetch: 'WebFetch',
 });
 
+const ENGINE_TIMEOUT_DEFAULTS = Object.freeze({
+  codex: Object.freeze({
+    idleMs: 10 * 60 * 1000,
+    toolMs: 25 * 60 * 1000,
+    ceilingMs: 60 * 60 * 1000,
+  }),
+  claude: Object.freeze({
+    idleMs: 5 * 60 * 1000,
+    toolMs: 25 * 60 * 1000,
+    ceilingMs: 60 * 60 * 1000,
+  }),
+});
+
 function resolveBinary(engineName, deps = {}) {
   const engine = normalizeEngineName(engineName);
   const home = deps.HOME || os.homedir();
@@ -269,6 +282,16 @@ function parseCodexStreamEvent(line) {
   return out;
 }
 
+function resolveEngineTimeouts(engineName, opts = {}) {
+  const engine = normalizeEngineName(engineName);
+  const base = ENGINE_TIMEOUT_DEFAULTS[engine] || ENGINE_TIMEOUT_DEFAULTS.claude;
+  if (!opts || !opts.reactive) return { ...base };
+  return {
+    ...base,
+    ceilingMs: null,
+  };
+}
+
 function buildClaudeArgs(options = {}) {
   const { model = ENGINE_MODEL_CONFIG.claude.main, readOnly = false, session = {}, addDirs } = options;
   const args = ['-p', '--model', model];
@@ -421,7 +444,7 @@ function createEngineRuntimeFactory(deps = {}) {
         defaultModel: ENGINE_MODEL_CONFIG.codex.main,
         stdinBehavior: 'write-and-close',
         killSignal: 'SIGTERM',
-        timeouts: { idleMs: 10 * 60 * 1000, toolMs: 25 * 60 * 1000, ceilingMs: 60 * 60 * 1000 },
+        timeouts: resolveEngineTimeouts('codex'),
         buildArgs: buildCodexArgs,
         buildEnv: ({ metameProject = '', metameSenderId = '' } = {}) => buildCodexEnv(process.env, { metameProject, metameSenderId }),
         parseStreamEvent: parseCodexStreamEvent,
@@ -434,7 +457,7 @@ function createEngineRuntimeFactory(deps = {}) {
       defaultModel: ENGINE_MODEL_CONFIG.claude.main,
       stdinBehavior: 'write-and-close',
       killSignal: 'SIGTERM',
-      timeouts: { idleMs: 5 * 60 * 1000, toolMs: 25 * 60 * 1000, ceilingMs: 60 * 60 * 1000 },
+      timeouts: resolveEngineTimeouts('claude'),
       buildArgs: buildClaudeArgs,
       buildEnv: ({ metameProject = '', metameSenderId = '' } = {}) => ({
         ...(() => {
@@ -460,6 +483,7 @@ module.exports = {
   ENGINE_DISTILL_MAP,
   ENGINE_DEFAULT_MODEL,
   _private: {
+    ENGINE_TIMEOUT_DEFAULTS,
     classifyEngineError,
     parseClaudeStreamEvent,
     parseCodexStreamEvent,
@@ -472,5 +496,6 @@ module.exports = {
     BUILTIN_CLAUDE_MODEL_VALUES,
     normalizeClaudeModel,
     looksLikeCodexModel,
+    resolveEngineTimeouts,
   },
 };

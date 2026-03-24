@@ -943,6 +943,8 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
     payload,
     callback: message.callback || false,
     new_session: !!message.new_session,
+    reactive: !!message._reactive,
+    reactive_project_key: String(message._reactive_project || '').trim(),
     chain: [...chain, message.from || 'unknown'],
     task_id: envelope ? envelope.task_id : null,
     scope_id: envelope ? envelope.scope_id : null,
@@ -1164,7 +1166,19 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
     taskBoard.markTaskStatus(envelope.task_id, 'running', { summary: `dispatched via ${sessionMode}` });
     taskBoard.appendTaskEvent(envelope.task_id, 'task_started', targetProject, { session_mode: sessionMode });
   }
-  _handleCommand(nullBot, dispatchChatId, prompt, config, null, null, dispatchReadOnly).catch(e => {
+  _handleCommand(
+    nullBot,
+    dispatchChatId,
+    prompt,
+    config,
+    null,
+    null,
+    dispatchReadOnly,
+    {
+      reactive: !!fullMsg.reactive,
+      reactiveProjectKey: fullMsg.reactive_project_key || '',
+    },
+  ).catch(e => {
     log('ERROR', `Dispatch handleCommand failed for ${targetProject}: ${e.message}`);
     if (envelope && taskBoard) {
       taskBoard.markTaskStatus(envelope.task_id, 'failed', { last_error: e.message, summary: 'dispatch execution failed' });
@@ -1699,6 +1713,7 @@ function physiologicalHeartbeat(config) {
       log,
       loadState,
       saveState,
+      activeProcesses,
       notifyUser: (msg) => {
         try {
           const cfg = loadConfig();

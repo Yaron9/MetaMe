@@ -220,6 +220,46 @@ describe('Phase C: Generic perpetual project (no research, no team)', () => {
     assert.ok(deps._notifications.some(n => n.includes('stale')));
   });
 
+  it('reconcilePerpetualProjects skips stale when reactive execution is still active', () => {
+    const config = {
+      projects: {
+        code_audit: {
+          name: 'Code Auditor',
+          reactive: true,
+          stale_timeout_minutes: 1,
+          cwd: tmpDir,
+        },
+      },
+    };
+
+    const deps = makeDeps(metameDir, {
+      activeProcesses: new Map([
+        ['_agent_code_audit', {
+          chatId: '_agent_code_audit',
+          aborted: false,
+          reactiveProjectKey: 'code_audit',
+          engine: 'claude',
+        }],
+      ]),
+    });
+    const st = deps.loadState();
+    st.reactive = {
+      code_audit: {
+        depth: 3,
+        status: 'running',
+        updated_at: new Date(Date.now() - 2 * 60 * 1000).toISOString(),
+        last_signal: 'NEXT_DISPATCH',
+      },
+    };
+    deps.saveState(st);
+
+    reconcilePerpetualProjects(config, deps);
+
+    const afterState = deps.loadState();
+    assert.equal(afterState.reactive.code_audit.status, 'running');
+    assert.equal(deps._notifications.length, 0);
+  });
+
   it('verifier runs correctly for generic project via convention', () => {
     // Create an audit report so verifier passes
     fs.writeFileSync(path.join(tmpDir, 'workspace', 'audit-core.md'), '# Core Module Audit\n\nNo issues found.');

@@ -574,7 +574,7 @@ function createCommandRouter(deps) {
     return false;
   }
 
-  async function handleCommand(bot, chatId, text, config, executeTaskByName, senderId = null, readOnly = false) {
+  async function handleCommand(bot, chatId, text, config, executeTaskByName, senderId = null, readOnly = false, meta = {}) {
     if (text && !text.startsWith('/chatid') && !text.startsWith('/myid')) log('INFO', `CMD [${String(chatId).slice(-8)}]: ${text.slice(0, 80)}`);
     const state = loadState();
 
@@ -654,7 +654,7 @@ function createCommandRouter(deps) {
       }
       const btwPrompt = `[Side question — answer concisely from existing context, no need for tools]\n\n${btwQuestion}`;
       resetCooldown(chatId);
-      await askClaude(bot, chatId, btwPrompt, config, true, senderId);
+      await askClaude(bot, chatId, btwPrompt, config, true, senderId, meta);
       return;
     }
 
@@ -727,7 +727,7 @@ function createCommandRouter(deps) {
       if (handled) {
         // /last attached the session — now send "继续" to actually resume the conversation
         resetCooldown(chatId);
-        await askClaude(bot, chatId, '继续上面的工作', config, readOnly, senderId);
+        await askClaude(bot, chatId, '继续上面的工作', config, readOnly, senderId, meta);
         return;
       }
       // No session found — fall through to normal askClaude
@@ -775,7 +775,7 @@ function createCommandRouter(deps) {
       await bot.sendMessage(chatId, 'Daily token budget exceeded.');
       return;
     }
-    const claudeResult = await askClaude(bot, chatId, text, config, readOnly, senderId);
+    const claudeResult = await askClaude(bot, chatId, text, config, readOnly, senderId, meta);
     const claudeFailed = !!(claudeResult && claudeResult.ok === false);
     const claudeAborted = !!(claudeResult && claudeResult.error === 'Stopped by user');
     if (claudeFailed && !claudeAborted && !macLocalFirst && macFallbackEnabled && allowLocalMacControl) {

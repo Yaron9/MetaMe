@@ -6,8 +6,8 @@ const {
   createEngineRuntimeFactory,
   normalizeEngineName,
   resolveEngineModel,
+  _private: { resolveCodexPermissionProfile, resolveEngineTimeouts },
   ENGINE_MODEL_CONFIG,
-  _private: { resolveCodexPermissionProfile },
 } = require('./daemon-engine-runtime');
 const { buildIntentHintBlock } = require('./intent-registry');
 const { buildAgentContextForEngine, buildMemorySnapshotContent, refreshMemorySnapshot } = require('./agent-layer');
@@ -835,12 +835,14 @@ function createClaudeEngine(deps) {
 
       if (chatId) {
         activeProcesses.set(chatId, {
+          chatId,
           child,
           aborted: false,
           abortReason: null,
           startedAt: _spawnAt,
           engine: rt.name,
           killSignal: rt.killSignal || 'SIGTERM',
+          reactiveProjectKey: String(options && options.reactiveProjectKey || '').trim(),
         });
         saveActivePids();
       }
@@ -871,10 +873,10 @@ function createClaudeEngine(deps) {
       const toolUsageLog = [];
 
       void timeoutMs;
-      const engineTimeouts = rt.timeouts || {};
+      const engineTimeouts = options.timeouts || rt.timeouts || {};
       const IDLE_TIMEOUT_MS = engineTimeouts.idleMs || (5 * 60 * 1000);
       const TOOL_EXEC_TIMEOUT_MS = engineTimeouts.toolMs || (25 * 60 * 1000);
-      const HARD_CEILING_MS = engineTimeouts.ceilingMs || (60 * 60 * 1000);
+      const HARD_CEILING_MS = Number.isFinite(engineTimeouts.ceilingMs) ? engineTimeouts.ceilingMs : null;
       const startTime = Date.now();
       let waitingForTool = false;
 
@@ -892,7 +894,9 @@ function createClaudeEngine(deps) {
       }
 
       let idleTimer = setTimeout(() => killChild('idle'), IDLE_TIMEOUT_MS);
-      const ceilingTimer = setTimeout(() => killChild('ceiling'), HARD_CEILING_MS);
+      const ceilingTimer = HARD_CEILING_MS && HARD_CEILING_MS > 0
+        ? setTimeout(() => killChild('ceiling'), HARD_CEILING_MS)
+        : null;
 
       function resetIdleTimer() {
         clearTimeout(idleTimer);
@@ -1248,7 +1252,7 @@ function createClaudeEngine(deps) {
     return loadConfig();
   }
 
-  async function askClaude(bot, chatId, prompt, config, readOnly = false, senderId = null) {
+  async function askClaude(bot, chatId, prompt, config, readOnly = false, senderId = null, meta = {}) {
     const _t0 = Date.now();
     log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
 
@@ -1261,12 +1265,14 @@ function createClaudeEngine(deps) {
       try { process.kill(-_existing.child.pid, 'SIGTERM'); } catch { try { _existing.child.kill('SIGTERM'); } catch { /* */ } }
     }
     activeProcesses.set(chatId, {
+      chatId,
       child: null,       // sentinel: no process yet
       aborted: false,
       abortReason: null,
       startedAt: _t0,
       engine: 'pending',
       killSignal: 'SIGTERM',
+      reactiveProjectKey: String(meta && meta.reactiveProjectKey || '').trim(),
     });
 
     // Track interaction time for idle/sleep detection
@@ -1391,6 +1397,7 @@ function createClaudeEngine(deps) {
         (boundProject && boundProject.engine) || getDefaultEngine()
       );
       const runtime = getEngineRuntime(engineName);
+      const executionTimeouts = resolveEngineTimeouts(engineName, { reactive: !!(meta && meta.reactive) });
       const requestedCodexPermissionProfile = engineName === 'codex'
         ? getCodexPermissionProfile(readOnly, daemonCfg)
         : null;
@@ -2021,6 +2028,8 @@ ${mentorRadarHint}
             persistent: runtime.name === 'claude' && !!warmPool,
             warmPool,
             warmSessionKey: _warmSessionKey,
+            reactiveProjectKey: String(meta && meta.reactiveProjectKey || '').trim(),
+            timeouts: executionTimeouts,
           },
         ));
 
@@ -2085,6 +2094,10 @@ ${mentorRadarHint}
               normalizeSenderId(senderId),
               runtime,
               onSession,
+              {
+                reactiveProjectKey: String(meta && meta.reactiveProjectKey || '').trim(),
+                timeouts: executionTimeouts,
+              },
             ));
             if (sessionId) await onSession(sessionId);
             observedRuntimeProfile = getActualCodexPermissionProfile(sessionId ? { id: sessionId } : session);
@@ -2154,6 +2167,10 @@ ${mentorRadarHint}
             normalizeSenderId(senderId),
             runtime,
             onSession,
+            {
+              reactiveProjectKey: String(meta && meta.reactiveProjectKey || '').trim(),
+              timeouts: executionTimeouts,
+            },
           ));
           if (sessionId) await onSession(sessionId);
         }

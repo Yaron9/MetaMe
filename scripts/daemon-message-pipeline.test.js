@@ -84,6 +84,25 @@ async function testParallelChatIds() {
   console.log('✓ testParallelChatIds');
 }
 
+async function testPassesMetaToHandleCommand() {
+  let capturedMeta = null;
+  const deps = createMockDeps({
+    handleCommand: async (bot, chatId, text, config, executeTaskByName, senderId, readOnly, meta) => {
+      void bot; void chatId; void text; void config; void executeTaskByName; void senderId; void readOnly;
+      capturedMeta = meta;
+      return { ok: true };
+    },
+  });
+  const pipeline = createMessagePipeline(deps);
+  const bot = createMockBot();
+
+  await pipeline.processMessage('chat-meta', 'hello', makeCtx(bot, {
+    meta: { reactive: true, reactiveProjectKey: 'scientist' },
+  }));
+  assert.deepStrictEqual(capturedMeta, { reactive: true, reactiveProjectKey: 'scientist' });
+  console.log('✓ testPassesMetaToHandleCommand');
+}
+
 async function testCollectAndFlushAfterChainDies() {
   // Simulates: msg1 (processing) → msg2 (pause+collect) → msg3 (collect)
   // → chain dies → debounce → flush all as ONE call
@@ -306,6 +325,7 @@ async function main() {
   console.log('Running daemon-message-pipeline tests...\n');
   await testIdleProcessing();
   await testParallelChatIds();
+  await testPassesMetaToHandleCommand();
   await testCollectAndFlushAfterChainDies();
   await testMessagesAfterFlushGoToCollecting();
   await testPriorityBypassDuringCollecting();

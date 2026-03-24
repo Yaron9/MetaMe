@@ -283,9 +283,9 @@ function createMessagePipeline(deps) {
    */
   async function _processOne(chatId, text, ctx) {
     if (resetCooldown) resetCooldown(chatId);
-    const { bot, config, executeTaskByName, senderId, readOnly } = ctx;
+    const { bot, config, executeTaskByName, senderId, readOnly, meta } = ctx;
     try {
-      return await handleCommand(bot, chatId, text, config, executeTaskByName, senderId, readOnly);
+      return await handleCommand(bot, chatId, text, config, executeTaskByName, senderId, readOnly, meta || {});
     } catch (err) {
       log('ERROR', `Pipeline: error processing message for ${chatId}: ${err.message}`);
       return { ok: false, error: err.message };
