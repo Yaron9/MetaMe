@@ -395,6 +395,15 @@ function createClaudeEngine(deps) {
     return `${bridge.join('\n')}\n\n[Current user message follows:]\n\n${fullPrompt}`;
   }
 
+  function buildCompactBridgeContext(prompt, output) {
+    const userText = String(prompt || '').replace(/\s+/g, ' ').trim();
+    const assistantText = String(output || '').replace(/\s+/g, ' ').trim();
+    const lines = ['Recent MetaMe continuity context:'];
+    if (userText) lines.push(`Last user message: ${userText.slice(0, 280)}`);
+    if (assistantText) lines.push(`Last assistant reply: ${assistantText.slice(0, 480)}`);
+    return lines.join('\n').trim();
+  }
+
   function getActualCodexPermissionProfile(session) {
     if (!session || !session.id) return null;
     if (typeof getCodexSessionSandboxProfile === 'function') {
@@ -2301,6 +2310,19 @@ ${mentorRadarHint}
         // Timeout with partial results: prepend warning
         if (timedOut) {
           cleanOutput = `⚠️ **任务超时，以下是已完成的部分结果：**\n\n${cleanOutput}`;
+        }
+
+        if (runtime.name === 'codex' && session && session.runtimeSessionObserved === false) {
+          const compactBridge = buildCompactBridgeContext(prompt, cleanOutput || output);
+          await patchSessionSerialized(sessionChatId, (cur) => {
+            const engines = { ...(cur.engines || {}) };
+            engines.codex = {
+              ...(engines.codex || {}),
+              compactContext: compactBridge,
+              runtimeSessionObserved: false,
+            };
+            return { ...cur, cwd: session.cwd || cur.cwd || HOME, engines };
+          });
         }
 
         // Match current session to a project for colored card display.

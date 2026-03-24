@@ -573,6 +573,111 @@ function createSessionStore(deps) {
     return all.slice(0, limit || 10);
   }
 
+  function buildPendingStateSessions(engine, cwd) {
+    const safeEngine = normalizeEngineName(engine);
+    const normCwd = cwd ? path.resolve(cwd) : null;
+    const state = loadState();
+    const sessions = state && state.sessions && typeof state.sessions === 'object' ? state.sessions : {};
+    const items = [];
+
+    for (const [chatKey, raw] of Object.entries(sessions)) {
+      const upgraded = upgradeSessionRecord(raw || {}, safeEngine);
+      const slot = upgraded.engines && upgraded.engines[safeEngine];
+      const sessionCwd = upgraded.cwd ? path.resolve(upgraded.cwd) : null;
+      if (!slot || !sessionCwd) continue;
+      if (normCwd && sessionCwd !== normCwd) continue;
+
+      const compactContext = String(slot.compactContext || '').trim();
+      const hasBridgeContext = compactContext.length > 0;
+      const hasPlaceholder = safeEngine === 'codex' && slot.runtimeSessionObserved === false;
+      const hasId = !!String(slot.id || '').trim();
+      const validId = hasId ? isEngineSessionValid(safeEngine, slot.id, sessionCwd) : false;
+      if (validId) continue;
+      if (!hasBridgeContext && !hasPlaceholder) continue;
+
+      const ts = Number(raw && raw.last_active) || 0;
+      const compactLines = compactContext.split('\n').map(line => line.trim()).filter(Boolean);
+      const lastUserLine = compactLines.find(line => /^last user message:/i.test(line));
+      const lastAssistantLine = compactLines.find(line => /^last assistant reply:/i.test(line));
+      const summary = hasBridgeContext
+        ? (
+            lastUserLine
+            || lastAssistantLine
+            || compactLines[0]
+            || '待接续上下文'
+          )
+        : '待接续上下文';
+      items.push({
+        sessionId: '',
+        projectPath: sessionCwd,
+        fileMtime: ts,
+        modified: new Date(ts || Date.now()).toISOString(),
+        messageCount: '?',
+        customTitle: '待接续上下文',
+        summary,
+        firstPrompt: summary,
+        lastUser: '',
+        _enriched: true,
+        engine: safeEngine,
+        pendingState: true,
+        pendingChatKey: chatKey,
+        compactContext,
+        started: false,
+        runtimeSessionObserved: false,
+        ...(slot.sandboxMode ? { sandboxMode: slot.sandboxMode } : {}),
+        ...(slot.approvalPolicy ? { approvalPolicy: slot.approvalPolicy } : {}),
+        ...(slot.permissionMode ? { permissionMode: slot.permissionMode } : {}),
+      });
+    }
+
+    items.sort((a, b) => (b.fileMtime || 0) - (a.fileMtime || 0));
+    return items;
+  }
+
+  function findAttachableSession(options = {}) {
+    const safeEngine = normalizeEngineName(options.engine);
+    const cwd = options.cwd ? path.resolve(options.cwd) : null;
+    const preferredSessionId = String(options.preferredSessionId || '').trim();
+    const excludeSessionId = String(options.excludeSessionId || '').trim();
+    const limit = Number(options.limit) > 0 ? Number(options.limit) : 20;
+    const allowGlobalFallback = !!options.allowGlobalFallback;
+    const includePendingState = options.includePendingState !== false;
+
+    const matches = listRecentSessions(limit, cwd, safeEngine)
+      .filter((session) => !excludeSessionId || session.sessionId !== excludeSessionId);
+    if (preferredSessionId) {
+      const preferred = matches.find(session => session.sessionId === preferredSessionId);
+      if (preferred) return preferred;
+    }
+    if (matches.length > 0) return matches[0];
+
+    if (includePendingState) {
+      const pending = buildPendingStateSessions(safeEngine, cwd)
+        .filter((session) => !excludeSessionId || session.sessionId !== excludeSessionId);
+      if (preferredSessionId) {
+        const preferredPending = pending.find(session => session.sessionId === preferredSessionId);
+        if (preferredPending) return preferredPending;
+      }
+      if (pending.length > 0) return pending[0];
+    }
+
+    if (allowGlobalFallback) {
+      const global = listRecentSessions(limit, null, safeEngine)
+        .filter((session) => !excludeSessionId || session.sessionId !== excludeSessionId);
+      if (preferredSessionId) {
+        const preferredGlobal = global.find(session => session.sessionId === preferredSessionId);
+        if (preferredGlobal) return preferredGlobal;
+      }
+      if (global.length > 0) return global[0];
+    }
+
+    if (!includePendingState) return null;
+    if (!allowGlobalFallback) return null;
+    const globalPending = buildPendingStateSessions(safeEngine, null)
+      .filter((session) => !excludeSessionId || session.sessionId !== excludeSessionId);
+    return globalPending[0] || null;
+  }
+
   function loadSessionTags() {
     try {
       return JSON.parse(fs.readFileSync(path.join(HOME, '.metame', 'session_tags.json'), 'utf8'));
@@ -1137,6 +1242,7 @@ function createSessionStore(deps) {
     watchSessionFiles,
     stopWatchingSessionFiles,
     listRecentSessions,
+    findAttachableSession,
     loadSessionTags,
     getSessionFileMtime,
     sessionLabel,
@@ -1161,6 +1267,7 @@ function createSessionStore(deps) {
       stripCodexInjectedHints,
       looksLikeInternalCodexPrompt,
       parseCodexSessionPreview,
+      buildPendingStateSessions,
     },
   };
 }

@@ -267,6 +267,133 @@ describe('daemon-session-store codex metadata', () => {
     assert.equal(elements.length, 2);
   });
 
+  it('finds pending codex bridge context when no real local thread exists', () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
+    const state = {
+      sessions: {
+        '_bound_metame': {
+          cwd: tempHome,
+          engines: {
+            codex: {
+              id: 'placeholder-thread',
+              started: false,
+              runtimeSessionObserved: false,
+              compactContext: 'Recent MetaMe continuity context:\nLast user message: 手机上聊了一半',
+              sandboxMode: 'workspace-write',
+              approvalPolicy: 'never',
+              permissionMode: 'workspace-write',
+            },
+          },
+          last_active: 1234567890,
+        },
+      },
+    };
+    const store = createSessionStore({
+      fs,
+      path,
+      HOME: tempHome,
+      loadState: () => state,
+      saveState: () => {},
+      log: () => {},
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+
+    const found = store.findAttachableSession({
+      engine: 'codex',
+      cwd: tempHome,
+      includePendingState: true,
+    });
+
+    assert.ok(found);
+    assert.equal(found.pendingState, true);
+    assert.equal(found.projectPath, path.resolve(tempHome));
+    assert.match(found.compactContext, /MetaMe continuity context/);
+    assert.equal(found.permissionMode, 'workspace-write');
+  });
+
+  it('prefers same-cwd pending codex bridge context over unrelated global real sessions', () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
+    const targetCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-target-'));
+    const otherCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-other-'));
+    const codexDir = path.join(tempHome, '.codex');
+    fs.mkdirSync(codexDir, { recursive: true });
+    const dbPath = path.join(codexDir, 'state_5.sqlite');
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        cwd TEXT,
+        title TEXT,
+        first_user_message TEXT,
+        source TEXT,
+        rollout_path TEXT,
+        created_at INTEGER,
+        updated_at INTEGER,
+        tokens_used INTEGER,
+        archived INTEGER,
+        sandbox_policy TEXT,
+        approval_mode TEXT
+      );
+    `);
+    db.prepare(`
+      INSERT INTO threads (id, cwd, title, first_user_message, source, rollout_path, created_at, updated_at, tokens_used, archived)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'real-other-thread',
+      otherCwd,
+      'Other session',
+      'Look at another project',
+      'cli',
+      path.join(otherCwd, 'rollout.jsonl'),
+      100,
+      200,
+      10,
+      0
+    );
+    db.close();
+
+    const state = {
+      sessions: {
+        '_bound_metame': {
+          cwd: targetCwd,
+          engines: {
+            codex: {
+              id: 'placeholder-thread',
+              started: false,
+              runtimeSessionObserved: false,
+              compactContext: 'Recent MetaMe continuity context:\nLast user message: 手机上聊 MetaMe 修复',
+            },
+          },
+          last_active: 300,
+        },
+      },
+    };
+
+    const store = createSessionStore({
+      fs,
+      path,
+      HOME: tempHome,
+      loadState: () => state,
+      saveState: () => {},
+      log: () => {},
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+
+    const found = store.findAttachableSession({
+      engine: 'codex',
+      cwd: targetCwd,
+      allowGlobalFallback: true,
+      includePendingState: true,
+    });
+
+    assert.ok(found);
+    assert.equal(found.pendingState, true);
+    assert.equal(found.projectPath, path.resolve(targetCwd));
+    assert.match(found.summary, /Last user message: 手机上聊 MetaMe 修复/);
+  });
+
   it('keeps fresh codex sessions non-resumable until runtime reports a real thread id', () => {
     const state = { sessions: {} };
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));

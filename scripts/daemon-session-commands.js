@@ -19,6 +19,7 @@ function createSessionCommandHandler(deps) {
     getCachedFile,
     getSession,
     listRecentSessions,
+    findAttachableSession,
     getSessionFileMtime,
     formatRelativeTime,
     sendDirListing,
@@ -97,14 +98,26 @@ function createSessionCommandHandler(deps) {
   }
 
   // Write per-engine session slot, preserving cwd and other engine slots.
-  function attachEngineSession(state, chatId, engine, sessionId, cwd) {
+  function attachEngineSession(state, chatId, engine, sessionId, cwd, meta = {}) {
     const effectiveId = getSessionRoute(chatId).sessionChatId;
     const existing = state.sessions[effectiveId] || {};
     const existingEngines = existing.engines || {};
+    const nextSlot = {
+      ...(existingEngines[engine] || {}),
+      ...(sessionId ? { id: sessionId } : { id: null }),
+      started: meta.started !== false,
+    };
+    if (meta.compactContext) nextSlot.compactContext = String(meta.compactContext);
+    else if (meta.clearCompactContext) delete nextSlot.compactContext;
+    if (meta.runtimeSessionObserved === false) nextSlot.runtimeSessionObserved = false;
+    else if (meta.runtimeSessionObserved === true) nextSlot.runtimeSessionObserved = true;
+    if (meta.sandboxMode) nextSlot.sandboxMode = meta.sandboxMode;
+    if (meta.approvalPolicy) nextSlot.approvalPolicy = meta.approvalPolicy;
+    if (meta.permissionMode) nextSlot.permissionMode = meta.permissionMode;
     state.sessions[effectiveId] = {
       ...existing,
       cwd: cwd || existing.cwd || HOME,
-      engines: { ...existingEngines, [engine]: { id: sessionId, started: true } },
+      engines: { ...existingEngines, [engine]: nextSlot },
     };
   }
 
@@ -118,16 +131,44 @@ function createSessionCommandHandler(deps) {
     return null;
   }
 
-  async function autoCreateSessionWhenEmpty(bot, chatId, cwd, engine) {
-    const resolvedCwd = cwd ? normalizeCwd(cwd) : null;
-    if (!resolvedCwd || !fs.existsSync(resolvedCwd)) {
-      await bot.sendMessage(chatId, `No sessions found${resolvedCwd ? ' in ' + path.basename(resolvedCwd) : ''}. Try /new first.`);
-      return true;
+  function resolveAttachableSession(engine, cwd, options = {}) {
+    if (typeof findAttachableSession === 'function') {
+      return findAttachableSession({ engine, cwd, ...options });
     }
-    const route = getSessionRoute(chatId);
-    const session = createSession(route.sessionChatId, resolvedCwd, '', engine || getDefaultEngine());
-    await bot.sendMessage(chatId, `📁 ${path.basename(resolvedCwd)}\n✅ 已自动创建新会话\nWorkdir: ${session.cwd}`);
-    return true;
+    const matches = listRecentSessions(options.limit || 10, cwd || null, engine);
+    if (matches.length > 0) return matches[0];
+    if (!options.allowGlobalFallback) return null;
+    const global = listRecentSessions(options.limit || 10, null, engine);
+    return global[0] || null;
+  }
+
+  function attachResolvedTarget(state, chatId, engine, target, fallbackCwd) {
+    const targetCwd = target && target.projectPath ? target.projectPath : fallbackCwd;
+    if (target && target.pendingState) {
+      attachEngineSession(state, chatId, engine, null, targetCwd, {
+        started: false,
+        compactContext: target.compactContext || '',
+        runtimeSessionObserved: false,
+        ...(target.sandboxMode ? { sandboxMode: target.sandboxMode } : {}),
+        ...(target.approvalPolicy ? { approvalPolicy: target.approvalPolicy } : {}),
+        ...(target.permissionMode ? { permissionMode: target.permissionMode } : {}),
+      });
+      return {
+        cwd: targetCwd,
+        pendingState: true,
+        label: target.customTitle || target.summary || '待接续上下文',
+      };
+    }
+    attachEngineSession(state, chatId, engine, target && target.sessionId ? target.sessionId : null, targetCwd, {
+      started: true,
+      runtimeSessionObserved: true,
+      clearCompactContext: true,
+    });
+    return {
+      cwd: targetCwd,
+      pendingState: false,
+      label: target && (target.customTitle || target.summary || target.sessionId) ? (target.customTitle || target.summary || target.sessionId) : 'Session',
+    };
   }
 
   async function handleSessionCommand(ctx) {
@@ -235,15 +276,10 @@ function createSessionCommandHandler(deps) {
       const curCwd = curSession ? curSession.cwd : null;
 
       // Strategy: try current cwd first, then fall back to global
-      let s = null;
-      if (curCwd) {
-        const cwdSessions = listRecentSessions(1, curCwd, currentEngine);
-        if (cwdSessions.length > 0) s = cwdSessions[0];
-      }
-      if (!s) {
-        const globalSessions = listRecentSessions(1, null, currentEngine);
-        if (globalSessions.length > 0) s = globalSessions[0];
-      }
+      const s = resolveAttachableSession(currentEngine, curCwd, {
+        allowGlobalFallback: true,
+        preferredSessionId: curSession && curSession.id,
+      });
 
       if (!s) {
         // Last resort: use __continue__ to resume whatever Claude thinks is last
@@ -259,8 +295,12 @@ function createSessionCommandHandler(deps) {
       const state2 = loadState();
       const cfgForEngine = loadConfig();
       const engineByCwd = normalizeEngineName(s.engine) || inferEngineByCwd(cfgForEngine, s.projectPath || HOME) || getDefaultEngine();
-      attachEngineSession(state2, chatId, engineByCwd, s.sessionId, s.projectPath || HOME);
+      const attached = attachResolvedTarget(state2, chatId, engineByCwd, s, s.projectPath || HOME);
       saveState(state2);
+      if (attached.pendingState) {
+        await bot.sendMessage(chatId, `⚡ 已接入待接续上下文\n📁 ${path.basename(attached.cwd || curCwd || HOME)}`);
+        return true;
+      }
       // Display: name/summary + id on separate lines
       const name = s.customTitle;
       const shortId = s.sessionId.slice(0, 8);
@@ -326,12 +366,9 @@ function createSessionCommandHandler(deps) {
     if (text === '/sessions') {
       const allSessions = listRecentSessions(15, getBoundCwd(chatId), getCurrentEngine(chatId));
       if (allSessions.length === 0) {
-        return autoCreateSessionWhenEmpty(
-          bot,
-          chatId,
-          getBoundCwd(chatId) || (getSession(chatId) && getSession(chatId).cwd),
-          getCurrentEngine(chatId)
-        );
+        const resolvedCwd = getBoundCwd(chatId) || (getSession(chatId) && getSession(chatId).cwd);
+        await bot.sendMessage(chatId, `No sessions found${resolvedCwd ? ' in ' + path.basename(resolvedCwd) : ''}. Try /new first.`);
+        return true;
       }
       if (bot.sendButtons) {
         await bot.sendRawCard(chatId, '📋 Recent Sessions', buildSessionCardElements(allSessions));
@@ -430,27 +467,24 @@ function createSessionCommandHandler(deps) {
         const route = getSessionRoute(chatId);
         const currentSession = getSession(route.sessionChatId) || getSession(chatId);
         const excludeId = currentSession?.id;
-        const recent = listRecentSessions(10, null, getCurrentEngine(chatId));
-        const filtered = excludeId ? recent.filter(s => s.sessionId !== excludeId) : recent;
-
         // For bound chats, prefer sessions from the same project to avoid
         // the bound-chat guard (handleCommand) immediately overwriting with a new session.
         const boundCwd = getBoundCwd(chatId);
+        const target = resolveAttachableSession(getCurrentEngine(chatId), boundCwd, {
+          allowGlobalFallback: true,
+          excludeSessionId: excludeId,
+        });
 
-        let candidates = filtered;
-        if (boundCwd) {
-          const boundFiltered = filtered.filter(s => s.projectPath && normalizeCwd(s.projectPath) === boundCwd);
-          if (boundFiltered.length > 0) candidates = boundFiltered;
-        }
-
-        if (candidates.length > 0 && candidates[0].projectPath) {
-          const target = candidates[0];
-          // Switch to that session (like /resume) AND its directory
+        if (target && target.projectPath) {
           const state2 = loadState();
           const cfgForEngine = loadConfig();
-          const engineByCwd = inferEngineByCwd(cfgForEngine, target.projectPath) || getDefaultEngine();
-          attachEngineSession(state2, chatId, engineByCwd, target.sessionId, target.projectPath);
+          const engineByCwd = normalizeEngineName(target.engine) || inferEngineByCwd(cfgForEngine, target.projectPath) || getDefaultEngine();
+          const attached = attachResolvedTarget(state2, chatId, engineByCwd, target, target.projectPath);
           saveState(state2);
+          if (attached.pendingState) {
+            await bot.sendMessage(chatId, `🔄 Synced pending context\n📁 ${path.basename(attached.cwd || HOME)}`);
+            return true;
+          }
           const name = target.customTitle || target.summary || '';
           const label = name ? name.slice(0, 40) : target.sessionId.slice(0, 8);
           await bot.sendMessage(chatId, `🔄 Synced to: ${label}\n📁 ${path.basename(target.projectPath)}`);

@@ -39,6 +39,7 @@ function createHarness(options = {}) {
     getCachedFile: () => null,
     getSession: (id) => state.sessions[id] || null,
     listRecentSessions: () => options.sessions || [],
+    findAttachableSession: options.findAttachableSession || null,
     getSessionFileMtime: () => null,
     formatRelativeTime: () => '1m ago',
     sendDirListing: async () => {},
@@ -145,5 +146,52 @@ describe('daemon-session-commands empty session bootstrap', () => {
 
     assert.equal(handled, true);
     assert.equal(h.created.length, 0);
+  });
+
+  it('attaches pending codex bridge context on /continue when no real local thread exists', async () => {
+    const h = createHarness({
+      stateSessions: {
+        _bound_metame: {
+          cwd: '/repo/metame',
+          engines: {
+            codex: {
+              id: 'placeholder-codex-thread',
+              started: false,
+              runtimeSessionObserved: false,
+              compactContext: 'Recent MetaMe continuity context:\nLast user message: 手机上聊到一半',
+            },
+          },
+          last_active: Date.now(),
+        },
+      },
+      config: {
+        projects: {
+          metame: { cwd: '/repo/metame', engine: 'codex' },
+        },
+        feishu: {
+          chat_agent_map: {
+            sess_chat: 'metame',
+          },
+        },
+      },
+      defaultEngine: 'codex',
+      findAttachableSession: () => ({
+        sessionId: '',
+        projectPath: '/repo/metame',
+        engine: 'codex',
+        pendingState: true,
+        compactContext: 'Recent MetaMe continuity context:\nLast user message: 手机上聊到一半',
+        customTitle: '待接续上下文',
+      }),
+    });
+
+    const handled = await h.handleSessionCommand({
+      bot: h.bot,
+      chatId: h.chatId,
+      text: '/continue',
+    });
+
+    assert.equal(handled, true);
+    assert.match(h.sent[0], /待接续上下文|pending context/i);
   });
 });
