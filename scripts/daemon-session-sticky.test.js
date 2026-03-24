@@ -198,21 +198,21 @@ function buildRealisticState() {
 
       // ── Team members (jia/yi/bing) ──
       '_agent_jia': {
-        cwd: '/Users/yaron/.metame/worktrees/MetaMe/jia',
+        cwd: '/Users/yaron/AGI/MetaMe/agents/jia',
         engines: {
           claude: { id: 'team-jia-claude', started: true },
         },
         last_active: Date.now() - 60000,
       },
       '_agent_yi': {
-        cwd: '/Users/yaron/.metame/worktrees/MetaMe/yi',
+        cwd: '/Users/yaron/AGI/MetaMe/agents/yi',
         engines: {
           claude: { id: 'team-yi-claude', started: true },
         },
         last_active: Date.now() - 60000,
       },
       '_agent_bing': {
-        cwd: '/Users/yaron/.metame/worktrees/MetaMe/bing',
+        cwd: '/Users/yaron/AGI/MetaMe/agents/bing',
         engines: {
           claude: { id: 'team-bing-claude', started: true },
         },
@@ -455,9 +455,9 @@ describe('Session Sticky — Virtual chatId agents (_agent_*)', () => {
     { chatId: '_agent_munger', cwd: '/Users/yaron/AGI/Munger' },
     { chatId: '_agent_metame', cwd: '/Users/yaron/AGI/MetaMe' },
     { chatId: '_agent_business', cwd: '/Users/yaron/AGI/Business' },
-    { chatId: '_agent_jia', cwd: '/Users/yaron/.metame/worktrees/MetaMe/jia' },
-    { chatId: '_agent_yi', cwd: '/Users/yaron/.metame/worktrees/MetaMe/yi' },
-    { chatId: '_agent_bing', cwd: '/Users/yaron/.metame/worktrees/MetaMe/bing' },
+    { chatId: '_agent_jia', cwd: '/Users/yaron/AGI/MetaMe/agents/jia' },
+    { chatId: '_agent_yi', cwd: '/Users/yaron/AGI/MetaMe/agents/yi' },
+    { chatId: '_agent_bing', cwd: '/Users/yaron/AGI/MetaMe/agents/bing' },
   ];
 
   for (const { chatId } of virtualAgents) {
