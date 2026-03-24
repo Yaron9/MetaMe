@@ -415,7 +415,7 @@ function buildCodexArgs(options = {}) {
   return args;
 }
 
-function buildCodexEnv(baseEnv = {}, { metameProject = '', metameSenderId = '' } = {}) {
+function buildCodexEnv(baseEnv = {}, { metameProject = '', metameSenderId = '', cwd = '' } = {}) {
   const env = { ...baseEnv, METAME_PROJECT: metameProject, METAME_SENDER_ID: String(metameSenderId || '') };
   const strippedKeys = [
     'CODEX_THREAD_ID',
@@ -423,6 +423,14 @@ function buildCodexEnv(baseEnv = {}, { metameProject = '', metameSenderId = '' }
     'CLAUDE_CODE_SSE_PORT',
   ];
   for (const key of strippedKeys) delete env[key];
+  const resolvedCwd = String(cwd || '').trim();
+  if (resolvedCwd) {
+    const codexHome = path.join(resolvedCwd, '.codex');
+    try {
+      fs.mkdirSync(codexHome, { recursive: true });
+      env.CODEX_HOME = codexHome;
+    } catch { /* best-effort */ }
+  }
   if (env.CODEX_HOME && !fs.existsSync(env.CODEX_HOME)) delete env.CODEX_HOME;
   return env;
 }
@@ -446,7 +454,7 @@ function createEngineRuntimeFactory(deps = {}) {
         killSignal: 'SIGTERM',
         timeouts: resolveEngineTimeouts('codex'),
         buildArgs: buildCodexArgs,
-        buildEnv: ({ metameProject = '', metameSenderId = '' } = {}) => buildCodexEnv(process.env, { metameProject, metameSenderId }),
+        buildEnv: ({ metameProject = '', metameSenderId = '', cwd = '' } = {}) => buildCodexEnv(process.env, { metameProject, metameSenderId, cwd }),
         parseStreamEvent: parseCodexStreamEvent,
         classifyError: classifyEngineError,
       };

@@ -160,7 +160,6 @@ function createBridgeStarter(deps) {
     const map = {
       ...(cfg.telegram  ? cfg.telegram.chat_agent_map  || {} : {}),
       ...(cfg.feishu    ? cfg.feishu.chat_agent_map    || {} : {}),
-      ...(cfg.weixin    ? cfg.weixin.chat_agent_map    || {} : {}),
       ...(cfg.imessage  ? cfg.imessage.chat_agent_map  || {} : {}),
     };
     const key = map[String(chatId)];
@@ -181,9 +180,9 @@ function createBridgeStarter(deps) {
       },
     });
   }
-  // Get team member's working directory using subdir (not worktree).
-  // Creates agents/<key>/ directory and symlinks CLAUDE.md from parent.
-  function _getMemberCwd(parentCwd, key) {
+  // Get team member's working directory inside the source tree, never under ~/.metame.
+  // Creates agents/<key>/ directory by default, or ensures an explicit member.cwd exists.
+  function _getMemberCwd(parentCwd, key, explicitCwd = null) {
     const { existsSync, mkdirSync, symlinkSync, readFileSync, writeFileSync } = require('fs');
     const { execFileSync } = require('child_process');
     const WIN_HIDE = process.platform === 'win32' ? { windowsHide: true } : {};
@@ -194,12 +193,14 @@ function createBridgeStarter(deps) {
       log('WARN', `Sanitized team member key: ${key} -> ${safeKey}`);
     }
 
-    // Use agents/<key>/ as the working directory
+    // Use explicit member cwd when provided, otherwise default to agents/<key>/.
     const agentsDir = path.join(parentCwd, 'agents');
-    const memberDir = path.join(agentsDir, safeKey);
+    const memberDir = explicitCwd
+      ? path.resolve(String(explicitCwd).replace(/^~/, require('os').homedir()))
+      : path.join(agentsDir, safeKey);
 
-    // Create agents directory if not exists
-    if (!existsSync(agentsDir)) {
+    // Create agents directory if using the default layout.
+    if (!explicitCwd && !existsSync(agentsDir)) {
       mkdirSync(agentsDir, { recursive: true });
     }
 
@@ -282,9 +283,11 @@ function createBridgeStarter(deps) {
     const virtualChatId = `_agent_${member.key}`;
     const parentCwd = member.cwd || boundProj.cwd;
     const resolvedParentCwd = parentCwd.replace(/^~/, require('os').homedir());
-    const memberCwd = typeof getOrCreateWorktree === 'function'
-      ? getOrCreateWorktree(resolvedParentCwd, member.key)
-      : _getMemberCwd(resolvedParentCwd, member.key);
+    const memberCwd = _getMemberCwd(
+      resolvedParentCwd,
+      member.key,
+      member.cwd || null,
+    );
     if (!memberCwd) {
       log('ERROR', `Team [${member.key}] cannot start: directory unavailable`);
       bot.sendMessage(realChatId, `❌ ${member.icon || '🤖'} ${member.name} 启动失败：工作目录创建失败`).catch(() => {});

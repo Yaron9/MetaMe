@@ -6,8 +6,8 @@ const {
   createEngineRuntimeFactory,
   normalizeEngineName,
   resolveEngineModel,
-  _private: { resolveCodexPermissionProfile, resolveEngineTimeouts },
   ENGINE_MODEL_CONFIG,
+  _private: { resolveCodexPermissionProfile },
 } = require('./daemon-engine-runtime');
 const { buildIntentHintBlock } = require('./intent-registry');
 const { buildAgentContextForEngine, buildMemorySnapshotContent, refreshMemorySnapshot } = require('./agent-layer');
@@ -395,22 +395,13 @@ function createClaudeEngine(deps) {
     return `${bridge.join('\n')}\n\n[Current user message follows:]\n\n${fullPrompt}`;
   }
 
-  function buildCompactBridgeContext(prompt, output) {
-    const userText = String(prompt || '').replace(/\s+/g, ' ').trim();
-    const assistantText = String(output || '').replace(/\s+/g, ' ').trim();
-    const lines = ['Recent MetaMe continuity context:'];
-    if (userText) lines.push(`Last user message: ${userText.slice(0, 280)}`);
-    if (assistantText) lines.push(`Last assistant reply: ${assistantText.slice(0, 480)}`);
-    return lines.join('\n').trim();
-  }
-
   function getActualCodexPermissionProfile(session) {
     if (!session || !session.id) return null;
     if (typeof getCodexSessionSandboxProfile === 'function') {
-      return getCodexSessionSandboxProfile(session.id);
+      return getCodexSessionSandboxProfile(session.id, session.cwd || '');
     }
     if (typeof getCodexSessionPermissionMode === 'function') {
-      const permissionMode = getCodexSessionPermissionMode(session.id);
+      const permissionMode = getCodexSessionPermissionMode(session.id, session.cwd || '');
       return permissionMode ? { sandboxMode: permissionMode, approvalPolicy: null, permissionMode } : null;
     }
     return null;
@@ -443,10 +434,6 @@ function createClaudeEngine(deps) {
         const entry = JSON.parse(line);
         const sessionModel = entry && entry.message && entry.message.model;
         if (!sessionModel || sessionModel === '<synthetic>') continue;
-        // Custom Claude-compatible providers may record backend-native model ids
-        // (for example MiniMax) in the JSONL. Those sessions are still resumable;
-        // we only skip model pinning when the family cannot be mapped back to
-        // Claude's alias set.
         // If the configured model is a short alias (sonnet/opus/haiku) and the JSONL model
         // belongs to the same family, do NOT pin — let the alias resolve to the latest version.
         // Only pin when the families genuinely differ (e.g. session was opus, config says sonnet).
@@ -837,21 +824,19 @@ function createClaudeEngine(deps) {
           cwd,
           stdio: ['pipe', 'pipe', 'pipe'],
           detached: process.platform !== 'win32',
-          env: rt.buildEnv({ metameProject, metameSenderId }),
+          env: rt.buildEnv({ metameProject, metameSenderId, cwd }),
         });
         log('INFO', `[TIMING:${chatId}] spawned ${rt.name} pid=${child.pid}`);
       }
 
       if (chatId) {
         activeProcesses.set(chatId, {
-          chatId,
           child,
           aborted: false,
           abortReason: null,
           startedAt: _spawnAt,
           engine: rt.name,
           killSignal: rt.killSignal || 'SIGTERM',
-          reactiveProjectKey: String(options && options.reactiveProjectKey || '').trim(),
         });
         saveActivePids();
       }
@@ -882,10 +867,10 @@ function createClaudeEngine(deps) {
       const toolUsageLog = [];
 
       void timeoutMs;
-      const engineTimeouts = options.timeouts || rt.timeouts || {};
+      const engineTimeouts = rt.timeouts || {};
       const IDLE_TIMEOUT_MS = engineTimeouts.idleMs || (5 * 60 * 1000);
       const TOOL_EXEC_TIMEOUT_MS = engineTimeouts.toolMs || (25 * 60 * 1000);
-      const HARD_CEILING_MS = Number.isFinite(engineTimeouts.ceilingMs) ? engineTimeouts.ceilingMs : null;
+      const HARD_CEILING_MS = engineTimeouts.ceilingMs || (60 * 60 * 1000);
       const startTime = Date.now();
       let waitingForTool = false;
 
@@ -903,9 +888,7 @@ function createClaudeEngine(deps) {
       }
 
       let idleTimer = setTimeout(() => killChild('idle'), IDLE_TIMEOUT_MS);
-      const ceilingTimer = HARD_CEILING_MS && HARD_CEILING_MS > 0
-        ? setTimeout(() => killChild('ceiling'), HARD_CEILING_MS)
-        : null;
+      const ceilingTimer = setTimeout(() => killChild('ceiling'), HARD_CEILING_MS);
 
       function resetIdleTimer() {
         clearTimeout(idleTimer);
@@ -1245,23 +1228,19 @@ function createClaudeEngine(deps) {
    * Reset active provider back to anthropic/opus and reload config.
    * Returns the freshly loaded config so callers can reassign their local variable.
    */
-  function fallbackToDefaultProvider(reason, boundProjectKey = '') {
+  function fallbackToDefaultProvider(reason) {
     log('WARN', `Falling back to anthropic/opus — reason: ${reason}`);
     if (providerMod && providerMod.getActiveName() !== 'anthropic') {
       providerMod.setActive('anthropic');
     }
     const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
     if (!cfg.daemon) cfg.daemon = {};
-    if (!cfg.daemon.models) cfg.daemon.models = {};
-    cfg.daemon.models.claude = 'opus';
-    if (boundProjectKey && cfg.projects && cfg.projects[boundProjectKey]) {
-      cfg.projects[boundProjectKey].model = 'opus';
-    }
+    cfg.daemon.model = 'opus';
     writeConfigSafe(cfg);
     return loadConfig();
   }
 
-  async function askClaude(bot, chatId, prompt, config, readOnly = false, senderId = null, meta = {}) {
+  async function askClaude(bot, chatId, prompt, config, readOnly = false, senderId = null) {
     const _t0 = Date.now();
     log('INFO', `askClaude for ${chatId}: ${prompt.slice(0, 50)}`);
 
@@ -1274,14 +1253,12 @@ function createClaudeEngine(deps) {
       try { process.kill(-_existing.child.pid, 'SIGTERM'); } catch { try { _existing.child.kill('SIGTERM'); } catch { /* */ } }
     }
     activeProcesses.set(chatId, {
-      chatId,
       child: null,       // sentinel: no process yet
       aborted: false,
       abortReason: null,
       startedAt: _t0,
       engine: 'pending',
       killSignal: 'SIGTERM',
-      reactiveProjectKey: String(meta && meta.reactiveProjectKey || '').trim(),
     });
 
     // Track interaction time for idle/sleep detection
@@ -1406,7 +1383,6 @@ function createClaudeEngine(deps) {
         (boundProject && boundProject.engine) || getDefaultEngine()
       );
       const runtime = getEngineRuntime(engineName);
-      const executionTimeouts = resolveEngineTimeouts(engineName, { reactive: !!(meta && meta.reactive) });
       const requestedCodexPermissionProfile = engineName === 'codex'
         ? getCodexPermissionProfile(readOnly, daemonCfg)
         : null;
@@ -1768,6 +1744,25 @@ ${mentorRadarHint}
 6. Before executing high-risk or non-obvious Bash commands (rm, kill, git reset, overwrite configs), prepend a single-line [Why] explanation. Skip for routine commands (ls, cat, grep).]`;
       }
 
+      // P2-B: inject session summary when resuming after a 2h+ gap
+      let summaryHint = '';
+      if (session.started) {
+        try {
+          const _stSum = loadState();
+          const _sess = _stSum.sessions && _stSum.sessions[chatId];
+          if (_sess && _sess.last_summary && _sess.last_summary_at) {
+            const _idleMs = Date.now() - (_sess.last_active || 0);
+            const _summaryAgeH = (Date.now() - _sess.last_summary_at) / 3600000;
+            if (_idleMs > 2 * 60 * 60 * 1000 && _summaryAgeH < 168) {
+              summaryHint = `
+
+[上次对话摘要（历史已完成，仅供上下文，请勿重复执行）]: ${_sess.last_summary}`;
+              log('INFO', `[DAEMON] Injected session summary for ${chatId} (idle ${Math.round(_idleMs / 3600000)}h)`);
+            }
+          }
+        } catch { /* non-critical */ }
+      }
+
       // Mentor context hook: inject after memoryHint, before langGuard.
       let mentorHint = '';
       if (mentorEnabled && !mentorExcluded && !mentorSuppressed) {
@@ -1839,7 +1834,7 @@ ${mentorRadarHint}
       // (varies per prompt), so include it even on warm reuse.
       const fullPrompt = _warmEntry
         ? routedPrompt + intentHint
-        : routedPrompt + daemonHint + intentHint + agentHint + macAutomationHint + memoryHint + mentorHint + langGuard;
+        : routedPrompt + daemonHint + intentHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
       if (runtime.name === 'codex' && session.started && session.id && requestedCodexPermissionProfile) {
         const actualPermissionProfile = getActualCodexPermissionProfile(session);
         if (codexNeedsFallbackForRequestedPermissions(actualPermissionProfile, requestedCodexPermissionProfile)) {
@@ -2037,8 +2032,6 @@ ${mentorRadarHint}
             persistent: runtime.name === 'claude' && !!warmPool,
             warmPool,
             warmSessionKey: _warmSessionKey,
-            reactiveProjectKey: String(meta && meta.reactiveProjectKey || '').trim(),
-            timeouts: executionTimeouts,
           },
         ));
 
@@ -2103,10 +2096,6 @@ ${mentorRadarHint}
               normalizeSenderId(senderId),
               runtime,
               onSession,
-              {
-                reactiveProjectKey: String(meta && meta.reactiveProjectKey || '').trim(),
-                timeouts: executionTimeouts,
-              },
             ));
             if (sessionId) await onSession(sessionId);
             observedRuntimeProfile = getActualCodexPermissionProfile(sessionId ? { id: sessionId } : session);
@@ -2176,10 +2165,6 @@ ${mentorRadarHint}
             normalizeSenderId(senderId),
             runtime,
             onSession,
-            {
-              reactiveProjectKey: String(meta && meta.reactiveProjectKey || '').trim(),
-              timeouts: executionTimeouts,
-            },
           ));
           if (sessionId) await onSession(sessionId);
         }
@@ -2277,7 +2262,7 @@ ${mentorRadarHint}
           const looksLikeError = output.length < 300 && /\b(not found|invalid model|unauthorized|401|403|404|error|failed)\b/i.test(output);
           if (looksLikeError && (activeProvCheck !== 'anthropic' || !builtinModelsCheck.includes(model))) {
             try {
-              config = fallbackToDefaultProvider(`output looks like error for ${activeProvCheck}/${model}`, boundProjectKey || '');
+              config = fallbackToDefaultProvider(`output looks like error for ${activeProvCheck}/${model}`);
               await bot.sendMessage(chatId, `⚠️ ${activeProvCheck}/${model} 疑似失败，已回退到 anthropic/opus\n输出: ${output.slice(0, 150)}`);
             } catch (fbErr) {
               log('ERROR', `Fallback failed: ${fbErr.message}`);
@@ -2310,19 +2295,6 @@ ${mentorRadarHint}
         // Timeout with partial results: prepend warning
         if (timedOut) {
           cleanOutput = `⚠️ **任务超时，以下是已完成的部分结果：**\n\n${cleanOutput}`;
-        }
-
-        if (runtime.name === 'codex' && session && session.runtimeSessionObserved === false) {
-          const compactBridge = buildCompactBridgeContext(prompt, cleanOutput || output);
-          await patchSessionSerialized(sessionChatId, (cur) => {
-            const engines = { ...(cur.engines || {}) };
-            engines.codex = {
-              ...(engines.codex || {}),
-              compactContext: compactBridge,
-              runtimeSessionObserved: false,
-            };
-            return { ...cur, cwd: session.cwd || cur.cwd || HOME, engines };
-          });
         }
 
         // Match current session to a project for colored card display.
@@ -2521,7 +2493,7 @@ ${mentorRadarHint}
             const builtinModelValues = (ENGINE_MODEL_CONFIG.claude.options || []).map(o => typeof o === 'string' ? o : o.value);
             if ((activeProv !== 'anthropic' || !builtinModelValues.includes(model)) && !errMsg.includes('Stopped by user')) {
               try {
-                config = fallbackToDefaultProvider(`${activeProv}/${model} error: ${errMsg.slice(0, 100)}`, boundProjectKey || '');
+                config = fallbackToDefaultProvider(`${activeProv}/${model} error: ${errMsg.slice(0, 100)}`);
                 await bot.sendMessage(chatId, `⚠️ ${activeProv}/${model} 失败，已回退到 anthropic/opus\n原因: ${errMsg.slice(0, 100)}`);
               } catch (fallbackErr) {
                 log('ERROR', `Fallback failed: ${fallbackErr.message}`);

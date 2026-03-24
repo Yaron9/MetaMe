@@ -85,12 +85,68 @@ function createSessionStore(deps) {
   } = deps;
 
   const CLAUDE_PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
-  const CODEX_DB = path.join(HOME, '.codex', 'state_5.sqlite');
+  const GLOBAL_CODEX_DB = path.join(HOME, '.codex', 'state_5.sqlite');
   const _sessionFileCache = new Map(); // sessionId -> { path, ts }
   const _codexRolloutCache = new Map(); // sessionId -> { path, ts }
   let _sessionCache = null;
   let _sessionCacheTime = 0;
   const SESSION_CACHE_TTL = 30000; // 30s — scan is expensive, 10s was too frequent
+
+  function resolveCodexHomeForCwd(cwd) {
+    const safeCwd = sanitizeCwd(cwd);
+    if (!safeCwd || safeCwd === HOME) return path.join(HOME, '.codex');
+    return path.join(safeCwd, '.codex');
+  }
+
+  function resolveCodexDbForCwd(cwd) {
+    return path.join(resolveCodexHomeForCwd(cwd), 'state_5.sqlite');
+  }
+
+  function getKnownCodexDbPaths(preferredCwd = '') {
+    const paths = [];
+    const seen = new Set();
+    const add = (candidate) => {
+      const value = String(candidate || '').trim();
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      paths.push(value);
+    };
+
+    const preferredDb = preferredCwd ? resolveCodexDbForCwd(preferredCwd) : '';
+    if (preferredDb) add(preferredDb);
+
+    try {
+      const state = loadState() || {};
+      const sessions = state.sessions || {};
+      for (const raw of Object.values(sessions)) {
+        if (!raw || typeof raw !== 'object') continue;
+        const candidateCwd = sanitizeCwd(raw.cwd || '');
+        if (candidateCwd) add(resolveCodexDbForCwd(candidateCwd));
+      }
+    } catch { /* ignore */ }
+
+    add(GLOBAL_CODEX_DB);
+    return paths;
+  }
+
+  function queryCodexDbs(preferredCwd, queryFn) {
+    const dbPaths = getKnownCodexDbPaths(preferredCwd);
+    for (const dbPath of dbPaths) {
+      let db = null;
+      try {
+        if (!fs.existsSync(dbPath)) continue;
+        const { DatabaseSync } = require('node:sqlite');
+        db = new DatabaseSync(dbPath, { readonly: true });
+        const result = queryFn(db, dbPath);
+        db.close();
+        db = null;
+        if (result) return result;
+      } catch {
+        if (db) { try { db.close(); } catch { /* ignore */ } }
+      }
+    }
+    return null;
+  }
 
   function findSessionFile(sessionId) {
     if (!sessionId || !fs.existsSync(CLAUDE_PROJECTS_DIR)) return null;
@@ -296,8 +352,8 @@ function createSessionStore(deps) {
               }
             } catch {}
           }
-        } catch (err) {
-          log('WARN', `scanClaudeSessions project ${proj}: ${err.message}`);
+        } catch (e) {
+          log('WARN', `[session-store] scanClaudeSessions project ${proj} index error: ${e.message}`);
         }
 
         try {
@@ -320,8 +376,8 @@ function createSessionStore(deps) {
               });
             }
           }
-        } catch (err) {
-          log('WARN', `scanClaudeSessions project ${proj}: ${err.message}`);
+        } catch (e) {
+          log('WARN', `[session-store] scanClaudeSessions project ${proj} file error: ${e.message}`);
         }
       }
 
@@ -389,37 +445,52 @@ function createSessionStore(deps) {
         } catch { /* non-fatal */ }
       }
       return all;
-    } catch (err) {
-      log('WARN', `scanClaudeSessions: ${err.message}`);
+    } catch (e) {
+      log('WARN', `[session-store] scanClaudeSessions failed: ${e.message}`);
       return [];
     }
   }
 
   function scanCodexSessions() {
-    let db = null;
     try {
-      if (!fs.existsSync(CODEX_DB)) return [];
-      const { DatabaseSync } = require('node:sqlite');
-      db = new DatabaseSync(CODEX_DB, { readonly: true });
-      const rows = db.prepare(`
-        SELECT
-          id,
-          cwd,
-          title,
-          first_user_message,
-          source,
-          rollout_path,
-          created_at,
-          updated_at,
-          tokens_used,
-          archived
-        FROM threads
-        ORDER BY updated_at DESC
-        LIMIT 200
-      `).all();
-      db.close();
-      db = null;
-      return rows
+      const seen = new Set();
+      const merged = [];
+      for (const dbPath of getKnownCodexDbPaths()) {
+        if (!fs.existsSync(dbPath)) continue;
+        let db = null;
+        try {
+          const { DatabaseSync } = require('node:sqlite');
+          db = new DatabaseSync(dbPath, { readonly: true });
+          const rows = db.prepare(`
+            SELECT
+              id,
+              cwd,
+              title,
+              first_user_message,
+              source,
+              rollout_path,
+              created_at,
+              updated_at,
+              tokens_used,
+              archived
+            FROM threads
+            ORDER BY updated_at DESC
+            LIMIT 200
+          `).all();
+          db.close();
+          db = null;
+          for (const row of rows) {
+            const key = String(row && row.id || '').trim();
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            merged.push(row);
+          }
+        } catch (e) {
+          log('WARN', `[session-store] scanCodexSessions failed for ${dbPath}: ${e.message}`);
+          if (db) { try { db.close(); } catch { /* ignore */ } }
+        }
+      }
+      return merged
         .filter((row) => {
           if (row.archived || !row.id || !row.cwd) return false;
           const seedText = String(row.first_user_message || row.title || '').trim();
@@ -449,31 +520,22 @@ function createSessionStore(deps) {
           };
         })
         .map((session) => enrichCodexSession(session));
-    } catch (err) {
-      if (db) { try { db.close(); } catch { /* ignore */ } }
-      log('WARN', `scanCodexSessions ${CODEX_DB}: ${err.message}`);
+    } catch (e) {
+      log('WARN', `[session-store] scanCodexSessions failed: ${e.message}`);
       return [];
     }
   }
 
-  function findCodexSessionFile(sessionId) {
-    if (!sessionId || !fs.existsSync(CODEX_DB)) return null;
+  function findCodexSessionFile(sessionId, cwd = '') {
+    if (!sessionId) return null;
     const cached = _codexRolloutCache.get(sessionId);
     if (cached && Date.now() - cached.ts < 30000) return cached.path;
-    let db = null;
-    try {
-      const { DatabaseSync } = require('node:sqlite');
-      db = new DatabaseSync(CODEX_DB, { readonly: true });
+    const result = queryCodexDbs(cwd, (db) => {
       const row = db.prepare('SELECT rollout_path FROM threads WHERE id = ?').get(sessionId);
-      db.close();
-      db = null;
-      const rolloutPath = row && row.rollout_path ? String(row.rollout_path) : null;
-      _codexRolloutCache.set(sessionId, { path: rolloutPath, ts: Date.now() });
-      return rolloutPath;
-    } catch {
-      if (db) { try { db.close(); } catch { /* ignore */ } }
-      return null;
-    }
+      return row && row.rollout_path ? String(row.rollout_path) : null;
+    });
+    _codexRolloutCache.set(sessionId, { path: result, ts: Date.now() });
+    return result;
   }
 
   function extractCodexMessageText(payload) {
@@ -550,15 +612,19 @@ function createSessionStore(deps) {
 
   function scanAllSessions() {
     if (_sessionCache && (Date.now() - _sessionCacheTime < SESSION_CACHE_TTL)) return _sessionCache;
-    const all = [...scanClaudeSessions(), ...scanCodexSessions()];
-    all.sort((a, b) => {
-      const aTime = a.fileMtime || new Date(a.modified).getTime();
-      const bTime = b.fileMtime || new Date(b.modified).getTime();
-      return bTime - aTime;
-    });
-    _sessionCache = all;
-    _sessionCacheTime = Date.now();
-    return all;
+    try {
+      const all = [...scanClaudeSessions(), ...scanCodexSessions()];
+      all.sort((a, b) => {
+        const aTime = a.fileMtime || new Date(a.modified).getTime();
+        const bTime = b.fileMtime || new Date(b.modified).getTime();
+        return bTime - aTime;
+      });
+      _sessionCache = all;
+      _sessionCacheTime = Date.now();
+      return all;
+    } catch {
+      return [];
+    }
   }
 
   function listRecentSessions(limit, cwd, engine) {
@@ -1168,33 +1234,33 @@ function createSessionStore(deps) {
   }
 
   function _isCodexSessionValid(sessionId, normCwd) {
-    let db = null;
-    try {
-      const { DatabaseSync } = require('node:sqlite');
-      db = new DatabaseSync(CODEX_DB, { readonly: true });
-      const row = db.prepare('SELECT cwd FROM threads WHERE id = ?').get(sessionId);
-      db.close();
-      db = null;
-      return !!row && path.resolve(row.cwd) === normCwd;
-    } catch (e) {
-      if (db) { try { db.close(); } catch { /* ignore */ } }
-      // Transient errors (DB locked, busy) should not invalidate a live session.
-      // Only treat "session truly not found" as invalid; infra failures are conservative.
-      const msg = (e && e.message) || '';
-      if (msg.includes('SQLITE_BUSY') || msg.includes('SQLITE_LOCKED')) return true;
-      return false;
+    const preferredDb = resolveCodexDbForCwd(normCwd);
+    for (const dbPath of getKnownCodexDbPaths(normCwd)) {
+      let db = null;
+      try {
+        if (!fs.existsSync(dbPath)) continue;
+        const { DatabaseSync } = require('node:sqlite');
+        db = new DatabaseSync(dbPath, { readonly: true });
+        const row = db.prepare('SELECT cwd FROM threads WHERE id = ?').get(sessionId);
+        db.close();
+        db = null;
+        if (!row) continue;
+        const rowCwd = path.resolve(String(row.cwd || ''));
+        if (rowCwd === normCwd) return true;
+        if (dbPath === preferredDb) return false;
+      } catch (e) {
+        if (db) { try { db.close(); } catch { /* ignore */ } }
+        const msg = (e && e.message) || '';
+        if (msg.includes('SQLITE_BUSY') || msg.includes('SQLITE_LOCKED')) return true;
+      }
     }
+    return false;
   }
 
-  function getCodexSessionSandboxProfile(sessionId) {
-    let db = null;
+  function getCodexSessionSandboxProfile(sessionId, cwd = '') {
     try {
       if (!sessionId) return null;
-      const { DatabaseSync } = require('node:sqlite');
-      db = new DatabaseSync(CODEX_DB, { readonly: true });
-      const row = db.prepare('SELECT sandbox_policy, approval_mode FROM threads WHERE id = ?').get(sessionId);
-      db.close();
-      db = null;
+      const row = queryCodexDbs(cwd, (db) => db.prepare('SELECT sandbox_policy, approval_mode FROM threads WHERE id = ?').get(sessionId));
       if (!row || !row.sandbox_policy) return null;
       const policy = JSON.parse(String(row.sandbox_policy));
       const sandboxMode = normalizeCodexSandboxMode(
@@ -1212,13 +1278,12 @@ function createSessionStore(deps) {
         permissionMode: sandboxMode || 'danger-full-access',
       };
     } catch {
-      if (db) { try { db.close(); } catch { /* ignore */ } }
       return null;
     }
   }
 
-  function getCodexSessionPermissionMode(sessionId) {
-    const profile = getCodexSessionSandboxProfile(sessionId);
+  function getCodexSessionPermissionMode(sessionId, cwd = '') {
+    const profile = getCodexSessionSandboxProfile(sessionId, cwd);
     return profile ? profile.permissionMode : null;
   }
 
