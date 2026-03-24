@@ -6,7 +6,7 @@ const {
   USAGE_CATEGORY_LABEL,
 } = require('./usage-classifier');
 const { IS_WIN } = require('./platform');
-const { ENGINE_MODEL_CONFIG, resolveEngineModel } = require('./daemon-engine-runtime');
+const { ENGINE_MODEL_CONFIG, resolveEngineModel, normalizeClaudeModel } = require('./daemon-engine-runtime');
 const { resolveProjectKey: _resolveProjectKey } = require('./daemon-team-dispatch');
 const {
   parseRemoteTargetRef,
@@ -1439,7 +1439,7 @@ function createAdminCommandHandler(deps) {
       return { handled: true, config };
     }
 
-    // /doctor — diagnostics; /fix — restore backup; /reset — reset model to sonnet
+    // /doctor — diagnostics; /fix — restore backup; /reset — reset Claude slot to opus
     if (text === '/fix') {
       if (restoreConfig()) {
         await bot.sendMessage(chatId, '✅ 已从备份恢复配置');
@@ -1453,7 +1453,8 @@ function createAdminCommandHandler(deps) {
         backupConfig();
         const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
         if (!cfg.daemon) cfg.daemon = {};
-        cfg.daemon.model = 'opus';
+        if (!cfg.daemon.models) cfg.daemon.models = {};
+        cfg.daemon.models.claude = 'opus';
         writeConfigSafe(cfg);
         config = loadConfig();
         await bot.sendMessage(chatId, '✅ 模型已重置为 opus');
@@ -1480,9 +1481,10 @@ function createAdminCommandHandler(deps) {
         issues++;
       }
 
-      const m = (cfg && cfg.daemon && cfg.daemon.model) || 'opus';
+      const daemonCfg = (cfg && cfg.daemon) || {};
+      const m = resolveEngineModel('claude', daemonCfg);
       const modelOk = isCustomProvider
-        ? /^[a-zA-Z0-9._-]{2,80}$/.test(String(m || '').trim())
+        ? ['sonnet', 'opus', 'haiku'].includes(m)
         : validModels.includes(m);
       if (modelOk) {
         checks.push(`✅ 模型: ${m}`);
@@ -1569,7 +1571,11 @@ function createAdminCommandHandler(deps) {
         : engineCfg.provider;
       const isBuiltinProvider = activeProvider === engineCfg.provider;
       const distillModel = getDistillModel();
-      const hintLine = engineCfg.hint ? `\n💡 ${engineCfg.hint}` : (!isBuiltinProvider ? `\n💡 ${activeProvider} 可输入任意模型名` : '');
+      const hintLine = engineCfg.hint
+        ? `\n💡 ${engineCfg.hint}`
+        : (!isBuiltinProvider && currentEngine === 'claude'
+            ? `\n💡 ${activeProvider} 的后端真实模型请在 CC Switch / provider 层配置`
+            : '');
 
       if (!arg) {
         const statusLine = `🤖 [${currentEngine}] 会话模型: ${currentModel}  Provider: ${activeProvider}\n🧪 后台轻量: ${distillModel}  (/distill-model 修改)${hintLine}`;
@@ -1587,10 +1593,13 @@ function createAdminCommandHandler(deps) {
       }
 
       const normalizedArg = arg.toLowerCase();
-      // Only restrict model names for claude with anthropic provider (known fixed set)
-      // codex always allows free-form input (OpenAI models change frequently)
-      if (currentEngine === 'claude' && isBuiltinProvider && !optionValues.includes(normalizedArg)) {
-        await bot.sendMessage(chatId, `❌ 无效模型: ${arg}\n可选: ${optionValues.join(', ')}\n💡 切换到自定义 provider 后可用任意模型名`);
+      // Claude session/config layer only accepts canonical slots; provider mapping stays in CC Switch.
+      if (currentEngine === 'claude' && !optionValues.includes(normalizedArg)) {
+        const suggested = normalizeClaudeModel(arg, '');
+        const hint = suggested
+          ? `\n💡 检测到它更像 Claude 槽位 ${suggested}，请直接用 /model ${suggested}`
+          : '';
+        await bot.sendMessage(chatId, `❌ Claude 会话模型只接受: ${optionValues.join(', ')}\n后端真实模型请在 CC Switch / provider 层配置，不要写进会话模型${hint}`);
         return { handled: true, config };
       }
 

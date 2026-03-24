@@ -144,6 +144,11 @@ describe('daemon-engine-runtime model resolution', () => {
     assert.equal(model, 'gpt-5-mini');
   });
 
+  it('does not leak legacy non-codex custom model ids into codex', () => {
+    const model = resolveEngineModel('codex', { model: 'MiniMax-M2.1' });
+    assert.equal(model, 'gpt-5.4');
+  });
+
   it('normalizes legacy custom claude model ids back to canonical slots', () => {
     assert.equal(resolveEngineModel('claude', { model: 'MiniMax-M2.1' }), 'sonnet');
     assert.equal(resolveEngineModel('claude', { model: 'claude-opus-4-6' }), 'opus');

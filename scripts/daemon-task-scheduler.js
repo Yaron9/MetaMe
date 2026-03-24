@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { classifyTaskUsage } = require('./usage-classifier');
+const { resolveEngineModel } = require('./daemon-engine-runtime');
 
 const WEEKDAY_INDEX = Object.freeze({
   sun: 0,
@@ -579,7 +580,7 @@ function createTaskScheduler(deps) {
     if (steps.length === 0) return { success: false, error: 'No steps defined', output: '' };
 
     // Workflow tasks match the user's session model setting (same quality as interactive)
-    const sessionModel = (config && config.daemon && config.daemon.model) || 'sonnet';
+    const sessionModel = resolveEngineModel('claude', (config && config.daemon) || {});
     const model = normalizeModel(task.model || sessionModel);
     const cwd = task.cwd ? task.cwd.replace(/^~/, HOME) : HOME;
     const sessionId = crypto.randomUUID();

@@ -1033,10 +1033,6 @@ function createSessionStore(deps) {
 
       // Try to read cwd/model from session JSONL file content (most reliable)
       const metadata = _readClaudeSessionMetadata(sessionFile);
-      if (metadata.model && !metadata.model.startsWith('claude-')) {
-        log('WARN', `[SessionValid] ${sessionId.slice(0, 8)}: non-claude model "${metadata.model}"`);
-        return false;
-      }
       if (metadata.cwd && path.resolve(metadata.cwd) === normCwd) return true;
       if (metadata.cwd) {
         // CWD mismatch: the session was created for a different directory.

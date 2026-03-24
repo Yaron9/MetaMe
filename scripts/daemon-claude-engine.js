@@ -434,13 +434,10 @@ function createClaudeEngine(deps) {
         const entry = JSON.parse(line);
         const sessionModel = entry && entry.message && entry.message.model;
         if (!sessionModel || sessionModel === '<synthetic>') continue;
-        if (!sessionModel.startsWith('claude-')) {
-          return {
-            shouldResume: false,
-            modelPin: null,
-            reason: 'non-claude-session',
-          };
-        }
+        // Custom Claude-compatible providers may record backend-native model ids
+        // (for example MiniMax) in the JSONL. Those sessions are still resumable;
+        // we only skip model pinning when the family cannot be mapped back to
+        // Claude's alias set.
         // If the configured model is a short alias (sonnet/opus/haiku) and the JSONL model
         // belongs to the same family, do NOT pin — let the alias resolve to the latest version.
         // Only pin when the families genuinely differ (e.g. session was opus, config says sonnet).
@@ -1235,14 +1232,18 @@ function createClaudeEngine(deps) {
    * Reset active provider back to anthropic/opus and reload config.
    * Returns the freshly loaded config so callers can reassign their local variable.
    */
-  function fallbackToDefaultProvider(reason) {
+  function fallbackToDefaultProvider(reason, boundProjectKey = '') {
     log('WARN', `Falling back to anthropic/opus — reason: ${reason}`);
     if (providerMod && providerMod.getActiveName() !== 'anthropic') {
       providerMod.setActive('anthropic');
     }
     const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
     if (!cfg.daemon) cfg.daemon = {};
-    cfg.daemon.model = 'opus';
+    if (!cfg.daemon.models) cfg.daemon.models = {};
+    cfg.daemon.models.claude = 'opus';
+    if (boundProjectKey && cfg.projects && cfg.projects[boundProjectKey]) {
+      cfg.projects[boundProjectKey].model = 'opus';
+    }
     writeConfigSafe(cfg);
     return loadConfig();
   }
@@ -2269,7 +2270,7 @@ ${mentorRadarHint}
           const looksLikeError = output.length < 300 && /\b(not found|invalid model|unauthorized|401|403|404|error|failed)\b/i.test(output);
           if (looksLikeError && (activeProvCheck !== 'anthropic' || !builtinModelsCheck.includes(model))) {
             try {
-              config = fallbackToDefaultProvider(`output looks like error for ${activeProvCheck}/${model}`);
+              config = fallbackToDefaultProvider(`output looks like error for ${activeProvCheck}/${model}`, boundProjectKey || '');
               await bot.sendMessage(chatId, `⚠️ ${activeProvCheck}/${model} 疑似失败，已回退到 anthropic/opus\n输出: ${output.slice(0, 150)}`);
             } catch (fbErr) {
               log('ERROR', `Fallback failed: ${fbErr.message}`);
@@ -2500,7 +2501,7 @@ ${mentorRadarHint}
             const builtinModelValues = (ENGINE_MODEL_CONFIG.claude.options || []).map(o => typeof o === 'string' ? o : o.value);
             if ((activeProv !== 'anthropic' || !builtinModelValues.includes(model)) && !errMsg.includes('Stopped by user')) {
               try {
-                config = fallbackToDefaultProvider(`${activeProv}/${model} error: ${errMsg.slice(0, 100)}`);
+                config = fallbackToDefaultProvider(`${activeProv}/${model} error: ${errMsg.slice(0, 100)}`, boundProjectKey || '');
                 await bot.sendMessage(chatId, `⚠️ ${activeProv}/${model} 失败，已回退到 anthropic/opus\n原因: ${errMsg.slice(0, 100)}`);
               } catch (fallbackErr) {
                 log('ERROR', `Fallback failed: ${fallbackErr.message}`);

@@ -93,23 +93,58 @@ const BUILTIN_CLAUDE_MODEL_VALUES = Object.freeze(
   ).filter(Boolean)
 );
 
+function normalizeClaudeModel(model, fallback = ENGINE_MODEL_CONFIG.claude.main) {
+  const raw = String(model || '').trim();
+  if (!raw) return fallback;
+  const normalized = raw.toLowerCase();
+  if (BUILTIN_CLAUDE_MODEL_VALUES.includes(normalized)) return normalized;
+  if (normalized.includes('opus')) return 'opus';
+  if (normalized.includes('sonnet')) return 'sonnet';
+  if (normalized.includes('haiku')) return 'haiku';
+  return fallback;
+}
+
+function looksLikeCodexModel(model) {
+  const raw = String(model || '').trim().toLowerCase();
+  if (!raw) return false;
+  return (
+    raw.startsWith('gpt-')
+    || raw.startsWith('o1')
+    || raw.startsWith('o3')
+    || raw.startsWith('o4')
+    || raw.includes('codex')
+  );
+}
+
 function resolveEngineModel(engineName, daemonCfg = {}, overrideModel = '') {
   const engine = normalizeEngineName(engineName);
   const engineCfg = ENGINE_MODEL_CONFIG[engine] || ENGINE_MODEL_CONFIG.claude;
   const engineModels = (daemonCfg && daemonCfg.models) || {};
   const explicitModel = String(overrideModel || '').trim();
-  if (explicitModel) return explicitModel;
+  if (explicitModel) {
+    return engine === 'claude'
+      ? normalizeClaudeModel(explicitModel, engineCfg.main)
+      : explicitModel;
+  }
 
   const perEngineModel = String(engineModels[engine] || '').trim();
-  if (perEngineModel) return perEngineModel;
+  if (perEngineModel) {
+    return engine === 'claude'
+      ? normalizeClaudeModel(perEngineModel, engineCfg.main)
+      : perEngineModel;
+  }
 
   const legacyModel = String((daemonCfg && daemonCfg.model) || '').trim();
   if (!legacyModel) return engineCfg.main;
 
   // Legacy daemon.model historically meant a Claude model.
-  // Preserve backward compatibility for non-Claude custom model IDs,
-  // but do not leak Claude aliases like "opus" into Codex sessions.
-  if (engine === 'codex' && BUILTIN_CLAUDE_MODEL_VALUES.includes(legacyModel)) {
+  if (engine === 'claude') {
+    return normalizeClaudeModel(legacyModel, engineCfg.main);
+  }
+
+  // Legacy daemon.model primarily belonged to Claude; only reuse it for Codex
+  // when it already looks like a real Codex/OpenAI model id.
+  if (engine === 'codex' && !looksLikeCodexModel(legacyModel)) {
     return engineCfg.main;
   }
   return legacyModel;
@@ -420,6 +455,7 @@ module.exports = {
   resolveBinary,
   detectDefaultEngine,
   resolveEngineModel,
+  normalizeClaudeModel,
   ENGINE_MODEL_CONFIG,
   ENGINE_DISTILL_MAP,
   ENGINE_DEFAULT_MODEL,
@@ -434,5 +470,7 @@ module.exports = {
     normalizeCodexApprovalPolicy,
     resolveCodexPermissionProfile,
     BUILTIN_CLAUDE_MODEL_VALUES,
+    normalizeClaudeModel,
+    looksLikeCodexModel,
   },
 };

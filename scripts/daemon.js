@@ -2078,16 +2078,6 @@ if (providerMod && typeof providerMod.setEngine === 'function') {
 }
 log('INFO', `Default engine: ${_defaultEngine} (detected: ${detectedEngine})`);
 
-// One-time migration: daemon.model (legacy) → daemon.models.<engine>
-try {
-  const _migCfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
-  if (_migCfg.daemon && _migCfg.daemon.model && !_migCfg.daemon.models) {
-    _migCfg.daemon.models = { [_defaultEngine]: _migCfg.daemon.model };
-    writeConfigSafe(_migCfg);
-    log('INFO', `Migrated daemon.model="${_migCfg.daemon.model}" → daemon.models.${_defaultEngine}`);
-  }
-} catch { /* ignore */ }
-
 function getDefaultEngine() {
   return _defaultEngine;
 }
@@ -2107,15 +2097,6 @@ function setDefaultEngine(engine) {
       try { providerMod.setEngine(engine); } catch { /* ignore */ }
     }
   }
-  // Migrate old daemon.model → daemon.models[engine] on first switch
-  try {
-    const cfg = yaml.load(fs.readFileSync(CONFIG_FILE, 'utf8')) || {};
-    if (!cfg.daemon) cfg.daemon = {};
-    if (cfg.daemon.model && !cfg.daemon.models) {
-      cfg.daemon.models = { [engine]: cfg.daemon.model };
-      writeConfigSafe(cfg);
-    }
-  } catch { /* ignore */ }
 }
 
 const getEngineRuntime = createEngineRuntimeFactory({
@@ -2609,10 +2590,6 @@ async function main() {
     'enable_nl_mac_control',
     'enable_nl_mac_fallback',
   ];
-  // All known models across all engines (for legacy daemon.model validation only)
-  const BUILTIN_CLAUDE_MODELS = (ENGINE_MODEL_CONFIG.claude.options || []).map(option =>
-    typeof option === 'string' ? option : option.value
-  ).filter(Boolean);
   for (const key of Object.keys(config)) {
     if (!KNOWN_SECTIONS.includes(key)) log('WARN', `Config: unknown section "${key}" (typo?)`);
   }
@@ -2620,14 +2597,11 @@ async function main() {
     for (const key of Object.keys(config.daemon)) {
       if (!KNOWN_DAEMON.includes(key)) log('WARN', `Config: unknown daemon.${key} (typo?)`);
     }
-    // Validate legacy daemon.model (only warn if anthropic provider + unknown Claude model)
-    if (config.daemon.model && !BUILTIN_CLAUDE_MODELS.includes(config.daemon.model)) {
+    // Keep legacy daemon.model read-compatible, but never auto-migrate or treat it
+    // as the write source of truth. The canonical writable field is daemon.models.<engine>.
+    if (config.daemon.model) {
       const activeProv = providerMod ? providerMod.getActiveName() : 'anthropic';
-      if (activeProv === 'anthropic' && _defaultEngine === 'claude') {
-        log('WARN', `Config: daemon.model="${config.daemon.model}" is not a known Claude model`);
-      } else {
-        log('INFO', `Config: legacy daemon.model="${config.daemon.model}" retained; active ${_defaultEngine} model resolves to "${resolveEngineModel(_defaultEngine, config.daemon)}" (${activeProv})`);
-      }
+      log('INFO', `Config: legacy daemon.model detected; active ${_defaultEngine} model resolves to "${resolveEngineModel(_defaultEngine, config.daemon)}" (${activeProv})`);
     }
   }
 

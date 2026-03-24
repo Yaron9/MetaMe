@@ -1,5 +1,7 @@
 'use strict';
 
+const { resolveEngineModel } = require('./daemon-engine-runtime');
+
 function createCommandRouter(deps) {
   const {
     loadState,
@@ -657,7 +659,7 @@ function createCommandRouter(deps) {
     }
 
     if (text.startsWith('/')) {
-      const currentModel = (config.daemon && config.daemon.model) || 'opus';
+      const currentModel = resolveEngineModel('claude', (config && config.daemon) || {});
       const currentProvider = providerMod ? providerMod.getActiveName() : 'anthropic';
       await bot.sendMessage(chatId, [
         '📱 手机端 Claude Code',

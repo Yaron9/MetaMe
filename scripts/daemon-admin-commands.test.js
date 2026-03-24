@@ -853,7 +853,7 @@ describe('daemon-admin-commands /doctor', () => {
     assert.doesNotMatch(sent[0], /默认引擎是 codex，但 Codex CLI 不可用/);
   });
 
-  it('normalizes legacy custom claude model names to canonical slots in /doctor', async (t) => {
+  it('normalizes custom-provider claude model names to canonical slots in /doctor', async (t) => {
     const sent = [];
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-doctor-cfg-'));
     t.after(() => {
@@ -925,8 +925,90 @@ describe('daemon-admin-commands /doctor', () => {
 
     assert.equal(res.handled, true);
     assert.equal(sent.length, 1);
-    assert.match(sent[0], /❌ 无效模型: MiniMax-M2\.1/);
-    assert.match(sent[0], /Claude 后端模型由 Claude Code \/ CCwitch 自动映射/);
+    assert.match(sent[0], /Claude 会话模型只接受: opus, sonnet, haiku/);
+    assert.match(sent[0], /CC Switch \/ provider 层配置/);
+  });
+});
+
+describe('daemon-admin-commands /model', () => {
+  it('shows provider-layer hint instead of allowing arbitrary Claude model names', async (t) => {
+    const sent = [];
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-model-status-'));
+    t.after(() => {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    });
+    const configFile = path.join(tmpDir, 'daemon.yaml');
+    const yaml = require('js-yaml');
+    fs.writeFileSync(configFile, yaml.dump({ daemon: { models: { claude: 'sonnet' } } }), 'utf8');
+    const providerStub = {
+      getActiveName: () => 'relay',
+      getDistillModel: () => 'gpt-5.1-codex-mini',
+    };
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        CONFIG_FILE: configFile,
+        providerMod: providerStub,
+        yaml,
+        loadConfig: () => yaml.load(fs.readFileSync(configFile, 'utf8')) || {},
+      }
+    );
+
+    const res = await handleAdminCommand({
+      bot: createBot(sent),
+      chatId: 'mobile-user-model-status',
+      text: '/model',
+      config: { daemon: { models: { claude: 'sonnet' } } },
+      state: { tasks: {}, budget: { tokens_used: 0 } },
+    });
+
+    assert.equal(res.handled, true);
+    assert.match(sent[0], /会话模型: sonnet/);
+    assert.match(sent[0], /CC Switch \/ provider 层配置/);
+    assert.doesNotMatch(sent[0], /可输入任意模型名/);
+  });
+});
+
+describe('daemon-admin-commands /reset', () => {
+  it('resets only the canonical Claude slot without rewriting legacy daemon.model', async (t) => {
+    const sent = [];
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-reset-cfg-'));
+    t.after(() => {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    });
+    const configFile = path.join(tmpDir, 'daemon.yaml');
+    const yaml = require('js-yaml');
+    fs.writeFileSync(configFile, yaml.dump({
+      daemon: {
+        model: 'MiniMax-M2.1',
+        models: { claude: 'haiku' },
+      },
+    }), 'utf8');
+
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        CONFIG_FILE: configFile,
+        yaml,
+        loadConfig: () => yaml.load(fs.readFileSync(configFile, 'utf8')) || {},
+        writeConfigSafe: (cfg) => fs.writeFileSync(configFile, yaml.dump(cfg), 'utf8'),
+      }
+    );
+
+    const res = await handleAdminCommand({
+      bot: createBot(sent),
+      chatId: 'mobile-user-reset',
+      text: '/reset',
+      config: {},
+      state: { tasks: {}, budget: { tokens_used: 0 } },
+    });
+
+    assert.equal(res.handled, true);
+    assert.match(sent[0], /模型已重置为 opus/);
+
+    const nextCfg = yaml.load(fs.readFileSync(configFile, 'utf8')) || {};
+    assert.equal(nextCfg.daemon.models.claude, 'opus');
+    assert.equal(nextCfg.daemon.model, 'MiniMax-M2.1');
   });
 });
 
