@@ -423,14 +423,7 @@ function buildCodexEnv(baseEnv = {}, { metameProject = '', metameSenderId = '', 
     'CLAUDE_CODE_SSE_PORT',
   ];
   for (const key of strippedKeys) delete env[key];
-  const resolvedCwd = String(cwd || '').trim();
-  if (resolvedCwd) {
-    const codexHome = path.join(resolvedCwd, '.codex');
-    try {
-      fs.mkdirSync(codexHome, { recursive: true });
-      env.CODEX_HOME = codexHome;
-    } catch { /* best-effort */ }
-  }
+  void cwd;
   if (env.CODEX_HOME && !fs.existsSync(env.CODEX_HOME)) delete env.CODEX_HOME;
   return env;
 }

@@ -102,6 +102,14 @@ describe('daemon-engine-runtime args builder', () => {
     assert.equal(env.PATH, '/tmp/bin');
   });
 
+  it('does not override CODEX_HOME from cwd for codex runtime', () => {
+    const env = _private.buildCodexEnv({
+      PATH: '/tmp/bin',
+    }, { metameProject: 'metame', cwd: '/tmp/project-a' });
+    assert.equal(env.CODEX_HOME, undefined);
+    assert.equal(env.METAME_PROJECT, 'metame');
+  });
+
   it('builds claude args with read-only tools', () => {
     const args = _private.buildClaudeArgs({
       model: 'opus',
