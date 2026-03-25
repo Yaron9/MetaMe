@@ -19,12 +19,12 @@ const ENGINE_TIMEOUT_DEFAULTS = Object.freeze({
   codex: Object.freeze({
     idleMs: 10 * 60 * 1000,
     toolMs: 25 * 60 * 1000,
-    ceilingMs: 60 * 60 * 1000,
+    ceilingMs: null,
   }),
   claude: Object.freeze({
     idleMs: 5 * 60 * 1000,
     toolMs: 25 * 60 * 1000,
-    ceilingMs: 60 * 60 * 1000,
+    ceilingMs: null,
   }),
 });
 
@@ -282,14 +282,10 @@ function parseCodexStreamEvent(line) {
   return out;
 }
 
-function resolveEngineTimeouts(engineName, opts = {}) {
+function resolveEngineTimeouts(engineName) {
   const engine = normalizeEngineName(engineName);
   const base = ENGINE_TIMEOUT_DEFAULTS[engine] || ENGINE_TIMEOUT_DEFAULTS.claude;
-  if (!opts || !opts.reactive) return { ...base };
-  return {
-    ...base,
-    ceilingMs: null,
-  };
+  return { ...base };
 }
 
 function buildClaudeArgs(options = {}) {

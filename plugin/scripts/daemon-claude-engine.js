@@ -888,7 +888,7 @@ function createClaudeEngine(deps) {
       const engineTimeouts = rt.timeouts || {};
       const IDLE_TIMEOUT_MS = engineTimeouts.idleMs || (5 * 60 * 1000);
       const TOOL_EXEC_TIMEOUT_MS = engineTimeouts.toolMs || (25 * 60 * 1000);
-      const HARD_CEILING_MS = engineTimeouts.ceilingMs || (60 * 60 * 1000);
+      const HARD_CEILING_MS = engineTimeouts.ceilingMs ?? null;
       const startTime = Date.now();
       let waitingForTool = false;
 
@@ -906,7 +906,9 @@ function createClaudeEngine(deps) {
       }
 
       let idleTimer = setTimeout(() => killChild('idle'), IDLE_TIMEOUT_MS);
-      const ceilingTimer = setTimeout(() => killChild('ceiling'), HARD_CEILING_MS);
+      const ceilingTimer = HARD_CEILING_MS
+        ? setTimeout(() => killChild('ceiling'), HARD_CEILING_MS)
+        : null;
 
       function resetIdleTimer() {
         clearTimeout(idleTimer);
