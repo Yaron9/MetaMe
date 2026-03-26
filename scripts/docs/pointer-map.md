@@ -9,6 +9,7 @@
 - Daemon 主循环：`scripts/daemon.js`
 - 多引擎 runtime 适配层：`scripts/daemon-engine-runtime.js`
 - 会话执行引擎（Claude/Codex 共用入口）：`scripts/daemon-claude-engine.js`
+- **核心纯逻辑模块**：`scripts/core/handoff.js`（子进程生命周期）、`scripts/core/audit.js`（审计状态）
 - 管理命令：`scripts/daemon-admin-commands.js`
 - 命令路由：`scripts/daemon-command-router.js`
 - 执行命令（`/stop`、`/compact` 等）：`scripts/daemon-exec-commands.js`
@@ -17,6 +18,7 @@
 - Provider/蒸馏模型配置：`scripts/providers.js`（`/provider`、`/distill-model`）
 - 跨平台基础设施：`scripts/platform.js`（`killProcessTree`、`socketPath`、`sleepSync`、`icon`）
 - 热重载安全机制：`scripts/daemon-runtime-lifecycle.js`（语法预检、last-good 备份、crash-loop 自愈）
+- 打包工具：`scripts/deploy-manifest.js`（部署清单）、`scripts/sync-plugin.js`（plugin 镜像同步）
 - 维护手册：`scripts/docs/maintenance-manual.md`
 
 ## 多引擎（Claude/Codex）定位
@@ -61,6 +63,27 @@
 - 运行时引擎切换与诊断：
   - `scripts/daemon-admin-commands.js`
   - 关键点：`/engine` 切换默认引擎；`/doctor` 按默认引擎检查 CLI 可用性（Claude/Codex）并兼容自定义 provider 模型名
+
+## 核心模块层（scripts/core/）
+
+纯逻辑模块，无副作用，完整单元测试覆盖。遵循 Unix 哲学：helper 只做计算/状态转换，返回数据+意图标志；调用方决定何时执行副作用。
+
+- `scripts/core/handoff.js`：子进程生命周期（22 公开 API + 7 `_internal`）
+  - 子进程管理：`createPlatformSpawn`（Win/Mac 双平台）、`terminateChildProcess`、`acquireStreamingChild`（warm pool 复用）
+  - Streaming 状态机：`applyStreamingContentState`、`applyStreamingToolState`、`applyStreamingMetadata`、`reduceStreamingWaitState`
+  - 输出处理：`splitStreamingStdoutChunk`、`accumulateStreamingStderr`、`parseStreamingEvents`、`buildStreamFlushPayload`
+  - 超时看门狗：`createStreamingWatchdog`（idle/tool/ceiling 三级超时 + 升级 kill）
+  - 结果构建：`buildStreamingResult`、`resolveStreamingClosePayload`（参数分组为 `streamState` + `timeoutConfig`）
+  - UI 覆盖层：`buildToolOverlayPayload`、`buildMilestoneOverlayPayload`
+  - 生命周期控制：`stopStreamingLifecycle`、`abortStreamingChildLifecycle`、`finalizePersistentStreamingTurn`
+  - 异步命令：`runAsyncCommand`（引擎中性，超时+升级 kill）
+  - 消费者：`scripts/daemon-claude-engine.js`（唯一）
+
+- `scripts/core/audit.js`：审计状态管理
+  - `createAudit(deps)` 工厂模式，显式依赖注入
+  - 消费者：`scripts/daemon.js`（唯一）
+
+- 测试：`scripts/core/handoff.test.js`、`scripts/daemon-audit.test.js`、`scripts/daemon-claude-engine.test.js`
 
 ## 团队 Dispatch 与跨设备通信定位
 
@@ -190,7 +213,7 @@
 
 1. 先看配置：`~/.metame/daemon.yaml` 与 `scripts/daemon-default.yaml`
 2. 再看命令入口：`scripts/daemon-admin-commands.js`、`scripts/daemon-command-router.js`、`scripts/daemon-exec-commands.js`
-3. 再看执行链路：`scripts/daemon-engine-runtime.js` → `scripts/daemon-claude-engine.js` → `scripts/mentor-engine.js`
+3. 再看执行链路：`scripts/daemon-engine-runtime.js` → `scripts/daemon-claude-engine.js` → `scripts/core/handoff.js`（纯逻辑）→ `scripts/mentor-engine.js`
 4. 团队/跨设备：`scripts/daemon-team-dispatch.js` → `scripts/daemon-remote-dispatch.js` → `scripts/daemon-bridges.js`
 5. 最后看离线任务：`scripts/distill.js`、`scripts/memory-extract.js`、`scripts/memory-nightly-reflect.js`
 

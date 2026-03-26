@@ -56,6 +56,19 @@ feishu:
 - `resume` 失败自动重试：同一 `chatId` 在 10 分钟内最多 1 次
 - 收到新 `thread_id` 时自动迁移 session id
 
+### 核心纯逻辑层（scripts/core/）
+
+执行引擎的子进程管理、streaming 状态机、超时看门狗等纯逻辑已提取到 `scripts/core/handoff.js`。
+
+架构纪律（见 CLAUDE.md）：
+- `core/handoff.js` 只做计算/状态转换，返回意图标志（`shouldFlush`、`isApiError`、`shouldUpdateWatchdog`）
+- `daemon-claude-engine.js` 是唯一消费者，负责执行副作用（watchdog 更新、flush、callback）
+- `core/audit.js` 由 `daemon.js` 消费，管理审计状态
+- 新增 helper 必须配测试：`scripts/core/*.test.js`
+- 公开 API 最小化：仅消费者需要的函数 export，内部函数放 `_internal`
+
+引擎兼容性：所有 handoff helper 都是引擎中性的，通过参数接收引擎特定行为（`rt.parseStreamEvent`、`rt.classifyError`、`rt.killSignal`）。
+
 ## 4. 命令行为差异
 
 - `/stop`：引擎中性，按 `activeProcesses.killSignal` 停止
@@ -152,6 +165,8 @@ feishu:
 ## 9. 双平台/双引擎维护矩阵
 
 ### 统一维护（改一处即可）
+- **core/handoff.js**（引擎中性、平台中性的纯逻辑，通过参数接收平台/引擎差异）
+- **core/audit.js**（纯状态管理，无平台差异）
 - agent-layer.js / daemon-agent-tools.js / daemon-agent-commands.js / daemon-user-acl.js
 - ENGINE_MODEL_CONFIG（daemon-engine-runtime.js 集中管理）
 - daemon-runtime-lifecycle.js 的语法检查和备份机制
@@ -427,9 +442,13 @@ Event 类型：`MISSION_START` / `DISPATCH` / `MEMBER_COMPLETE` / `PHASE_GATE` /
 
 ## 14. 变更后维护动作
 
-1. `npm test`
-2. `npm run sync:plugin`
-3. 更新文档：
+1. 测试：
+   - `npm test`（全量）
+   - 改 `core/handoff.js` 时：`node --test scripts/core/handoff.test.js scripts/daemon-claude-engine.test.js`
+   - 改 `daemon.js` 审计相关时：`node --test scripts/daemon-audit.test.js`
+2. Lint：`npx eslint scripts/daemon*.js scripts/core/*.js`
+3. `npm run sync:plugin`
+4. 更新文档：
    - `scripts/docs/pointer-map.md`
-   - `README.md`
-   - `README中文版.md`
+   - `scripts/docs/maintenance-manual.md`
+   - `README.md` / `README中文版.md`
