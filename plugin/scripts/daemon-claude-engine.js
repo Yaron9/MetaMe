@@ -10,6 +10,7 @@ const {
   _private: { resolveCodexPermissionProfile },
 } = require('./daemon-engine-runtime');
 const { buildIntentHintBlock } = require('./intent-registry');
+const { rawChatId } = require('./core/thread-chat-id');
 const { buildAgentContextForEngine, buildMemorySnapshotContent, refreshMemorySnapshot } = require('./agent-layer');
 const { createPlatformSpawn, terminateChildProcess, stopStreamingLifecycle, abortStreamingChildLifecycle, setActiveChildProcess, clearActiveChildProcess, acquireStreamingChild, buildStreamingResult, resolveStreamingClosePayload, accumulateStreamingStderr, splitStreamingStdoutChunk, buildStreamFlushPayload, buildToolOverlayPayload, buildMilestoneOverlayPayload, finalizePersistentStreamingTurn, writeStreamingChildInput, parseStreamingEvents, applyStreamingMetadata, applyStreamingToolState, applyStreamingContentState, createStreamingWatchdog, runAsyncCommand } = require('./core/handoff');
 
@@ -1197,7 +1198,7 @@ function createClaudeEngine(deps) {
       ...(config.feishu ? config.feishu.chat_agent_map || {} : {}),
       ...(config.imessage ? config.imessage.chat_agent_map || {} : {}),
     };
-    const _ackBoundKey = _ackAgentMap[_ackChatIdStr] || projectKeyFromVirtualChatId(_ackChatIdStr);
+    const _ackBoundKey = _ackAgentMap[_ackChatIdStr] || _ackAgentMap[rawChatId(_ackChatIdStr)] || projectKeyFromVirtualChatId(_ackChatIdStr);
     const _ackBoundProj = _ackBoundKey && config.projects ? config.projects[_ackBoundKey] : null;
     // _ackCardHeader: non-null for bound projects with a name; passed to editMessage to preserve header on streaming edits
     let _ackCardHeader = (_ackBoundProj && _ackBoundProj.name)
@@ -1250,7 +1251,7 @@ function createClaudeEngine(deps) {
         ...(config.feishu ? config.feishu.chat_agent_map : {}),
         ...(config.imessage ? config.imessage.chat_agent_map : {}),
       };
-      const _isStrictChatSession = !!(_strictAgentMap[String(chatId)] || projectKeyFromVirtualChatId(String(chatId)));
+      const _isStrictChatSession = !!(_strictAgentMap[String(chatId)] || _strictAgentMap[rawChatId(String(chatId))] || projectKeyFromVirtualChatId(String(chatId)));
       const agentMatch = _isStrictChatSession ? null : routeAgent(prompt, config);
       if (agentMatch) {
         const { key, proj, rest } = agentMatch;
@@ -1279,7 +1280,7 @@ function createClaudeEngine(deps) {
         ...(config.feishu ? config.feishu.chat_agent_map : {}),
         ...(config.imessage ? config.imessage.chat_agent_map : {}),
       };
-      const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
+      const boundProjectKey = chatAgentMap[chatIdStr] || chatAgentMap[rawChatId(chatIdStr)] || projectKeyFromVirtualChatId(chatIdStr);
       const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
       const daemonCfg = (config && config.daemon) || {};
       // Keep real group chats on their own session key.
@@ -1476,7 +1477,7 @@ function createClaudeEngine(deps) {
         ...(config.feishu ? config.feishu.chat_agent_map : {}),
         ...(config.imessage ? config.imessage.chat_agent_map : {}),
       };
-      const projectKey = _agentMap0[_cid0] || projectKeyFromVirtualChatId(_cid0);
+      const projectKey = _agentMap0[_cid0] || _agentMap0[rawChatId(_cid0)] || projectKeyFromVirtualChatId(_cid0);
       try {
         const memory = require('./memory');
 
