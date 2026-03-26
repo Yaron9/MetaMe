@@ -4,6 +4,8 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { execSync } = require('child_process');
+const { buildReactivePrompt } = require('./core/reactive-prompt');
+const { calculateNextAction } = require('./core/reactive-signal');
 const EVENTS_DIR = path.join(os.homedir(), '.metame', 'events');
 
 /**
@@ -195,6 +197,25 @@ function readPhaseFromState(statePath) {
     const content = fs.readFileSync(statePath, 'utf8');
     const match = content.match(/^phase:\s*(\S+)/m);
     return match ? match[1] : '';
+  } catch { return ''; }
+}
+
+/**
+ * Load working memory file for a project.
+ * Returns the file content as a string, or empty string if not found.
+ *
+ * @param {string} projectKey
+ * @param {string} [metameDir] - Override ~/.metame path (for testing)
+ * @returns {string}
+ */
+function loadWorkingMemory(projectKey, metameDir) {
+  const memPath = path.join(
+    metameDir || path.join(os.homedir(), '.metame'),
+    'memory', 'now', `${projectKey}_memory.md`
+  );
+  try {
+    const content = fs.readFileSync(memPath, 'utf8').trim();
+    return content || '';
   } catch { return ''; }
 }
 
@@ -911,12 +932,51 @@ function handleReactiveOutput(targetProject, output, config, deps) {
 
   // ── Case 1: targetProject is a reactive parent ──
   if (isReactiveParent(targetProject, config)) {
-    if (!hasSignals) return;
-
     const projectKey = targetProject;
     const pName = config.projects[projectKey]?.name || projectKey;
     const st = deps.loadState();
     const rs = getReactiveState(st, projectKey);
+    const maxRetries = manifest?.no_signal_max_retries || 3;
+
+    const decision = calculateNextAction({
+      hasSignals,
+      isComplete: signals.complete,
+      noSignalCount: rs._no_signal_count || 0,
+      maxRetries,
+    });
+
+    rs._no_signal_count = decision.nextNoSignalCount;
+
+    if (decision.action === 'pause') {
+      setReactiveStatus(st, projectKey, 'paused', decision.pauseReason);
+      deps.saveState(st);
+      logEvent(projectKey, { type: 'NO_SIGNAL_PAUSE', count: decision.nextNoSignalCount });
+      if (deps.notifyUser) {
+        deps.notifyUser(`\u26a0\ufe0f ${pName} continuous ${maxRetries} rounds without signal, paused`);
+      }
+      return;
+    }
+
+    if (decision.action === 'retry') {
+      deps.saveState(st);
+      logEvent(projectKey, { type: 'NO_SIGNAL_RETRY', count: decision.nextNoSignalCount, output_length: output.length });
+      const maxDepthForRetry = manifest?.max_depth || rs.max_depth || 50;
+      const workingMemory = loadWorkingMemory(projectKey, deps.metameDir);
+      deps.handleDispatchItem({
+        target: projectKey,
+        prompt: buildReactivePrompt(
+          'Check progress and continue executing the task.',
+          { depth: rs.depth, maxDepth: maxDepthForRetry, completionSignal, workingMemory, isRetry: true }
+        ),
+        from: '_system',
+        _reactive: true,
+        _reactive_project: projectKey,
+        new_session: true,
+      }, config);
+      return;
+    }
+
+    // decision.action === 'proceed' — reset no-signal count, continue normal flow
 
     // Mission complete takes priority
     if (signals.complete) {
@@ -997,11 +1057,14 @@ function handleReactiveOutput(targetProject, output, config, deps) {
     deps.saveState(st);
 
     // Dispatch each directive with fresh session
+    const workingMemory = loadWorkingMemory(projectKey, deps.metameDir);
     for (const d of signals.directives) {
       logEvent(projectKey, { type: 'DISPATCH', target: d.target, prompt: d.prompt.slice(0, 200) });
       deps.handleDispatchItem({
         target: d.target,
-        prompt: d.prompt,
+        prompt: buildReactivePrompt(d.prompt, {
+          depth: rs.depth, maxDepth, completionSignal, workingMemory,
+        }),
         from: projectKey,
         _reactive: true,
         _reactive_project: projectKey,
@@ -1117,9 +1180,13 @@ function handleReactiveOutput(targetProject, output, config, deps) {
   const parentManifest = parentCwd ? loadProjectManifest(parentCwd) : null;
   const signal = parentManifest?.completion_signal || 'MISSION_COMPLETE';
   const summary = extractOutputSummary(output);
+  const parentWorkingMemory = loadWorkingMemory(parentKey, deps.metameDir);
   deps.handleDispatchItem({
     target: parentKey,
-    prompt: `[${targetProject} delivery]${verifierBlock}\n\n${summary}\n\nDecide next step. Use NEXT_DISPATCH or ${signal}.`,
+    prompt: buildReactivePrompt(
+      `[${targetProject} delivery]${verifierBlock}\n\n${summary}\n\nDecide next step.`,
+      { depth: rs.depth, maxDepth: parentManifestForDepth?.max_depth || rs.max_depth || 50, completionSignal: signal, workingMemory: parentWorkingMemory }
+    ),
     from: targetProject,
     _reactive: true,
     _reactive_project: parentKey,
@@ -1132,5 +1199,5 @@ module.exports = {
   parseReactiveSignals,
   reconcilePerpetualProjects,
   replayEventLog,
-  __test: { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, generateStateFile, loadProjectManifest, resolveProjectScripts, parseEventLog, buildRunningMemory, scanRelevantArtifacts, buildWorkingMemory, persistMemoryFiles, extractInlineFacts, extractOutputSummary, isReactiveExecutionActive },
+  __test: { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, generateStateFile, loadProjectManifest, resolveProjectScripts, parseEventLog, buildRunningMemory, scanRelevantArtifacts, buildWorkingMemory, persistMemoryFiles, extractInlineFacts, extractOutputSummary, isReactiveExecutionActive, loadWorkingMemory },
 };

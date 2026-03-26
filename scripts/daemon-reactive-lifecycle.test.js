@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { handleReactiveOutput, parseReactiveSignals, replayEventLog, __test } = require('./daemon-reactive-lifecycle');
-const { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, loadProjectManifest, resolveProjectScripts, generateStateFile, buildRunningMemory, scanRelevantArtifacts, buildWorkingMemory, persistMemoryFiles, extractInlineFacts, extractOutputSummary } = __test;
+const { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, loadProjectManifest, resolveProjectScripts, generateStateFile, buildRunningMemory, scanRelevantArtifacts, buildWorkingMemory, persistMemoryFiles, extractInlineFacts, extractOutputSummary, loadWorkingMemory } = __test;
 
 // ── parseReactiveSignals ──────────────────────────────────────
 
@@ -180,10 +180,64 @@ describe('handleReactiveOutput — reactive parent', () => {
     assert.equal(state.reactive.scientist.status, 'completed');
   });
 
-  it('ignores output with no signals', () => {
+  it('retries on first no-signal output (instead of silently ignoring)', () => {
     const { deps, dispatches } = makeDeps();
     handleReactiveOutput('scientist', 'Just some regular output', REACTIVE_CONFIG, deps);
-    assert.equal(dispatches.length, 0);
+    assert.equal(dispatches.length, 1, 'Should dispatch a retry');
+    assert.equal(dispatches[0].target, 'scientist');
+    assert.ok(dispatches[0].prompt.includes('REACTIVE MODE'), 'Retry prompt should be reactive-wrapped');
+    assert.ok(dispatches[0].prompt.includes('Warning:'), 'Should contain retry warning');
+    assert.equal(dispatches[0].new_session, true);
+    assert.equal(dispatches[0]._reactive, true);
+  });
+});
+
+describe('handleReactiveOutput — no-signal resilience', () => {
+  it('pauses after 3 consecutive no-signal outputs', () => {
+    const { deps, dispatches, notifications, state } = makeDeps();
+    // Set _no_signal_count to 2 (next one triggers pause at default maxRetries=3)
+    state.reactive.scientist = {
+      depth: 5, max_depth: 50, status: 'running',
+      pause_reason: '', last_signal: '', updated_at: '',
+      _no_signal_count: 2,
+    };
+    handleReactiveOutput('scientist', 'No signals here', REACTIVE_CONFIG, deps);
+    assert.equal(dispatches.length, 0, 'Should NOT dispatch on pause');
+    assert.equal(state.reactive.scientist.status, 'paused');
+    assert.equal(state.reactive.scientist.pause_reason, 'no_signal_repeated');
+    assert.equal(state.reactive.scientist._no_signal_count, 3);
+    assert.ok(notifications.length > 0, 'Should notify user about pause');
+  });
+
+  it('resets _no_signal_count on normal signal output', () => {
+    const { deps, state } = makeDeps();
+    state.reactive.scientist = {
+      depth: 5, max_depth: 50, status: 'running',
+      pause_reason: '', last_signal: '', updated_at: '',
+      _no_signal_count: 2,
+    };
+    handleReactiveOutput('scientist', 'NEXT_DISPATCH: sci_scout "do work"', REACTIVE_CONFIG, deps);
+    assert.equal(state.reactive.scientist._no_signal_count, 0, 'Count should reset to 0');
+  });
+
+  it('resets _no_signal_count on MISSION_COMPLETE', () => {
+    const { deps, state } = makeDeps();
+    state.reactive.scientist = {
+      depth: 5, max_depth: 50, status: 'running',
+      pause_reason: '', last_signal: '', updated_at: '',
+      _no_signal_count: 2,
+    };
+    handleReactiveOutput('scientist', 'MISSION_COMPLETE', REACTIVE_CONFIG, deps);
+    assert.equal(state.reactive.scientist._no_signal_count, 0);
+    assert.equal(state.reactive.scientist.status, 'completed');
+  });
+
+  it('wraps NEXT_DISPATCH prompts with buildReactivePrompt', () => {
+    const { deps, dispatches } = makeDeps();
+    handleReactiveOutput('scientist', 'NEXT_DISPATCH: sci_scout "search papers"', REACTIVE_CONFIG, deps);
+    assert.equal(dispatches.length, 1);
+    assert.ok(dispatches[0].prompt.includes('[REACTIVE MODE]'), 'Should be wrapped with reactive prompt');
+    assert.ok(dispatches[0].prompt.includes('search papers'), 'Should contain original prompt');
   });
 });
 
