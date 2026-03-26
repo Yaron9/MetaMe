@@ -1,6 +1,7 @@
 'use strict';
 
 const { resolveEngineModel } = require('./daemon-engine-runtime');
+const { rawChatId: extractOriginalChatId } = require('./core/thread-chat-id');
 
 function createCommandRouter(deps) {
   const {
@@ -232,7 +233,8 @@ function createCommandRouter(deps) {
       ...(config && config.imessage ? config.imessage.chat_agent_map : {}),
       ...(config && config.siri_bridge ? config.siri_bridge.chat_agent_map : {}),
     };
-    const mappedKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
+    const _rawChatId = extractOriginalChatId(chatIdStr);
+    const mappedKey = chatAgentMap[chatIdStr] || chatAgentMap[_rawChatId] || projectKeyFromVirtualChatId(chatIdStr);
     const mappedProject = mappedKey && config && config.projects ? config.projects[mappedKey] : null;
     const preferredEngine = String((mappedProject && mappedProject.engine) || getDefaultEngine()).toLowerCase();
     const state = loadState() || {};
@@ -488,6 +490,13 @@ function createCommandRouter(deps) {
     const workspaceDir = extractPathFromText(input);
     const hasWorkspacePath = !!workspaceDir;
 
+    // Exclude third-party product context — "智能体" about other companies is NOT about our agents
+    // Requires BOTH a company name AND agent-related keyword to trigger, avoiding false positives on generic verbs
+    const _hasThirdPartyName = /(阿里|百度|腾讯|字节|谷歌|google|openai|微软|microsoft|deepseek|豆包|通义|文心|kimi)/i.test(input);
+    const _hasAgentWord = /(智能体|agent|助手|机器人)/i.test(input);
+    const _isAboutOurAgents = /(我的|我们的|当前|这个群|这里的|metame)/i.test(input);
+    if (_hasThirdPartyName && _hasAgentWord && !_isAboutOurAgents) return false;
+
     const hasAgentContext = /(agent|智能体|工作区|人设|绑定|当前群|这个群|chat|workspace)/i.test(input);
     const wantsList = /(列出|查看|显示|有哪些|list|show)/i.test(input) && /(agent|智能体|工作区|绑定)/i.test(input);
     const wantsUnbind = /(解绑|取消绑定|断开绑定|unbind|unassign)/i.test(input) && hasAgentContext;
@@ -647,7 +656,9 @@ function createCommandRouter(deps) {
       ...(config.siri_bridge ? config.siri_bridge.chat_agent_map : {}),
     };
     const _chatIdStr = String(chatId);
+    const _rawChatId2 = extractOriginalChatId(_chatIdStr);
     const mappedKey = chatAgentMap[_chatIdStr] ||
+      chatAgentMap[_rawChatId2] ||
       projectKeyFromVirtualChatId(_chatIdStr);
     if (mappedKey && config.projects && config.projects[mappedKey]) {
       const proj = config.projects[mappedKey];
@@ -802,7 +813,8 @@ function createCommandRouter(deps) {
       ...(config.imessage ? config.imessage.chat_agent_map : {}),
       ...(config.siri_bridge ? config.siri_bridge.chat_agent_map : {}),
     };
-    const _isStrictChat = !!(_strictChatAgentMap[String(chatId)] || projectKeyFromVirtualChatId(String(chatId)));
+    const _rawChatId3 = extractOriginalChatId(String(chatId));
+    const _isStrictChat = !!(_strictChatAgentMap[String(chatId)] || _strictChatAgentMap[_rawChatId3] || projectKeyFromVirtualChatId(String(chatId)));
 
     // Nickname-only switch: bypass cooldown + budget (no Claude call)
     // Skipped for strict chats (fixed-agent groups)
