@@ -8,6 +8,10 @@
  * persistent preferences/identity signals, appends to buffer.
  */
 
+// Global safety net: hooks must NEVER crash or exit non-zero
+process.on('uncaughtException', () => process.exit(0));
+process.on('unhandledRejection', () => process.exit(0));
+
 const fs = require('fs');
 const path = require('path');
 const os = require('os');

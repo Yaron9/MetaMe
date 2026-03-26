@@ -19,6 +19,10 @@
 
 'use strict';
 
+// Global safety net: hooks must NEVER crash or exit non-zero
+process.on('uncaughtException', () => process.exit(0));
+process.on('unhandledRejection', () => process.exit(0));
+
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -59,8 +63,7 @@ function run(data) {
   let intentBlock = '';
   try {
     intentBlock = buildIntentHintBlock(prompt, config, projectKey);
-  } catch (e) {
-    process.stderr.write(`[intent-engine] registry: ${e.message}\n`);
+  } catch {
     return exit();
   }
   if (!intentBlock) return exit();
