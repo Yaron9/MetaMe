@@ -138,6 +138,7 @@ const {
   USAGE_RETENTION_DAYS_DEFAULT,
   normalizeUsageCategory,
 } = require('./usage-classifier');
+const { createAudit } = require('./core/audit');
 const { createTaskBoard } = require('./task-board');
 const taskEnvelope = require('./daemon-task-envelope');
 const { createAdminCommandHandler } = require('./daemon-admin-commands');
@@ -196,38 +197,22 @@ function getActiveProviderEnv() {
   try { return providerMod.buildActiveEnv(); } catch { return {}; }
 }
 
-// ---------------------------------------------------------
-// LOGGING
-// ---------------------------------------------------------
-let _logMaxSize = 1048576; // cached, refreshed on config reload
-function refreshLogMaxSize(cfg) {
-  _logMaxSize = (cfg && cfg.daemon && cfg.daemon.log_max_size) || 1048576;
-}
-
-function log(level, msg) {
-  const ts = new Date().toISOString();
-  const line = `[${ts}] [${level}] ${msg}\n`;
-  try {
-    // Rotate if over max size
-    if (fs.existsSync(LOG_FILE)) {
-      const stat = fs.statSync(LOG_FILE);
-      if (stat.size > _logMaxSize) {
-        const bakFile = LOG_FILE + '.bak';
-        if (fs.existsSync(bakFile)) fs.unlinkSync(bakFile);
-        fs.renameSync(LOG_FILE, bakFile);
-      }
-    }
-    fs.appendFileSync(LOG_FILE, line, 'utf8');
-  } catch {
-    // Last resort
-    process.stderr.write(line);
-  }
-  // When running as LaunchAgent (stdout redirected to file), mirror structured logs there too.
-  // This unifies daemon.log and daemon-npm-stdout.log into one source of truth.
-  if (!process.stdout.isTTY) {
-    process.stdout.write(line);
-  }
-}
+const {
+  refreshLogMaxSize,
+  log,
+  loadState,
+  saveState,
+  ensureUsageShape,
+  ensureStateShape,
+  pruneDailyUsage,
+} = createAudit({
+  fs,
+  logFile: LOG_FILE,
+  stateFile: STATE_FILE,
+  stdout: process.stdout,
+  stderr: process.stderr,
+  usageRetentionDaysDefault: USAGE_RETENTION_DAYS_DEFAULT,
+});
 
 const {
   cpExtractTimestamp,
@@ -334,149 +319,6 @@ function restoreConfig() {
     fs.copyFileSync(bak, CONFIG_FILE);
     config = loadConfig(); // eslint-disable-line no-undef
     return true;
-  }
-}
-
-let _cachedState = null;
-
-function ensureUsageShape(state) {
-  if (!state.usage || typeof state.usage !== 'object') state.usage = {};
-  if (!state.usage.categories || typeof state.usage.categories !== 'object') state.usage.categories = {};
-  if (!state.usage.daily || typeof state.usage.daily !== 'object') state.usage.daily = {};
-  const keepDays = Number(state.usage.retention_days);
-  state.usage.retention_days = Number.isFinite(keepDays) && keepDays >= 7
-    ? Math.floor(keepDays)
-    : USAGE_RETENTION_DAYS_DEFAULT;
-}
-
-function ensureStateShape(state) {
-  if (!state || typeof state !== 'object') return {
-    pid: null,
-    budget: { date: null, tokens_used: 0 },
-    tasks: {},
-    sessions: {},
-    started_at: null,
-    usage: { retention_days: USAGE_RETENTION_DAYS_DEFAULT, categories: {}, daily: {} },
-  };
-  if (!state.budget || typeof state.budget !== 'object') state.budget = { date: null, tokens_used: 0 };
-  if (typeof state.budget.tokens_used !== 'number') state.budget.tokens_used = Number(state.budget.tokens_used) || 0;
-  if (!Object.prototype.hasOwnProperty.call(state.budget, 'date')) state.budget.date = null;
-  if (!state.tasks || typeof state.tasks !== 'object') state.tasks = {};
-  if (!state.sessions || typeof state.sessions !== 'object') state.sessions = {};
-  ensureUsageShape(state);
-  return state;
-}
-
-function pruneDailyUsage(usage, todayIso) {
-  const keepDays = usage.retention_days || USAGE_RETENTION_DAYS_DEFAULT;
-  const cutoff = new Date(`${todayIso}T00:00:00.000Z`);
-  cutoff.setUTCDate(cutoff.getUTCDate() - (keepDays - 1));
-  const cutoffIso = cutoff.toISOString().slice(0, 10);
-  for (const day of Object.keys(usage.daily || {})) {
-    if (day < cutoffIso) delete usage.daily[day];
-  }
-}
-
-function _readStateFromDisk() {
-  try {
-    const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    return ensureStateShape(s);
-  } catch {
-    return ensureStateShape({
-      pid: null,
-      budget: { date: null, tokens_used: 0 },
-      tasks: {},
-      sessions: {},
-      started_at: null,
-    });
-  }
-}
-
-function loadState() {
-  if (!_cachedState) _cachedState = _readStateFromDisk();
-  return _cachedState;
-}
-
-function saveState(state) {
-  const next = ensureStateShape(state);
-  if (_cachedState && _cachedState !== next) {
-    const current = ensureStateShape(_cachedState);
-
-    const currentBudgetDate = String(current.budget.date || '');
-    const nextBudgetDate = String(next.budget.date || '');
-    const currentBudgetTokens = Math.max(0, Math.floor(Number(current.budget.tokens_used) || 0));
-    const nextBudgetTokens = Math.max(0, Math.floor(Number(next.budget.tokens_used) || 0));
-    if (currentBudgetDate && (!nextBudgetDate || currentBudgetDate > nextBudgetDate)) {
-      next.budget.date = currentBudgetDate;
-      next.budget.tokens_used = currentBudgetTokens;
-    } else if (currentBudgetDate && currentBudgetDate === nextBudgetDate) {
-      next.budget.tokens_used = Math.max(currentBudgetTokens, nextBudgetTokens);
-    }
-
-    const currentKeepDays = Number(current.usage.retention_days) || USAGE_RETENTION_DAYS_DEFAULT;
-    const nextKeepDays = Number(next.usage.retention_days) || USAGE_RETENTION_DAYS_DEFAULT;
-    next.usage.retention_days = Math.max(currentKeepDays, nextKeepDays);
-
-    for (const [category, curMeta] of Object.entries(current.usage.categories || {})) {
-      if (!next.usage.categories[category] || typeof next.usage.categories[category] !== 'object') {
-        next.usage.categories[category] = {};
-      }
-      const curTotal = Math.max(0, Math.floor(Number(curMeta && curMeta.total) || 0));
-      const nextTotal = Math.max(0, Math.floor(Number(next.usage.categories[category].total) || 0));
-      if (curTotal > nextTotal) next.usage.categories[category].total = curTotal;
-
-      const curUpdated = String(curMeta && curMeta.updated_at || '');
-      const nextUpdated = String(next.usage.categories[category].updated_at || '');
-      if (curUpdated && curUpdated > nextUpdated) next.usage.categories[category].updated_at = curUpdated;
-    }
-
-    for (const [day, curDayUsageRaw] of Object.entries(current.usage.daily || {})) {
-      const curDayUsage = (curDayUsageRaw && typeof curDayUsageRaw === 'object') ? curDayUsageRaw : {};
-      if (!next.usage.daily[day] || typeof next.usage.daily[day] !== 'object') {
-        next.usage.daily[day] = {};
-      }
-      const nextDayUsage = next.usage.daily[day];
-      for (const [key, curValue] of Object.entries(curDayUsage)) {
-        const curNum = Math.max(0, Math.floor(Number(curValue) || 0));
-        const nextNum = Math.max(0, Math.floor(Number(nextDayUsage[key]) || 0));
-        if (curNum > nextNum) nextDayUsage[key] = curNum;
-      }
-      const categorySum = Object.entries(nextDayUsage)
-        .filter(([key]) => key !== 'total')
-        .reduce((sum, [, value]) => sum + Math.max(0, Math.floor(Number(value) || 0)), 0);
-      nextDayUsage.total = Math.max(Math.max(0, Math.floor(Number(nextDayUsage.total) || 0)), categorySum);
-    }
-
-    const currentUsageUpdated = String(current.usage.updated_at || '');
-    const nextUsageUpdated = String(next.usage.updated_at || '');
-    if (currentUsageUpdated && currentUsageUpdated > nextUsageUpdated) {
-      next.usage.updated_at = currentUsageUpdated;
-    }
-
-    // Merge sessions: prevent concurrent agents from wiping each other's session data.
-    // When a stale state object is saved (e.g. after a long spawnClaudeStreaming await),
-    // preserve any sessions that were added/updated by other agents in the interim.
-    if (current.sessions && typeof current.sessions === 'object') {
-      if (!next.sessions || typeof next.sessions !== 'object') next.sessions = {};
-      for (const [key, curSession] of Object.entries(current.sessions)) {
-        if (!next.sessions[key]) {
-          // Session exists in cache but not in incoming state → preserve it
-          next.sessions[key] = curSession;
-        } else {
-          // Both have it → keep whichever has newer last_active
-          const curActive = Number(curSession && curSession.last_active) || 0;
-          const nextActive = Number(next.sessions[key] && next.sessions[key].last_active) || 0;
-          if (curActive > nextActive) next.sessions[key] = curSession;
-        }
-      }
-    }
-  }
-
-  _cachedState = next;
-  try {
-    fs.writeFileSync(STATE_FILE, JSON.stringify(next, null, 2), 'utf8');
-  } catch (e) {
-    log('ERROR', `Failed to save state: ${e.message}`);
   }
 }
 

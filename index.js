@@ -8,6 +8,7 @@ const path = require('path');
 const os = require('os');
 const { spawn, execSync } = require('child_process');
 const { sleepSync, findProcessesByPattern, killProcessTree, icon } = require('./scripts/platform');
+const { collectDeployGroups, collectSyntaxCheckFiles } = require('./scripts/deploy-manifest');
 
 // On Windows, resolve .cmd wrapper → actual Node.js entry and spawn node directly.
 // Completely bypasses cmd.exe, eliminating terminal flash.
@@ -477,20 +478,11 @@ function requestDaemonRestart({
 // Auto-deploy bundled scripts to ~/.metame/
 // IMPORTANT: daemon.yaml is USER CONFIG — never overwrite it. Only daemon-default.yaml (template) is synced.
 const scriptsDir = path.join(__dirname, 'scripts');
-// Auto-detect ALL runtime scripts: daemon-*.js + all other non-test, non-utility .js/.yaml/.sh files.
-// This prevents "missing module" crashes when new files are added without updating a manual list.
 const EXCLUDED_SCRIPTS = new Set(['sync-readme.js', 'test_daemon.js', 'daemon.yaml']);
-const BUNDLED_SCRIPTS = (() => {
-  try {
-    return fs.readdirSync(scriptsDir).filter((f) => {
-      if (EXCLUDED_SCRIPTS.has(f)) return false;
-      if (/\.test\.js$/.test(f)) return false;
-      return /\.(js|yaml|sh)$/.test(f);
-    });
-  } catch {
-    return [];
-  }
-})();
+const SCRIPT_DEPLOY_GROUPS = collectDeployGroups(fs, path, scriptsDir, {
+  excludedScripts: EXCLUDED_SCRIPTS,
+  includeNestedDirs: ['core'],
+});
 
 // Protect daemon.yaml: create backup before any sync operation
 const DAEMON_YAML_BACKUP = path.join(METAME_DIR, 'daemon.yaml.bak');
@@ -526,15 +518,14 @@ if (_isInWorktree) {
 // Catches bad merges and careless agent edits BEFORE they can crash the daemon.
 const { execSync: _execSync } = require('child_process');
 const syntaxErrors = [];
-for (const f of BUNDLED_SCRIPTS) {
-  if (!f.endsWith('.js')) continue;
-  const fp = path.join(scriptsDir, f);
+for (const fp of collectSyntaxCheckFiles(path, SCRIPT_DEPLOY_GROUPS)) {
   if (!fs.existsSync(fp)) continue;
   try {
     _execSync(`"${process.execPath}" -c "${fp}"`, { timeout: 5000, stdio: 'pipe', windowsHide: true });
   } catch (e) {
+    const label = path.relative(scriptsDir, fp);
     const msg = (e.stderr ? e.stderr.toString().trim() : e.message).split('\n')[0];
-    syntaxErrors.push(`${f}: ${msg}`);
+    syntaxErrors.push(`${label}: ${msg}`);
   }
 }
 
@@ -544,7 +535,11 @@ if (syntaxErrors.length > 0) {
   for (const err of syntaxErrors) console.error(`  ${err}`);
   console.error('Fix the errors before deploying. Daemon continues running with old code.');
 } else {
-  scriptsUpdated = syncDirFiles(scriptsDir, METAME_DIR, { fileList: BUNDLED_SCRIPTS });
+  scriptsUpdated = SCRIPT_DEPLOY_GROUPS.reduce((updated, group) => {
+    const destDir = group.destSubdir ? path.join(METAME_DIR, group.destSubdir) : METAME_DIR;
+    const changed = syncDirFiles(group.srcDir, destDir, { fileList: group.fileList });
+    return updated || changed;
+  }, false);
   if (scriptsUpdated) {
     console.log(`${icon("pkg")} Scripts synced to ~/.metame/.`);
   }

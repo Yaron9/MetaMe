@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { PassThrough } = require('stream');
+const { EventEmitter } = require('events');
 const { createClaudeEngine } = require('./daemon-claude-engine');
 
 function createEngineWithState(state) {
@@ -89,6 +90,94 @@ function createFakeCodexProcess(events) {
   return proc;
 }
 
+function createPersistentClaudeProcess() {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const stdin = new EventEmitter();
+  stdin.destroy = () => {};
+  const proc = new EventEmitter();
+  proc.writeCount = 0;
+  proc.failWriteOn = 0;
+  proc.emitErrorOnWrite = 0;
+  proc.writeErrorMessage = 'warm stdin failure';
+  stdin.write = () => {
+    proc.writeCount += 1;
+    if (proc.failWriteOn && proc.writeCount === proc.failWriteOn) {
+      throw new Error(proc.writeErrorMessage);
+    }
+    if (proc.emitErrorOnWrite && proc.writeCount === proc.emitErrorOnWrite) {
+      setImmediate(() => stdin.emit('error', new Error(proc.writeErrorMessage)));
+    }
+    return true;
+  };
+  stdin.end = () => {};
+  proc.stdout = stdout;
+  proc.stderr = stderr;
+  proc.stdin = stdin;
+  proc.pid = 4242;
+  proc.killed = false;
+  proc.exitCode = null;
+  proc.killSignals = [];
+  proc.kill = (signal) => { proc.killSignals.push(signal); };
+  proc.emitSuccess = () => {
+    stdout.write(`${JSON.stringify({ type: 'result', subtype: 'success', result: 'ok', usage: { input_tokens: 1, output_tokens: 1 }, session_id: 'warm-session' })}\n`);
+  };
+  proc.finish = (code = 0) => {
+    proc.exitCode = code;
+    proc.emit('close', code);
+  };
+  return proc;
+}
+
+function createTimeoutTestProcess(outputLines = []) {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const stdin = new PassThrough();
+  const proc = new EventEmitter();
+  proc.stdout = stdout;
+  proc.stderr = stderr;
+  proc.stdin = stdin;
+  proc.pid = 9898;
+  proc.killed = false;
+  proc.exitCode = null;
+  proc.killSignals = [];
+  proc.kill = (signal) => {
+    proc.killSignals.push(signal);
+    proc.killed = true;
+    setImmediate(() => {
+      proc.exitCode = 1;
+      proc.emit('close', 1);
+    });
+  };
+  if (outputLines.length > 0) {
+    setImmediate(() => {
+      for (const line of outputLines) stdout.write(`${line}\n`);
+    });
+  }
+  return proc;
+}
+
+function createStreamingStdinFailureProcess() {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const stdin = new EventEmitter();
+  stdin.write = () => true;
+  stdin.end = () => {};
+  stdin.destroy = () => {};
+  const proc = new EventEmitter();
+  proc.stdout = stdout;
+  proc.stderr = stderr;
+  proc.stdin = stdin;
+  proc.pid = 9797;
+  proc.killSignals = [];
+  proc.kill = (signal) => { proc.killSignals.push(signal); };
+  proc.finish = (code = 1) => {
+    proc.exitCode = code;
+    proc.emit('close', code);
+  };
+  return proc;
+}
+
 describe('daemon-claude-engine private helpers', () => {
   it('serializes session patches in order', async () => {
     const state = { sessions: {} };
@@ -105,6 +194,39 @@ describe('daemon-claude-engine private helpers', () => {
 
     await Promise.all([p1, p2]);
     assert.deepEqual(state.sessions.chat1.order, ['a', 'b']);
+  });
+
+  it('resolves streaming timeout defaults with a one-hour hard ceiling', () => {
+    const state = { sessions: {} };
+    const engine = createEngineWithState(state);
+
+    assert.deepEqual(
+      engine._private.resolveStreamingTimeouts({}),
+      {
+        idleMs: 5 * 60 * 1000,
+        toolMs: 25 * 60 * 1000,
+        ceilingMs: 60 * 60 * 1000,
+      }
+    );
+  });
+
+  it('preserves explicit zero-valued streaming timeout overrides', () => {
+    const state = { sessions: {} };
+    const engine = createEngineWithState(state);
+
+    assert.deepEqual(
+      engine._private.resolveStreamingTimeouts({ idleMs: 0, toolMs: 0, ceilingMs: 0 }),
+      { idleMs: 0, toolMs: 0, ceilingMs: 0 }
+    );
+  });
+
+  it('formats immediate timeout windows without rewriting them to one minute', () => {
+    const state = { sessions: {} };
+    const engine = createEngineWithState(state);
+
+    assert.equal(engine._private.formatTimeoutWindowLabel(0, 'idle'), '立即');
+    assert.equal(engine._private.formatTimeoutWindowLabel(0, 'tool'), '立即');
+    assert.equal(engine._private.formatTimeoutWindowLabel(60 * 1000, 'idle'), '1 分钟');
   });
 
   it('tracks message ids returned by file delivery helpers', () => {
@@ -1807,5 +1929,603 @@ describe('daemon-claude-engine private helpers', () => {
     assert.match(stdinPayloads[1], /Recent conversation context:/);
     assert.match(stdinPayloads[1], /Last user message: 十/);
     assert.match(stdinPayloads[1], /Last assistant reply: 收到，已记下/);
+  });
+
+  it('clears stale stdin error listeners when reusing a warm Claude process', async () => {
+    const state = { sessions: {} };
+    const child = createPersistentClaudeProcess();
+    let spawnCount = 0;
+    let storedWarm = null;
+    let releaseWarmCount = 0;
+    const warmPool = {
+      buildStreamMessage(input) { return input; },
+      storeWarm(_key, proc) { storedWarm = proc; },
+      releaseWarm() { releaseWarmCount += 1; },
+    };
+
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: () => {
+        spawnCount += 1;
+        return child;
+      },
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses: new Map(),
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({}),
+      loadState: () => state,
+      saveState: () => {},
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: () => null,
+      getSessionForEngine: () => null,
+      createSession: () => ({ id: 'sid', cwd: '/tmp', started: true, engine: 'claude' }),
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: () => null,
+      getCodexSessionPermissionMode: () => null,
+      getSessionRecentContext: () => null,
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getEngineRuntime: () => ({
+        name: 'claude',
+        binary: 'claude',
+        buildArgs: () => ['-p'],
+        buildEnv: () => ({ ...process.env }),
+        parseStreamEvent: (line) => {
+          const event = JSON.parse(line);
+          if (event.type === 'result' && event.subtype === 'success') {
+            return [{
+              type: 'done',
+              result: event.result,
+              usage: event.usage,
+              sessionId: event.session_id,
+            }];
+          }
+          return [];
+        },
+        classifyError: () => null,
+        killSignal: 'SIGTERM',
+        timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: 2000 },
+      }),
+    });
+
+    const firstPromise = engine.spawnClaudeStreaming(
+      ['-p'],
+      'first-input',
+      '/tmp',
+      null,
+      1000,
+      'chat-warm',
+      '',
+      '',
+      null,
+      null,
+      { persistent: true, warmPool, warmSessionKey: 'warm-key' }
+    );
+    child.emitSuccess();
+    const first = await firstPromise;
+    assert.equal(first.error, null);
+    assert.equal(spawnCount, 1);
+    assert.equal(storedWarm, child);
+    assert.equal(child.stdin.listenerCount('error'), 1);
+    assert.equal(child.stdout.listenerCount('data'), 1);
+    assert.equal(child.stderr.listenerCount('data'), 1);
+    assert.equal(child.listenerCount('close'), 1);
+    assert.equal(child.listenerCount('error'), 1);
+
+    child.emitErrorOnWrite = 2;
+    const secondPromise = engine.spawnClaudeStreaming(
+      ['-p'],
+      'second-input',
+      '/tmp',
+      null,
+      1000,
+      'chat-warm',
+      '',
+      '',
+      null,
+      null,
+      { persistent: true, warmChild: child, warmPool, warmSessionKey: 'warm-key' }
+    );
+    assert.equal(child.stdin.listenerCount('error'), 1);
+    assert.equal(child.stdout.listenerCount('data'), 1);
+    assert.equal(child.stderr.listenerCount('data'), 1);
+    assert.equal(child.listenerCount('close'), 1);
+    assert.equal(child.listenerCount('error'), 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    child.finish(1);
+    const second = await secondPromise;
+    assert.equal(second.error, 'warm stdin failure');
+    assert.equal(spawnCount, 1);
+    assert.deepEqual(child.killSignals, ['SIGTERM']);
+    assert.equal(releaseWarmCount, 1);
+  });
+
+  it('reports tool stalls differently from idle stalls on the streaming path', async () => {
+    const state = { sessions: {} };
+    const toolProc = createTimeoutTestProcess([JSON.stringify({ type: 'tool_use', toolName: 'Bash', toolInput: { command: 'sleep 1' } })]);
+    const idleProc = createTimeoutTestProcess([]);
+    let spawnSeq = 0;
+
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: () => {
+        spawnSeq += 1;
+        return spawnSeq === 1 ? toolProc : idleProc;
+      },
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses: new Map(),
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({}),
+      loadState: () => state,
+      saveState: () => {},
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: () => null,
+      getSessionForEngine: () => null,
+      createSession: () => ({ id: 'sid', cwd: '/tmp', started: true, engine: 'claude' }),
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: () => null,
+      getCodexSessionPermissionMode: () => null,
+      getSessionRecentContext: () => null,
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getEngineRuntime: () => ({
+        name: 'claude',
+        binary: 'claude',
+        buildArgs: () => ['-p'],
+        buildEnv: () => ({ ...process.env }),
+        parseStreamEvent: (line) => {
+          const event = JSON.parse(line);
+          return [event];
+        },
+        classifyError: () => null,
+        killSignal: 'SIGTERM',
+        timeouts: { idleMs: 20, toolMs: 60, ceilingMs: 0 },
+      }),
+    });
+
+    const toolResult = await engine.spawnClaudeStreaming(['-p'], 'tool', '/tmp', null, 1000, 'chat-tool');
+    const idleResult = await engine.spawnClaudeStreaming(['-p'], 'idle', '/tmp', null, 1000, 'chat-idle');
+
+    assert.match(toolResult.error, /工具执行.*超时/);
+    assert.match(idleResult.error, /无输出/);
+    assert.deepEqual(toolProc.killSignals, ['SIGTERM']);
+    assert.deepEqual(idleProc.killSignals, ['SIGTERM']);
+  });
+
+  it('delivers distinct timeout messages through askClaude for tool stalls and idle stalls', async () => {
+    const state = { sessions: {} };
+    let spawnSeq = 0;
+    const toolProc = createTimeoutTestProcess([JSON.stringify({ type: 'tool_use', toolName: 'Bash', toolInput: { command: 'sleep 1' } })]);
+    const idleProc = createTimeoutTestProcess([]);
+    const sent = [];
+
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: () => {
+        spawnSeq += 1;
+        return spawnSeq === 1 ? toolProc : idleProc;
+      },
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses: new Map(),
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({}),
+      loadState: () => state,
+      saveState: (next) => {
+        Object.assign(state, next);
+        state.sessions = next.sessions;
+      },
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: (chatId) => state.sessions[chatId] || null,
+      getSessionForEngine: () => null,
+      createSession: (chatId, cwd, _name, engineName) => {
+        const created = { id: `${chatId}-sid`, cwd, engine: engineName, started: false };
+        state.sessions[chatId] = created;
+        return created;
+      },
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: () => null,
+      getCodexSessionPermissionMode: () => null,
+      getSessionRecentContext: () => null,
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getEngineRuntime: () => ({
+        name: 'claude',
+        binary: 'claude',
+        buildArgs: () => ['-p'],
+        buildEnv: () => ({ ...process.env }),
+        parseStreamEvent: (line) => [JSON.parse(line)],
+        classifyError: () => null,
+        killSignal: 'SIGTERM',
+        timeouts: { idleMs: 20, toolMs: 60, ceilingMs: 0 },
+      }),
+    });
+
+    const bot = {
+      sendTyping: async () => {},
+      sendMessage: async (_chatId, text) => {
+        sent.push(String(text));
+        return { message_id: `msg-${sent.length}` };
+      },
+      sendMarkdown: async (_chatId, text) => {
+        sent.push(String(text));
+        return { message_id: `md-${sent.length}` };
+      },
+      sendCard: async (_chatId, card) => {
+        sent.push(String((card && card.body) || ''));
+        return { message_id: `card-${sent.length}` };
+      },
+      editMessage: async () => true,
+      deleteMessage: async () => true,
+    };
+
+    const toolResult = await engine.askClaude(bot, 'tool-chat', 'tool prompt', {}, false, 'ou_admin');
+    const idleResult = await engine.askClaude(bot, 'idle-chat', 'idle prompt', {}, false, 'ou_admin');
+
+    assert.equal(toolResult.ok, false);
+    assert.equal(idleResult.ok, false);
+    assert.ok(sent.some((text) => /工具执行.*超时/.test(text)));
+    assert.ok(sent.some((text) => /无输出/.test(text)));
+  });
+
+  it('fails fast on streaming stdin errors without waiting for close', async () => {
+    const state = { sessions: {} };
+    const activeProcesses = new Map();
+    const proc = createStreamingStdinFailureProcess();
+
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: () => proc,
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses,
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({}),
+      loadState: () => state,
+      saveState: () => {},
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: () => null,
+      getSessionForEngine: () => null,
+      createSession: () => ({ id: 'sid', cwd: '/tmp', started: true, engine: 'claude' }),
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: () => null,
+      getCodexSessionPermissionMode: () => null,
+      getSessionRecentContext: () => null,
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getEngineRuntime: () => ({
+        name: 'claude',
+        binary: 'claude',
+        buildArgs: () => ['-p'],
+        buildEnv: () => ({ ...process.env }),
+        parseStreamEvent: () => [],
+        classifyError: () => null,
+        killSignal: 'SIGTERM',
+        timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: 0 },
+      }),
+    });
+
+    const promise = engine.spawnClaudeStreaming(['-p'], 'stdin-fail', '/tmp', null, 1000, 'chat-stdin');
+    proc.stdin.emit('error', new Error('stream failed'));
+    const result = await promise;
+
+    assert.equal(result.error, 'stream failed');
+    assert.deepEqual(proc.killSignals, ['SIGTERM']);
+    assert.equal(activeProcesses.has('chat-stdin'), false);
+
+    proc.finish(1);
+  });
+
+  it('preserves collected streaming state on stdin failure', async () => {
+    const state = { sessions: {} };
+    const activeProcesses = new Map();
+    const proc = createStreamingStdinFailureProcess();
+
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: () => proc,
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses,
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({}),
+      loadState: () => state,
+      saveState: () => {},
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: () => null,
+      getSessionForEngine: () => null,
+      createSession: () => ({ id: 'sid', cwd: '/tmp', started: true, engine: 'claude' }),
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: () => null,
+      getCodexSessionPermissionMode: () => null,
+      getSessionRecentContext: () => null,
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getEngineRuntime: () => ({
+        name: 'claude',
+        binary: 'claude',
+        buildArgs: () => ['-p'],
+        buildEnv: () => ({ ...process.env }),
+        parseStreamEvent: (line) => [JSON.parse(line)],
+        classifyError: () => null,
+        killSignal: 'SIGTERM',
+        timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: 0 },
+      }),
+    });
+
+    const promise = engine.spawnClaudeStreaming(['-p'], 'stdin-fail', '/tmp/file.txt', null, 1000, 'chat-stdin');
+    proc.stdout.write(`${JSON.stringify({ type: 'session', sessionId: 'sess-1' })}\n`);
+    proc.stdout.write(`${JSON.stringify({ type: 'text', text: 'partial output' })}\n`);
+    proc.stdout.write(`${JSON.stringify({ type: 'tool_use', toolName: 'Write', toolInput: { file_path: '/tmp/out.txt' } })}\n`);
+    proc.stdin.emit('error', new Error('stream failed'));
+    const result = await promise;
+
+    assert.equal(result.error, 'stream failed');
+    assert.equal(result.output, 'partial output');
+    assert.deepEqual(result.files, ['/tmp/out.txt']);
+    assert.deepEqual(result.toolUsageLog, [{ tool: 'Write', context: 'out.txt' }]);
+    assert.equal(result.sessionId, 'sess-1');
+    assert.equal(activeProcesses.has('chat-stdin'), false);
+
+    proc.finish(1);
+  });
+
+  it('absorbs buffered unterminated streaming events before failing fast on stdin error', async () => {
+    const state = { sessions: {} };
+    const activeProcesses = new Map();
+    const proc = createStreamingStdinFailureProcess();
+
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: () => proc,
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses,
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({}),
+      loadState: () => state,
+      saveState: () => {},
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: () => null,
+      getSessionForEngine: () => null,
+      createSession: () => ({ id: 'sid', cwd: '/tmp', started: true, engine: 'claude' }),
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: () => null,
+      getCodexSessionPermissionMode: () => null,
+      getSessionRecentContext: () => null,
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getEngineRuntime: () => ({
+        name: 'claude',
+        binary: 'claude',
+        buildArgs: () => ['-p'],
+        buildEnv: () => ({ ...process.env }),
+        parseStreamEvent: (line) => [JSON.parse(line)],
+        classifyError: () => null,
+        killSignal: 'SIGTERM',
+        timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: 0 },
+      }),
+    });
+
+    const promise = engine.spawnClaudeStreaming(['-p'], 'stdin-fail', '/tmp/file.txt', null, 1000, 'chat-buffered');
+    proc.stdout.write(`${JSON.stringify({ type: 'session', sessionId: 'sess-buffered' })}\n`);
+    proc.stdout.write(`${JSON.stringify({ type: 'text', text: 'live output' })}\n`);
+    proc.stdout.write(`${JSON.stringify({ type: 'tool_use', toolName: 'Write', toolInput: { file_path: '/tmp/buffered.txt' } })}\n`);
+    proc.stdout.write(JSON.stringify({ type: 'tool_result' }));
+    proc.stdout.write(`\n${JSON.stringify({ type: 'done', result: 'ignored fallback', usage: { input_tokens: 1, output_tokens: 2 } })}`);
+    proc.stdout.write(`\n${JSON.stringify({ type: 'text', text: 'buffered tail' })}`);
+    proc.stdin.emit('error', new Error('buffered fail'));
+    const result = await promise;
+
+    assert.equal(result.error, 'buffered fail');
+    assert.equal(result.output, 'live output\n\nbuffered tail');
+    assert.deepEqual(result.files, ['/tmp/buffered.txt']);
+    assert.deepEqual(result.toolUsageLog, [{ tool: 'Write', context: 'buffered.txt' }]);
+    assert.deepEqual(result.usage, { input_tokens: 1, output_tokens: 2 });
+    assert.equal(result.sessionId, 'sess-buffered');
+    assert.equal(activeProcesses.has('chat-buffered'), false);
+
+    proc.finish(1);
+  });
+
+  it('does not re-arm watchdog timers when buffered events are absorbed during close cleanup', async () => {
+    const state = { sessions: {} };
+    const activeProcesses = new Map();
+    const proc = createStreamingStdinFailureProcess();
+    const logs = [];
+
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: () => proc,
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses,
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: (...args) => { logs.push(args.join(' ')); },
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({}),
+      loadState: () => state,
+      saveState: () => {},
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: () => null,
+      getSessionForEngine: () => null,
+      createSession: () => ({ id: 'sid', cwd: '/tmp', started: true, engine: 'claude' }),
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: () => null,
+      getCodexSessionPermissionMode: () => null,
+      getSessionRecentContext: () => null,
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getEngineRuntime: () => ({
+        name: 'claude',
+        binary: 'claude',
+        buildArgs: () => ['-p'],
+        buildEnv: () => ({ ...process.env }),
+        parseStreamEvent: (line) => [JSON.parse(line)],
+        classifyError: () => null,
+        killSignal: 'SIGTERM',
+        timeouts: { idleMs: 10, toolMs: 10, ceilingMs: 0 },
+      }),
+    });
+
+    const promise = engine.spawnClaudeStreaming(['-p'], 'close-buffered', '/tmp/file.txt', null, 1000, 'chat-close-buffered');
+    proc.stdout.write(JSON.stringify({ type: 'tool_use', toolName: 'Write', toolInput: { file_path: '/tmp/late.txt' } }));
+    proc.finish(0);
+    const result = await promise;
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    assert.equal(result.error, null);
+    assert.deepEqual(result.files, ['/tmp/late.txt']);
+    assert.deepEqual(result.toolUsageLog, [{ tool: 'Write', context: 'late.txt' }]);
+    assert.deepEqual(proc.killSignals, []);
+    assert.equal(logs.some((entry) => entry.includes('timeout for chatId chat-close-buffered')), false);
   });
 });

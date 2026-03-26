@@ -1,0 +1,26 @@
+id: unix-elegance-refactor
+title: MetaMe Unix Elegance Refactor
+branch: task-unix-elegance
+worktree: /tmp/metame-unix-elegance
+status: in_progress
+closed_lanes:
+  - packaging
+  - audit
+  - handoff
+current_lane: none
+workflow:
+  - implement
+  - test
+  - review
+  - fix
+  - retest
+  - log
+remaining_opportunities:
+  - agent-map-dry: 4 duplicate chat_agent_map merge blocks in askClaude (~20 lines saved)
+  - askClaude-decomposition: ~1300 line function could split into session-prep / memory-inject / error-handle phases
+  - memory-injection-extract: 120-line block in askClaude could become injectMemory(...)
+rules:
+  - edit only inside this worktree
+  - never edit plugin/scripts directly
+  - do not open the next cut until the current slice is reviewed clean
+  - update unix-elegance-log.md before ending a session
