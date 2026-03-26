@@ -81,6 +81,7 @@ function createClaudeEngine(deps) {
     getSessionName,
     writeSessionName,
     markSessionStarted,
+    stripThinkingSignatures,
     isEngineSessionValid,
     getCodexSessionSandboxProfile,
     getCodexSessionPermissionMode,
@@ -432,7 +433,7 @@ function createClaudeEngine(deps) {
 
   function isClaudeThinkingSignatureError(errMsg) {
     const msg = String(errMsg || '');
-    return msg.includes('Invalid signature') || msg.includes('thinking block');
+    return msg.includes('Invalid signature') && msg.includes('thinking block');
   }
 
   function formatClaudeResumeFallbackUserMessage(retryError) {
@@ -2357,13 +2358,26 @@ ${mentorRadarHint}
           return { ok: false, error: errMsg, errorCode };
         }
 
-        // If session not found / locked / thinking signature invalid — create new and retry once (Claude path)
+        // If session not found / locked / thinking signature invalid — try repair or create new and retry once (Claude path)
         const _isThinkingSignatureError = isClaudeThinkingSignatureError(errMsg);
         const _isSessionResumeFail = errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use') || _isThinkingSignatureError;
         if (runtime.name === 'claude' && _isSessionResumeFail) {
           const _reason = errMsg.includes('already in use') ? 'locked' : _isThinkingSignatureError ? 'thinking-signature-invalid' : 'not found';
-          log('WARN', `Session ${session.id} unusable (${_reason}), creating new`);
-          session = createSession(sessionChatId, effectiveCwd, '', runtime.name);
+
+          // For thinking signature errors, try to repair the session in-place first (preserve context)
+          let _repaired = false;
+          if (_isThinkingSignatureError && session.id) {
+            const stripped = stripThinkingSignatures(session.id);
+            if (stripped > 0) {
+              log('INFO', `Session ${session.id} repaired: stripped ${stripped} thinking signatures, retrying same session`);
+              _repaired = true;
+            }
+          }
+
+          if (!_repaired) {
+            log('WARN', `Session ${session.id} unusable (${_reason}), creating new`);
+            session = createSession(sessionChatId, effectiveCwd, '', runtime.name);
+          }
 
           const retryArgs = runtime.buildArgs({
             model,

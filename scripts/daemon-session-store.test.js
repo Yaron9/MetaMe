@@ -872,4 +872,113 @@ describe('daemon-session-store codex metadata', () => {
     assert.equal(sessions[0].sessionId, 'claude-session');
     assert.equal(logs.some(entry => entry.message.includes('scanCodexSessions') && entry.message.includes('state_5.sqlite')), true);
   });
+
+  it('stripThinkingSignatures removes signature from thinking blocks', () => {
+    const state = { sessions: {} };
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
+    const projectDir = path.join(tempHome, '.claude', 'projects', 'project-a');
+    fs.mkdirSync(projectDir, { recursive: true });
+    const sessionId = 'session-with-thinking';
+    const lines = [
+      JSON.stringify({ type: 'user', message: { content: 'hello' } }),
+      JSON.stringify({ type: 'assistant', message: { content: [
+        { type: 'thinking', thinking: 'let me think...', signature: 'EpkECkYICxgC...' },
+        { type: 'text', text: 'Here is my answer' },
+      ] } }),
+      JSON.stringify({ type: 'user', message: { content: 'follow up' } }),
+      JSON.stringify({ type: 'assistant', message: { content: [
+        { type: 'thinking', thinking: 'more thinking', signature: 'AaBbCcDdEe...' },
+        { type: 'text', text: 'Second answer' },
+      ] } }),
+    ];
+    fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), lines.join('\n') + '\n', 'utf8');
+
+    const store = createSessionStore({
+      fs, path, HOME: tempHome,
+      loadState: () => state,
+      saveState: () => {},
+      log: () => {},
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+
+    const stripped = store.stripThinkingSignatures(sessionId);
+    assert.equal(stripped, 2);
+
+    // Verify file content: thinking blocks should have no signature
+    const result = fs.readFileSync(path.join(projectDir, `${sessionId}.jsonl`), 'utf8');
+    const parsed = result.trim().split('\n').map(l => JSON.parse(l));
+    assert.equal(parsed.length, 4);
+    const block1 = parsed[1].message.content[0];
+    assert.equal(block1.type, 'thinking');
+    assert.equal(block1.thinking, 'let me think...');
+    assert.equal(block1.signature, undefined);
+    const block2 = parsed[3].message.content[0];
+    assert.equal(block2.type, 'thinking');
+    assert.equal(block2.signature, undefined);
+    // Non-thinking blocks untouched
+    assert.equal(parsed[1].message.content[1].text, 'Here is my answer');
+  });
+
+  it('stripThinkingSignatures returns 0 for session without thinking blocks', () => {
+    const state = { sessions: {} };
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
+    const projectDir = path.join(tempHome, '.claude', 'projects', 'project-a');
+    fs.mkdirSync(projectDir, { recursive: true });
+    const sessionId = 'session-no-thinking';
+    const lines = [
+      JSON.stringify({ type: 'user', message: { content: 'hello' } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }] } }),
+    ];
+    fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), lines.join('\n') + '\n', 'utf8');
+
+    const store = createSessionStore({
+      fs, path, HOME: tempHome,
+      loadState: () => state,
+      saveState: () => {},
+      log: () => {},
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+
+    const stripped = store.stripThinkingSignatures(sessionId);
+    assert.equal(stripped, 0);
+
+    // File should be unchanged (not rewritten)
+    const result = fs.readFileSync(path.join(projectDir, `${sessionId}.jsonl`), 'utf8');
+    assert.equal(result, lines.join('\n') + '\n');
+  });
+
+  it('stripThinkingSignatures handles malformed lines gracefully', () => {
+    const state = { sessions: {} };
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
+    const projectDir = path.join(tempHome, '.claude', 'projects', 'project-a');
+    fs.mkdirSync(projectDir, { recursive: true });
+    const sessionId = 'session-malformed';
+    const lines = [
+      'not valid json',
+      JSON.stringify({ type: 'assistant', message: { content: [
+        { type: 'thinking', thinking: 'ok', signature: 'sig123' },
+      ] } }),
+    ];
+    fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), lines.join('\n') + '\n', 'utf8');
+
+    const store = createSessionStore({
+      fs, path, HOME: tempHome,
+      loadState: () => state,
+      saveState: () => {},
+      log: () => {},
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+
+    const stripped = store.stripThinkingSignatures(sessionId);
+    assert.equal(stripped, 1);
+
+    const result = fs.readFileSync(path.join(projectDir, `${sessionId}.jsonl`), 'utf8');
+    const resultLines = result.trim().split('\n');
+    assert.equal(resultLines[0], 'not valid json'); // malformed line preserved
+    const parsed = JSON.parse(resultLines[1]);
+    assert.equal(parsed.message.content[0].signature, undefined);
+  });
 });

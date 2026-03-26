@@ -233,6 +233,51 @@ function createSessionStore(deps) {
     }
   }
 
+  /**
+   * Strip thinking block signatures from a session JSONL file.
+   * This allows resuming sessions after switching models (e.g. MiniMax → Claude)
+   * without hitting "Invalid signature in thinking block" errors.
+   * Returns the number of signatures stripped, or 0 if nothing changed.
+   */
+  function stripThinkingSignatures(sessionId) {
+    try {
+      const sessionFile = findSessionFile(sessionId);
+      if (!sessionFile) return 0;
+      const fileContent = fs.readFileSync(sessionFile, 'utf8');
+      const lines = fileContent.split('\n');
+      let changed = 0;
+      const patched = lines.map(line => {
+        if (!line.trim()) return line;
+        try {
+          const obj = JSON.parse(line);
+          const content = obj && obj.message && obj.message.content;
+          if (!Array.isArray(content)) return line;
+          let lineChanged = false;
+          for (const block of content) {
+            if (block && block.type === 'thinking' && block.signature) {
+              delete block.signature;
+              lineChanged = true;
+            }
+          }
+          if (lineChanged) {
+            changed++;
+            return JSON.stringify(obj);
+          }
+        } catch { /* skip malformed lines */ }
+        return line;
+      });
+      if (changed > 0) {
+        fs.writeFileSync(sessionFile, patched.join('\n'), 'utf8');
+        _sessionFileCache.delete(sessionId);
+        log('INFO', `stripThinkingSignatures: patched ${changed} lines in ${path.basename(sessionFile)}`);
+      }
+      return changed;
+    } catch (e) {
+      log('WARN', `stripThinkingSignatures failed: ${e.message}`);
+      return 0;
+    }
+  }
+
   function invalidateSessionCache() { _sessionCache = null; }
 
   // 监听 ~/.claude/projects 目录，手机端新建 session 后桌面端无需重启即可感知
@@ -1304,6 +1349,7 @@ function createSessionStore(deps) {
     findCodexSessionFile,
     clearSessionFileCache,
     truncateSessionToCheckpoint,
+    stripThinkingSignatures,
     watchSessionFiles,
     stopWatchingSessionFiles,
     listRecentSessions,
