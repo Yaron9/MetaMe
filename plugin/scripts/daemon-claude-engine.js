@@ -819,7 +819,7 @@ function createClaudeEngine(deps) {
       const writtenFiles = [];
       const toolUsageLog = [];
 
-      void timeoutMs;
+      void timeoutMs; // positional placeholder — actual timeouts come from engine config
       const engineTimeouts = resolveStreamingTimeouts(rt.timeouts || {});
       const IDLE_TIMEOUT_MS = engineTimeouts.idleMs;
       const TOOL_EXEC_TIMEOUT_MS = engineTimeouts.toolMs;
@@ -932,7 +932,6 @@ function createClaudeEngine(deps) {
             finalize(finalizePersistentStreamingTurn({
               watchdog,
               milestoneTimer,
-              clearActiveChildProcess,
               activeProcesses,
               saveActivePids,
               chatId,
@@ -941,7 +940,6 @@ function createClaudeEngine(deps) {
               child,
               observedSessionId,
               cwd,
-              buildStreamingResult,
               output: finalResult || '',
               files: writtenFiles,
               toolUsageLog,
@@ -950,17 +948,7 @@ function createClaudeEngine(deps) {
           }
           return;
         }
-        if (event.type === 'tool_result') {
-          const toolState = applyStreamingToolState(
-            { waitingForTool, toolCallCount, toolUsageLog, writtenFiles },
-            event,
-            { pathModule: path, maxEntries: 50 }
-          );
-          waitingForTool = toolState.waitingForTool;
-          if (!buffered && toolState.shouldUpdateWatchdog) watchdog.setWaitingForTool(toolState.watchdogWaiting);
-          return;
-        }
-        if (event.type !== 'tool_use') return;
+        if (event.type !== 'tool_result' && event.type !== 'tool_use') return;
 
         const toolState = applyStreamingToolState(
           { waitingForTool, toolCallCount, toolUsageLog, writtenFiles },
@@ -969,18 +957,17 @@ function createClaudeEngine(deps) {
         );
         toolCallCount = toolState.toolCallCount;
         waitingForTool = toolState.waitingForTool;
-        if (!buffered && toolState.shouldUpdateWatchdog) watchdog.setWaitingForTool(toolState.watchdogWaiting);
-        const { toolName, toolInput } = toolState;
         toolUsageLog.length = 0;
         toolUsageLog.push(...toolState.toolUsageLog);
         writtenFiles.length = 0;
         writtenFiles.push(...toolState.writtenFiles);
+        if (!buffered && toolState.shouldUpdateWatchdog) watchdog.setWaitingForTool(toolState.watchdogWaiting);
 
-        if (buffered) return;
+        if (event.type !== 'tool_use' || buffered) return;
 
         const overlay = buildToolOverlayPayload({
-          toolName,
-          toolInput,
+          toolName: toolState.toolName,
+          toolInput: toolState.toolInput,
           streamText: _streamText,
           lastStatusTime,
           now: Date.now(),
@@ -1029,15 +1016,13 @@ function createClaudeEngine(deps) {
         const stderrState = accumulateStreamingStderr(
           { stderr, classifiedError },
           chunk,
-          {
-            classifyError: rt.classifyError,
-            onApiError(apiChunk) {
-              log('ERROR', `[API-ERROR] ${rt.name} stderr for ${chatId}: ${apiChunk.slice(0, 300)}`);
-            },
-          }
+          { classifyError: rt.classifyError }
         );
         stderr = stderrState.stderr;
         classifiedError = stderrState.classifiedError;
+        if (stderrState.isApiError) {
+          log('ERROR', `[API-ERROR] ${rt.name} stderr for ${chatId}: ${chunk.slice(0, 300)}`);
+        }
       });
 
       if (child.stdin && typeof child.stdin.on === 'function') {
@@ -1066,22 +1051,20 @@ function createClaudeEngine(deps) {
         clearActiveChildProcess(activeProcesses, saveActivePids, chatId);
         finalize(resolveStreamingClosePayload({
           code,
-          finalResult,
-          finalUsage,
-          observedSessionId,
-          writtenFiles,
-          toolUsageLog,
+          streamState: { finalResult, finalUsage, observedSessionId, writtenFiles, toolUsageLog },
           wasAborted,
           abortReason,
           stdinFailureError,
           watchdog,
-          startTime,
-          idleTimeoutMs: IDLE_TIMEOUT_MS,
-          toolTimeoutMs: TOOL_EXEC_TIMEOUT_MS,
-          hardCeilingMs: HARD_CEILING_MS,
+          timeoutConfig: {
+            startTime,
+            idleTimeoutMs: IDLE_TIMEOUT_MS,
+            toolTimeoutMs: TOOL_EXEC_TIMEOUT_MS,
+            hardCeilingMs: HARD_CEILING_MS,
+            formatTimeoutWindowLabel,
+          },
           classifiedError,
           stderr,
-          formatTimeoutWindowLabel,
         }));
       });
 

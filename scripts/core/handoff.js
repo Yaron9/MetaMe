@@ -199,22 +199,14 @@ function buildStreamingResult(base, overrides = {}) {
 function resolveStreamingClosePayload(opts) {
   const {
     code,
-    finalResult,
-    finalUsage,
-    observedSessionId,
-    writtenFiles,
-    toolUsageLog,
+    streamState: { finalResult, finalUsage, observedSessionId, writtenFiles, toolUsageLog } = {},
     wasAborted = false,
     abortReason = '',
     stdinFailureError = null,
     watchdog,
-    startTime,
-    idleTimeoutMs,
-    toolTimeoutMs,
-    hardCeilingMs,
+    timeoutConfig: { startTime, idleTimeoutMs, toolTimeoutMs, hardCeilingMs, formatTimeoutWindowLabel } = {},
     classifiedError,
     stderr = '',
-    formatTimeoutWindowLabel,
   } = opts;
 
   const base = {
@@ -279,7 +271,6 @@ function resolveStreamingClosePayload(opts) {
 function accumulateStreamingStderr(state, chunk, opts = {}) {
   const {
     classifyError = null,
-    onApiError = null,
   } = opts;
 
   const nextState = {
@@ -287,9 +278,7 @@ function accumulateStreamingStderr(state, chunk, opts = {}) {
     classifiedError: state ? state.classifiedError || null : null,
   };
 
-  if (/\b(400|is not supported|model.*not found|invalid.*model)\b/i.test(chunk) && typeof onApiError === 'function') {
-    onApiError(chunk);
-  }
+  nextState.isApiError = /\b(400|is not supported|model.*not found|invalid.*model)\b/i.test(chunk);
   if (!nextState.classifiedError && typeof classifyError === 'function') {
     nextState.classifiedError = classifyError(chunk);
   }
@@ -444,7 +433,6 @@ function finalizePersistentStreamingTurn(opts = {}) {
   const {
     watchdog,
     milestoneTimer,
-    clearActiveChildProcess,
     activeProcesses,
     saveActivePids,
     chatId,
@@ -453,7 +441,6 @@ function finalizePersistentStreamingTurn(opts = {}) {
     child = null,
     observedSessionId = '',
     cwd = '',
-    buildStreamingResult,
     output = '',
     files = [],
     toolUsageLog = [],
@@ -462,9 +449,7 @@ function finalizePersistentStreamingTurn(opts = {}) {
 
   if (watchdog && typeof watchdog.stop === 'function') watchdog.stop();
   clearInterval(milestoneTimer);
-  if (typeof clearActiveChildProcess === 'function') {
-    clearActiveChildProcess(activeProcesses, saveActivePids, chatId);
-  }
+  clearActiveChildProcess(activeProcesses, saveActivePids, chatId);
   if (warmPool && warmSessionKey && child && !child.killed && child.exitCode === null) {
     warmPool.storeWarm(warmSessionKey, child, { sessionId: observedSessionId, cwd });
   }
@@ -757,13 +742,10 @@ function runAsyncCommand(opts) {
   });
 }
 
+// Public API — consumed by daemon-claude-engine.js
 module.exports = {
-  resolveNodeEntry,
   createPlatformSpawn,
   terminateChildProcess,
-  escalateKill,
-  resetReusableChildListeners,
-  destroyChildStdin,
   stopStreamingLifecycle,
   abortStreamingChildLifecycle,
   setActiveChildProcess,
@@ -775,16 +757,24 @@ module.exports = {
   splitStreamingStdoutChunk,
   buildStreamFlushPayload,
   buildToolOverlayPayload,
-  recordToolUsage,
   buildMilestoneOverlayPayload,
   finalizePersistentStreamingTurn,
   writeStreamingChildInput,
   parseStreamingEvents,
-  reduceStreamingWaitState,
-  applyStreamingTextResult,
   applyStreamingMetadata,
   applyStreamingToolState,
   applyStreamingContentState,
   createStreamingWatchdog,
   runAsyncCommand,
+
+  // Internal helpers — exported for unit test coverage only
+  _internal: {
+    resolveNodeEntry,
+    escalateKill,
+    resetReusableChildListeners,
+    destroyChildStdin,
+    recordToolUsage,
+    reduceStreamingWaitState,
+    applyStreamingTextResult,
+  },
 };

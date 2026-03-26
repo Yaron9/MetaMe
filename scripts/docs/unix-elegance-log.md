@@ -237,6 +237,22 @@
 - Review result: clean, no findings. Rename from `applyContentSideEffects` to `applyContentState` accepted per reviewer suggestion.
 - `applyStreamEvent(...)` is now ~90 lines: a thin event router delegating to pure helpers with side effects at the edge. No further extraction is profitable without over-engineering.
 
+## Session 50
+- Gate: `handoff` lane, Unix philosophy global review + fixes.
+- Review: comprehensive Unix-philosophy audit (not slice-level) of the entire 28-helper extraction.
+- Findings & fixes:
+  1. **Critical**: `finalizePersistentStreamingTurn` accepted sibling functions (`buildStreamingResult`, `clearActiveChildProcess`) as params → now calls them directly as module-level siblings.
+  2. **Critical**: `tool_use` / `tool_result` had asymmetric state destructuring → unified into single branch with consistent application.
+  3. **Important**: 7 internal helpers were publicly exported → moved to `_internal` namespace, public API trimmed from 29 to 22.
+  4. **Important**: `resolveStreamingClosePayload` had 16 flat params → grouped into `streamState` (5) + `timeoutConfig` (5) + top-level (5).
+  5. **Important**: `accumulateStreamingStderr` fired `onApiError` callback side-effect → now returns `isApiError` flag, consumer does its own logging.
+  6. **Noted but deferred**: `applyStreamingContentState`/`reduceStreamingWaitState` overlap (minor, same-module composition), `buildToolOverlayPayload` thickness (~60 lines, works fine), Chinese hardcoded in mechanism layer (locale-coupled but single-locale product), over-defensive null checks (verbose but safe).
+- Validation:
+  - `node --test scripts/core/handoff.test.js` — 61 pass, 0 fail
+  - `node --test scripts/daemon-claude-engine.test.js` — 38 pass, 0 fail
+  - `npx eslint scripts/daemon-claude-engine.js scripts/core/handoff*.js` — clean
+- Re-review result: all 5 fixes pass, no new issues introduced.
+
 ## Lane Closure: `handoff`
 - Sessions 32–49, 18 slices total.
 - Extracted 28 pure helpers from `daemon-claude-engine.js` into `scripts/core/handoff.js`:

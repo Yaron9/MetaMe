@@ -5,7 +5,9 @@ const assert = require('node:assert/strict');
 const path = require('path');
 
 const { EventEmitter } = require('events');
-const { resolveNodeEntry, createPlatformSpawn, terminateChildProcess, escalateKill, resetReusableChildListeners, destroyChildStdin, stopStreamingLifecycle, abortStreamingChildLifecycle, setActiveChildProcess, clearActiveChildProcess, acquireStreamingChild, buildStreamingResult, resolveStreamingClosePayload, accumulateStreamingStderr, splitStreamingStdoutChunk, buildStreamFlushPayload, buildToolOverlayPayload, recordToolUsage, buildMilestoneOverlayPayload, finalizePersistentStreamingTurn, writeStreamingChildInput, parseStreamingEvents, reduceStreamingWaitState, applyStreamingTextResult, applyStreamingMetadata, applyStreamingToolState, applyStreamingContentState, createStreamingWatchdog, runAsyncCommand } = require('./handoff');
+const handoff = require('./handoff');
+const { createPlatformSpawn, terminateChildProcess, stopStreamingLifecycle, abortStreamingChildLifecycle, setActiveChildProcess, clearActiveChildProcess, acquireStreamingChild, buildStreamingResult, resolveStreamingClosePayload, accumulateStreamingStderr, splitStreamingStdoutChunk, buildStreamFlushPayload, buildToolOverlayPayload, buildMilestoneOverlayPayload, finalizePersistentStreamingTurn, writeStreamingChildInput, parseStreamingEvents, applyStreamingMetadata, applyStreamingToolState, applyStreamingContentState, createStreamingWatchdog, runAsyncCommand } = handoff;
+const { resolveNodeEntry, escalateKill, resetReusableChildListeners, destroyChildStdin, recordToolUsage, reduceStreamingWaitState, applyStreamingTextResult } = handoff._internal;
 
 describe('resolveNodeEntry', () => {
   it('extracts the node entry from a cmd wrapper', () => {
@@ -345,25 +347,19 @@ describe('buildStreamingResult', () => {
 
 describe('resolveStreamingClosePayload', () => {
   const formatTimeoutWindowLabel = (timeoutMs, kind) => `${kind}:${timeoutMs}`;
+  const emptyStream = { finalResult: '', finalUsage: null, observedSessionId: '', writtenFiles: [], toolUsageLog: [] };
+  const defaultTimeout = { startTime: Date.now(), idleTimeoutMs: 1000, toolTimeoutMs: 1000, hardCeilingMs: 60000, formatTimeoutWindowLabel };
 
   it('maps interrupted merge-pause exits to the merge pause error code', () => {
     const result = resolveStreamingClosePayload({
       code: 1,
-      finalResult: 'partial',
-      finalUsage: null,
-      observedSessionId: 'sess',
-      writtenFiles: ['/tmp/out.txt'],
-      toolUsageLog: [{ tool: 'Write', context: 'out.txt' }],
+      streamState: { finalResult: 'partial', finalUsage: null, observedSessionId: 'sess', writtenFiles: ['/tmp/out.txt'], toolUsageLog: [{ tool: 'Write', context: 'out.txt' }] },
       wasAborted: true,
       abortReason: 'merge-pause',
       watchdog: { isKilled: () => false, getKilledReason: () => null },
-      startTime: Date.now(),
-      idleTimeoutMs: 1000,
-      toolTimeoutMs: 1000,
-      hardCeilingMs: 60000,
+      timeoutConfig: defaultTimeout,
       classifiedError: null,
       stderr: '',
-      formatTimeoutWindowLabel,
     });
 
     assert.equal(result.error, 'Paused for merge');
@@ -374,21 +370,13 @@ describe('resolveStreamingClosePayload', () => {
   it('keeps interrupted zero-exit payloads nullable when no output was produced', () => {
     const result = resolveStreamingClosePayload({
       code: 0,
-      finalResult: '',
-      finalUsage: null,
-      observedSessionId: '',
-      writtenFiles: [],
-      toolUsageLog: [],
+      streamState: emptyStream,
       wasAborted: true,
       abortReason: 'user-stop',
       watchdog: { isKilled: () => false, getKilledReason: () => null },
-      startTime: Date.now(),
-      idleTimeoutMs: 1000,
-      toolTimeoutMs: 1000,
-      hardCeilingMs: 60000,
+      timeoutConfig: defaultTimeout,
       classifiedError: null,
       stderr: '',
-      formatTimeoutWindowLabel,
     });
 
     assert.equal(result.output, null);
@@ -398,22 +386,14 @@ describe('resolveStreamingClosePayload', () => {
   it('marks watchdog timeouts as timedOut results', () => {
     const result = resolveStreamingClosePayload({
       code: 1,
-      finalResult: '',
-      finalUsage: null,
-      observedSessionId: '',
-      writtenFiles: [],
-      toolUsageLog: [],
+      streamState: emptyStream,
       wasAborted: false,
       abortReason: '',
       stdinFailureError: null,
       watchdog: { isKilled: () => true, getKilledReason: () => 'tool' },
-      startTime: Date.now() - 2 * 60000,
-      idleTimeoutMs: 1000,
-      toolTimeoutMs: 2000,
-      hardCeilingMs: 60000,
+      timeoutConfig: { startTime: Date.now() - 2 * 60000, idleTimeoutMs: 1000, toolTimeoutMs: 2000, hardCeilingMs: 60000, formatTimeoutWindowLabel },
       classifiedError: null,
       stderr: '',
-      formatTimeoutWindowLabel,
     });
 
     assert.equal(result.timedOut, true);
@@ -423,19 +403,11 @@ describe('resolveStreamingClosePayload', () => {
   it('prefers classified engine errors over raw stderr on non-zero exit', () => {
     const result = resolveStreamingClosePayload({
       code: 2,
-      finalResult: '',
-      finalUsage: null,
-      observedSessionId: '',
-      writtenFiles: [],
-      toolUsageLog: [],
+      streamState: emptyStream,
       watchdog: { isKilled: () => false, getKilledReason: () => null },
-      startTime: Date.now(),
-      idleTimeoutMs: 1000,
-      toolTimeoutMs: 1000,
-      hardCeilingMs: 60000,
+      timeoutConfig: defaultTimeout,
       classifiedError: { message: 'friendly message', code: 'EXEC_FAILURE' },
       stderr: 'raw stderr',
-      formatTimeoutWindowLabel,
     });
 
     assert.equal(result.error, 'friendly message');
@@ -464,18 +436,24 @@ describe('accumulateStreamingStderr', () => {
     assert.deepEqual(second.classifiedError, { message: 'classified:model not found', code: 'EXEC_FAILURE' });
   });
 
-  it('reports API-looking stderr chunks through the callback', () => {
-    const seen = [];
+  it('flags API-looking stderr chunks via isApiError', () => {
     const result = accumulateStreamingStderr(
       { stderr: '', classifiedError: null },
       '400 invalid model request',
-      {
-        onApiError: (chunk) => { seen.push(chunk); },
-      }
+      {}
     );
 
     assert.equal(result.stderr, '400 invalid model request');
-    assert.deepEqual(seen, ['400 invalid model request']);
+    assert.equal(result.isApiError, true);
+  });
+
+  it('does not flag non-API stderr as isApiError', () => {
+    const result = accumulateStreamingStderr(
+      { stderr: '', classifiedError: null },
+      'normal debug output',
+      {}
+    );
+    assert.equal(result.isApiError, false);
   });
 });
 
@@ -644,7 +622,6 @@ describe('finalizePersistentStreamingTurn', () => {
     const result = finalizePersistentStreamingTurn({
       watchdog: { stop() { stopped = true; } },
       milestoneTimer: timer,
-      clearActiveChildProcess,
       activeProcesses: active,
       saveActivePids: () => { saveCount += 1; },
       chatId: 'chat-1',
@@ -655,7 +632,6 @@ describe('finalizePersistentStreamingTurn', () => {
       child,
       observedSessionId: 'sess-1',
       cwd: '/tmp/project',
-      buildStreamingResult,
       output: 'ok',
       files: ['/tmp/out.txt'],
       toolUsageLog: [{ tool: 'Write', context: 'out.txt' }],
