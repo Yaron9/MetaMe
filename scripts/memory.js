@@ -186,7 +186,7 @@ function searchMemoryItems(query, { kind = null, scope = null, project = null, s
       .map(t => '"' + t.replace(/"/g, '') + '"').join(' ');
     const where = conditions.length > 0 ? `AND ${conditions.join(' AND ')}` : '';
     const sql = `
-      SELECT mi.*, fts.rank AS fts_rank
+      SELECT mi.*, (-fts.rank / (1.0 + ABS(fts.rank))) AS fts_rank
       FROM memory_items_fts fts
       JOIN memory_items mi ON mi.rowid = fts.rowid
       WHERE memory_items_fts MATCH ? ${where}
