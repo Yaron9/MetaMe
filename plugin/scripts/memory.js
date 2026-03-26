@@ -1,26 +1,20 @@
 #!/usr/bin/env node
 
 /**
- * memory.js — MetaMe Unified Memory Store (v2)
+ * memory.js — MetaMe Lightweight Session Memory
  *
- * Single table: memory_items (kind: profile|convention|episode|insight)
- * SQLite + FTS5 trigram search, Node.js native (node:sqlite), zero deps.
+ * SQLite + FTS5 keyword search, Node.js native (node:sqlite), zero deps.
+ * Stores distilled session summaries for cross-session recall.
  *
  * DB: ~/.metame/memory.db
  *
- * v2 API:
- *   saveMemoryItem(item)
- *   searchMemoryItems(query, opts)
- *   promoteItem(id)
- *   archiveItem(id, supersededById?)
- *   bumpSearchCount(id)
- *   readWorkingMemory(agentKey?)
- *   assembleContext({ query, scope, budget })
- *
- * v1 adapters (backward-compatible, route to v2 internally):
- *   saveSession, saveFacts, saveFactLabels,
- *   searchFacts, searchFactsAsync, searchSessions,
- *   recentSessions, stats
+ * API:
+ *   saveSession({ sessionId, project, scope, summary, keywords, mood })
+ *   searchSessions(query, { limit, project, scope })
+ *   recentSessions({ limit, project, scope })
+ *   getSession(sessionId)
+ *   stats()
+ *   close()
  */
 
 'use strict';
@@ -30,10 +24,17 @@ const os = require('os');
 const fs = require('fs');
 
 const DB_PATH = path.join(os.homedir(), '.metame', 'memory.db');
-const METAME_DIR = path.join(os.homedir(), '.metame');
-const WORKING_MEMORY_DIR = path.join(METAME_DIR, 'memory', 'now');
 
+/** Minimal structured logger. level: 'INFO' | 'WARN' | 'ERROR' */
+function log(level, msg) {
+  const ts = new Date().toISOString();
+  process.stderr.write(`${ts} [${level}] ${msg}\n`);
+}
+
+// Lazy-init: only open DB when first called
 let _db = null;
+// Counts external callers that have called acquire() but not yet release().
+// Internal helpers (getDb, _trackSearch, etc.) do NOT affect this counter.
 let _refCount = 0;
 
 function getDb() {
@@ -48,435 +49,951 @@ function getDb() {
   _db.exec('PRAGMA journal_mode = WAL');
   _db.exec('PRAGMA busy_timeout = 3000');
 
+  // Core table
   _db.exec(`
-    CREATE TABLE IF NOT EXISTS memory_items (
-      id              TEXT PRIMARY KEY,
-      kind            TEXT NOT NULL,
-      state           TEXT NOT NULL DEFAULT 'candidate',
-      title           TEXT,
-      content         TEXT NOT NULL,
-      summary         TEXT,
-      confidence      REAL DEFAULT 0.5,
-      project         TEXT DEFAULT '*',
-      scope           TEXT,
-      task_key        TEXT,
-      session_id      TEXT,
-      agent_key       TEXT,
-      supersedes_id   TEXT,
-      source_type     TEXT,
-      source_id       TEXT,
-      search_count    INTEGER DEFAULT 0,
-      last_searched_at TEXT,
-      tags            TEXT DEFAULT '[]',
-      created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    CREATE TABLE IF NOT EXISTS sessions (
+      id         TEXT PRIMARY KEY,
+      project    TEXT NOT NULL,
+      scope      TEXT DEFAULT NULL,
+      summary    TEXT NOT NULL,
+      keywords   TEXT DEFAULT '',
+      mood       TEXT DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      token_cost INTEGER DEFAULT 0
     )
   `);
 
+  // FTS5 index for keyword search over summary + keywords
   try {
     _db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS memory_items_fts USING fts5(
-        title, content, tags,
-        content=memory_items, content_rowid=rowid,
+      CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
+        summary, keywords, project,
+        content='sessions',
+        content_rowid='rowid',
+        tokenize='trigram'
+      )
+    `);
+  } catch {
+    // FTS table may already exist with different schema on upgrade
+  }
+
+  // Triggers to keep FTS in sync
+  const triggers = [
+    `CREATE TRIGGER IF NOT EXISTS sessions_ai AFTER INSERT ON sessions BEGIN
+       INSERT INTO sessions_fts(rowid, summary, keywords, project)
+       VALUES (new.rowid, new.summary, new.keywords, new.project);
+     END`,
+    `CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN
+       INSERT INTO sessions_fts(sessions_fts, rowid, summary, keywords, project)
+       VALUES ('delete', old.rowid, old.summary, old.keywords, old.project);
+     END`,
+    `CREATE TRIGGER IF NOT EXISTS sessions_au AFTER UPDATE ON sessions BEGIN
+       INSERT INTO sessions_fts(sessions_fts, rowid, summary, keywords, project)
+       VALUES ('delete', old.rowid, old.summary, old.keywords, old.project);
+       INSERT INTO sessions_fts(rowid, summary, keywords, project)
+       VALUES (new.rowid, new.summary, new.keywords, new.project);
+     END`,
+  ];
+  for (const t of triggers) {
+    try { _db.exec(t); } catch { /* trigger may already exist */ }
+  }
+
+  // Backward-compatible migration for old DBs without `scope`
+  try { _db.exec('ALTER TABLE sessions ADD COLUMN scope TEXT DEFAULT NULL'); } catch { }
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_scope ON sessions(scope)'); } catch { }
+
+
+  // ── Facts table: atomic knowledge triples ──
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS facts (
+      id           TEXT PRIMARY KEY,
+      entity       TEXT NOT NULL,
+      relation     TEXT NOT NULL,
+      value        TEXT NOT NULL,
+      confidence   TEXT NOT NULL DEFAULT 'medium',
+      source_type  TEXT NOT NULL DEFAULT 'session',
+      source_id    TEXT,
+      project      TEXT NOT NULL DEFAULT '*',
+      scope        TEXT DEFAULT NULL,
+      tags         TEXT DEFAULT '[]',
+      created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      superseded_by TEXT
+    )
+  `);
+
+  // Optional concept label side-table (non-invasive, no ALTER on facts schema)
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS fact_labels (
+      fact_id     TEXT NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+      label       TEXT NOT NULL,
+      domain      TEXT,
+      created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (fact_id, label)
+    )
+  `);
+
+  // FTS5 index for facts (separate from sessions_fts, zero compatibility risk)
+  try {
+    _db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
+        entity, relation, value, tags,
+        content='facts',
+        content_rowid='rowid',
         tokenize='trigram'
       )
     `);
   } catch { /* already exists */ }
 
-  const miTriggers = [
-    `CREATE TRIGGER IF NOT EXISTS mi_ai AFTER INSERT ON memory_items BEGIN
-       INSERT INTO memory_items_fts(rowid, title, content, tags)
-       VALUES (new.rowid, new.title, new.content, new.tags);
+  // Triggers to keep facts_fts in sync
+  const factTriggers = [
+    `CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
+       INSERT INTO facts_fts(rowid, entity, relation, value, tags)
+       VALUES (new.rowid, new.entity, new.relation, new.value, new.tags);
      END`,
-    `CREATE TRIGGER IF NOT EXISTS mi_ad AFTER DELETE ON memory_items BEGIN
-       INSERT INTO memory_items_fts(memory_items_fts, rowid, title, content, tags)
-       VALUES ('delete', old.rowid, old.title, old.content, old.tags);
+    `CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
+       INSERT INTO facts_fts(facts_fts, rowid, entity, relation, value, tags)
+       VALUES ('delete', old.rowid, old.entity, old.relation, old.value, old.tags);
      END`,
-    `CREATE TRIGGER IF NOT EXISTS mi_au AFTER UPDATE ON memory_items BEGIN
-       INSERT INTO memory_items_fts(memory_items_fts, rowid, title, content, tags)
-       VALUES ('delete', old.rowid, old.title, old.content, old.tags);
-       INSERT INTO memory_items_fts(rowid, title, content, tags)
-       VALUES (new.rowid, new.title, new.content, new.tags);
+    `CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
+       INSERT INTO facts_fts(facts_fts, rowid, entity, relation, value, tags)
+       VALUES ('delete', old.rowid, old.entity, old.relation, old.value, old.tags);
+       INSERT INTO facts_fts(rowid, entity, relation, value, tags)
+       VALUES (new.rowid, new.entity, new.relation, new.value, new.tags);
      END`,
   ];
-  for (const t of miTriggers) {
+  for (const t of factTriggers) {
     try { _db.exec(t); } catch { /* trigger may already exist */ }
   }
 
-  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_kind_state ON memory_items(kind, state)'); } catch { }
-  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_project ON memory_items(project)'); } catch { }
-  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_scope ON memory_items(scope)'); } catch { }
-  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_supersedes ON memory_items(supersedes_id)'); } catch { }
+  // Indexes
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_entity  ON facts(entity)'); } catch { }
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_entity_relation ON facts(entity, relation)'); } catch { }
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_project ON facts(project)'); } catch { }
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_fact_labels_label ON fact_labels(label)'); } catch { }
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_fact_labels_domain ON fact_labels(domain)'); } catch { }
+
+  // Backward-compatible migration for old DBs without `scope`
+  try { _db.exec('ALTER TABLE facts ADD COLUMN scope TEXT DEFAULT NULL'); } catch { }
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_facts_scope   ON facts(scope)'); } catch { }
+
+  // Search frequency tracking: counts how many times a fact appeared in search results.
+  // This is a RELEVANCE PROXY, not a usefulness score — "searched" ≠ "actually helpful".
+  // Renamed from recall_count (was ambiguous). Migration copies existing data forward.
+  try { _db.exec('ALTER TABLE facts ADD COLUMN recall_count INTEGER DEFAULT 0'); } catch { }
+  try { _db.exec('ALTER TABLE facts ADD COLUMN search_count INTEGER DEFAULT 0'); } catch { }
+  try { _db.exec('ALTER TABLE facts ADD COLUMN last_searched_at TEXT'); } catch { }
+  // One-time migration: copy recall_count → search_count for existing rows
+  try { _db.exec('UPDATE facts SET search_count = recall_count WHERE recall_count > 0 AND search_count = 0'); } catch { }
+
+  // conflict_status: 'OK' (default) | 'CONFLICT' — set by _detectConflict for non-stateful relations
+  try { _db.exec("ALTER TABLE facts ADD COLUMN conflict_status TEXT NOT NULL DEFAULT 'OK'"); } catch { }
 
   return _db;
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// v2 Core API
-// ═══════════════════════════════════════════════════════════════════
-
-const memoryModel = require('./core/memory-model');
-
-function generateMemoryId() {
-  return `mi_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function saveMemoryItem(item) {
-  if (!item || !item.content) throw new Error('saveMemoryItem requires content');
+/**
+ * Save a distilled session summary.
+ *
+ * @param {object} opts
+ * @param {string} opts.sessionId  - Claude session ID (unique key)
+ * @param {string} opts.project    - Project key (e.g. 'metame', 'desktop')
+ * @param {string|null} [opts.scope] - Stable workspace scope ID (e.g. proj_<hash>)
+ * @param {string} opts.summary    - Distilled summary text
+ * @param {string} [opts.keywords] - Comma-separated keywords for search boost
+ * @param {string} [opts.mood]     - User mood/sentiment detected
+ * @param {number} [opts.tokenCost] - Approximate token cost of the session
+ * @returns {{ ok: boolean, id: string }}
+ */
+function saveSession({ sessionId, project, scope = null, summary, keywords = '', mood = '', tokenCost = 0 }) {
+  if (!sessionId || !project || !summary) {
+    throw new Error('saveSession requires sessionId, project, summary');
+  }
+  const normalizedProject = project === '*' ? '*' : String(project || 'unknown');
+  const normalizedScope = normalizedProject === '*'
+    ? '*'
+    : (scope && typeof scope === 'string' ? scope : null);
   const db = getDb();
-  const id = item.id || generateMemoryId();
   const stmt = db.prepare(`
-    INSERT INTO memory_items (id, kind, state, title, content, summary, confidence,
-      project, scope, task_key, session_id, agent_key, supersedes_id,
-      source_type, source_id, search_count, last_searched_at, tags,
-      created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    INSERT INTO sessions (id, project, scope, summary, keywords, mood, token_cost)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
-      kind=excluded.kind, state=excluded.state, title=excluded.title,
-      content=excluded.content, summary=excluded.summary, confidence=excluded.confidence,
-      project=excluded.project, scope=excluded.scope, task_key=excluded.task_key,
-      session_id=excluded.session_id, agent_key=excluded.agent_key,
-      supersedes_id=excluded.supersedes_id, source_type=excluded.source_type,
-      source_id=excluded.source_id, tags=excluded.tags,
-      updated_at=datetime('now')
+      project = excluded.project,
+      scope = excluded.scope,
+      summary = excluded.summary,
+      keywords = excluded.keywords,
+      mood = excluded.mood,
+      token_cost = excluded.token_cost
   `);
   stmt.run(
-    id,
-    item.kind || 'insight',
-    item.state || 'candidate',
-    item.title || null,
-    item.content.slice(0, 10000),
-    item.summary || null,
-    typeof item.confidence === 'number' ? item.confidence : 0.5,
-    item.project || '*',
-    item.scope || null,
-    item.task_key || null,
-    item.session_id || null,
-    item.agent_key || null,
-    item.supersedes_id || null,
-    item.source_type || null,
-    item.source_id || null,
-    item.search_count || 0,
-    item.last_searched_at || null,
-    typeof item.tags === 'string' ? item.tags : JSON.stringify(Array.isArray(item.tags) ? item.tags : []),
+    sessionId,
+    normalizedProject,
+    normalizedScope,
+    summary.slice(0, 10000),
+    keywords.slice(0, 1000),
+    mood.slice(0, 100),
+    tokenCost
   );
-  return { ok: true, id };
+  return { ok: true, id: sessionId };
 }
 
-function searchMemoryItems(query, { kind = null, scope = null, project = null, state = 'active', limit = 20 } = {}) {
+// Relations with "current state" semantics: new value replaces old.
+// Historical relations (tech_decision, bug_lesson, arch_convention, project_milestone) keep all versions.
+const STATEFUL_RELATIONS = new Set(['config_fact', 'config_change', 'workflow_rule']);
+
+/**
+ * Save atomic facts extracted from a session.
+ *
+ * @param {string} sessionId - Source session ID
+ * @param {string} project   - Project key ('metame', 'desktop', '*' for global)
+ * @param {Array}  facts     - Array of { entity, relation, value, confidence, tags }
+ * @param {object} [opts]
+ * @param {string|null} [opts.scope] - Stable workspace scope ID (e.g. proj_<hash>)
+ * @returns {{ saved: number, skipped: number, superseded: number }}
+ */
+function saveFacts(sessionId, project, facts, { scope = null } = {}) {
+  if (!Array.isArray(facts) || facts.length === 0) return { saved: 0, skipped: 0, superseded: 0 };
   const db = getDb();
-  const conditions = [];
-  const params = [];
+  const normalizedProject = project === '*' ? '*' : String(project || 'unknown');
+  const fallbackSessionScope = (() => {
+    const sid = String(sessionId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24);
+    return sid ? `sess_${sid}` : null;
+  })();
+  const normalizedScope = normalizedProject === '*'
+    ? '*'
+    : (scope && typeof scope === 'string' ? scope : (normalizedProject === 'unknown' ? fallbackSessionScope : null));
 
-  if (state) { conditions.push('mi.state = ?'); params.push(state); }
-  if (kind) { conditions.push('mi.kind = ?'); params.push(kind); }
-  if (project && scope) {
-    conditions.push(`((mi.scope = ? OR mi.scope = '*') OR (mi.scope IS NULL AND (mi.project = ? OR mi.project = '*')))`);
-    params.push(scope, project);
-  } else if (scope) {
-    conditions.push(`(mi.scope = ? OR mi.scope = '*')`);
-    params.push(scope);
-  } else if (project) {
-    conditions.push(`(mi.project = ? OR mi.project = '*')`);
-    params.push(project);
+  let dedupScopeSql = '';
+  let dedupScopeParams = [];
+  if (normalizedScope === '*') {
+    dedupScopeSql = `((scope = '*') OR (scope IS NULL AND project = '*'))`;
+  } else if (normalizedScope) {
+    dedupScopeSql = `((scope = ?) OR (scope = '*') OR (scope IS NULL AND project IN (?, '*')))`;
+    dedupScopeParams = [normalizedScope, normalizedProject];
+  } else {
+    dedupScopeSql = `(project IN (?, '*'))`;
+    dedupScopeParams = [normalizedProject];
   }
 
-  if (query && query.trim()) {
-    const sanitized = query.trim().split(/\s+/)
-      .map(t => '"' + t.replace(/"/g, '') + '"').join(' ');
-    const where = conditions.length > 0 ? `AND ${conditions.join(' AND ')}` : '';
-    const sql = `
-      SELECT mi.*, fts.rank AS fts_rank
-      FROM memory_items_fts fts
-      JOIN memory_items mi ON mi.rowid = fts.rowid
-      WHERE memory_items_fts MATCH ? ${where}
-      ORDER BY fts.rank
-      LIMIT ?
-    `;
+  const existsDup = db.prepare(`
+    SELECT 1 AS ok
+    FROM facts
+    WHERE entity = ? AND relation = ? AND substr(value, 1, 50) = ?
+      AND ${dedupScopeSql}
+    LIMIT 1
+  `);
+
+  const insert = db.prepare(`
+    INSERT INTO facts (id, entity, relation, value, confidence, source_type, source_id, project, scope, tags, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    ON CONFLICT(id) DO NOTHING
+  `);
+
+  let saved = 0;
+  let skipped = 0;
+  let superseded = 0;
+  let conflicts = 0;
+  const savedFacts = [];
+  const batchDedup = new Set();
+
+  for (const f of facts) {
+    // Basic validation
+    if (!f.entity || !f.relation || !f.value) { skipped++; continue; }
+    if (f.value.length < 20 || f.value.length > 300) { skipped++; continue; }
+
+    // Dedup: same entity+relation with similar value prefix
+    const dupKey = `${f.entity}::${f.relation}`;
+    const prefix = f.value.slice(0, 50);
+    const dedupKey = `${dupKey}::${prefix}`;
+    const isBatchDup = batchDedup.has(dedupKey);
+    const dbDup = existsDup.get(f.entity, f.relation, prefix, ...dedupScopeParams);
+    const isDup = isBatchDup || !!(dbDup && dbDup.ok === 1);
+    if (isDup) { skipped++; continue; }
+
+    const id = `f-${sessionId.slice(0, 8)}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const tags = JSON.stringify(Array.isArray(f.tags) ? f.tags.slice(0, 3) : []);
     try {
-      const rows = db.prepare(sql).all(sanitized, ...params, limit);
-      if (rows.length > 0) {
-        _trackSearch(rows.map(r => r.id));
-        return rows;
-      }
-    } catch { /* FTS error, fall through to LIKE */ }
+      const sourceType = f.source_type || 'session';
+      insert.run(id, f.entity, f.relation, f.value.slice(0, 300),
+        f.confidence || 'medium', sourceType, sessionId, normalizedProject, normalizedScope, tags);
+      batchDedup.add(dedupKey);
+      savedFacts.push({
+        id, entity: f.entity, relation: f.relation, value: f.value,
+        project: normalizedProject, scope: normalizedScope, tags: f.tags || [], created_at: new Date().toISOString()
+      });
+      saved++;
 
-    const like = '%' + query.trim() + '%';
-    conditions.push('(mi.title LIKE ? OR mi.content LIKE ? OR mi.tags LIKE ?)');
-    params.push(like, like, like);
+      // For stateful relations, mark older active facts with same entity::relation as superseded
+      if (STATEFUL_RELATIONS.has(f.relation)) {
+        let whereSql = '';
+        let filterParams = [];
+        if (normalizedScope === '*') {
+          whereSql = `((scope = '*') OR (scope IS NULL AND project = '*'))`;
+        } else if (normalizedScope) {
+          whereSql = `((scope = ?) OR (scope IS NULL AND project = ?))`;
+          filterParams = [normalizedScope, normalizedProject];
+        } else {
+          whereSql = `(project IN (?, '*'))`;
+          filterParams = [normalizedProject];
+        }
+
+        // Fetch the IDs being superseded before running the update (for audit log)
+        const db2 = getDb();
+        const toSupersede = db2.prepare(
+          `SELECT id, value FROM facts
+           WHERE entity = ? AND relation = ? AND id != ? AND superseded_by IS NULL
+             AND ${whereSql}`
+        ).all(f.entity, f.relation, id, ...filterParams);
+
+        const result = db.prepare(
+          `UPDATE facts SET superseded_by = ?, updated_at = datetime('now')
+           WHERE entity = ? AND relation = ? AND id != ? AND superseded_by IS NULL
+             AND ${whereSql}`
+        ).run(id, f.entity, f.relation, id, ...filterParams);
+        const changes = result.changes || 0;
+        superseded += changes;
+
+        // Audit log: append to ~/.metame/memory_supersede_log.jsonl (never mutates, only appends)
+        if (changes > 0) {
+          _logSupersede(toSupersede, id, f.entity, f.relation, f.value, sessionId);
+        }
+      } else {
+        // Conflict detection for non-stateful relations
+        let whereSql = '';
+        let filterParams = [];
+        if (normalizedScope === '*') {
+          whereSql = `((scope = '*') OR (scope IS NULL AND project = '*'))`;
+        } else if (normalizedScope) {
+          whereSql = `((scope = ?) OR (scope IS NULL AND project = ?))`;
+          filterParams = [normalizedScope, normalizedProject];
+        } else {
+          whereSql = `(project IN (?, '*'))`;
+          filterParams = [normalizedProject];
+        }
+        conflicts += _detectConflict(db, f, id, whereSql, filterParams, sessionId);
+      }
+    } catch { skipped++; }
   }
 
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  const fallbackSql = `SELECT mi.* FROM memory_items mi ${where} ORDER BY mi.created_at DESC LIMIT ?`;
-  const rows = db.prepare(fallbackSql).all(...params, limit);
-  if (rows.length > 0) _trackSearch(rows.map(r => r.id));
-  return rows;
+  // Async sync to QMD (non-blocking, non-fatal)
+  if (savedFacts.length > 0) {
+    let qmdClient = null;
+    try { qmdClient = require('./qmd-client'); } catch { /* qmd-client not available */ }
+    if (qmdClient) qmdClient.upsertFacts(savedFacts);
+  }
+
+  if (conflicts > 0) log('WARN', `[MEMORY] ${conflicts} conflict(s) detected`);
+
+  return { saved, skipped, superseded, conflicts, savedFacts };
 }
 
+/**
+ * Save concept labels for facts (side-table).
+ *
+ * @param {Array<{fact_id:string,label:string,domain?:string}>} rows
+ * @returns {{ saved: number, skipped: number }}
+ */
+function saveFactLabels(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return { saved: 0, skipped: 0 };
+  const db = getDb();
+  const upsert = db.prepare(`
+    INSERT INTO fact_labels (fact_id, label, domain)
+    VALUES (?, ?, ?)
+    ON CONFLICT(fact_id, label) DO UPDATE SET
+      domain = COALESCE(excluded.domain, fact_labels.domain)
+  `);
+
+  let saved = 0;
+  let skipped = 0;
+  for (const row of rows) {
+    const factId = String(row && row.fact_id ? row.fact_id : '').trim();
+    const label = String(row && row.label ? row.label : '').trim();
+    const domainRaw = row && row.domain != null ? String(row.domain).trim() : '';
+    const domain = domainRaw || null;
+    if (!factId || !label) { skipped++; continue; }
+    if (label.length > 60) { skipped++; continue; }
+    if (domain && domain.length > 60) { skipped++; continue; }
+    try {
+      upsert.run(factId, label, domain);
+      saved++;
+    } catch {
+      skipped++;
+    }
+  }
+  return { saved, skipped };
+}
+
+/**
+ * Increment search_count and last_searched_at for a list of fact IDs.
+ * Semantics: "this fact appeared in search results" — NOT "this fact was useful".
+ * High search_count = frequently retrieved. Low/zero = candidate for pruning.
+ * Non-fatal; called after each successful search.
+ */
 function _trackSearch(ids) {
   if (!ids || ids.length === 0) return;
   try {
     const db = getDb();
     const placeholders = ids.map(() => '?').join(',');
     db.prepare(
-      `UPDATE memory_items SET search_count = search_count + 1, last_searched_at = datetime('now')
+      `UPDATE facts SET search_count = search_count + 1, last_searched_at = datetime('now')
        WHERE id IN (${placeholders})`
     ).run(...ids);
   } catch { /* non-fatal */ }
 }
 
-function promoteItem(id) {
-  const db = getDb();
-  db.prepare(`UPDATE memory_items SET state = 'active', updated_at = datetime('now') WHERE id = ?`).run(id);
-}
+const SUPERSEDE_LOG = path.join(os.homedir(), '.metame', 'memory_supersede_log.jsonl');
+const CONFLICT_LOG = path.join(os.homedir(), '.metame', 'memory_conflict_log.jsonl');
 
-function archiveItem(id, supersededById) {
-  const db = getDb();
-  if (supersededById) {
-    db.prepare(`UPDATE memory_items SET state = 'archived', supersedes_id = ?, updated_at = datetime('now') WHERE id = ?`)
-      .run(supersededById, id);
-  } else {
-    db.prepare(`UPDATE memory_items SET state = 'archived', updated_at = datetime('now') WHERE id = ?`).run(id);
-  }
-}
-
-function bumpSearchCount(id) {
-  const db = getDb();
-  db.prepare(`UPDATE memory_items SET search_count = search_count + 1, last_searched_at = datetime('now') WHERE id = ?`).run(id);
-}
-
-function readWorkingMemory(agentKey) {
+/**
+ * Append supersede operations to audit log (append-only, never mutated).
+ * Each line: { ts, new_id, new_value_prefix, entity, relation, superseded: [{id, value_prefix}], session_id }
+ * Use this to investigate accidental overwrites or replay if needed.
+ */
+function _logSupersede(oldFacts, newId, entity, relation, newValue, sessionId) {
+  if (!oldFacts || oldFacts.length === 0) return;
   try {
-    if (!fs.existsSync(WORKING_MEMORY_DIR)) return '';
-    if (agentKey) {
-      const filePath = path.join(WORKING_MEMORY_DIR, `${agentKey}.md`);
-      return fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8').trim() : '';
+    const entry = {
+      ts: new Date().toISOString(),
+      entity,
+      relation,
+      new_id: newId,
+      new_value: newValue.slice(0, 80),
+      session_id: sessionId,
+      superseded: oldFacts.map(f => ({ id: f.id, value: f.value.slice(0, 80) })),
+    };
+    fs.appendFileSync(SUPERSEDE_LOG, JSON.stringify(entry) + '\n', 'utf8');
+  } catch { /* non-fatal */ }
+}
+
+/**
+ * Detect value conflicts for non-stateful facts.
+ *
+ * When a new fact (entity, relation) already has an active record whose value
+ * differs significantly from the incoming value, both are flagged CONFLICT.
+ * "Significant difference" = trimmed values are not equal AND neither contains
+ * the other as a substring (handles minor rewording and prefix matches).
+ *
+ * @param {object} db            - DatabaseSync instance
+ * @param {object} fact          - The newly-inserted fact { entity, relation, value }
+ * @param {string} newId         - Row ID of the newly-inserted fact
+ * @param {string} whereSql      - Scope WHERE clause (reused from saveFacts)
+ * @param {Array}  filterParams  - Bind params for whereSql
+ * @param {string} sessionId     - Source session ID (for audit log)
+ * @returns {number} Number of conflicts detected (0 or more)
+ */
+function _detectConflict(db, fact, newId, whereSql, filterParams, sessionId) {
+  try {
+    const existing = db.prepare(
+      `SELECT id, value FROM facts
+       WHERE entity = ? AND relation = ? AND id != ? AND superseded_by IS NULL
+         AND (conflict_status IS NULL OR conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
+         AND ${whereSql}`
+    ).all(fact.entity, fact.relation, newId, ...filterParams);
+
+    if (existing.length === 0) return 0;
+
+    const newVal = fact.value.trim();
+    let conflictCount = 0;
+
+    const conflicting = [];
+    for (const row of existing) {
+      const oldVal = row.value.trim();
+      // Skip if values are equivalent or one contains the other
+      if (oldVal === newVal) continue;
+      if (oldVal.includes(newVal) || newVal.includes(oldVal)) continue;
+
+      // Mark existing record as CONFLICT
+      db.prepare(
+        `UPDATE facts SET conflict_status = 'CONFLICT', updated_at = datetime('now') WHERE id = ?`
+      ).run(row.id);
+
+      conflicting.push({ id: row.id, value: row.value.slice(0, 80) });
+      conflictCount++;
     }
-    const files = fs.readdirSync(WORKING_MEMORY_DIR).filter(f => f.endsWith('.md'));
-    const parts = [];
-    for (const f of files) {
-      const content = fs.readFileSync(path.join(WORKING_MEMORY_DIR, f), 'utf8').trim();
-      if (content) parts.push(`[${f.replace('.md', '')}]\n${content}`);
+
+    if (conflictCount > 0) {
+      // Mark the new fact as CONFLICT too
+      db.prepare(
+        `UPDATE facts SET conflict_status = 'CONFLICT', updated_at = datetime('now') WHERE id = ?`
+      ).run(newId);
+
+      // Audit log (append-only, never mutated)
+      try {
+        const entry = {
+          ts: new Date().toISOString(),
+          entity: fact.entity,
+          relation: fact.relation,
+          new_id: newId,
+          new_value: fact.value.slice(0, 80),
+          session_id: sessionId,
+          conflicting,
+        };
+        fs.appendFileSync(CONFLICT_LOG, JSON.stringify(entry) + '\n', 'utf8');
+      } catch { /* non-fatal */ }
     }
-    return parts.join('\n\n');
-  } catch { return ''; }
+
+    return conflictCount;
+  } catch { return 0; }
 }
 
-function assembleContext({ query, scope = {}, budget } = {}) {
-  const items = searchMemoryItems(query, {
-    state: 'active',
-    project: scope.project,
-    scope: scope.workspace,
-    limit: 50,
-  });
-  const working = readWorkingMemory(scope.agent);
-  const ranked = memoryModel.rankMemoryItems(items, query, {
-    project: scope.project,
-    scope: scope.workspace,
-    task: scope.task,
-    session: scope.session,
-    agent: scope.agent,
-  });
-  const allocated = memoryModel.allocateBudget(ranked, budget);
-  const blocks = memoryModel.assemblePromptBlocks(allocated);
-  blocks.working = working;
-  return blocks;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// v1 Adapters — backward-compatible API routing to v2 memory_items
-// External callers (extract, reflect, engine, search CLI) work unchanged.
-// ═══════════════════════════════════════════════════════════════════
-
-function _parseTags(raw) {
-  if (Array.isArray(raw)) return raw;
-  if (typeof raw === 'string') {
-    try { const p = JSON.parse(raw); return Array.isArray(p) ? p : []; } catch { return []; }
+/**
+ * Scope filter semantics (new + legacy):
+ * - New rows: prefer `scope` exact match or global scope '*'
+ * - Legacy rows (scope NULL): fallback to project match or project='*'
+ */
+function _matchesFactScope(row, project, scope) {
+  if (!row) return false;
+  const rowScope = row.scope === undefined ? null : row.scope;
+  if (scope) {
+    if (rowScope === scope || rowScope === '*') return true;
+    if (rowScope === null) {
+      if (!project) return false;
+      return row.project === project || row.project === '*';
+    }
+    return false;
   }
-  return [];
+  if (project) return row.project === project || row.project === '*';
+  return true;
 }
 
-const CONVENTION_RELATIONS = new Set([
-  'bug_lesson', 'arch_convention', 'workflow_rule', 'config_fact', 'config_change',
-]);
+/**
+ * Search facts: QMD hybrid search (if available) → FTS5 → LIKE fallback.
+ *
+ * @param {string} query          - Search keywords / natural language
+ * @param {object} [opts]
+ * @param {number} [opts.limit=5] - Max results
+ * @param {string} [opts.project] - Filter by project (also always includes '*')
+ * @param {string} [opts.scope]   - Stable workspace scope (also includes global '*')
+ * @returns {Promise<Array>|Array} Fact objects
+ */
+async function searchFactsAsync(query, { limit = 5, project = null, scope = null } = {}) {
+  // Try QMD hybrid search first
+  let qmdClient = null;
+  try { qmdClient = require('./qmd-client'); } catch { /* not available */ }
 
-function saveSession({ sessionId, project, scope = null, summary, keywords = '' }) {
-  if (!sessionId || !project || !summary) {
-    throw new Error('saveSession requires sessionId, project, summary');
-  }
-  const tags = keywords ? keywords.split(',').map(k => k.trim()).filter(Boolean) : [];
-  return saveMemoryItem({
-    id: `mi_ses_${sessionId}`,
-    kind: 'episode',
-    state: 'active',
-    title: summary.slice(0, 80),
-    content: summary,
-    confidence: 0.7,
-    project: project === '*' ? '*' : String(project || 'unknown'),
-    scope: scope || null,
-    session_id: sessionId,
-    source_type: 'session',
-    source_id: sessionId,
-    tags,
-  });
-}
-
-function saveFacts(sessionId, project, facts, { scope = null, source_type = null } = {}) {
-  if (!Array.isArray(facts) || facts.length === 0) return { saved: 0, skipped: 0, superseded: 0, savedFacts: [] };
-  const normalizedProject = project === '*' ? '*' : String(project || 'unknown');
-  let saved = 0;
-  let skipped = 0;
-  const savedFacts = [];
-
-  for (const f of facts) {
-    if (!f.entity || !f.relation || !f.value) { skipped++; continue; }
-    if (f.value.length < 20 || f.value.length > 300) { skipped++; continue; }
-
-    const kind = CONVENTION_RELATIONS.has(f.relation) ? 'convention' : 'insight';
-    const conf = f.confidence === 'high' ? 0.9 : f.confidence === 'medium' ? 0.7 : 0.4;
-    const id = `mi_f_${String(sessionId).slice(0, 8)}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    const tags = Array.isArray(f.tags) ? f.tags.slice(0, 3) : [];
-
+  if (qmdClient && qmdClient.isAvailable()) {
     try {
-      saveMemoryItem({
-        id,
-        kind,
-        state: 'candidate',
-        title: `${f.entity} \u00b7 ${f.relation}`,
-        content: f.value.slice(0, 300),
-        confidence: conf,
-        project: normalizedProject,
-        scope: scope || null,
-        session_id: sessionId,
-        source_type: f.source_type || source_type || 'session',
-        source_id: sessionId,
-        tags,
-      });
-      savedFacts.push({
-        id, entity: f.entity, relation: f.relation, value: f.value,
-        project: normalizedProject, scope, tags, created_at: new Date().toISOString(),
-      });
-      saved++;
-    } catch { skipped++; }
+      const ids = await qmdClient.search(query, limit * 2); // fetch extra for project filter
+      if (ids && ids.length > 0) {
+        const db = getDb();
+        const placeholders = ids.map(() => '?').join(',');
+        let rows = db.prepare(
+          `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
+           FROM facts WHERE id IN (${placeholders}) AND superseded_by IS NULL
+           AND (conflict_status IS NULL OR conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))`
+        ).all(...ids);
+
+        // Apply project/scope filter
+        if (project || scope) {
+          rows = rows.filter(r => _matchesFactScope(r, project, scope));
+        }
+
+        // Preserve QMD ranking order
+        const idOrder = new Map(ids.map((id, i) => [id, i]));
+        rows.sort((a, b) => (idOrder.get(a.id) ?? 999) - (idOrder.get(b.id) ?? 999));
+
+        if (rows.length > 0) {
+          _trackSearch(rows.map(r => r.id));
+          return rows.slice(0, limit);
+        }
+      }
+    } catch { /* QMD failed, fall through to FTS5 */ }
   }
-  return { saved, skipped, superseded: 0, savedFacts };
+
+  return searchFacts(query, { limit, project, scope });
 }
 
-function saveFactLabels() {
-  // Labels are now embedded as tags in saveMemoryItem. No-op for backward compat.
-  return { saved: 0, skipped: 0 };
-}
-
+/**
+ * Search facts by keyword (FTS5 + LIKE fallback). Synchronous.
+ *
+ * @param {string} query          - Search keywords
+ * @param {object} [opts]
+ * @param {number} [opts.limit=5] - Max results
+ * @param {string} [opts.project] - Filter by project (also always includes '*')
+ * @param {string} [opts.scope]   - Stable workspace scope (also includes global '*')
+ * @returns {Array<{ id, entity, relation, value, confidence, project, scope, tags, created_at }>}
+ */
 function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
   if (!query || !query.trim()) return [];
-  const rows = searchMemoryItems(query, {
-    state: 'active',
-    project: project || null,
-    scope: scope || null,
-    limit,
-  }).filter(r => r.kind === 'insight' || r.kind === 'convention');
+  const db = getDb();
 
-  // Map v2 fields back to v1 shape for callers
-  return rows.map(r => ({
-    id: r.id,
-    entity: (r.title || '').split(' \u00b7 ')[0] || r.title || '',
-    relation: (r.title || '').split(' \u00b7 ')[1] || '',
-    value: r.content,
-    confidence: r.confidence >= 0.9 ? 'high' : r.confidence >= 0.6 ? 'medium' : 'low',
-    project: r.project,
-    scope: r.scope,
-    tags: _parseTags(r.tags),
-    created_at: r.created_at,
-  }));
+  const sanitized = query.trim().split(/\s+/)
+    .map(t => '"' + t.replace(/"/g, '') + '"').join(' ');
+
+  // FTS5 path
+  try {
+    let sql, params;
+    if (scope && project) {
+      sql = `
+        SELECT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at, rank
+        FROM facts_fts fts JOIN facts f ON f.rowid = fts.rowid
+        WHERE facts_fts MATCH ?
+          AND ((f.scope = ? OR f.scope = '*') OR (f.scope IS NULL AND (f.project = ? OR f.project = '*')))
+          AND f.superseded_by IS NULL
+          AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
+        ORDER BY rank LIMIT ?
+      `;
+      params = [sanitized, scope, project, limit];
+    } else if (scope) {
+      sql = `
+        SELECT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at, rank
+        FROM facts_fts fts JOIN facts f ON f.rowid = fts.rowid
+        WHERE facts_fts MATCH ? AND (f.scope = ? OR f.scope = '*') AND f.superseded_by IS NULL
+          AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
+        ORDER BY rank LIMIT ?
+      `;
+      params = [sanitized, scope, limit];
+    } else if (project) {
+      sql = `
+        SELECT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at, rank
+        FROM facts_fts fts JOIN facts f ON f.rowid = fts.rowid
+        WHERE facts_fts MATCH ? AND (f.project = ? OR f.project = '*') AND f.superseded_by IS NULL
+          AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
+        ORDER BY rank LIMIT ?
+      `;
+      params = [sanitized, project, limit];
+    } else {
+      sql = `
+        SELECT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at, rank
+        FROM facts_fts fts JOIN facts f ON f.rowid = fts.rowid
+        WHERE facts_fts MATCH ? AND f.superseded_by IS NULL
+          AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
+        ORDER BY rank LIMIT ?
+      `;
+      params = [sanitized, limit];
+    }
+    const ftsResults = db.prepare(sql).all(...params);
+    if (ftsResults.length > 0) {
+      // Supplement with fact_labels matches (concepts written by memory-extract).
+      const ftsIds = new Set(ftsResults.map(r => r.id));
+      const remaining = limit - ftsResults.length;
+      if (remaining > 0) {
+        try {
+          const labelLike = '%' + query.trim() + '%';
+          let labelSql = `
+            SELECT DISTINCT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at
+            FROM fact_labels fl JOIN facts f ON f.id = fl.fact_id
+            WHERE fl.label LIKE ?
+              AND f.superseded_by IS NULL
+              AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))`;
+          const labelParams = [labelLike];
+          if (scope && project) {
+            labelSql += ` AND ((f.scope = ? OR f.scope = '*') OR (f.scope IS NULL AND (f.project = ? OR f.project = '*')))`;
+            labelParams.push(scope, project);
+          } else if (scope) {
+            labelSql += ` AND (f.scope = ? OR f.scope = '*')`;
+            labelParams.push(scope);
+          } else if (project) {
+            labelSql += ` AND (f.project = ? OR f.project = '*')`;
+            labelParams.push(project);
+          }
+          labelSql += ` LIMIT ?`;
+          labelParams.push(remaining + ftsResults.length);
+          const labelRows = db.prepare(labelSql).all(...labelParams);
+          for (const row of labelRows) {
+            if (!ftsIds.has(row.id) && ftsResults.length < limit) {
+              ftsIds.add(row.id);
+              ftsResults.push(row);
+            }
+          }
+        } catch { /* fact_labels table may not exist yet */ }
+      }
+      _trackSearch(ftsResults.map(r => r.id));
+      return ftsResults;
+    }
+  } catch { /* FTS error, fall through */ }
+
+  // LIKE fallback (also check fact_labels)
+  const like = '%' + query.trim() + '%';
+  const likeSql = scope && project
+    ? `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
+       FROM facts WHERE (entity LIKE ? OR value LIKE ? OR tags LIKE ?)
+       AND ((scope = ? OR scope = '*') OR (scope IS NULL AND (project = ? OR project = '*')))
+       AND superseded_by IS NULL
+       AND (conflict_status IS NULL OR conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
+       ORDER BY created_at DESC LIMIT ?`
+    : scope
+      ? `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
+       FROM facts WHERE (entity LIKE ? OR value LIKE ? OR tags LIKE ?)
+       AND (scope = ? OR scope = '*') AND superseded_by IS NULL
+       AND (conflict_status IS NULL OR conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
+       ORDER BY created_at DESC LIMIT ?`
+      : project
+        ? `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
+       FROM facts WHERE (entity LIKE ? OR value LIKE ? OR tags LIKE ?)
+       AND (project = ? OR project = '*') AND superseded_by IS NULL
+       AND (conflict_status IS NULL OR conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
+       ORDER BY created_at DESC LIMIT ?`
+        : `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
+       FROM facts WHERE (entity LIKE ? OR value LIKE ? OR tags LIKE ?)
+       AND superseded_by IS NULL
+       AND (conflict_status IS NULL OR conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))
+       ORDER BY created_at DESC LIMIT ?`;
+  const likeResults = scope && project
+    ? db.prepare(likeSql).all(like, like, like, scope, project, limit)
+    : scope
+      ? db.prepare(likeSql).all(like, like, like, scope, limit)
+      : project
+        ? db.prepare(likeSql).all(like, like, like, project, limit)
+        : db.prepare(likeSql).all(like, like, like, limit);
+  // Supplement LIKE results with fact_labels matches.
+  if (likeResults.length < limit) {
+    try {
+      const labelLike = '%' + query.trim() + '%';
+      const likeIds = new Set(likeResults.map(r => r.id));
+      let labelSql2 = `
+        SELECT DISTINCT f.id, f.entity, f.relation, f.value, f.confidence, f.project, f.scope, f.tags, f.created_at
+        FROM fact_labels fl JOIN facts f ON f.id = fl.fact_id
+        WHERE fl.label LIKE ?
+          AND f.superseded_by IS NULL
+          AND (f.conflict_status IS NULL OR f.conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))`;
+      const labelParams2 = [labelLike];
+      if (scope && project) {
+        labelSql2 += ` AND ((f.scope = ? OR f.scope = '*') OR (f.scope IS NULL AND (f.project = ? OR f.project = '*')))`;
+        labelParams2.push(scope, project);
+      } else if (scope) {
+        labelSql2 += ` AND (f.scope = ? OR f.scope = '*')`;
+        labelParams2.push(scope);
+      } else if (project) {
+        labelSql2 += ` AND (f.project = ? OR f.project = '*')`;
+        labelParams2.push(project);
+      }
+      labelSql2 += ` LIMIT ?`;
+      labelParams2.push(limit);
+      const labelRows = db.prepare(labelSql2).all(...labelParams2);
+      for (const row of labelRows) {
+        if (!likeIds.has(row.id) && likeResults.length < limit) {
+          likeIds.add(row.id);
+          likeResults.push(row);
+        }
+      }
+    } catch { /* fact_labels table may not exist yet */ }
+  }
+  // Entity path expansion: supplement with entity hierarchy matches per query term.
+  // Handles multi-word queries like "daemon dispatch" that won't match dotted entity paths
+  // (e.g. "MetaMe.daemon.dispatch.cross-bot") via LIKE '%daemon dispatch%'.
+  if (likeResults.length < limit) {
+    const terms = query.trim().split(/\s+/).filter(t => t.length >= 3);
+    if (terms.length > 0) {
+      try {
+        const likeIds = new Set(likeResults.map(r => r.id));
+        const entityOrClauses = terms.map(() => `entity LIKE ?`).join(' OR ');
+        const entityParams = terms.map(t => `%${t}%`);
+        let entityExpSql = `SELECT id, entity, relation, value, confidence, project, scope, tags, created_at
+          FROM facts WHERE (${entityOrClauses})
+            AND superseded_by IS NULL
+            AND (conflict_status IS NULL OR conflict_status NOT IN ('ARCHIVED', 'CONFLICT'))`;
+        if (scope && project) {
+          entityExpSql += ` AND ((scope = ? OR scope = '*') OR (scope IS NULL AND (project = ? OR project = '*')))`;
+          entityParams.push(scope, project);
+        } else if (scope) {
+          entityExpSql += ` AND (scope = ? OR scope = '*')`;
+          entityParams.push(scope);
+        } else if (project) {
+          entityExpSql += ` AND (project = ? OR project = '*')`;
+          entityParams.push(project);
+        }
+        entityExpSql += ` ORDER BY created_at DESC LIMIT ?`;
+        entityParams.push(limit);
+        const entityRows = db.prepare(entityExpSql).all(...entityParams);
+        for (const row of entityRows) {
+          if (!likeIds.has(row.id) && likeResults.length < limit) {
+            likeIds.add(row.id);
+            likeResults.push(row);
+          }
+        }
+      } catch { /* entity expansion failed */ }
+    }
+  }
+  if (likeResults.length > 0) _trackSearch(likeResults.map(r => r.id));
+  return likeResults;
 }
 
-async function searchFactsAsync(query, opts) {
-  return searchFacts(query, opts);
-}
-
+/**
+ * Search sessions by keyword (FTS5 match).
+ *
+ * @param {string} query         - Search query (FTS5 syntax supported)
+ * @param {object} [opts]
+ * @param {number} [opts.limit=5] - Max results
+ * @param {string} [opts.project] - Filter by project
+ * @param {string} [opts.scope] - Stable workspace scope (also includes global '*')
+ * @returns {Array<{ id, project, scope, summary, keywords, mood, created_at, rank }>}
+ */
 function searchSessions(query, { limit = 5, project = null, scope = null } = {}) {
   if (!query || !query.trim()) return [];
-  return searchMemoryItems(query, {
-    kind: 'episode',
-    state: 'active',
-    project: project || null,
-    scope: scope || null,
-    limit,
-  }).map(r => ({
-    id: r.session_id || r.id,
-    project: r.project,
-    scope: r.scope,
-    summary: r.content,
-    keywords: r.tags,
-    mood: '',
-    created_at: r.created_at,
-    token_cost: 0,
-  }));
+  const db = getDb();
+
+  // Sanitize: wrap each term in quotes to prevent FTS5 syntax errors
+  const sanitized = query.trim().split(/\s+/).map(t => '"' + t.replace(/"/g, '') + '"').join(' ');
+
+  let sql, params;
+  if (scope && project) {
+    sql = `
+      SELECT s.id, s.project, s.scope, s.summary, s.keywords, s.mood, s.created_at, s.token_cost, rank
+      FROM sessions_fts f JOIN sessions s ON s.rowid = f.rowid
+      WHERE sessions_fts MATCH ?
+        AND ((s.scope = ? OR s.scope = '*') OR (s.scope IS NULL AND (s.project = ? OR s.project = '*')))
+      ORDER BY rank LIMIT ?
+    `;
+    params = [sanitized, scope, project, limit];
+  } else if (scope) {
+    sql = `
+      SELECT s.id, s.project, s.scope, s.summary, s.keywords, s.mood, s.created_at, s.token_cost, rank
+      FROM sessions_fts f JOIN sessions s ON s.rowid = f.rowid
+      WHERE sessions_fts MATCH ? AND (s.scope = ? OR s.scope = '*')
+      ORDER BY rank LIMIT ?
+    `;
+    params = [sanitized, scope, limit];
+  } else if (project) {
+    sql = `
+      SELECT s.id, s.project, s.scope, s.summary, s.keywords, s.mood, s.created_at, s.token_cost, rank
+      FROM sessions_fts f JOIN sessions s ON s.rowid = f.rowid
+      WHERE sessions_fts MATCH ? AND s.project = ?
+      ORDER BY rank LIMIT ?
+    `;
+    params = [sanitized, project, limit];
+  } else {
+    sql = `
+      SELECT s.id, s.project, s.scope, s.summary, s.keywords, s.mood, s.created_at, s.token_cost, rank
+      FROM sessions_fts f JOIN sessions s ON s.rowid = f.rowid
+      WHERE sessions_fts MATCH ?
+      ORDER BY rank LIMIT ?
+    `;
+    params = [sanitized, limit];
+  }
+
+  // Try FTS first, fall back to LIKE if FTS errors OR returns 0 (e.g. short CJK queries < 3 chars)
+  let ftsResults = [];
+  try { ftsResults = db.prepare(sql).all(...params); } catch { /* FTS syntax error */ }
+  if (ftsResults.length > 0) return ftsResults;
+
+  // LIKE fallback (handles short CJK terms like "飞书" that trigram can't match)
+  const likeParam = '%' + query.trim() + '%';
+  const likeSql = scope && project
+    ? `SELECT id, project, scope, summary, keywords, mood, created_at, token_cost
+       FROM sessions
+       WHERE (summary LIKE ? OR keywords LIKE ?)
+         AND ((scope = ? OR scope = '*') OR (scope IS NULL AND (project = ? OR project = '*')))
+       ORDER BY created_at DESC LIMIT ?`
+    : scope
+      ? `SELECT id, project, scope, summary, keywords, mood, created_at, token_cost
+       FROM sessions
+       WHERE (summary LIKE ? OR keywords LIKE ?)
+         AND (scope = ? OR scope = '*')
+       ORDER BY created_at DESC LIMIT ?`
+      : project
+        ? `SELECT id, project, scope, summary, keywords, mood, created_at, token_cost
+       FROM sessions
+       WHERE (summary LIKE ? OR keywords LIKE ?) AND project = ?
+       ORDER BY created_at DESC LIMIT ?`
+        : `SELECT id, project, scope, summary, keywords, mood, created_at, token_cost
+       FROM sessions
+       WHERE (summary LIKE ? OR keywords LIKE ?)
+       ORDER BY created_at DESC LIMIT ?`;
+  return scope && project
+    ? db.prepare(likeSql).all(likeParam, likeParam, scope, project, limit)
+    : scope
+      ? db.prepare(likeSql).all(likeParam, likeParam, scope, limit)
+      : project
+        ? db.prepare(likeSql).all(likeParam, likeParam, project, limit)
+        : db.prepare(likeSql).all(likeParam, likeParam, limit);
 }
 
+/**
+ * Get most recent sessions.
+ *
+ * @param {object} [opts]
+ * @param {number} [opts.limit=3] - Max results
+ * @param {string} [opts.project] - Filter by project
+ * @param {string} [opts.scope] - Stable workspace scope (also includes global '*')
+ * @returns {Array<{ id, project, scope, summary, keywords, mood, created_at }>}
+ */
 function recentSessions({ limit = 3, project = null, scope = null } = {}) {
-  return searchMemoryItems(null, {
-    kind: 'episode',
-    state: 'active',
-    project: project || null,
-    scope: scope || null,
-    limit,
-  }).map(r => ({
-    id: r.session_id || r.id,
-    project: r.project,
-    scope: r.scope,
-    summary: r.content,
-    keywords: r.tags,
-    mood: '',
-    created_at: r.created_at,
-    token_cost: 0,
-  }));
+  const db = getDb();
+  if (scope && project) {
+    return db.prepare(
+      `SELECT id, project, scope, summary, keywords, mood, created_at, token_cost
+       FROM sessions
+       WHERE ((scope = ? OR scope = '*') OR (scope IS NULL AND (project = ? OR project = '*')))
+       ORDER BY created_at DESC LIMIT ?`
+    ).all(scope, project, limit);
+  }
+  if (scope) {
+    return db.prepare(
+      `SELECT id, project, scope, summary, keywords, mood, created_at, token_cost
+       FROM sessions
+       WHERE (scope = ? OR scope = '*')
+       ORDER BY created_at DESC LIMIT ?`
+    ).all(scope, limit);
+  }
+  if (project) {
+    return db.prepare(
+      'SELECT id, project, scope, summary, keywords, mood, created_at, token_cost FROM sessions WHERE project = ? ORDER BY created_at DESC LIMIT ?'
+    ).all(project, limit);
+  }
+  return db.prepare(
+    'SELECT id, project, scope, summary, keywords, mood, created_at, token_cost FROM sessions ORDER BY created_at DESC LIMIT ?'
+  ).all(limit);
 }
 
+/**
+ * Get a single session by ID.
+ * @param {string} sessionId
+ * @returns {object|null}
+ */
+function getSession(sessionId) {
+  const db = getDb();
+  return db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId) || null;
+}
+
+/**
+ * Get total memory stats.
+ * @returns {{ count, dbSizeKB, oldestDate, newestDate }}
+ */
 function stats() {
   const db = getDb();
-  const row = db.prepare(
-    `SELECT COUNT(*) as count, MIN(created_at) as oldest, MAX(created_at) as newest FROM memory_items WHERE state = 'active'`
-  ).get();
-  const factsRow = db.prepare(
-    `SELECT COUNT(*) as count FROM memory_items WHERE state = 'active' AND kind IN ('insight', 'convention')`
-  ).get();
+  const row = db.prepare('SELECT COUNT(*) as count, MIN(created_at) as oldest, MAX(created_at) as newest FROM sessions').get();
+  const factsRow = db.prepare('SELECT COUNT(*) as count FROM facts WHERE superseded_by IS NULL').get();
   let dbSizeKB = 0;
   try { dbSizeKB = Math.round(fs.statSync(DB_PATH).size / 1024); } catch { /* */ }
   return { count: row.count, facts: factsRow.count, dbSizeKB, oldestDate: row.oldest || null, newestDate: row.newest || null };
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// Lifecycle
-// ═══════════════════════════════════════════════════════════════════
-
+/**
+ * Close the database connection (for clean shutdown).
+ */
+/**
+ * Acquire a reference. Call once per logical "session" (e.g. per task run).
+ * Ensures DB is open and increments the ref count.
+ * Must be paired with a matching release() call.
+ */
 function acquire() {
   _refCount++;
-  getDb();
+  getDb(); // ensure DB is initialised
 }
 
+/**
+ * Release a reference. When the last caller releases, the DB is closed.
+ * Safe to call even if acquire() was never called (no-op when _refCount <= 0).
+ */
 function release() {
   if (_refCount > 0) _refCount--;
   if (_refCount === 0 && _db) { _db.close(); _db = null; }
 }
 
+/**
+ * Backwards-compatible alias. Equivalent to release().
+ * External callers that previously called close() continue to work correctly.
+ */
 function close() { release(); }
 
+/** Force-close regardless of ref count. Only call on process exit. */
 function forceClose() {
   _refCount = 0;
   if (_db) { _db.close(); _db = null; }
 }
 
 module.exports = {
-  // v2 API
-  saveMemoryItem,
-  searchMemoryItems,
-  promoteItem,
-  archiveItem,
-  bumpSearchCount,
-  readWorkingMemory,
-  assembleContext,
-  // v1 adapters (backward-compatible)
   saveSession,
   saveFacts,
   saveFactLabels,
@@ -484,8 +1001,8 @@ module.exports = {
   searchFactsAsync,
   searchSessions,
   recentSessions,
+  getSession,
   stats,
-  // lifecycle
   acquire,
   release,
   close,
