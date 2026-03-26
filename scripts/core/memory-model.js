@@ -98,10 +98,8 @@ function contentEqual(a, b) {
   return a.content === b.content && a.title === b.title;
 }
 
-function sameTitleOrEntity(a, b) {
-  if (a.title && b.title && a.title === b.title) return true;
-  if (a.entity && b.entity && a.entity === b.entity) return true;
-  return false;
+function sameTitle(a, b) {
+  return !!(a.title && b.title && a.title === b.title);
 }
 
 /** @param {object} candidate */
@@ -112,7 +110,7 @@ function judgeMerge(candidate, existingItems) {
     if (contentEqual(candidate, existing)) return { action: 'noop' };
   }
   for (const existing of existingItems) {
-    if (sameTitleOrEntity(candidate, existing)) {
+    if (sameTitle(candidate, existing)) {
       if (isProtected(existing)) return { action: 'reject' };
       return { action: 'supersede', targetId: existing.id };
     }
