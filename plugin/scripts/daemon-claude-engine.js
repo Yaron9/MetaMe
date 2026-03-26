@@ -11,6 +11,7 @@ const {
 } = require('./daemon-engine-runtime');
 const { buildIntentHintBlock } = require('./intent-registry');
 const { buildAgentContextForEngine, buildMemorySnapshotContent, refreshMemorySnapshot } = require('./agent-layer');
+const { createPlatformSpawn, terminateChildProcess, stopStreamingLifecycle, abortStreamingChildLifecycle, setActiveChildProcess, clearActiveChildProcess, acquireStreamingChild, buildStreamingResult, resolveStreamingClosePayload, accumulateStreamingStderr, splitStreamingStdoutChunk, buildStreamFlushPayload, buildToolOverlayPayload, buildMilestoneOverlayPayload, finalizePersistentStreamingTurn, writeStreamingChildInput, parseStreamingEvents, applyStreamingMetadata, applyStreamingToolState, applyStreamingContentState, createStreamingWatchdog, runAsyncCommand } = require('./core/handoff');
 
 /**
  * Antigravity Raw Session Logging — Lossless Diary (L0)
@@ -31,6 +32,22 @@ function logRawSessionDiary(fs, path, HOME, { chatId, prompt, output, error, pro
     const entry = `\n---\ndate: ${new Date().toISOString()}\nproject: ${projectKey || 'global'}\n---\n\n## 🙋‍♂️ 用户指令\n\`\`\`text\n${prompt}\n\`\`\`\n\n## 🤖 执行实录\n${outputLog}${outputTruncated}\n`;
     fs.appendFileSync(diaryPath, entry, 'utf8');
   } catch (e) { console.warn(`[MetaMe] Raw session logging failed: ${e.message}`); }
+}
+
+function resolveStreamingTimeouts(engineTimeouts = {}) {
+  return {
+    idleMs: engineTimeouts.idleMs ?? (5 * 60 * 1000),
+    toolMs: engineTimeouts.toolMs ?? (25 * 60 * 1000),
+    ceilingMs: engineTimeouts.ceilingMs ?? (60 * 60 * 1000),
+  };
+}
+
+function formatTimeoutWindowLabel(timeoutMs, kind = 'idle') {
+  const mins = Math.round(Number(timeoutMs || 0) / 60000);
+  if (mins <= 0) {
+    return kind === 'tool' ? '立即' : '立即';
+  }
+  return `${Math.max(1, mins)} 分钟`;
 }
 
 function createClaudeEngine(deps) {
@@ -136,62 +153,15 @@ function createClaudeEngine(deps) {
   const getEngineRuntime = typeof injectedGetEngineRuntime === 'function'
     ? injectedGetEngineRuntime
     : createEngineRuntimeFactory({ fs, path, HOME, CLAUDE_BIN, getActiveProviderEnv });
-
-  // On Windows, spawning .cmd files via shell:true causes cmd.exe to flash briefly.
-  // Instead, read the .cmd wrapper, extract the real Node.js entry point, and spawn
-  // `node <entry.js> <args>` directly — completely bypasses cmd.exe, zero flash.
-  function resolveNodeEntry(cmdPath) {
-    try {
-      const content = fs.readFileSync(cmdPath, 'utf8');
-      // Match the quoted .js path just before %* at end of last exec line
-      const m = content.match(/"([^"]+\.js)"\s*%\*\s*$/m);
-      if (m) {
-        // Substitute %dp0% (batch var for the cmd file's own directory)
-        const entry = m[1].replace(/%dp0%/gi, path.dirname(cmdPath) + path.sep);
-        if (fs.existsSync(entry)) return entry;
-      }
-    } catch { /* ignore */ }
-    return null;
-  }
-
-  // Cache resolved entries so we only read .cmd files once
-  const _nodeEntryCache = new Map();
-  function resolveNodeEntryForCmd(cmd) {
-    if (_nodeEntryCache.has(cmd)) return _nodeEntryCache.get(cmd);
-    let cmdPath = cmd;
-    const lowerCmd = String(cmd || '').toLowerCase();
-    // If bare name (not a file path), find the .cmd via where
-    if (lowerCmd === 'claude' || lowerCmd === 'codex') {
-      try {
-        const { execSync: _es } = require('child_process');
-        const lines = _es(`where ${cmd}`, { encoding: 'utf8', timeout: 3000 })
-          .split('\n').map(l => l.trim()).filter(Boolean);
-        cmdPath = lines.find(l => l.toLowerCase().endsWith(`${lowerCmd}.cmd`)) || lines[0] || cmd;
-      } catch { /* ignore */ }
-    }
-    const entry = resolveNodeEntry(cmdPath);
-    _nodeEntryCache.set(cmd, entry);
-    return entry;
-  }
-
-  function spawn(cmd, args, options) {
-    if (process.platform !== 'win32') return _spawn(cmd, args, options);
-
-    const lowerCmd = String(cmd || '').toLowerCase();
-    const isCmdLike = lowerCmd.endsWith('.cmd') || lowerCmd.endsWith('.bat')
-      || cmd === CLAUDE_BIN || lowerCmd === 'claude' || lowerCmd === 'codex';
-
-    if (isCmdLike) {
-      const entry = resolveNodeEntryForCmd(cmd);
-      if (entry) {
-        // Run node directly — no cmd.exe, no flash
-        return _spawn(process.execPath, [entry, ...args], { ...options, windowsHide: true });
-      }
-      // Fallback: shell with windowsHide
-      return _spawn(cmd, args, { ...options, shell: process.env.COMSPEC || true, windowsHide: true });
-    }
-    return _spawn(cmd, args, { ...options, windowsHide: true });
-  }
+  const { spawn } = createPlatformSpawn({
+    fs,
+    path,
+    spawn: _spawn,
+    execSync: require('child_process').execSync,
+    processPlatform: process.platform,
+    processExecPath: process.execPath,
+    claudeBin: CLAUDE_BIN,
+  });
 
   // Per-chatId patch queues: Agent A's writes never block Agent B.
   const _patchQueues = new Map(); // chatId -> Promise
@@ -725,54 +695,25 @@ function createClaudeEngine(deps) {
    * Returns { output, error } after process exits.
    */
   function spawnClaudeAsync(args, input, cwd, timeoutMs = 300000, metameProject = '') {
-    return new Promise((resolve) => {
-      const env = {
-        ...process.env,
-        ...getActiveProviderEnv(),
-        METAME_INTERNAL_PROMPT: '1',
-        METAME_PROJECT: metameProject || '',
-      };
-      delete env.CLAUDECODE;
-      const child = spawn(CLAUDE_BIN, args, {
-        cwd,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env,
-      });
-
-      let stdout = '';
-      let stderr = '';
-      let killed = false;
-
-      const timer = setTimeout(() => {
-        killed = true;
-        try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
-        setTimeout(() => {
-          try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { } }
-        }, 5000);
-      }, timeoutMs);
-
-      child.stdout.on('data', (data) => { stdout += data.toString(); });
-      child.stderr.on('data', (data) => { stderr += data.toString(); });
-
-      child.on('close', (code) => {
-        clearTimeout(timer);
-        if (killed) {
-          resolve({ output: null, error: 'Timeout: Claude took too long' });
-        } else if (code !== 0) {
-          resolve({ output: null, error: stderr || `Exit code ${code}` });
-        } else {
-          resolve({ output: stdout.trim(), error: null });
-        }
-      });
-
-      child.on('error', (err) => {
-        clearTimeout(timer);
-        resolve({ output: null, error: formatEngineSpawnError(err, { name: getDefaultEngine() }) });
-      });
-
-      // Write input and close stdin
-      child.stdin.write(input);
-      child.stdin.end();
+    const env = {
+      ...process.env,
+      ...getActiveProviderEnv(),
+      METAME_INTERNAL_PROMPT: '1',
+      METAME_PROJECT: metameProject || '',
+    };
+    delete env.CLAUDECODE;
+    return runAsyncCommand({
+      spawn,
+      cmd: CLAUDE_BIN,
+      args,
+      cwd,
+      env,
+      input,
+      timeoutMs,
+      killSignal: 'SIGTERM',
+      useProcessGroup: false,
+      forceKillDelayMs: 5000,
+      formatSpawnError: (err) => formatEngineSpawnError(err, { name: 'claude' }),
     });
   }
 
@@ -828,27 +769,20 @@ function createClaudeEngine(deps) {
         : args;
       const _spawnAt = Date.now();
 
-      let child;
-      if (warmChild) {
-        // Reuse warm process — remove stale listeners, attach fresh ones below
-        child = warmChild;
-        child.stdout.removeAllListeners('data');
-        child.stderr.removeAllListeners('data');
-        child.removeAllListeners('close');
-        child.removeAllListeners('error');
-        log('INFO', `[TIMING:${chatId}] reusing warm pid=${child.pid} (+0ms)`);
-      } else {
-        child = spawn(rt.binary, streamArgs, {
-          cwd,
-          stdio: ['pipe', 'pipe', 'pipe'],
-          detached: process.platform !== 'win32',
-          env: rt.buildEnv({ metameProject, metameSenderId, cwd }),
-        });
-        log('INFO', `[TIMING:${chatId}] spawned ${rt.name} pid=${child.pid}`);
-      }
+      const { child, reused } = acquireStreamingChild({
+        warmChild,
+        spawn,
+        binary: rt.binary,
+        args: streamArgs,
+        cwd,
+        env: rt.buildEnv({ metameProject, metameSenderId, cwd }),
+        useDetached: process.platform !== 'win32',
+      });
+      if (reused) log('INFO', `[TIMING:${chatId}] reusing warm pid=${child.pid} (+0ms)`);
+      else log('INFO', `[TIMING:${chatId}] spawned ${rt.name} pid=${child.pid}`);
 
       if (chatId) {
-        activeProcesses.set(chatId, {
+        setActiveChildProcess(activeProcesses, saveActivePids, chatId, {
           child,
           aborted: false,
           abortReason: null,
@@ -856,18 +790,16 @@ function createClaudeEngine(deps) {
           engine: rt.name,
           killSignal: rt.killSignal || 'SIGTERM',
         });
-        saveActivePids();
       }
 
       let buffer = '';
       let stderr = '';
-      let killed = false;
-      let killedReason = 'idle';
       let finalResult = '';
       let finalUsage = null;
       let observedSessionId = '';
       let _firstOutputLogged = false;
       let classifiedError = null;
+      let stdinFailureError = null;
       let lastStatusTime = 0;
       const STATUS_THROTTLE = statusThrottleMs;
       // Streaming card: accumulate text and push to card in real-time (throttled)
@@ -875,84 +807,208 @@ function createClaudeEngine(deps) {
       let _lastStreamFlush = 0;
       const STREAM_THROTTLE = 1500; // ms between card edits (safe within Feishu 5 req/s limit)
       function flushStream(force) {
-        if (!onStatus || !_streamText.trim()) return;
-        const now = Date.now();
-        if (!force && now - _lastStreamFlush < STREAM_THROTTLE) return;
-        _lastStreamFlush = now;
-        onStatus('__STREAM_TEXT__' + _streamText).catch(() => { });
+        if (!onStatus) return;
+        const flush = buildStreamFlushPayload(
+          { streamText: _streamText, lastFlushAt: _lastStreamFlush },
+          { force, now: Date.now(), throttleMs: STREAM_THROTTLE }
+        );
+        if (!flush.shouldFlush) return;
+        _lastStreamFlush = flush.lastFlushAt;
+        onStatus(flush.payload).catch(() => { });
       }
       const writtenFiles = [];
       const toolUsageLog = [];
 
       void timeoutMs;
-      const engineTimeouts = rt.timeouts || {};
-      const IDLE_TIMEOUT_MS = engineTimeouts.idleMs || (5 * 60 * 1000);
-      const TOOL_EXEC_TIMEOUT_MS = engineTimeouts.toolMs || (25 * 60 * 1000);
-      const HARD_CEILING_MS = engineTimeouts.ceilingMs ?? null;
+      const engineTimeouts = resolveStreamingTimeouts(rt.timeouts || {});
+      const IDLE_TIMEOUT_MS = engineTimeouts.idleMs;
+      const TOOL_EXEC_TIMEOUT_MS = engineTimeouts.toolMs;
+      const HARD_CEILING_MS = engineTimeouts.ceilingMs;
       const startTime = Date.now();
       let waitingForTool = false;
 
-      let sigkillTimer = null;
-      function killChild(reason) {
-        if (killed) return;
-        killed = true;
-        killedReason = reason;
-        log('WARN', `[${rt.name}] ${reason} timeout for chatId ${chatId} — killing process group`);
-        const sig = rt.killSignal || 'SIGTERM';
-        try { process.kill(-child.pid, sig); } catch { child.kill(sig); }
-        sigkillTimer = setTimeout(() => {
-          try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { } }
-        }, 5000);
-      }
+      const watchdog = createStreamingWatchdog({
+        child,
+        killSignal: rt.killSignal || 'SIGTERM',
+        useProcessGroup: process.platform !== 'win32',
+        idleTimeoutMs: IDLE_TIMEOUT_MS,
+        toolTimeoutMs: TOOL_EXEC_TIMEOUT_MS,
+        ceilingTimeoutMs: HARD_CEILING_MS,
+        forceKillDelayMs: 5000,
+        onKill(reason) {
+          log('WARN', `[${rt.name}] ${reason} timeout for chatId ${chatId} — killing process group`);
+        },
+      });
 
-      let idleTimer = setTimeout(() => killChild('idle'), IDLE_TIMEOUT_MS);
-      const ceilingTimer = HARD_CEILING_MS
-        ? setTimeout(() => killChild('ceiling'), HARD_CEILING_MS)
-        : null;
-
-      function resetIdleTimer() {
-        clearTimeout(idleTimer);
-        const timeout = waitingForTool ? TOOL_EXEC_TIMEOUT_MS : IDLE_TIMEOUT_MS;
-        idleTimer = setTimeout(() => killChild('idle'), timeout);
+      function abortForStdinFailure(err) {
+        if (stdinFailureError) return;
+        stdinFailureError = err && err.message ? err.message : String(err || 'stdin error');
+        abortStreamingChildLifecycle({
+          child,
+          watchdog,
+          milestoneTimer,
+          activeProcesses,
+          saveActivePids,
+          chatId,
+          reason: 'stdin',
+        });
+        absorbBufferedEvents();
+        finalize(buildStreamingResult({
+          output: finalResult || null,
+          error: stdinFailureError,
+          files: writtenFiles,
+          toolUsageLog,
+          usage: finalUsage,
+          sessionId: observedSessionId || '',
+        }));
       }
 
       let toolCallCount = 0;
       let lastMilestoneMin = 0;
       const milestoneTimer = setInterval(() => {
-        if (killed) return;
+        if (watchdog.isKilled()) return;
         const elapsedMin = Math.floor((Date.now() - startTime) / 60000);
         const nextMin = lastMilestoneMin === 0 ? 2 : lastMilestoneMin + 5;
         if (elapsedMin >= nextMin) {
           lastMilestoneMin = elapsedMin;
-          const parts = [`⏳ 已运行 ${elapsedMin} 分钟`];
-          if (toolCallCount > 0) parts.push(`调用 ${toolCallCount} 次工具`);
-          if (writtenFiles.length > 0) parts.push(`修改 ${writtenFiles.length} 个文件`);
-          const recentTool = toolUsageLog.length > 0 ? toolUsageLog[toolUsageLog.length - 1] : null;
-          if (recentTool) {
-            const ctx = recentTool.context || recentTool.skill || '';
-            parts.push(`最近: ${recentTool.tool}${ctx ? ' ' + ctx : ''}`);
-          }
           if (onStatus) {
-            const milestoneMsg = parts.join(' | ');
-            const msg = _streamText ? `__TOOL_OVERLAY__${_streamText}\n\n> ${milestoneMsg}` : milestoneMsg;
-            onStatus(msg).catch(() => { });
+            onStatus(buildMilestoneOverlayPayload({
+              elapsedMin,
+              toolCallCount,
+              writtenFiles,
+              toolUsageLog,
+              streamText: _streamText,
+            })).catch(() => { });
           }
         }
       }, 30000);
 
       function parseEventsFromLine(line) {
-        try {
-          return rt.parseStreamEvent(line) || [];
-        } catch {
-          return [];
+        return parseStreamingEvents(rt.parseStreamEvent, line);
+      }
+
+      function applyContentState(event, buffered) {
+        const contentState = applyStreamingContentState(
+          { finalResult, streamText: _streamText, waitingForTool, finalUsage },
+          event
+        );
+        finalResult = contentState.finalResult;
+        _streamText = contentState.streamText;
+        waitingForTool = contentState.waitingForTool;
+        finalUsage = contentState.finalUsage;
+        if (!buffered && contentState.shouldUpdateWatchdog) watchdog.setWaitingForTool(contentState.watchdogWaiting);
+        if (!buffered && contentState.shouldFlush) flushStream(contentState.flushForce);
+      }
+
+      function applyStreamEvent(event, options = {}) {
+        if (!event || !event.type) return;
+
+        const buffered = options.buffered === true;
+        if (event.type === 'session' && event.sessionId) {
+          observedSessionId = applyStreamingMetadata(
+            { observedSessionId, classifiedError },
+            event
+          ).observedSessionId;
+          if (!buffered && typeof onSession === 'function') {
+            Promise.resolve(onSession(observedSessionId)).catch(() => { });
+          }
+          return;
+        }
+        if (event.type === 'error') {
+          classifiedError = applyStreamingMetadata(
+            { observedSessionId, classifiedError },
+            event
+          ).classifiedError;
+          return;
+        }
+        if (event.type === 'text' && event.text) {
+          applyContentState(event, buffered);
+          return;
+        }
+        if (event.type === 'done') {
+          applyContentState(event, buffered);
+
+          if (!buffered && isPersistent) {
+            finalize(finalizePersistentStreamingTurn({
+              watchdog,
+              milestoneTimer,
+              clearActiveChildProcess,
+              activeProcesses,
+              saveActivePids,
+              chatId,
+              warmPool: _warmPool,
+              warmSessionKey,
+              child,
+              observedSessionId,
+              cwd,
+              buildStreamingResult,
+              output: finalResult || '',
+              files: writtenFiles,
+              toolUsageLog,
+              usage: finalUsage,
+            }));
+          }
+          return;
+        }
+        if (event.type === 'tool_result') {
+          const toolState = applyStreamingToolState(
+            { waitingForTool, toolCallCount, toolUsageLog, writtenFiles },
+            event,
+            { pathModule: path, maxEntries: 50 }
+          );
+          waitingForTool = toolState.waitingForTool;
+          if (!buffered && toolState.shouldUpdateWatchdog) watchdog.setWaitingForTool(toolState.watchdogWaiting);
+          return;
+        }
+        if (event.type !== 'tool_use') return;
+
+        const toolState = applyStreamingToolState(
+          { waitingForTool, toolCallCount, toolUsageLog, writtenFiles },
+          event,
+          { pathModule: path, maxEntries: 50 }
+        );
+        toolCallCount = toolState.toolCallCount;
+        waitingForTool = toolState.waitingForTool;
+        if (!buffered && toolState.shouldUpdateWatchdog) watchdog.setWaitingForTool(toolState.watchdogWaiting);
+        const { toolName, toolInput } = toolState;
+        toolUsageLog.length = 0;
+        toolUsageLog.push(...toolState.toolUsageLog);
+        writtenFiles.length = 0;
+        writtenFiles.push(...toolState.writtenFiles);
+
+        if (buffered) return;
+
+        const overlay = buildToolOverlayPayload({
+          toolName,
+          toolInput,
+          streamText: _streamText,
+          lastStatusTime,
+          now: Date.now(),
+          throttleMs: STATUS_THROTTLE,
+          toolEmoji: TOOL_EMOJI,
+          pathModule: path,
+        });
+        if (!overlay.shouldEmit) return;
+        lastStatusTime = overlay.lastStatusTime;
+        if (onStatus) {
+          onStatus(overlay.payload).catch(() => { });
+        }
+      }
+
+      function absorbBufferedEvents() {
+        if (!buffer.trim()) return;
+        const events = parseEventsFromLine(buffer.trim());
+        buffer = '';
+        for (const event of events) {
+          applyStreamEvent(event, { buffered: true });
         }
       }
 
       child.stdout.on('data', (data) => {
-        resetIdleTimer();
-        buffer += data.toString();
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+        watchdog.resetIdle();
+        const stdoutState = splitStreamingStdoutChunk(buffer, data.toString());
+        const lines = stdoutState.lines;
+        buffer = stdoutState.buffer;
 
         for (const line of lines) {
           if (!line.trim()) continue;
@@ -962,254 +1018,89 @@ function createClaudeEngine(deps) {
           }
           const events = parseEventsFromLine(line);
           for (const event of events) {
-            if (!event || !event.type) continue;
-            if (event.type === 'session' && event.sessionId) {
-              observedSessionId = String(event.sessionId);
-              if (typeof onSession === 'function') {
-                Promise.resolve(onSession(observedSessionId)).catch(() => { });
-              }
-              continue;
-            }
-            if (event.type === 'error') {
-              classifiedError = event;
-              continue;
-            }
-            if (event.type === 'text' && event.text) {
-              finalResult += (finalResult ? '\n\n' : '') + String(event.text);
-              _streamText = finalResult;
-              if (waitingForTool) {
-                waitingForTool = false;
-                resetIdleTimer();
-              }
-              flushStream(); // throttled stream to card
-              continue;
-            }
-            if (event.type === 'done') {
-              finalUsage = event.usage || null;
-              if (waitingForTool) {
-                waitingForTool = false;
-                resetIdleTimer();
-              }
-              // Fallback: if no text streamed yet (tool-only response), use result text from done.
-              // Do NOT use when finalResult already has content — result duplicates streamed text.
-              if (!finalResult && event.result) {
-                finalResult = String(event.result);
-                _streamText = finalResult;
-              }
-              flushStream(true); // force final text flush before process ends
-
-              // Persistent mode: finalize on result event, keep process alive for reuse
-              if (isPersistent) {
-                clearTimeout(idleTimer);
-                clearTimeout(ceilingTimer);
-                clearTimeout(sigkillTimer);
-                clearInterval(milestoneTimer);
-                if (chatId) { activeProcesses.delete(chatId); saveActivePids(); }
-                // Store process back in warm pool for next turn
-                if (_warmPool && warmSessionKey && child && !child.killed && child.exitCode === null) {
-                  _warmPool.storeWarm(warmSessionKey, child, { sessionId: observedSessionId, cwd });
-                }
-                finalize({
-                  output: finalResult || '',
-                  error: null,
-                  files: writtenFiles,
-                  toolUsageLog,
-                  usage: finalUsage,
-                  sessionId: observedSessionId || '',
-                });
-              }
-              continue;
-            }
-            if (event.type === 'tool_result') {
-              if (waitingForTool) {
-                waitingForTool = false;
-                resetIdleTimer();
-              }
-              continue;
-            }
-            if (event.type !== 'tool_use') continue;
-
-            toolCallCount++;
-            waitingForTool = true;
-            resetIdleTimer();
-            const toolName = event.toolName || 'Tool';
-            const toolInput = event.toolInput || {};
-
-            const toolEntry = { tool: toolName };
-            if (toolName === 'Skill' && toolInput.skill) toolEntry.skill = toolInput.skill;
-            else if (toolInput.command) toolEntry.context = String(toolInput.command).slice(0, 50);
-            else if (toolInput.file_path) toolEntry.context = path.basename(String(toolInput.file_path));
-            if (toolUsageLog.length < 50) toolUsageLog.push(toolEntry);
-
-            if (toolName === 'Write' && toolInput.file_path) {
-              const filePath = String(toolInput.file_path);
-              if (!writtenFiles.includes(filePath)) writtenFiles.push(filePath);
-            }
-
-            const now = Date.now();
-            if (now - lastStatusTime < STATUS_THROTTLE) continue;
-            lastStatusTime = now;
-
-            const emoji = TOOL_EMOJI[toolName] || TOOL_EMOJI.default;
-            let displayName = toolName;
-            let displayEmoji = emoji;
-            let context = '';
-
-            if (toolName === 'Skill' && toolInput.skill) {
-              context = toolInput.skill;
-            } else if ((toolName === 'Task' || toolName === 'Agent') && toolInput.description) {
-              const agentType = toolInput.subagent_type ? `[${toolInput.subagent_type}] ` : '';
-              context = (agentType + String(toolInput.description)).slice(0, 40);
-            } else if (toolName.startsWith('mcp__')) {
-              const parts = toolName.split('__');
-              const server = parts[1] || 'unknown';
-              const action = parts.slice(2).join('_') || '';
-              if (server === 'playwright') {
-                displayEmoji = '🌐';
-                displayName = 'Browser';
-                context = action.replace(/_/g, ' ');
-              } else {
-                displayEmoji = '🔗';
-                displayName = `MCP:${server}`;
-                context = action.replace(/_/g, ' ').slice(0, 25);
-              }
-            } else if (toolInput.file_path) {
-              const basename = path.basename(String(toolInput.file_path));
-              const dotIdx = basename.lastIndexOf('.');
-              context = dotIdx > 0 ? basename.slice(0, dotIdx) + '\u200B' + basename.slice(dotIdx) : basename;
-            } else if (toolInput.command) {
-              context = String(toolInput.command).slice(0, 30);
-              if (String(toolInput.command).length > 30) context += '...';
-            } else if (toolInput.pattern) {
-              context = String(toolInput.pattern).slice(0, 20);
-            } else if (toolInput.query) {
-              context = String(toolInput.query).slice(0, 25);
-            } else if (toolInput.url) {
-              try { context = new URL(toolInput.url).hostname; } catch { context = 'web'; }
-            }
-
-            const status = context
-              ? `${displayEmoji} ${displayName}: 「${context}」`
-              : `${displayEmoji} ${displayName}...`;
-            if (onStatus) {
-              // Overlay tool status on top of streamed text (if any); else show plain status
-              const msg = _streamText ? `__TOOL_OVERLAY__${_streamText}\n\n> ${status}` : status;
-              onStatus(msg).catch(() => { });
-            }
+            applyStreamEvent(event);
           }
         }
       });
 
       child.stderr.on('data', (data) => {
-        resetIdleTimer();
+        watchdog.resetIdle();
         const chunk = data.toString();
-        stderr += chunk;
-        // Detect API errors (400, model not supported, etc.) and log them explicitly
-        if (/\b(400|is not supported|model.*not found|invalid.*model)\b/i.test(chunk)) {
-          log('ERROR', `[API-ERROR] ${rt.name} stderr for ${chatId}: ${chunk.slice(0, 300)}`);
-        }
-        if (!classifiedError && typeof rt.classifyError === 'function') {
-          classifiedError = rt.classifyError(chunk);
-        }
+        const stderrState = accumulateStreamingStderr(
+          { stderr, classifiedError },
+          chunk,
+          {
+            classifyError: rt.classifyError,
+            onApiError(apiChunk) {
+              log('ERROR', `[API-ERROR] ${rt.name} stderr for ${chatId}: ${apiChunk.slice(0, 300)}`);
+            },
+          }
+        );
+        stderr = stderrState.stderr;
+        classifiedError = stderrState.classifiedError;
       });
+
+      if (child.stdin && typeof child.stdin.on === 'function') {
+        child.stdin.on('error', (err) => {
+          abortForStdinFailure(err);
+        });
+      }
 
       child.on('close', (code) => {
         log('INFO', `[TIMING:${chatId}] process-close code=${code} total=${Date.now() - _spawnAt}ms`);
-        clearTimeout(idleTimer);
-        clearTimeout(ceilingTimer);
-        clearTimeout(sigkillTimer);
-        clearInterval(milestoneTimer);
+        stopStreamingLifecycle(watchdog, milestoneTimer);
 
         // Persistent mode: if already finalized on result event, just clean up
         if (isPersistent && settled) {
-          if (chatId) { activeProcesses.delete(chatId); saveActivePids(); }
+          clearActiveChildProcess(activeProcesses, saveActivePids, chatId);
           // Process died after we returned result — remove from warm pool
           if (_warmPool && warmSessionKey) _warmPool.releaseWarm(warmSessionKey);
           return;
         }
 
-        if (buffer.trim()) {
-          const events = parseEventsFromLine(buffer.trim());
-          for (const event of events) {
-            if (event.type === 'text' && event.text) finalResult = String(event.text);
-            if (event.type === 'done') finalUsage = event.usage || null;
-            if (event.type === 'session' && event.sessionId) observedSessionId = String(event.sessionId);
-            if (event.type === 'error') classifiedError = event;
-          }
-        }
+        absorbBufferedEvents();
 
         const proc = chatId ? activeProcesses.get(chatId) : null;
         const wasAborted = proc && proc.aborted;
         const abortReason = proc && proc.abortReason ? String(proc.abortReason) : '';
-        if (chatId) { activeProcesses.delete(chatId); saveActivePids(); }
-
-        if (wasAborted) {
-          const _errCode = (abortReason === 'daemon-restart' || abortReason === 'shutdown')
-            ? 'INTERRUPTED_RESTART'
-            : abortReason === 'merge-pause'
-              ? 'INTERRUPTED_MERGE_PAUSE'
-              : 'INTERRUPTED_USER';
-          finalize({
-            output: finalResult || null,
-            error: abortReason === 'merge-pause' ? 'Paused for merge' : 'Stopped by user',
-            errorCode: _errCode,
-            files: writtenFiles,
-            toolUsageLog,
-            usage: finalUsage,
-            sessionId: observedSessionId || '',
-          });
-          return;
-        }
-        if (killed) {
-          const elapsed = Math.round((Date.now() - startTime) / 60000);
-          const idleMin = Math.max(1, Math.round(IDLE_TIMEOUT_MS / 60000));
-          const reason = killedReason === 'ceiling'
-            ? `⏱ 已运行 ${elapsed} 分钟，达到上限（${Math.round(HARD_CEILING_MS / 60000)} 分钟）`
-            : `⏱ 已 ${idleMin} 分钟无输出，判定卡死（共运行 ${elapsed} 分钟）`;
-          finalize({ output: finalResult || null, error: reason, timedOut: true, files: writtenFiles, toolUsageLog, usage: finalUsage, sessionId: observedSessionId || '' });
-          return;
-        }
-        if (code !== 0) {
-          const engineErr = classifiedError && classifiedError.message
-            ? classifiedError.message
-            : (stderr || `Exit code ${code}`);
-          finalize({ output: finalResult || null, error: engineErr, errorCode: classifiedError ? classifiedError.code : undefined, files: writtenFiles, toolUsageLog, usage: finalUsage, sessionId: observedSessionId || '' });
-          return;
-        }
-        finalize({ output: finalResult || '', error: null, files: writtenFiles, toolUsageLog, usage: finalUsage, sessionId: observedSessionId || '' });
+        clearActiveChildProcess(activeProcesses, saveActivePids, chatId);
+        finalize(resolveStreamingClosePayload({
+          code,
+          finalResult,
+          finalUsage,
+          observedSessionId,
+          writtenFiles,
+          toolUsageLog,
+          wasAborted,
+          abortReason,
+          stdinFailureError,
+          watchdog,
+          startTime,
+          idleTimeoutMs: IDLE_TIMEOUT_MS,
+          toolTimeoutMs: TOOL_EXEC_TIMEOUT_MS,
+          hardCeilingMs: HARD_CEILING_MS,
+          classifiedError,
+          stderr,
+          formatTimeoutWindowLabel,
+        }));
       });
 
       child.on('error', (err) => {
-        clearTimeout(idleTimer);
-        clearTimeout(ceilingTimer);
-        clearTimeout(sigkillTimer);
-        clearInterval(milestoneTimer);
-        if (chatId) { activeProcesses.delete(chatId); saveActivePids(); }
+        stopStreamingLifecycle(watchdog, milestoneTimer);
+        clearActiveChildProcess(activeProcesses, saveActivePids, chatId);
         finalize({ output: null, error: formatEngineSpawnError(err, rt), files: [], toolUsageLog: [], usage: null, sessionId: '' });
       });
 
       try {
-        if (isPersistent && _warmPool) {
-          // Stream-json mode: write JSON-formatted message, keep stdin open
-          child.stdin.write(_warmPool.buildStreamMessage(input, observedSessionId || ''));
-        } else {
-          child.stdin.write(input);
-          child.stdin.end();
-        }
+        writeStreamingChildInput({
+          child,
+          input,
+          isPersistent,
+          warmPool: _warmPool,
+          observedSessionId,
+        });
       } catch (e) {
-        clearTimeout(idleTimer);
-        clearTimeout(ceilingTimer);
-        clearTimeout(sigkillTimer);
-        clearInterval(milestoneTimer);
-        if (chatId) { activeProcesses.delete(chatId); saveActivePids(); }
-        try { child.stdin.destroy(); } catch { /* ignore */ }
-        try {
-          const sig = rt.killSignal || 'SIGTERM';
-          process.kill(-child.pid, sig);
-        } catch {
-          try { child.kill(rt.killSignal || 'SIGTERM'); } catch { /* ignore */ }
-        }
-        finalize({ output: null, error: e.message, files: [], toolUsageLog: [], usage: null, sessionId: '' });
+        abortForStdinFailure(e);
       }
     });
   }
@@ -1290,7 +1181,7 @@ function createClaudeEngine(deps) {
     const _existing = activeProcesses.get(chatId);
     if (_existing && _existing.child && !_existing.aborted) {
       log('WARN', `askClaude: overwriting active process for ${chatId} — aborting previous`);
-      try { process.kill(-_existing.child.pid, 'SIGTERM'); } catch { try { _existing.child.kill('SIGTERM'); } catch { /* */ } }
+      terminateChildProcess(_existing.child, 'SIGTERM', { useProcessGroup: process.platform !== 'win32' });
     }
     activeProcesses.set(chatId, {
       child: null,       // sentinel: no process yet
@@ -2571,6 +2462,8 @@ ${mentorRadarHint}
     _private: {
       patchSessionSerialized,
       shouldRetryCodexResumeFallback,
+      resolveStreamingTimeouts,
+      formatTimeoutWindowLabel,
       formatEngineSpawnError,
       adaptDaemonHintForEngine,
       getSessionChatId,
