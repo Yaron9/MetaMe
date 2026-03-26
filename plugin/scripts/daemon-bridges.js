@@ -812,11 +812,13 @@ function createBridgeStarter(deps) {
           let _replyMappingFound = false; // true = mapping exists (agentKey may be null = main)
           // Load state once for the entire routing block
           const _st = loadState();
-          if (parentId && !threadRootId) {
+          // Quoted reply = explicit parentId but NOT a topic thread (topics always carry parentId=root_id)
+          const _isQuotedReply = !!(parentId && !threadRootId);
+          if (_isQuotedReply) {
             log('INFO', `Feishu reply metadata detected chat=${chatId} parentId=${parentId}`);
           }
           // In topic mode, session continuity is handled by pipelineChatId — skip msg_sessions lookup
-          if (parentId && !threadRootId) {
+          if (_isQuotedReply) {
             const mapped = _st.msg_sessions && _st.msg_sessions[parentId];
             if (mapped) {
               _replyMappingFound = true;
@@ -903,7 +905,7 @@ function createBridgeStarter(deps) {
             //   a) agentKey = known team member → route to that member (set sticky)
             //   b) agentKey = null, mapping found → user replied to main; clear sticky, route to main
             //   c) parentId present, no mapping  → intent is explicit, avoid sticky; clear sticky, route to main
-            if (parentId) {
+            if (_isQuotedReply) {
               if (_replyAgentKey) {
                 const member = _boundProj.team.find(m => m.key === _replyAgentKey);
                 if (member) {

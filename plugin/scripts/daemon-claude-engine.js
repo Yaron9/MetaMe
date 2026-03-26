@@ -10,6 +10,7 @@ const {
   _private: { resolveCodexPermissionProfile },
 } = require('./daemon-engine-runtime');
 const { buildIntentHintBlock } = require('./intent-registry');
+const { rawChatId } = require('./core/thread-chat-id');
 const { buildAgentContextForEngine, buildMemorySnapshotContent, refreshMemorySnapshot } = require('./agent-layer');
 const { createPlatformSpawn, terminateChildProcess, stopStreamingLifecycle, abortStreamingChildLifecycle, setActiveChildProcess, clearActiveChildProcess, acquireStreamingChild, buildStreamingResult, resolveStreamingClosePayload, accumulateStreamingStderr, splitStreamingStdoutChunk, buildStreamFlushPayload, buildToolOverlayPayload, buildMilestoneOverlayPayload, finalizePersistentStreamingTurn, writeStreamingChildInput, parseStreamingEvents, applyStreamingMetadata, applyStreamingToolState, applyStreamingContentState, createStreamingWatchdog, runAsyncCommand } = require('./core/handoff');
 
@@ -1279,7 +1280,8 @@ function createClaudeEngine(deps) {
         ...(config.feishu ? config.feishu.chat_agent_map : {}),
         ...(config.imessage ? config.imessage.chat_agent_map : {}),
       };
-      const boundProjectKey = chatAgentMap[chatIdStr] || projectKeyFromVirtualChatId(chatIdStr);
+      const _rawChatId = rawChatId(chatIdStr);
+      const boundProjectKey = chatAgentMap[chatIdStr] || chatAgentMap[_rawChatId] || projectKeyFromVirtualChatId(chatIdStr);
       const boundProject = boundProjectKey && config.projects ? config.projects[boundProjectKey] : null;
       const daemonCfg = (config && config.daemon) || {};
       // Keep real group chats on their own session key.
