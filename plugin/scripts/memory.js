@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 
 /**
- * memory.js — MetaMe Unified Memory Store (v2)
+ * memory.js — MetaMe Unified Memory Store
  *
  * Single table: memory_items (kind: profile|convention|episode|insight)
  * SQLite + FTS5 trigram search, Node.js native (node:sqlite), zero deps.
  *
  * DB: ~/.metame/memory.db
  *
- * v2 API:
+ * Core API:
  *   saveMemoryItem(item)
  *   searchMemoryItems(query, opts)
  *   promoteItem(id)
@@ -17,7 +17,7 @@
  *   readWorkingMemory(agentKey?)
  *   assembleContext({ query, scope, budget })
  *
- * v1 adapters (backward-compatible, route to v2 internally):
+ * Compatibility API (same-signature wrappers for existing callers):
  *   saveSession, saveFacts, saveFactLabels,
  *   searchFacts, searchFactsAsync, searchSessions,
  *   recentSessions, stats
@@ -112,7 +112,7 @@ function getDb() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// v2 Core API
+// Core API
 // ═══════════════════════════════════════════════════════════════════
 
 const memoryModel = require('./core/memory-model');
@@ -284,8 +284,8 @@ function assembleContext({ query, scope = {}, budget } = {}) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// v1 Adapters — backward-compatible API routing to v2 memory_items
-// External callers (extract, reflect, engine, search CLI) work unchanged.
+// Compatibility API — same-signature wrappers for existing callers
+// (extract, reflect, engine, search CLI work unchanged)
 // ═══════════════════════════════════════════════════════════════════
 
 function _parseTags(raw) {
@@ -363,7 +363,6 @@ function saveFacts(sessionId, project, facts, { scope = null, source_type = null
 }
 
 function saveFactLabels() {
-  // Labels are now embedded as tags in saveMemoryItem. No-op for backward compat.
   return { saved: 0, skipped: 0 };
 }
 
@@ -376,7 +375,6 @@ function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
     limit,
   }).filter(r => r.kind === 'insight' || r.kind === 'convention');
 
-  // Map v2 fields back to v1 shape for callers
   return rows.map(r => ({
     id: r.id,
     entity: (r.title || '').split(' \u00b7 ')[0] || r.title || '',
@@ -407,7 +405,7 @@ function searchSessions(query, { limit = 5, project = null, scope = null } = {})
     project: r.project,
     scope: r.scope,
     summary: r.content,
-    keywords: r.tags,
+    keywords: _parseTags(r.tags).join(','),
     mood: '',
     created_at: r.created_at,
     token_cost: 0,
@@ -426,7 +424,7 @@ function recentSessions({ limit = 3, project = null, scope = null } = {}) {
     project: r.project,
     scope: r.scope,
     summary: r.content,
-    keywords: r.tags,
+    keywords: _parseTags(r.tags).join(','),
     mood: '',
     created_at: r.created_at,
     token_cost: 0,
@@ -468,7 +466,7 @@ function forceClose() {
 }
 
 module.exports = {
-  // v2 API
+  // core
   saveMemoryItem,
   searchMemoryItems,
   promoteItem,
@@ -476,7 +474,7 @@ module.exports = {
   bumpSearchCount,
   readWorkingMemory,
   assembleContext,
-  // v1 adapters (backward-compatible)
+  // compatibility
   saveSession,
   saveFacts,
   saveFactLabels,

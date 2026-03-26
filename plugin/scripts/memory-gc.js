@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 
 /**
- * memory-gc.js — Nightly Memory Garbage Collection (v2)
+ * memory-gc.js — Nightly Memory Garbage Collection
  *
- * Promotes hot candidates to active and archives stale items
- * in the memory_items table using memoryModel.shouldPromote()
- * and memoryModel.shouldArchive() policies.
+ * Promotes hot candidates and archives stale items in memory.db
+ * using the memory_items table and core/memory-model.js heuristics.
  *
  * Designed to run nightly at 02:00 via daemon.yaml scheduler.
  */
@@ -111,18 +110,13 @@ function run() {
 
     const dbSizeBefore = getDbSizeBytes();
 
-    // ── v2 memory_items GC: promote candidates + archive stale items ──
-    let promoted = 0;
-    let archived = 0;
-
     const memoryModel = require('./core/memory-model');
 
-    // Check if memory_items table exists
-    const tableCheck = db.prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_items'"
-    ).get();
+    let promoted = 0;
+    let archivedCount = 0;
 
-    if (tableCheck) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
       // Phase 1: Promote hot candidates
       const candidates = db.prepare(
         `SELECT * FROM memory_items WHERE state = 'candidate'`
@@ -135,7 +129,7 @@ function run() {
           promoted++;
         }
       }
-      if (promoted > 0) console.log(`[MEMORY-GC] Promoted ${promoted} candidates → active`);
+      if (promoted > 0) console.log(`[MEMORY-GC] Promoted ${promoted} candidates`);
 
       // Phase 2: Archive stale items
       const allItems = db.prepare(
@@ -146,16 +140,21 @@ function run() {
           db.prepare(
             `UPDATE memory_items SET state = 'archived', updated_at = datetime('now') WHERE id = ?`
           ).run(item.id);
-          archived++;
+          archivedCount++;
         }
       }
-      if (archived > 0) console.log(`[MEMORY-GC] Archived ${archived} stale memory_items`);
-    } else {
-      console.log('[MEMORY-GC] memory_items table not found, nothing to GC.');
+      if (archivedCount > 0) console.log(`[MEMORY-GC] Archived ${archivedCount} stale items`);
+
+      db.exec('COMMIT');
+    } catch (e) {
+      try { db.exec('ROLLBACK'); } catch {}
+      throw e;
     }
 
+    console.log(`[MEMORY-GC] Promoted ${promoted}, archived ${archivedCount}`);
+
     // Run VACUUM to reclaim space (only if we archived something) — outside transaction
-    if (archived > 0) {
+    if (archivedCount > 0) {
       try {
         db.exec('VACUUM');
       } catch { /* non-fatal — WAL mode makes VACUUM occasionally slow */ }
@@ -166,7 +165,7 @@ function run() {
     // ── Write audit log ──
     writeGcLog({
       promoted,
-      archived,
+      archived: archivedCount,
       db_size_before: dbSizeBefore,
       db_size_after: dbSizeAfter,
     });

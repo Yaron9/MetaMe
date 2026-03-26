@@ -33,7 +33,7 @@ const MIN_SEARCH_COUNT = 3;
 const WINDOW_DAYS = 7;
 const MAX_FACTS = 20;
 const LOCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
-const EXCLUDED_RELATIONS = ['project_milestone', 'synthesized_insight', 'knowledge_capsule', 'bug_lesson'];
+const EXCLUDED_KINDS = ['project_milestone', 'synthesized_insight', 'knowledge_capsule', 'bug_lesson'];
 
 // Ensure output directories exist at startup
 [MEMORY_DIR, DECISIONS_DIR, LESSONS_DIR, CAPSULES_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
@@ -109,17 +109,18 @@ function writeReflectLog(record) {
  * Returns array of plain objects.
  */
 function queryHotFacts(db, windowDays = WINDOW_DAYS) {
+  const kindPlaceholders = EXCLUDED_KINDS.map(() => '?').join(', ');
   const stmt = db.prepare(`
-    SELECT id, title, content, kind, confidence, search_count, source_type, created_at
+    SELECT id, title, kind, content, confidence, search_count, created_at
     FROM memory_items
     WHERE search_count >= ${MIN_SEARCH_COUNT}
       AND created_at >= datetime('now', '-${windowDays} days')
       AND state = 'active'
-      AND kind IN ('insight', 'convention')
+      AND kind NOT IN (${kindPlaceholders})
     ORDER BY search_count DESC, created_at DESC
     LIMIT ${MAX_FACTS}
   `);
-  return stmt.all();
+  return stmt.all(...EXCLUDED_KINDS);
 }
 
 /**
@@ -502,8 +503,8 @@ entity_prefix: ${group.prefix}
     }
 
     // ── Conflict Resolution ──────────────────────────────────────────────
-    // Query CONFLICT items grouped by title+kind, ask Haiku to pick winner.
-    // Loser is marked state='superseded'; winner restored to 'active'.
+    // Query CONFLICT memory_items grouped by title+kind, ask Haiku to pick winner.
+    // Loser is archived with supersedes_id; winner restored to active.
     let conflictsResolved = 0;
     try {
       const conflictGroups = db.prepare(`
@@ -577,14 +578,14 @@ ${JSON.stringify(conflictInput, null, 2)}
                 const loserIds = group.facts.filter(f => f.id !== v.winner_id).map(f => f.id);
                 if (loserIds.length === 0) continue;
 
-                // Mark losers as superseded
+                // Mark losers as archived (superseded by winner)
                 const placeholders = loserIds.map(() => '?').join(',');
                 db.prepare(
-                  `UPDATE memory_items SET state = 'superseded', updated_at = datetime('now')
+                  `UPDATE memory_items SET supersedes_id = ?, state = 'archived', updated_at = datetime('now')
                    WHERE id IN (${placeholders})`
-                ).run(...loserIds);
+                ).run(v.winner_id, ...loserIds);
 
-                // Restore winner
+                // Restore winner to active
                 db.prepare(
                   `UPDATE memory_items SET state = 'active', updated_at = datetime('now') WHERE id = ?`
                 ).run(v.winner_id);
@@ -650,6 +651,6 @@ module.exports = {
     collectCapsuleGroups,
     entityPrefix,
     parseJsonFromLlm,
-    EXCLUDED_RELATIONS,
+    EXCLUDED_KINDS,
   },
 };

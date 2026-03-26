@@ -6,25 +6,24 @@ const { DatabaseSync } = require('node:sqlite');
 const reflect = require('./memory-nightly-reflect');
 
 describe('memory-nightly-reflect Step4', () => {
-  it('queryHotFacts excludes synthesized and capsule relations', () => {
+  it('queryHotFacts excludes synthesized and capsule kinds', () => {
     const db = new DatabaseSync(':memory:');
     db.exec(`
-      CREATE TABLE facts (
+      CREATE TABLE memory_items (
         id TEXT PRIMARY KEY,
-        entity TEXT,
-        relation TEXT,
-        value TEXT,
-        confidence TEXT,
+        title TEXT,
+        kind TEXT,
+        content TEXT,
+        confidence REAL,
         search_count INTEGER,
         created_at TEXT,
-        superseded_by TEXT,
-        conflict_status TEXT
+        state TEXT DEFAULT 'active'
       )
     `);
 
     const ins = db.prepare(`
-      INSERT INTO facts (id, entity, relation, value, confidence, search_count, created_at, superseded_by, conflict_status)
-      VALUES (?, ?, ?, ?, 'high', ?, datetime('now'), NULL, 'OK')
+      INSERT INTO memory_items (id, title, kind, content, confidence, search_count, created_at, state)
+      VALUES (?, ?, ?, ?, 0.9, ?, datetime('now'), 'active')
     `);
     ins.run('1', 'a.b', 'arch_convention', 'v1', 5);
     ins.run('2', 'a.b', 'synthesized_insight', 'v2', 5);
@@ -34,7 +33,7 @@ describe('memory-nightly-reflect Step4', () => {
 
     const rows = reflect._private.queryHotFacts(db);
     assert.equal(rows.length, 1);
-    assert.equal(rows[0].relation, 'arch_convention');
+    assert.equal(rows[0].kind, 'arch_convention');
     db.close();
   });
 
