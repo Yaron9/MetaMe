@@ -1,20 +1,11 @@
 #!/usr/bin/env node
 
 /**
- * memory-gc.js — Nightly Fact Garbage Collection
+ * memory-gc.js — Nightly Memory Garbage Collection (v2)
  *
- * Archives stale, low-frequency facts from memory.db by marking them
- * with conflict_status = 'ARCHIVED' (soft delete, fully auditable).
- *
- * GC criteria (ALL must be true):
- *   1. last_searched_at older than 30 days (i.e. datetime < now-30d), OR NULL and created_at also older than 30 days
- *   2. search_count < 3
- *   3. superseded_by IS NULL          (already-superseded facts excluded)
- *   4. conflict_status IS NULL OR conflict_status = 'OK'  (skip CONFLICT/ARCHIVED)
- *   5. relation NOT IN protected set  (workflow_rule, arch_convention, config_fact never archived)
- *
- * Protected relations are permanently excluded — they are high-value guardrails
- * that must survive regardless of search frequency.
+ * Promotes hot candidates to active and archives stale items
+ * in the memory_items table using memoryModel.shouldPromote()
+ * and memoryModel.shouldArchive() policies.
  *
  * Designed to run nightly at 02:00 via daemon.yaml scheduler.
  */
@@ -31,13 +22,6 @@ const DB_PATH = path.join(METAME_DIR, 'memory.db');
 const LOCK_FILE = path.join(METAME_DIR, 'memory-gc.lock');
 const GC_LOG_FILE = path.join(METAME_DIR, 'memory_gc_log.jsonl');
 
-// Relations that are permanently protected from archival
-const PROTECTED_RELATIONS = ['workflow_rule', 'arch_convention', 'config_fact'];
-
-// GC threshold: facts older than this many days are candidates
-const STALE_DAYS = 30;
-// GC threshold: facts with fewer searches than this are candidates
-const MIN_SEARCH_COUNT = 3;
 // Lock timeout: if a lock is older than this, it's stale and safe to break
 const LOCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -127,86 +111,51 @@ function run() {
 
     const dbSizeBefore = getDbSizeBytes();
 
-    // ── Ensure ARCHIVED status column accepts the new value ──
-    // conflict_status was created with NOT NULL DEFAULT 'OK'; ARCHIVED is a new valid state.
-    // No schema change needed — we just write the string value directly.
+    // ── v2 memory_items GC: promote candidates + archive stale items ──
+    let promoted = 0;
+    let archived = 0;
 
-    const protectedPlaceholders = PROTECTED_RELATIONS.map(() => '?').join(', ');
+    const memoryModel = require('./core/memory-model');
 
-    // ── DRY RUN: count candidates and protected exclusions ──
-    console.log(`[MEMORY-GC] Scanning facts older than ${STALE_DAYS} days with search_count < ${MIN_SEARCH_COUNT}...`);
+    // Check if memory_items table exists
+    const tableCheck = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_items'"
+    ).get();
 
-    const countCandidatesStmt = db.prepare(`
-      SELECT COUNT(*) AS cnt
-      FROM facts
-      WHERE (
-        (last_searched_at IS NOT NULL AND last_searched_at < datetime('now', '-${STALE_DAYS} days'))
-        OR
-        (last_searched_at IS NULL AND created_at < datetime('now', '-${STALE_DAYS} days'))
-      )
-      AND search_count < ${MIN_SEARCH_COUNT}
-      AND superseded_by IS NULL
-      AND (conflict_status IS NULL OR conflict_status = 'OK')
-      AND relation NOT IN (${protectedPlaceholders})
-      AND source_type != 'manual'
-    `);
-    const candidateCount = countCandidatesStmt.get(...PROTECTED_RELATIONS).cnt;
-
-    // Count how many facts would be skipped due to the protected-relation guard
-    const countProtectedStmt = db.prepare(`
-      SELECT COUNT(*) AS cnt
-      FROM facts
-      WHERE (
-        (last_searched_at IS NOT NULL AND last_searched_at < datetime('now', '-${STALE_DAYS} days'))
-        OR
-        (last_searched_at IS NULL AND created_at < datetime('now', '-${STALE_DAYS} days'))
-      )
-      AND search_count < ${MIN_SEARCH_COUNT}
-      AND superseded_by IS NULL
-      AND (conflict_status IS NULL OR conflict_status = 'OK')
-      AND (relation IN (${protectedPlaceholders}) OR source_type = 'manual')
-    `);
-    const protectedCount = countProtectedStmt.get(...PROTECTED_RELATIONS).cnt;
-
-    console.log(`[MEMORY-GC] Found ${candidateCount} candidates (excluded ${protectedCount} protected facts)`);
-
-    let archivedCount = 0;
-
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      if (candidateCount > 0) {
-        // ── EXECUTE: archive the candidates ──
-        const updateStmt = db.prepare(`
-          UPDATE facts
-          SET conflict_status = 'ARCHIVED',
-              updated_at = datetime('now')
-          WHERE (
-            (last_searched_at IS NOT NULL AND last_searched_at < datetime('now', '-${STALE_DAYS} days'))
-            OR
-            (last_searched_at IS NULL AND created_at < datetime('now', '-${STALE_DAYS} days'))
-          )
-          AND search_count < ${MIN_SEARCH_COUNT}
-          AND superseded_by IS NULL
-          AND (conflict_status IS NULL OR conflict_status = 'OK')
-          AND relation NOT IN (${protectedPlaceholders})
-          AND source_type != 'manual'
-        `);
-
-        const result = updateStmt.run(...PROTECTED_RELATIONS);
-        archivedCount = result.changes;
-
-        console.log(`[MEMORY-GC] Archived ${archivedCount} facts → conflict_status = 'ARCHIVED'`);
-      } else {
-        console.log('[MEMORY-GC] No candidates to archive.');
+    if (tableCheck) {
+      // Phase 1: Promote hot candidates
+      const candidates = db.prepare(
+        `SELECT * FROM memory_items WHERE state = 'candidate'`
+      ).all();
+      for (const item of candidates) {
+        if (memoryModel.shouldPromote(item)) {
+          db.prepare(
+            `UPDATE memory_items SET state = 'active', updated_at = datetime('now') WHERE id = ?`
+          ).run(item.id);
+          promoted++;
+        }
       }
-      db.exec('COMMIT');
-    } catch (e) {
-      try { db.exec('ROLLBACK'); } catch {}
-      throw e;
+      if (promoted > 0) console.log(`[MEMORY-GC] Promoted ${promoted} candidates → active`);
+
+      // Phase 2: Archive stale items
+      const allItems = db.prepare(
+        `SELECT * FROM memory_items WHERE state IN ('candidate', 'active')`
+      ).all();
+      for (const item of allItems) {
+        if (memoryModel.shouldArchive(item)) {
+          db.prepare(
+            `UPDATE memory_items SET state = 'archived', updated_at = datetime('now') WHERE id = ?`
+          ).run(item.id);
+          archived++;
+        }
+      }
+      if (archived > 0) console.log(`[MEMORY-GC] Archived ${archived} stale memory_items`);
+    } else {
+      console.log('[MEMORY-GC] memory_items table not found, nothing to GC.');
     }
 
     // Run VACUUM to reclaim space (only if we archived something) — outside transaction
-    if (archivedCount > 0) {
+    if (archived > 0) {
       try {
         db.exec('VACUUM');
       } catch { /* non-fatal — WAL mode makes VACUUM occasionally slow */ }
@@ -216,11 +165,8 @@ function run() {
 
     // ── Write audit log ──
     writeGcLog({
-      archived: archivedCount,
-      skipped_protected: protectedCount,
-      candidates_found: candidateCount,
-      stale_days_threshold: STALE_DAYS,
-      min_search_count_threshold: MIN_SEARCH_COUNT,
+      promoted,
+      archived,
       db_size_before: dbSizeBefore,
       db_size_after: dbSizeAfter,
     });

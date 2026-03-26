@@ -109,19 +109,17 @@ function writeReflectLog(record) {
  * Returns array of plain objects.
  */
 function queryHotFacts(db, windowDays = WINDOW_DAYS) {
-  const relationPlaceholders = EXCLUDED_RELATIONS.map(() => '?').join(', ');
   const stmt = db.prepare(`
-    SELECT id, entity, relation, value, confidence, search_count, created_at
-    FROM facts
+    SELECT id, title, content, kind, confidence, search_count, source_type, created_at
+    FROM memory_items
     WHERE search_count >= ${MIN_SEARCH_COUNT}
       AND created_at >= datetime('now', '-${windowDays} days')
-      AND superseded_by IS NULL
-      AND (conflict_status IS NULL OR conflict_status = 'OK')
-      AND relation NOT IN (${relationPlaceholders})
+      AND state = 'active'
+      AND kind IN ('insight', 'convention')
     ORDER BY search_count DESC, created_at DESC
     LIMIT ${MAX_FACTS}
   `);
-  return stmt.all(...EXCLUDED_RELATIONS);
+  return stmt.all();
 }
 
 /**
@@ -194,7 +192,7 @@ function entityPrefix(entity) {
 function collectCapsuleGroups(facts, minGroupSize = 3) {
   const groups = new Map();
   for (const fact of Array.isArray(facts) ? facts : []) {
-    const prefix = entityPrefix(fact && fact.entity);
+    const prefix = entityPrefix(fact && fact.title);
     if (!prefix) continue;
     if (!groups.has(prefix)) groups.set(prefix, []);
     groups.get(prefix).push(fact);
@@ -304,9 +302,9 @@ async function run() {
 
     const factsJson = JSON.stringify(
       hotFacts.map(f => ({
-        entity: f.entity,
-        relation: f.relation,
-        value: f.value,
+        title: f.title,
+        kind: f.kind,
+        content: f.content,
         confidence: f.confidence,
         search_count: f.search_count,
       })),
@@ -406,9 +404,9 @@ Rules:
 
         const sourceItems = factsForGroup ? factsForGroup.items : group.items;
         const groupFacts = sourceItems.map(f => ({
-          entity: f.entity,
-          relation: f.relation,
-          value: f.value,
+          title: f.title,
+          kind: f.kind,
+          content: f.content,
           search_count: f.search_count,
         }));
         const capsulePrompt = playbookExists
@@ -504,15 +502,15 @@ entity_prefix: ${group.prefix}
     }
 
     // ── Conflict Resolution ──────────────────────────────────────────────
-    // Query CONFLICT facts grouped by entity+relation, ask Haiku to pick winner.
-    // Loser is marked superseded_by winner; winner restored to OK.
+    // Query CONFLICT items grouped by title+kind, ask Haiku to pick winner.
+    // Loser is marked state='superseded'; winner restored to 'active'.
     let conflictsResolved = 0;
     try {
       const conflictGroups = db.prepare(`
-        SELECT entity, relation, COUNT(*) as cnt
-        FROM facts
-        WHERE conflict_status = 'CONFLICT' AND superseded_by IS NULL
-        GROUP BY entity, relation
+        SELECT title, kind, COUNT(*) as cnt
+        FROM memory_items
+        WHERE state = 'conflict'
+        GROUP BY title, kind
         HAVING cnt >= 2
         ORDER BY cnt DESC
         LIMIT 10
@@ -525,23 +523,23 @@ entity_prefix: ${group.prefix}
         const allConflicts = [];
         for (const g of conflictGroups) {
           const rows = db.prepare(`
-            SELECT id, entity, relation, value, confidence, created_at
-            FROM facts
-            WHERE entity = ? AND relation = ? AND conflict_status = 'CONFLICT' AND superseded_by IS NULL
+            SELECT id, title, kind, content, confidence, created_at
+            FROM memory_items
+            WHERE title = ? AND kind = ? AND state = 'conflict'
             ORDER BY created_at DESC
-          `).all(g.entity, g.relation);
-          if (rows.length >= 2) allConflicts.push({ entity: g.entity, relation: g.relation, facts: rows });
+          `).all(g.title, g.kind);
+          if (rows.length >= 2) allConflicts.push({ title: g.title, kind: g.kind, facts: rows });
         }
 
         if (allConflicts.length > 0) {
           // Limit to 5 groups to avoid truncating serialized JSON
           const conflictInput = allConflicts.slice(0, 5).map(g => ({
-            entity: g.entity,
-            relation: g.relation,
-            candidates: g.facts.slice(0, 5).map(f => ({ id: f.id, value: f.value.slice(0, 150), confidence: f.confidence, created_at: f.created_at })),
+            title: g.title,
+            kind: g.kind,
+            candidates: g.facts.slice(0, 5).map(f => ({ id: f.id, content: f.content.slice(0, 150), confidence: f.confidence, created_at: f.created_at })),
           }));
 
-          const resolvePrompt = `你是知识库冲突调解员。以下是同一 entity+relation 下的冲突事实，请选出每组最准确的一条保留。
+          const resolvePrompt = `你是知识库冲突调解员。以下是同一 title+kind 下的冲突记忆条目，请选出每组最准确的一条保留。
 
 冲突组(JSON):
 ${JSON.stringify(conflictInput, null, 2)}
@@ -549,15 +547,15 @@ ${JSON.stringify(conflictInput, null, 2)}
 输出 JSON 数组，每个元素对应一组冲突的裁决：
 [
   {
-    "entity": "...",
-    "relation": "...",
-    "winner_id": "保留的fact id",
+    "title": "...",
+    "kind": "...",
+    "winner_id": "保留的item id",
     "reason": "一句话理由"
   }
 ]
 
 规则：
-- 优先选最新（created_at）且 confidence=high 的
+- 优先选最新（created_at）且 confidence 高的
 - 如果旧条目更准确具体，选旧的
 - 只输出 JSON 数组`;
 
@@ -569,9 +567,9 @@ ${JSON.stringify(conflictInput, null, 2)}
             const verdicts = parseJsonFromLlm(resolveRaw);
             if (Array.isArray(verdicts)) {
               for (const v of verdicts) {
-                if (!v || !v.winner_id || !v.entity || !v.relation) continue;
+                if (!v || !v.winner_id || !v.title || !v.kind) continue;
                 // Validate winner exists in our conflict set
-                const group = allConflicts.find(g => g.entity === v.entity && g.relation === v.relation);
+                const group = allConflicts.find(g => g.title === v.title && g.kind === v.kind);
                 if (!group) continue;
                 const winnerExists = group.facts.some(f => f.id === v.winner_id);
                 if (!winnerExists) continue;
@@ -582,13 +580,13 @@ ${JSON.stringify(conflictInput, null, 2)}
                 // Mark losers as superseded
                 const placeholders = loserIds.map(() => '?').join(',');
                 db.prepare(
-                  `UPDATE facts SET superseded_by = ?, conflict_status = 'OK', updated_at = datetime('now')
+                  `UPDATE memory_items SET state = 'superseded', updated_at = datetime('now')
                    WHERE id IN (${placeholders})`
-                ).run(v.winner_id, ...loserIds);
+                ).run(...loserIds);
 
                 // Restore winner
                 db.prepare(
-                  `UPDATE facts SET conflict_status = 'OK', updated_at = datetime('now') WHERE id = ?`
+                  `UPDATE memory_items SET state = 'active', updated_at = datetime('now') WHERE id = ?`
                 ).run(v.winner_id);
 
                 conflictsResolved += loserIds.length;

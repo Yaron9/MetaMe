@@ -719,7 +719,7 @@ function runAsyncCommand(opts) {
       if (stdinFailureError) {
         finalize({ output: null, error: stdinFailureError });
       } else if (timedOut) {
-        finalize({ output: null, error: 'Timeout: Claude took too long' });
+        finalize({ output: null, error: `Timeout: engine took too long (${Math.round(timeoutMs / 1000)}s)` });
       } else if (code !== 0) {
         finalize({ output: null, error: stderr || `Exit code ${code}` });
       } else {
