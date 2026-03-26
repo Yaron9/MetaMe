@@ -29,8 +29,7 @@
 
 - 会话与引擎选择：
   - `scripts/daemon-claude-engine.js`
-  - 关键点：`askClaude()` 按 `project.engine`/session 选择 runtime；`patchSessionSerialized()` 串行回写 session
-  - 说明：同一底层 session 续聊不再注入会话恢复摘要；额外上下文仅来自显式 compact / memory / intent 链路
+  - 关键点：`askClaude()` 路由+执行，streaming 纯逻辑委托 `core/handoff.js`；`patchSessionSerialized()` 串行回写避免竞态
   - Codex 规则：`exec`/`resume`、10 分钟窗口内一次自动重试、`thread_id` 迁移回写
 
 - Agent Soul 身份层（新）：
@@ -38,7 +37,7 @@
   - 关键点：`ensureAgentLayer()` 创建 `~/.metame/agents/<id>/`（soul.md、memory-snapshot.md、agent.yaml）；
     `createLinkOrMirror()` Windows 兼容（symlink → hardlink → copy 降级）；
     `ensureClaudeMdSoulImport()` 在 CLAUDE.md 头部注入 `@SOUL.md`（Claude CLI 自动加载）；
-    Codex 引擎在每次新 session 时将 CLAUDE.md + SOUL.md 合并写入 AGENTS.md（见 daemon-claude-engine.js:957）；
+    Codex 引擎在每次新 session 时将 CLAUDE.md + SOUL.md 合并写入 AGENTS.md；
     `repairAgentLayer()` 懒迁移：老项目补建 soul 层，幂等安全
 
 - Agent 命令处理（新）：
@@ -66,24 +65,11 @@
 
 ## 核心模块层（scripts/core/）
 
-纯逻辑模块，无副作用，完整单元测试覆盖。遵循 Unix 哲学：helper 只做计算/状态转换，返回数据+意图标志；调用方决定何时执行副作用。
+纯逻辑，无副作用，返回意图标志由调用方执行。
 
-- `scripts/core/handoff.js`：子进程生命周期（22 公开 API + 7 `_internal`）
-  - 子进程管理：`createPlatformSpawn`（Win/Mac 双平台）、`terminateChildProcess`、`acquireStreamingChild`（warm pool 复用）
-  - Streaming 状态机：`applyStreamingContentState`、`applyStreamingToolState`、`applyStreamingMetadata`、`reduceStreamingWaitState`
-  - 输出处理：`splitStreamingStdoutChunk`、`accumulateStreamingStderr`、`parseStreamingEvents`、`buildStreamFlushPayload`
-  - 超时看门狗：`createStreamingWatchdog`（idle/tool/ceiling 三级超时 + 升级 kill）
-  - 结果构建：`buildStreamingResult`、`resolveStreamingClosePayload`（参数分组为 `streamState` + `timeoutConfig`）
-  - UI 覆盖层：`buildToolOverlayPayload`、`buildMilestoneOverlayPayload`
-  - 生命周期控制：`stopStreamingLifecycle`、`abortStreamingChildLifecycle`、`finalizePersistentStreamingTurn`
-  - 异步命令：`runAsyncCommand`（引擎中性，超时+升级 kill）
-  - 消费者：`scripts/daemon-claude-engine.js`（唯一）
-
-- `scripts/core/audit.js`：审计状态管理
-  - `createAudit(deps)` 工厂模式，显式依赖注入
-  - 消费者：`scripts/daemon.js`（唯一）
-
-- 测试：`scripts/core/handoff.test.js`、`scripts/daemon-audit.test.js`、`scripts/daemon-claude-engine.test.js`
+- `core/handoff.js`：子进程 spawn/kill、streaming 状态机、超时看门狗、结果构建。唯一消费者 `daemon-claude-engine.js`
+- `core/audit.js`：审计状态。唯一消费者 `daemon.js`
+- 测试：`core/handoff.test.js`、`daemon-audit.test.js`、`daemon-claude-engine.test.js`
 
 ## 团队 Dispatch 与跨设备通信定位
 

@@ -43,31 +43,15 @@ feishu:
 
 ## 3. 会话与执行规则
 
-- 引擎 runtime 工厂：`scripts/daemon-engine-runtime.js`
-- 会话执行入口：`scripts/daemon-claude-engine.js`（Claude/Codex 共用）
-- Session 回写：`patchSessionSerialized()` 串行化，避免 thread.started 竞态覆盖
-- 同一个底层 session 不做自动“恢复摘要”注入；续聊直接依赖引擎原生上下文
-- 额外上下文只在显式链路进入时注入，例如 `/compact` 产物、`NOW.md`、memory facts / capsules、intent hints
+- Runtime 工厂：`daemon-engine-runtime.js`
+- 执行编排：`daemon-claude-engine.js`，streaming 纯逻辑委托 `core/handoff.js`（引擎中性），审计状态在 `core/audit.js`
+- 架构纪律见 CLAUDE.md「代码架构纪律（Unix 哲学）」
 
 ### Codex 会话策略
 
 - 首轮：`codex exec --json -`
 - 续轮：`codex exec resume <thread_id> --json -`
 - `resume` 失败自动重试：同一 `chatId` 在 10 分钟内最多 1 次
-- 收到新 `thread_id` 时自动迁移 session id
-
-### 核心纯逻辑层（scripts/core/）
-
-执行引擎的子进程管理、streaming 状态机、超时看门狗等纯逻辑已提取到 `scripts/core/handoff.js`。
-
-架构纪律（见 CLAUDE.md）：
-- `core/handoff.js` 只做计算/状态转换，返回意图标志（`shouldFlush`、`isApiError`、`shouldUpdateWatchdog`）
-- `daemon-claude-engine.js` 是唯一消费者，负责执行副作用（watchdog 更新、flush、callback）
-- `core/audit.js` 由 `daemon.js` 消费，管理审计状态
-- 新增 helper 必须配测试：`scripts/core/*.test.js`
-- 公开 API 最小化：仅消费者需要的函数 export，内部函数放 `_internal`
-
-引擎兼容性：所有 handoff helper 都是引擎中性的，通过参数接收引擎特定行为（`rt.parseStreamEvent`、`rt.classifyError`、`rt.killSignal`）。
 
 ## 4. 命令行为差异
 
