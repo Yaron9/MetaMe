@@ -1,6 +1,7 @@
 'use strict';
 
 const { normalizeEngineName: _normalizeEngine } = require('./daemon-utils');
+const { rawChatId: _rawChatId } = require('./core/thread-chat-id');
 
 function createSessionCommandHandler(deps) {
   const {
@@ -57,9 +58,9 @@ function createSessionCommandHandler(deps) {
     const state = loadState();
     const chatKey = String(chatId);
     const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
-    const boundKey = agentMap[chatKey] || null;
+    const boundKey = agentMap[chatKey] || agentMap[_rawChatId(chatKey)] || null;
     const boundProj = boundKey && cfg.projects ? cfg.projects[boundKey] : null;
-    const stickyKey = state && state.team_sticky ? state.team_sticky[chatKey] : null;
+    const stickyKey = state && state.team_sticky ? (state.team_sticky[chatKey] || state.team_sticky[_rawChatId(chatKey)]) : null;
     const stickyMember = stickyKey && boundProj && Array.isArray(boundProj.team)
       ? boundProj.team.find((m) => m && m.key === stickyKey)
       : null;

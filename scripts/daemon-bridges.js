@@ -187,12 +187,13 @@ function createBridgeStarter(deps) {
 
   // ── Team group helpers ─────────────────────────────────────────────────
   function _getBoundProject(chatId, cfg) {
+    const { rawChatId } = require('./core/thread-chat-id');
     const map = {
       ...(cfg.telegram  ? cfg.telegram.chat_agent_map  || {} : {}),
       ...(cfg.feishu    ? cfg.feishu.chat_agent_map    || {} : {}),
       ...(cfg.imessage  ? cfg.imessage.chat_agent_map  || {} : {}),
     };
-    const key = map[String(chatId)];
+    const key = map[String(chatId)] || map[rawChatId(chatId)];
     const proj = key && cfg.projects ? cfg.projects[key] : null;
     return { key: key || null, project: proj || null };
   }
