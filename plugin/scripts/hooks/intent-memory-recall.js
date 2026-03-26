@@ -31,6 +31,5 @@ module.exports = function detectMemoryRecall(prompt) {
     '- 搜索记忆: `node ~/.metame/memory-search.js "关键词1" "keyword2"`',
     '- 一次传 3-4 个关键词（中文+英文+函数名）',
     '- `--facts` 只搜事实，`--sessions` 只搜会话',
-    '- v2统一召回: `require("./memory").assembleContext({ query, scope: { project, agent } })`',
   ].join('\n');
 };

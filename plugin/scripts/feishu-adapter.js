@@ -12,16 +12,16 @@ const path = require('path');
 let Lark;
 function _tryRequireLark() {
   // 1. local node_modules (dev environment)
-  try { return require('@larksuiteoapi/node-sdk'); } catch { }
+  try { return require('@larksuiteoapi/node-sdk'); } catch {}
   // 2. METAME_ROOT/node_modules (packaged metame-cli)
   const metameRoot = process.env.METAME_ROOT;
   if (metameRoot) {
-    try { return require(path.join(metameRoot, 'node_modules', '@larksuiteoapi/node-sdk')); } catch { }
+    try { return require(path.join(metameRoot, 'node_modules', '@larksuiteoapi/node-sdk')); } catch {}
   }
   // 3. ~/.metame/node_modules (auto-installed for new users)
   const home = process.env.HOME || process.env.USERPROFILE;
   if (home) {
-    try { return require(path.join(home, '.metame', 'node_modules', '@larksuiteoapi', 'node-sdk')); } catch { }
+    try { return require(path.join(home, '.metame', 'node_modules', '@larksuiteoapi', 'node-sdk')); } catch {}
   }
   return null;
 }
@@ -204,7 +204,7 @@ function createBot(config) {
     /**
      * Typing indicator (Feishu has no such API — no-op)
      */
-    async sendTyping(_chatId) { },
+    async sendTyping(_chatId) {},
 
     /**
      * Send interactive card with action buttons (V1 schema — required for card.action.trigger)
@@ -297,7 +297,7 @@ function createBot(config) {
               resolve(destPath);
             });
             fileStream.on('error', (err) => {
-              fs.unlink(destPath, () => { });
+              fs.unlink(destPath, () => {});
               reject(err);
             });
           });
@@ -445,7 +445,7 @@ function createBot(config) {
                     fileName: content.file_name || (content.image_key ? `image_${Date.now()}.png` : `file_${Date.now()}`),
                     msgType: msg.message_type,
                   };
-                } catch { }
+                } catch {}
               }
 
               text = text.replace(/@_user_\d+\s*/g, '').trim();
