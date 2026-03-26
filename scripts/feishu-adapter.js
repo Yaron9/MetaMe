@@ -112,15 +112,36 @@ function createBot(config) {
     }
   }
 
+  // ── Thread-aware send primitive ──────────────────────────────────────
+  // Detects composite "thread:chatId:threadId" IDs from daemon-bridges
+  // and routes to client.im.message.reply (stays inside the topic thread)
+  // instead of client.im.message.create.
+  const { parseThreadChatId } = require('./core/thread-chat-id');
+
+  async function _dispatchSend(chatId, msgType, content, timeout = 15000) {
+    const thread = parseThreadChatId(chatId);
+    let res;
+    if (thread) {
+      // Topic mode: reply inside the thread so the response stays in the topic
+      res = await withTimeout(client.im.message.reply({
+        path: { message_id: thread.threadId },
+        data: { msg_type: msgType, content },
+      }), timeout);
+    } else {
+      // Normal mode: create message in chat
+      res = await withTimeout(client.im.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: { receive_id: chatId, msg_type: msgType, content },
+      }), timeout);
+    }
+    const msgId = res?.data?.message_id;
+    return msgId ? { message_id: msgId } : null;
+  }
+
   // Private: send an interactive card JSON; returns { message_id } or null.
   // All card functions funnel through here to avoid repeating the SDK call.
   async function _sendInteractive(chatId, card) {
-    const res = await withTimeout(client.im.message.create({
-      params: { receive_id_type: 'chat_id' },
-      data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
-    }), 30000); // 30s: large card content can be slow; timeout must not fire after delivery
-    const msgId = res?.data?.message_id;
-    return msgId ? { message_id: msgId } : null;
+    return _dispatchSend(chatId, 'interactive', JSON.stringify(card), 30000);
   }
 
   let _editBroken = false;      // closure var — safe against destructured calls
@@ -132,17 +153,7 @@ function createBot(config) {
      * Send a plain text message
      */
     async sendMessage(chatId, text) {
-      const res = await withTimeout(client.im.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chatId,
-          msg_type: 'text',
-          content: JSON.stringify({ text }),
-        },
-      }));
-      // Return Telegram-compatible shape so daemon can edit it later
-      const msgId = res?.data?.message_id;
-      return msgId ? { message_id: msgId } : null;
+      return _dispatchSend(chatId, 'text', JSON.stringify({ text }));
     },
 
     async editMessage(chatId, messageId, text, header = null) {
@@ -345,16 +356,9 @@ function createBot(config) {
           throw new Error(`No file_key in response: ${JSON.stringify(uploadRes)}`);
         }
 
-        // 2. Send file message
-        const sendRes = await client.im.message.create({
-          params: { receive_id_type: 'chat_id' },
-          data: {
-            receive_id: chatId,
-            msg_type: 'file',
-            content: JSON.stringify({ file_key: fileKey }),
-          },
-        });
-        const msgId = sendRes?.data?.message_id;
+        // 2. Send file message (thread-aware)
+        const sendResult = await _dispatchSend(chatId, 'file', JSON.stringify({ file_key: fileKey }));
+        const msgId = sendResult?.message_id;
         if (caption) await this.sendMessage(chatId, caption);
         return msgId ? { message_id: msgId } : null;
       } catch (uploadErr) {

@@ -4,6 +4,7 @@ let userAcl = null;
 try { userAcl = require('./daemon-user-acl'); } catch { /* optional */ }
 const { findTeamMember: _findTeamMember } = require('./daemon-team-dispatch');
 const { isRemoteMember } = require('./daemon-remote-dispatch');
+const { buildThreadChatId } = require('./core/thread-chat-id');
 const imessageIO = (() => { try { return require('./daemon-siri-imessage'); } catch { return null; } })();
 const siriBridgeMod = (() => { try { return require('./daemon-siri-bridge'); } catch { return null; } })();
 const weixinBridgeMod = (() => { try { return require('./daemon-weixin-bridge'); } catch { return null; } })();
@@ -114,6 +115,20 @@ function createBridgeStarter(deps) {
       if (text) return text;
     }
     return null;
+  }
+
+  /**
+   * Extract the topic root message ID (root_id) from a Feishu event.
+   * Returns non-null ONLY for messages inside a Feishu "话题" thread,
+   * NOT for plain quoted replies in conversation mode.
+   */
+  function extractFeishuThreadRootId(event) {
+    const msg = (event && event.message) || (event && event.event && event.event.message);
+    if (!msg) return null;
+    // root_id is set when the message belongs to a topic thread.
+    // In conversation mode, a simple "指定回复" sets parent_id but NOT root_id.
+    const rootId = String(msg.root_id || '').trim();
+    return rootId || null;
   }
 
   function trackBridgeReplyMapping(messageId, payload = {}) {
@@ -728,6 +743,13 @@ function createBridgeStarter(deps) {
           return;
         }
 
+        // ── Topic mode detection (before file/text split) ──
+        const threadRootId = extractFeishuThreadRootId(event);
+        const pipelineChatId = threadRootId ? buildThreadChatId(chatId, threadRootId) : chatId;
+        if (threadRootId) {
+          log('INFO', `Feishu topic detected: root=${threadRootId} → pipelineChatId=${pipelineChatId}`);
+        }
+
         if (fileInfo && fileInfo.fileKey) {
           const acl = await applyUserAcl({
             bot,
@@ -747,7 +769,7 @@ function createBridgeStarter(deps) {
 
           try {
             await bot.downloadFile(fileInfo.messageId, fileInfo.fileKey, destPath, fileInfo.msgType);
-            await bot.sendMessage(chatId, `📥 Saved: ${fileInfo.fileName}`);
+            await bot.sendMessage(pipelineChatId, `📥 Saved: ${fileInfo.fileName}`);
 
             const prompt = text
               ? `User uploaded a file to the project: ${destPath}\nUser says: "${text}"`
@@ -755,21 +777,21 @@ function createBridgeStarter(deps) {
 
             // Respect team_sticky: route to active agent same as text messages
             const _stFile = loadState();
-            const _chatKeyFile = String(chatId);
+            const _chatKeyFile = String(pipelineChatId);
             const { project: _boundProjFile } = _getBoundProject(chatId, liveCfg);
             const _stickyKeyFile = (_stFile.team_sticky || {})[_chatKeyFile];
             if (_boundProjFile && Array.isArray(_boundProjFile.team) && _boundProjFile.team.length > 0 && _stickyKeyFile) {
               const _stickyMember = _boundProjFile.team.find(m => m.key === _stickyKeyFile);
               if (_stickyMember) {
                 log('INFO', `Feishu file → sticky route to ${_stickyKeyFile}`);
-                _dispatchToTeamMember(_stickyMember, _boundProjFile, prompt, liveCfg, bot, chatId, executeTaskByName, acl);
+                _dispatchToTeamMember(_stickyMember, _boundProjFile, prompt, liveCfg, bot, pipelineChatId, executeTaskByName, acl);
                 return;
               }
             }
-            await pipeline.processMessage(chatId, prompt, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
+            await pipeline.processMessage(pipelineChatId, prompt, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
           } catch (err) {
             log('ERROR', `Feishu file download failed: ${err.message}`);
-            await bot.sendMessage(chatId, `❌ Download failed: ${err.message}`);
+            await bot.sendMessage(pipelineChatId, `❌ Download failed: ${err.message}`);
           }
           return;
         }
@@ -790,10 +812,11 @@ function createBridgeStarter(deps) {
           let _replyMappingFound = false; // true = mapping exists (agentKey may be null = main)
           // Load state once for the entire routing block
           const _st = loadState();
-          if (parentId) {
+          if (parentId && !threadRootId) {
             log('INFO', `Feishu reply metadata detected chat=${chatId} parentId=${parentId}`);
           }
-          if (parentId) {
+          // In topic mode, session continuity is handled by pipelineChatId — skip msg_sessions lookup
+          if (parentId && !threadRootId) {
             const mapped = _st.msg_sessions && _st.msg_sessions[parentId];
             if (mapped) {
               _replyMappingFound = true;
@@ -816,7 +839,8 @@ function createBridgeStarter(deps) {
           }
 
           // Helper: set/clear sticky on shared state object and persist
-          const _chatKey = String(chatId);
+          // Use pipelineChatId so each topic gets independent sticky state
+          const _chatKey = String(pipelineChatId);
           const _setSticky = (key) => {
             if (!_st.team_sticky) _st.team_sticky = {};
             _st.team_sticky[_chatKey] = key;
@@ -860,15 +884,15 @@ function createBridgeStarter(deps) {
                 pipeline.clearQueue(vid);
                 const stopped = pipeline.interruptActive(vid);
                 if (stopped) {
-                  await bot.sendMessage(chatId, `⏹ Stopping ${label}...`);
+                  await bot.sendMessage(pipelineChatId, `⏹ Stopping ${label}...`);
                 } else {
-                  await bot.sendMessage(chatId, `${label} 当前没有活跃任务`);
+                  await bot.sendMessage(pipelineChatId, `${label} 当前没有活跃任务`);
                 }
                 return;
               }
               // /stop <bad-nickname> → no match, report error instead of falling through
               if (_stopArg) {
-                await bot.sendMessage(chatId, `❌ 未找到团队成员: ${_stopArg}`);
+                await bot.sendMessage(pipelineChatId, `❌ 未找到团队成员: ${_stopArg}`);
                 return;
               }
               // Bare /stop, no sticky set → fall through to handleCommand
@@ -885,7 +909,7 @@ function createBridgeStarter(deps) {
                 if (member) {
                   _setSticky(member.key);
                   log('INFO', `Quoted reply → force route to ${_replyAgentKey} (sticky set)`);
-                  _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+                  _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, pipelineChatId, executeTaskByName, acl);
                   return;
                 }
                 // agentKey set but not a current team member → fall through to main
@@ -894,7 +918,7 @@ function createBridgeStarter(deps) {
               // Cases b & c: no agentKey (main agent) or stale/unknown agentKey
               _clearSticky();
               log('INFO', `Quoted reply → route to main (agentKey=${_replyAgentKey} mappingFound=${_replyMappingFound})`);
-              await pipeline.processMessage(chatId, trimmedText, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
+              await pipeline.processMessage(pipelineChatId, trimmedText, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
               return;
             }
             // 1. Explicit nickname → route + set sticky
@@ -905,7 +929,7 @@ function createBridgeStarter(deps) {
                   if (!rest) {
                     // Pure nickname, no task — confirm member is online
                     log('INFO', `Sticky set (pure nickname): ${_chatKey.slice(-8)} → ${member.key}`);
-                    bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`)
+                    bot.sendMarkdown(pipelineChatId, `${member.icon || '🤖'} **${member.name}** 在线`)
                       .then((msg) => {
                         if (msg && msg.message_id) {
                           trackBridgeReplyMapping(msg.message_id, inferSessionMapping(`_agent_${member.key}`, {
@@ -919,7 +943,7 @@ function createBridgeStarter(deps) {
                     return;
                   }
                   log('INFO', `Sticky set: ${_chatKey.slice(-8)} → ${member.key}`);
-                  _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, chatId, executeTaskByName, acl);
+                  _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, pipelineChatId, executeTaskByName, acl);
                   return;
             }
 
@@ -932,7 +956,7 @@ function createBridgeStarter(deps) {
               const rest = trimmedText.slice(_mainMatch.length).replace(/^[\s,，:：]+/, '');
                   log('INFO', `Main nickname → cleared sticky, routing to main${rest ? ` (task: ${rest.slice(0, 30)})` : ''}`);
                   if (!rest) {
-                    bot.sendMarkdown(chatId, `${_boundProj.icon || '🤖'} **${_boundProj.name}** 在线`)
+                    bot.sendMarkdown(pipelineChatId, `${_boundProj.icon || '🤖'} **${_boundProj.name}** 在线`)
                       .then((msg) => {
                         if (msg && msg.message_id) {
                           trackBridgeReplyMapping(msg.message_id, inferSessionMapping(String(chatId), {
@@ -947,10 +971,10 @@ function createBridgeStarter(deps) {
                     return;
                   }
               try {
-                await pipeline.processMessage(chatId, rest, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
+                await pipeline.processMessage(pipelineChatId, rest, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
               } catch (e) {
                 log('ERROR', `Team main-route handleCommand failed: ${e.message}`);
-                bot.sendMessage(chatId, `❌ 执行失败: ${e.message}`).catch(() => {});
+                bot.sendMessage(pipelineChatId, `❌ 执行失败: ${e.message}`).catch(() => {});
               }
               return;
             }
@@ -960,7 +984,7 @@ function createBridgeStarter(deps) {
               const member = _boundProj.team.find(m => m.key === _stickyKey);
               if (member) {
                 log('INFO', `Sticky route: → ${_stickyKey}`);
-                _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+                _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, pipelineChatId, executeTaskByName, acl);
                 return;
               }
             }
@@ -968,10 +992,10 @@ function createBridgeStarter(deps) {
           }
 
           try {
-            await pipeline.processMessage(chatId, text, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
+            await pipeline.processMessage(pipelineChatId, text, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
           } catch (e) {
             log('ERROR', `Feishu handleCommand failed for ${chatId}: ${e.message}`);
-            bot.sendMessage(chatId, `❌ 命令执行失败: ${e.message}`).catch(() => {});
+            bot.sendMessage(pipelineChatId, `❌ 命令执行失败: ${e.message}`).catch(() => {});
           }
         }
       }, { log: (lvl, msg) => log(lvl, msg) });
