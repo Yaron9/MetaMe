@@ -108,68 +108,6 @@ function saveSessionTag(sessionId, sessionName, facts) {
   }
 }
 
-function normalizeConceptList(input) {
-  if (!Array.isArray(input)) return [];
-  const out = [];
-  const seen = new Set();
-  for (const raw of input) {
-    const v = String(raw || '').trim();
-    if (!v || v.length > 40) continue;
-    if (seen.has(v)) continue;
-    seen.add(v);
-    out.push(v);
-    if (out.length >= 3) break;
-  }
-  return out;
-}
-
-function normalizeDomain(input) {
-  const v = String(input || '').trim();
-  if (!v) return null;
-  return v.length > 40 ? v.slice(0, 40) : v;
-}
-
-function factFingerprint(fact) {
-  if (!fact || typeof fact !== 'object') return '';
-  const entity = String(fact.entity || '').trim();
-  const relation = String(fact.relation || '').trim();
-  const value = String(fact.value || '').trim().slice(0, 100);
-  if (!entity || !relation || !value) return '';
-  return `${entity}||${relation}||${value}`;
-}
-
-function buildFactLabelRows(extractedFacts, savedFacts) {
-  const source = Array.isArray(extractedFacts) ? extractedFacts : [];
-  const saved = Array.isArray(savedFacts) ? savedFacts : [];
-  if (source.length === 0 || saved.length === 0) return [];
-
-  const byFp = new Map();
-  for (const fact of source) {
-    const fp = factFingerprint(fact);
-    if (!fp) continue;
-    if (!byFp.has(fp)) byFp.set(fp, fact);
-  }
-
-  const rows = [];
-  const dedup = new Set();
-  for (const sf of saved) {
-    const fp = factFingerprint(sf);
-    if (!fp) continue;
-    const src = byFp.get(fp);
-    if (!src) continue;
-    const concepts = normalizeConceptList(src.concepts);
-    if (concepts.length === 0) continue;
-    const domain = normalizeDomain(src.domain);
-    for (const label of concepts) {
-      const rowKey = `${sf.id}::${label}`;
-      if (dedup.has(rowKey)) continue;
-      dedup.add(rowKey);
-      rows.push({ fact_id: sf.id, label, domain });
-    }
-  }
-  return rows;
-}
-
 const VAGUE_PATTERNS = [
   /^用户(问|提|说|提到)/, /^我们(讨论|分析|查看)/,
   /这个问题/, /上面(提到|说的|的)/, /可能是因为/,
@@ -216,13 +154,7 @@ async function extractFacts(skeleton, evidence, distillEnv) {
     return true;
   });
 
-  const normalizedFacts = filteredFacts.map(f => ({
-    ...f,
-    concepts: normalizeConceptList(f.concepts),
-    domain: normalizeDomain(f.domain),
-  }));
-
-  return { ok: true, facts: normalizedFacts, session_name };
+  return { ok: true, facts: filteredFacts, session_name };
 }
 
 /**
@@ -313,25 +245,16 @@ async function run() {
           const fallbackScope = skeleton.session_id
             ? `sess_${String(skeleton.session_id).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24)}`
             : null;
-          const { saved, skipped, superseded, savedFacts } = memory.saveFacts(
+          const { saved, skipped, superseded } = memory.saveFacts(
             skeleton.session_id,
             skeleton.project || 'unknown',
             facts,
             { scope: skeleton.project_id || fallbackScope }
           );
-          let labelsSaved = 0;
-          if (typeof memory.saveFactLabels === 'function' && Array.isArray(savedFacts) && savedFacts.length > 0) {
-            const labelRows = buildFactLabelRows(facts, savedFacts);
-            if (labelRows.length > 0) {
-              const labelResult = memory.saveFactLabels(labelRows);
-              labelsSaved = Number(labelResult && labelResult.saved) || 0;
-            }
-          }
           totalSaved += saved;
           totalSkipped += skipped;
           const superMsg = superseded > 0 ? `, ${superseded} superseded` : '';
-          const labelMsg = labelsSaved > 0 ? `, ${labelsSaved} labels` : '';
-          console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)}: ${saved} facts saved, ${skipped} skipped${superMsg}${labelMsg}`);
+          console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)}: ${saved} facts saved, ${skipped} skipped${superMsg}`);
         } else {
           console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)} (${session_name}): no facts extracted`);
         }
@@ -386,25 +309,16 @@ async function run() {
 
           if (facts.length > 0) {
             const fallbackScope = `codex_${String(cs.session_id).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24)}`;
-            const { saved, skipped, superseded, savedFacts } = memory.saveFacts(
+            const { saved, skipped, superseded } = memory.saveFacts(
               cs.session_id,
               skeleton.project || 'unknown',
               facts,
               { scope: skeleton.project_id || fallbackScope, source_type: 'codex' }
             );
-            let labelsSaved = 0;
-            if (typeof memory.saveFactLabels === 'function' && Array.isArray(savedFacts) && savedFacts.length > 0) {
-              const labelRows = buildFactLabelRows(facts, savedFacts);
-              if (labelRows.length > 0) {
-                const lr = memory.saveFactLabels(labelRows);
-                labelsSaved = Number(lr && lr.saved) || 0;
-              }
-            }
             totalSaved += saved;
             totalSkipped += skipped;
             const superMsg = superseded > 0 ? `, ${superseded} superseded` : '';
-            const labelMsg = labelsSaved > 0 ? `, ${labelsSaved} labels` : '';
-            console.log(`[memory-extract] Codex ${cs.session_id.slice(0, 8)} (${session_name}): ${saved} facts saved${superMsg}${labelMsg}`);
+            console.log(`[memory-extract] Codex ${cs.session_id.slice(0, 8)} (${session_name}): ${saved} facts saved${superMsg}`);
 
             // Persist Codex session summary to memory.db sessions table
             try {
@@ -456,10 +370,4 @@ if (require.main === module) {
 module.exports = {
   run,
   extractFacts,
-  _private: {
-    normalizeConceptList,
-    normalizeDomain,
-    buildFactLabelRows,
-    factFingerprint,
-  },
 };
