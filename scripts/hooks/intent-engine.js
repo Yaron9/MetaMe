@@ -69,7 +69,7 @@ function run(data) {
   if (!intentBlock) return exit();
 
   process.stdout.write(JSON.stringify({
-    hookSpecificOutput: { additionalSystemPrompt: intentBlock },
+    hookSpecificOutput: { additionalContext: intentBlock },
   }));
   exit();
 }
