@@ -4,7 +4,7 @@ let userAcl = null;
 try { userAcl = require('./daemon-user-acl'); } catch { /* optional */ }
 const { findTeamMember: _findTeamMember } = require('./daemon-team-dispatch');
 const { isRemoteMember } = require('./daemon-remote-dispatch');
-const { buildThreadChatId } = require('./core/thread-chat-id');
+const { buildThreadChatId, rawChatId: _threadRawChatId } = require('./core/thread-chat-id');
 const imessageIO = (() => { try { return require('./daemon-siri-imessage'); } catch { return null; } })();
 const siriBridgeMod = (() => { try { return require('./daemon-siri-bridge'); } catch { return null; } })();
 const weixinBridgeMod = (() => { try { return require('./daemon-weixin-bridge'); } catch { return null; } })();
@@ -187,13 +187,12 @@ function createBridgeStarter(deps) {
 
   // ── Team group helpers ─────────────────────────────────────────────────
   function _getBoundProject(chatId, cfg) {
-    const { rawChatId } = require('./core/thread-chat-id');
     const map = {
       ...(cfg.telegram  ? cfg.telegram.chat_agent_map  || {} : {}),
       ...(cfg.feishu    ? cfg.feishu.chat_agent_map    || {} : {}),
       ...(cfg.imessage  ? cfg.imessage.chat_agent_map  || {} : {}),
     };
-    const key = map[String(chatId)] || map[rawChatId(chatId)];
+    const key = map[String(chatId)] || map[_threadRawChatId(chatId)];
     const proj = key && cfg.projects ? cfg.projects[key] : null;
     return { key: key || null, project: proj || null };
   }
@@ -762,7 +761,7 @@ function createBridgeStarter(deps) {
           });
           if (acl.blocked) return;
           log('INFO', `Feishu file from ${chatId}: ${fileInfo.fileName} (key: ${fileInfo.fileKey}, msgId: ${fileInfo.messageId}, type: ${fileInfo.msgType})`);
-          const session = getSession(chatId);
+          const session = getSession(pipelineChatId) || getSession(chatId);
           const cwd = session?.cwd || HOME;
           const uploadDir = path.join(cwd, 'upload');
           if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });

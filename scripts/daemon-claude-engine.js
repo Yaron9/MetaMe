@@ -250,10 +250,10 @@ function createClaudeEngine(deps) {
   }
 
   function getSessionChatId(chatId, boundProjectKey) {
-    const rawChatId = String(chatId || '');
-    if (rawChatId.startsWith('_agent_') || rawChatId.startsWith('_scope_')) return rawChatId;
+    const chatIdStr = String(chatId || '');
+    if (chatIdStr.startsWith('_agent_') || chatIdStr.startsWith('_scope_')) return chatIdStr;
     if (boundProjectKey) return `_bound_${boundProjectKey}`;
-    return rawChatId || chatId;
+    return chatIdStr || chatId;
   }
 
   function normalizeCodexSandboxMode(value, fallback = null) {
