@@ -33,7 +33,7 @@ function recencyScore(createdAt, now) {
 /** @param {string} query */
 /** @param {{ project, scope, task, session, agent }} scopeContext */
 /** @returns {number} */
-function scoreMemoryItem(item, query, scopeContext) {
+function scoreMemoryItem(item, query, scopeContext, now) {
   const scopeMatch = matchScope(
     { project: item.project, scope: item.scope, agent: item.agent_key },
     scopeContext,
@@ -45,7 +45,7 @@ function scoreMemoryItem(item, query, scopeContext) {
   const confidence = (typeof item.confidence === 'number' && Number.isFinite(item.confidence))
     ? Math.max(0, Math.min(1, item.confidence))
     : 0;
-  const recency = recencyScore(item.created_at, Date.now());
+  const recency = recencyScore(item.created_at, now || Date.now());
 
   return scopeMatch * 4 + kindWeight * 3 + textRelevance * 2 + confidence * 1 + recency * 1;
 }
@@ -54,9 +54,9 @@ function scoreMemoryItem(item, query, scopeContext) {
 /** @param {string} query */
 /** @param {{ project, scope, task, session, agent }} scopeContext */
 /** @returns {Array} sorted descending by score, each item gets .score */
-function rankMemoryItems(items, query, scopeContext) {
+function rankMemoryItems(items, query, scopeContext, now) {
   const scored = items.map(item => {
-    const score = scoreMemoryItem(item, query, scopeContext);
+    const score = scoreMemoryItem(item, query, scopeContext, now);
     return Object.assign({}, item, { score });
   });
   scored.sort((a, b) => b.score - a.score);

@@ -173,9 +173,9 @@ function createBridgeStarter(deps) {
   // ── Team group helpers ─────────────────────────────────────────────────
   function _getBoundProject(chatId, cfg) {
     const map = {
-      ...(cfg.telegram ? cfg.telegram.chat_agent_map || {} : {}),
-      ...(cfg.feishu ? cfg.feishu.chat_agent_map || {} : {}),
-      ...(cfg.imessage ? cfg.imessage.chat_agent_map || {} : {}),
+      ...(cfg.telegram  ? cfg.telegram.chat_agent_map  || {} : {}),
+      ...(cfg.feishu    ? cfg.feishu.chat_agent_map    || {} : {}),
+      ...(cfg.imessage  ? cfg.imessage.chat_agent_map  || {} : {}),
     };
     const key = map[String(chatId)];
     const proj = key && cfg.projects ? cfg.projects[key] : null;
@@ -191,7 +191,7 @@ function createBridgeStarter(deps) {
         const orig = target[prop];
         if (typeof orig !== 'function') return orig;
         if (!SEND.has(prop)) return orig.bind(target);
-        return function (_chatId, ...args) { return orig.call(target, replyChatId, ...args); };
+        return function(_chatId, ...args) { return orig.call(target, replyChatId, ...args); };
       },
     });
   }
@@ -287,9 +287,9 @@ function createBridgeStarter(deps) {
         source_sender_id: acl.senderId || '',
       }, cfg).then(res => {
         if (res.success) {
-          bot.sendMessage(realChatId, `📡 已发送给 ${member.icon || '🤖'} ${member.name} (${member.peer})`).catch(() => { });
+          bot.sendMessage(realChatId, `📡 已发送给 ${member.icon || '🤖'} ${member.name} (${member.peer})`).catch(() => {});
         } else {
-          bot.sendMessage(realChatId, `❌ 远端派发失败: ${res.error}`).catch(() => { });
+          bot.sendMessage(realChatId, `❌ 远端派发失败: ${res.error}`).catch(() => {});
         }
       });
       return;
@@ -305,7 +305,7 @@ function createBridgeStarter(deps) {
     );
     if (!memberCwd) {
       log('ERROR', `Team [${member.key}] cannot start: directory unavailable`);
-      bot.sendMessage(realChatId, `❌ ${member.icon || '🤖'} ${member.name} 启动失败：工作目录创建失败`).catch(() => { });
+      bot.sendMessage(realChatId, `❌ ${member.icon || '🤖'} ${member.name} 启动失败：工作目录创建失败`).catch(() => {});
       return;
     }
     log('INFO', `Team [${member.key}] using cwd: ${memberCwd}`);
@@ -363,267 +363,267 @@ function createBridgeStarter(deps) {
         while (running && signal === abortController.signal) {
           try {
             const updates = await bot.getUpdates(offset, 30, signal);
-            for (const update of updates) {
-              offset = update.update_id + 1;
+          for (const update of updates) {
+            offset = update.update_id + 1;
 
-              if (update.callback_query) {
-                const cb = update.callback_query;
-                const chatId = cb.message && cb.message.chat.id;
-                const senderId = cb.from && cb.from.id ? String(cb.from.id) : null;
-                bot.answerCallback(cb.id).catch(() => { });
-                if (chatId && cb.data) {
-                  const liveCfg = loadConfig();
-                  const allowedIds = (liveCfg.telegram && liveCfg.telegram.allowed_chat_ids) || [];
-                  if (!allowedIds.includes(chatId)) continue;
-                  const isBindCmd = cb.data.startsWith('/agent bind')
-                    || cb.data.startsWith('/agent-bind-dir')
-                    || cb.data.startsWith('/browse bind')
-                    || cb.data === '/activate';
-                  const acl = await applyUserAcl({
-                    bot,
-                    chatId,
-                    text: cb.data,
-                    config: liveCfg,
-                    senderId,
-                    bypassAcl: !allowedIds.includes(chatId) && !!isBindCmd,
-                  });
-                  if (acl.blocked) continue;
-                  pipeline.processMessage(chatId, cb.data, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly }).catch(e => {
-                    log('ERROR', `Telegram callback handler error: ${e.message}`);
-                  });
-                }
-                continue;
-              }
-
-              if (!update.message) continue;
-
-              const msg = update.message;
-              const chatId = msg.chat.id;
-              const senderId = msg.from && msg.from.id ? String(msg.from.id) : null;
-
-              const liveCfg = loadConfig();
-              const allowedIds = (liveCfg.telegram && liveCfg.telegram.allowed_chat_ids) || [];
-              const trimmedText = msg.text && msg.text.trim();
-              const isBindCmd = trimmedText && (
-                trimmedText.startsWith('/agent bind')
-                || trimmedText.startsWith('/agent-bind-dir')
-                || trimmedText.startsWith('/browse bind')
-                || trimmedText === '/activate'
-              );
-              const isAllowedChat = allowedIds.includes(chatId);
-              if (!isAllowedChat && !isBindCmd) {
-                log('WARN', `Rejected message from unauthorized chat: ${chatId}`);
-                bot.sendMessage(chatId, unauthorizedMsg(chatId)).catch(() => { });
-                continue;
-              }
-
-              if ((msg.voice || msg.audio) && !msg.text) {
-                await bot.sendMessage(chatId, '🎤 Use Telegram voice-to-text (long press → Transcribe), then send as text.');
-                continue;
-              }
-
-              if (msg.document || msg.photo) {
-                const fileId = msg.document ? msg.document.file_id : msg.photo[msg.photo.length - 1].file_id;
-                const fileName = msg.document ? msg.document.file_name : `photo_${Date.now()}.jpg`;
-                const caption = msg.caption || '';
+            if (update.callback_query) {
+              const cb = update.callback_query;
+              const chatId = cb.message && cb.message.chat.id;
+              const senderId = cb.from && cb.from.id ? String(cb.from.id) : null;
+              bot.answerCallback(cb.id).catch(() => { });
+              if (chatId && cb.data) {
+                const liveCfg = loadConfig();
+                const allowedIds = (liveCfg.telegram && liveCfg.telegram.allowed_chat_ids) || [];
+                if (!allowedIds.includes(chatId)) continue;
+                const isBindCmd = cb.data.startsWith('/agent bind')
+                  || cb.data.startsWith('/agent-bind-dir')
+                  || cb.data.startsWith('/browse bind')
+                  || cb.data === '/activate';
                 const acl = await applyUserAcl({
                   bot,
                   chatId,
-                  text: caption || '[file-upload]',
+                  text: cb.data,
                   config: liveCfg,
                   senderId,
-                  bypassAcl: !isAllowedChat && !!isBindCmd,
+                  bypassAcl: !allowedIds.includes(chatId) && !!isBindCmd,
                 });
                 if (acl.blocked) continue;
-
-                const session = getSession(chatId);
-                const cwd = session?.cwd || HOME;
-                const uploadDir = path.join(cwd, 'upload');
-                if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-                const destPath = path.join(uploadDir, fileName);
-
-                try {
-                  await bot.downloadFile(fileId, destPath);
-                  await bot.sendMessage(chatId, `📥 Saved: ${fileName}`);
-
-                  const prompt = caption
-                    ? `User uploaded a file to the project: ${destPath}\nUser says: "${caption}"`
-                    : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
-
-                  // Respect team_sticky: route to active agent same as text messages
-                  const _stFile = loadState();
-                  const _chatKeyFile = String(chatId);
-                  const { project: _boundProjFile } = _getBoundProject(chatId, liveCfg);
-                  const _stickyKeyFile = (_stFile.team_sticky || {})[_chatKeyFile];
-                  if (_boundProjFile && Array.isArray(_boundProjFile.team) && _boundProjFile.team.length > 0 && _stickyKeyFile) {
-                    const _stickyMember = _boundProjFile.team.find(m => m.key === _stickyKeyFile);
-                    if (_stickyMember) {
-                      log('INFO', `Telegram file → sticky route to ${_stickyKeyFile}`);
-                      _dispatchToTeamMember(_stickyMember, _boundProjFile, prompt, liveCfg, bot, chatId, executeTaskByName, acl);
-                      continue;
-                    }
-                  }
-                  pipeline.processMessage(chatId, prompt, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly }).catch(e => {
-                    log('ERROR', `Telegram file handler error: ${e.message}`);
-                  });
-                } catch (err) {
-                  log('ERROR', `File download failed: ${err.message}`);
-                  await bot.sendMessage(chatId, `❌ Download failed: ${err.message}`);
-                }
-                continue;
-              }
-
-              if (msg.text) {
-                const text = msg.text.trim();
-                const acl = await applyUserAcl({
-                  bot,
-                  chatId,
-                  text,
-                  config: liveCfg,
-                  senderId,
-                  bypassAcl: !isAllowedChat && !!isBindCmd,
-                });
-                if (acl.blocked) continue;
-
-                // Team group routing for Telegram (same logic as Feishu)
-                const trimmedText = text.trim();
-                const parentId = msg.reply_to_message && msg.reply_to_message.message_id
-                  ? String(msg.reply_to_message.message_id)
-                  : null;
-                let _replyAgentKey = null;
-                const { key: _boundKey, project: _boundProj } = _getBoundProject(chatId, liveCfg);
-                const _isTeamSlashCmd = trimmedText.startsWith('/') && !/^\/stop(\s|$)/i.test(trimmedText);
-
-                // Load sticky state
-                const _st = loadState();
-                if (parentId) {
-                  const mapped = _st.msg_sessions && _st.msg_sessions[parentId];
-                  if (mapped) {
-                    if (typeof restoreSessionFromReply === 'function') {
-                      restoreSessionFromReply(chatId, mapped);
-                    } else {
-                      if (!_st.sessions) _st.sessions = {};
-                      _st.sessions[chatId] = { id: mapped.id, cwd: mapped.cwd, started: true };
-                      saveState(_st);
-                    }
-                    log('INFO', `Telegram session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
-                    _replyAgentKey = mapped.agentKey || null;
-                  }
-                }
-                const _chatKey = String(chatId);
-                const _setSticky = (key) => {
-                  if (!_st.team_sticky) _st.team_sticky = {};
-                  _st.team_sticky[_chatKey] = key;
-                  saveState(_st);
-                };
-                const _clearSticky = () => {
-                  if (_st.team_sticky) delete _st.team_sticky[_chatKey];
-                  saveState(_st);
-                };
-                const _stickyKey = (_st.team_sticky || {})[_chatKey] || null;
-
-                if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0 && !_isTeamSlashCmd) {
-                  // Team dispatch logic (same as Feishu)
-                  const _stopMatch = trimmedText && trimmedText.match(/^\/stop(?:\s+(.+))?$/i);
-                  if (_stopMatch) {
-                    const _stopArg = (_stopMatch[1] || '').trim();
-                    let _targetKey = null;
-                    if (_replyAgentKey) {
-                      const m = _boundProj.team.find(t => t.key === _replyAgentKey);
-                      if (m) _targetKey = m.key;
-                    }
-                    if (!_targetKey && _stopArg) {
-                      const _sa = _stopArg.toLowerCase();
-                      const m = _boundProj.team.find(t =>
-                        (t.nicknames || []).some(n => n.toLowerCase() === _sa) || (t.name && t.name.toLowerCase() === _sa) || t.key === _sa
-                      );
-                      if (m) _targetKey = m.key;
-                    }
-                    if (!_targetKey && !_stopArg) _targetKey = _stickyKey;
-                    if (_targetKey) {
-                      const vid = `_agent_${_targetKey}`;
-                      const member = _boundProj.team.find(t => t.key === _targetKey);
-                      const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
-                      pipeline.clearQueue(vid);
-                      const stopped = pipeline.interruptActive(vid);
-                      if (stopped) {
-                        await bot.sendMessage(chatId, `⏹ Stopping ${label}...`);
-                      } else {
-                        await bot.sendMessage(chatId, `${label} 当前没有活跃任务`);
-                      }
-                      continue;
-                    }
-                    if (_stopArg) {
-                      await bot.sendMessage(chatId, `❌ 未找到团队成员: ${_stopArg}`).catch(() => { });
-                      continue;
-                    }
-                  }
-
-                  // 0. Quoted reply → force route + set sticky
-                  if (_replyAgentKey) {
-                    const member = _boundProj.team.find(m => m.key === _replyAgentKey);
-                    if (member) {
-                      _setSticky(member.key);
-                      log('INFO', `Telegram quoted reply → force route to ${_replyAgentKey} (sticky set)`);
-                      _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
-                      continue;
-                    }
-                    log('INFO', `Telegram quoted reply agentKey=${_replyAgentKey} not in team, falling through`);
-                  }
-
-                  // 1. Explicit nickname → route + set sticky
-                  const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
-                  if (teamMatch) {
-                    const { member, rest } = teamMatch;
-                    _setSticky(member.key);
-                    if (!rest) {
-                      log('INFO', `Sticky set (pure nickname): ${_chatKey.slice(-8)} → ${member.key}`);
-                      bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`).catch(() => { });
-                      continue;
-                    }
-                    log('INFO', `Sticky set: ${_chatKey.slice(-8)} → ${member.key}`);
-                    _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, chatId, executeTaskByName, acl);
-                    continue;
-                  }
-
-                  // 1.5. Main project nickname → clear sticky, route to main
-                  const _mainNicks = Array.isArray(_boundProj.nicknames) ? _boundProj.nicknames : [];
-                  const _trimLower = trimmedText.toLowerCase();
-                  const _mainMatch = _mainNicks.find(n => _trimLower === n.toLowerCase() || _trimLower.startsWith(n.toLowerCase() + ' ') || _trimLower.startsWith(n.toLowerCase() + '，') || _trimLower.startsWith(n.toLowerCase() + ','));
-                  if (_mainMatch) {
-                    _clearSticky();
-                    const rest = trimmedText.slice(_mainMatch.length).replace(/^[\s,，:：]+/, '');
-                    log('INFO', `Main nickname → cleared sticky, routing to main${rest ? ` (task: ${rest.slice(0, 30)})` : ''}`);
-                    if (!rest) {
-                      bot.sendMarkdown(chatId, `${_boundProj.icon || '🤖'} **${_boundProj.name}** 在线`).catch(() => { });
-                      continue;
-                    }
-                    try {
-                      await pipeline.processMessage(chatId, rest, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
-                    } catch (e) {
-                      log('ERROR', `Team main-route handleCommand failed: ${e.message}`);
-                      bot.sendMessage(chatId, `❌ 执行失败: ${e.message}`).catch(() => { });
-                    }
-                    continue;
-                  }
-
-                  // 2. Sticky: no nickname given → route to last explicitly named member
-                  if (_stickyKey) {
-                    const member = _boundProj.team.find(m => m.key === _stickyKey);
-                    if (member) {
-                      log('INFO', `Sticky route: → ${_stickyKey}`);
-                      _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
-                      continue;
-                    }
-                  }
-                }
-
-                // Default: route to main project
-                pipeline.processMessage(chatId, text, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly }).catch(e => {
-                  log('ERROR', `Telegram handler error: ${e.message}`);
+                pipeline.processMessage(chatId, cb.data, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly }).catch(e => {
+                  log('ERROR', `Telegram callback handler error: ${e.message}`);
                 });
               }
+              continue;
             }
+
+            if (!update.message) continue;
+
+            const msg = update.message;
+            const chatId = msg.chat.id;
+            const senderId = msg.from && msg.from.id ? String(msg.from.id) : null;
+
+            const liveCfg = loadConfig();
+            const allowedIds = (liveCfg.telegram && liveCfg.telegram.allowed_chat_ids) || [];
+            const trimmedText = msg.text && msg.text.trim();
+            const isBindCmd = trimmedText && (
+              trimmedText.startsWith('/agent bind')
+              || trimmedText.startsWith('/agent-bind-dir')
+              || trimmedText.startsWith('/browse bind')
+              || trimmedText === '/activate'
+            );
+            const isAllowedChat = allowedIds.includes(chatId);
+            if (!isAllowedChat && !isBindCmd) {
+              log('WARN', `Rejected message from unauthorized chat: ${chatId}`);
+              bot.sendMessage(chatId, unauthorizedMsg(chatId)).catch(() => {});
+              continue;
+            }
+
+            if ((msg.voice || msg.audio) && !msg.text) {
+              await bot.sendMessage(chatId, '🎤 Use Telegram voice-to-text (long press → Transcribe), then send as text.');
+              continue;
+            }
+
+            if (msg.document || msg.photo) {
+              const fileId = msg.document ? msg.document.file_id : msg.photo[msg.photo.length - 1].file_id;
+              const fileName = msg.document ? msg.document.file_name : `photo_${Date.now()}.jpg`;
+              const caption = msg.caption || '';
+              const acl = await applyUserAcl({
+                bot,
+                chatId,
+                text: caption || '[file-upload]',
+                config: liveCfg,
+                senderId,
+                bypassAcl: !isAllowedChat && !!isBindCmd,
+              });
+              if (acl.blocked) continue;
+
+              const session = getSession(chatId);
+              const cwd = session?.cwd || HOME;
+              const uploadDir = path.join(cwd, 'upload');
+              if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+              const destPath = path.join(uploadDir, fileName);
+
+              try {
+                await bot.downloadFile(fileId, destPath);
+                await bot.sendMessage(chatId, `📥 Saved: ${fileName}`);
+
+                const prompt = caption
+                  ? `User uploaded a file to the project: ${destPath}\nUser says: "${caption}"`
+                  : `User uploaded a file to the project: ${destPath}\nAcknowledge receipt. Only read the file if the user asks you to.`;
+
+                // Respect team_sticky: route to active agent same as text messages
+                const _stFile = loadState();
+                const _chatKeyFile = String(chatId);
+                const { project: _boundProjFile } = _getBoundProject(chatId, liveCfg);
+                const _stickyKeyFile = (_stFile.team_sticky || {})[_chatKeyFile];
+                if (_boundProjFile && Array.isArray(_boundProjFile.team) && _boundProjFile.team.length > 0 && _stickyKeyFile) {
+                  const _stickyMember = _boundProjFile.team.find(m => m.key === _stickyKeyFile);
+                  if (_stickyMember) {
+                    log('INFO', `Telegram file → sticky route to ${_stickyKeyFile}`);
+                    _dispatchToTeamMember(_stickyMember, _boundProjFile, prompt, liveCfg, bot, chatId, executeTaskByName, acl);
+                    continue;
+                  }
+                }
+                pipeline.processMessage(chatId, prompt, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly }).catch(e => {
+                  log('ERROR', `Telegram file handler error: ${e.message}`);
+                });
+              } catch (err) {
+                log('ERROR', `File download failed: ${err.message}`);
+                await bot.sendMessage(chatId, `❌ Download failed: ${err.message}`);
+              }
+              continue;
+            }
+
+            if (msg.text) {
+              const text = msg.text.trim();
+              const acl = await applyUserAcl({
+                bot,
+                chatId,
+                text,
+                config: liveCfg,
+                senderId,
+                bypassAcl: !isAllowedChat && !!isBindCmd,
+              });
+              if (acl.blocked) continue;
+
+              // Team group routing for Telegram (same logic as Feishu)
+              const trimmedText = text.trim();
+              const parentId = msg.reply_to_message && msg.reply_to_message.message_id
+                ? String(msg.reply_to_message.message_id)
+                : null;
+              let _replyAgentKey = null;
+              const { key: _boundKey, project: _boundProj } = _getBoundProject(chatId, liveCfg);
+              const _isTeamSlashCmd = trimmedText.startsWith('/') && !/^\/stop(\s|$)/i.test(trimmedText);
+
+              // Load sticky state
+              const _st = loadState();
+              if (parentId) {
+                const mapped = _st.msg_sessions && _st.msg_sessions[parentId];
+                if (mapped) {
+                  if (typeof restoreSessionFromReply === 'function') {
+                    restoreSessionFromReply(chatId, mapped);
+                  } else {
+                    if (!_st.sessions) _st.sessions = {};
+                    _st.sessions[chatId] = { id: mapped.id, cwd: mapped.cwd, started: true };
+                    saveState(_st);
+                  }
+                  log('INFO', `Telegram session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
+                  _replyAgentKey = mapped.agentKey || null;
+                }
+              }
+              const _chatKey = String(chatId);
+              const _setSticky = (key) => {
+                if (!_st.team_sticky) _st.team_sticky = {};
+                _st.team_sticky[_chatKey] = key;
+                saveState(_st);
+              };
+              const _clearSticky = () => {
+                if (_st.team_sticky) delete _st.team_sticky[_chatKey];
+                saveState(_st);
+              };
+              const _stickyKey = (_st.team_sticky || {})[_chatKey] || null;
+
+              if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0 && !_isTeamSlashCmd) {
+                // Team dispatch logic (same as Feishu)
+                const _stopMatch = trimmedText && trimmedText.match(/^\/stop(?:\s+(.+))?$/i);
+                if (_stopMatch) {
+                  const _stopArg = (_stopMatch[1] || '').trim();
+                  let _targetKey = null;
+                  if (_replyAgentKey) {
+                    const m = _boundProj.team.find(t => t.key === _replyAgentKey);
+                    if (m) _targetKey = m.key;
+                  }
+                  if (!_targetKey && _stopArg) {
+                    const _sa = _stopArg.toLowerCase();
+                    const m = _boundProj.team.find(t =>
+                      (t.nicknames || []).some(n => n.toLowerCase() === _sa) || (t.name && t.name.toLowerCase() === _sa) || t.key === _sa
+                    );
+                    if (m) _targetKey = m.key;
+                  }
+                  if (!_targetKey && !_stopArg) _targetKey = _stickyKey;
+                  if (_targetKey) {
+                    const vid = `_agent_${_targetKey}`;
+                    const member = _boundProj.team.find(t => t.key === _targetKey);
+                    const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
+                    pipeline.clearQueue(vid);
+                    const stopped = pipeline.interruptActive(vid);
+                    if (stopped) {
+                      await bot.sendMessage(chatId, `⏹ Stopping ${label}...`);
+                    } else {
+                      await bot.sendMessage(chatId, `${label} 当前没有活跃任务`);
+                    }
+                    continue;
+                  }
+                  if (_stopArg) {
+                    await bot.sendMessage(chatId, `❌ 未找到团队成员: ${_stopArg}`).catch(() => {});
+                    continue;
+                  }
+                }
+
+                // 0. Quoted reply → force route + set sticky
+                if (_replyAgentKey) {
+                  const member = _boundProj.team.find(m => m.key === _replyAgentKey);
+                  if (member) {
+                    _setSticky(member.key);
+                    log('INFO', `Telegram quoted reply → force route to ${_replyAgentKey} (sticky set)`);
+                    _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+                    continue;
+                  }
+                  log('INFO', `Telegram quoted reply agentKey=${_replyAgentKey} not in team, falling through`);
+                }
+
+                // 1. Explicit nickname → route + set sticky
+                const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
+                if (teamMatch) {
+                  const { member, rest } = teamMatch;
+                  _setSticky(member.key);
+                  if (!rest) {
+                    log('INFO', `Sticky set (pure nickname): ${_chatKey.slice(-8)} → ${member.key}`);
+                    bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`).catch(() => {});
+                    continue;
+                  }
+                  log('INFO', `Sticky set: ${_chatKey.slice(-8)} → ${member.key}`);
+                  _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, chatId, executeTaskByName, acl);
+                  continue;
+                }
+
+                // 1.5. Main project nickname → clear sticky, route to main
+                const _mainNicks = Array.isArray(_boundProj.nicknames) ? _boundProj.nicknames : [];
+                const _trimLower = trimmedText.toLowerCase();
+                const _mainMatch = _mainNicks.find(n => _trimLower === n.toLowerCase() || _trimLower.startsWith(n.toLowerCase() + ' ') || _trimLower.startsWith(n.toLowerCase() + '，') || _trimLower.startsWith(n.toLowerCase() + ','));
+                if (_mainMatch) {
+                  _clearSticky();
+                  const rest = trimmedText.slice(_mainMatch.length).replace(/^[\s,，:：]+/, '');
+                  log('INFO', `Main nickname → cleared sticky, routing to main${rest ? ` (task: ${rest.slice(0, 30)})` : ''}`);
+                  if (!rest) {
+                    bot.sendMarkdown(chatId, `${_boundProj.icon || '🤖'} **${_boundProj.name}** 在线`).catch(() => {});
+                    continue;
+                  }
+                  try {
+                    await pipeline.processMessage(chatId, rest, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
+                  } catch (e) {
+                    log('ERROR', `Team main-route handleCommand failed: ${e.message}`);
+                    bot.sendMessage(chatId, `❌ 执行失败: ${e.message}`).catch(() => {});
+                  }
+                  continue;
+                }
+
+                // 2. Sticky: no nickname given → route to last explicitly named member
+                if (_stickyKey) {
+                  const member = _boundProj.team.find(m => m.key === _stickyKey);
+                  if (member) {
+                    log('INFO', `Sticky route: → ${_stickyKey}`);
+                    _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, chatId, executeTaskByName, acl);
+                    continue;
+                  }
+                }
+              }
+
+              // Default: route to main project
+              pipeline.processMessage(chatId, text, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly }).catch(e => {
+                log('ERROR', `Telegram handler error: ${e.message}`);
+              });
+            }
+          }
           } catch (e) {
             if (e.message === 'aborted') break;
             log('ERROR', `Telegram poll error: ${e.message}`);
@@ -724,7 +724,7 @@ function createBridgeStarter(deps) {
         if (!isAllowedChat && !isBindCmd) {
           log('WARN', `Feishu: rejected message from ${chatId}`);
           const msg = unauthorizedMsg(chatId);
-          (bot.sendMarkdown ? bot.sendMarkdown(chatId, msg) : bot.sendMessage(chatId, msg)).catch(() => { });
+          (bot.sendMarkdown ? bot.sendMarkdown(chatId, msg) : bot.sendMessage(chatId, msg)).catch(() => {});
           return;
         }
 
@@ -899,28 +899,28 @@ function createBridgeStarter(deps) {
             }
             // 1. Explicit nickname → route + set sticky
             const teamMatch = _findTeamMember(trimmedText, _boundProj.team);
-            if (teamMatch) {
-              const { member, rest } = teamMatch;
-              _setSticky(member.key);
-              if (!rest) {
-                // Pure nickname, no task — confirm member is online
-                log('INFO', `Sticky set (pure nickname): ${_chatKey.slice(-8)} → ${member.key}`);
-                bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`)
-                  .then((msg) => {
-                    if (msg && msg.message_id) {
-                      trackBridgeReplyMapping(msg.message_id, inferSessionMapping(`_agent_${member.key}`, {
-                        agentKey: member.key,
-                        cwd: member.cwd || _boundProj.cwd,
-                        engine: member.engine || _boundProj.engine || 'claude',
-                      }));
-                    }
-                  })
-                  .catch(() => { });
-                return;
-              }
-              log('INFO', `Sticky set: ${_chatKey.slice(-8)} → ${member.key}`);
-              _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, chatId, executeTaskByName, acl);
-              return;
+              if (teamMatch) {
+                  const { member, rest } = teamMatch;
+                  _setSticky(member.key);
+                  if (!rest) {
+                    // Pure nickname, no task — confirm member is online
+                    log('INFO', `Sticky set (pure nickname): ${_chatKey.slice(-8)} → ${member.key}`);
+                    bot.sendMarkdown(chatId, `${member.icon || '🤖'} **${member.name}** 在线`)
+                      .then((msg) => {
+                        if (msg && msg.message_id) {
+                          trackBridgeReplyMapping(msg.message_id, inferSessionMapping(`_agent_${member.key}`, {
+                            agentKey: member.key,
+                            cwd: member.cwd || _boundProj.cwd,
+                            engine: member.engine || _boundProj.engine || 'claude',
+                          }));
+                        }
+                      })
+                      .catch(() => {});
+                    return;
+                  }
+                  log('INFO', `Sticky set: ${_chatKey.slice(-8)} → ${member.key}`);
+                  _dispatchToTeamMember(member, _boundProj, rest, liveCfg, bot, chatId, executeTaskByName, acl);
+                  return;
             }
 
             // 1.5. Main project nickname → clear sticky, route to main
@@ -930,27 +930,27 @@ function createBridgeStarter(deps) {
             if (_mainMatch) {
               _clearSticky();
               const rest = trimmedText.slice(_mainMatch.length).replace(/^[\s,，:：]+/, '');
-              log('INFO', `Main nickname → cleared sticky, routing to main${rest ? ` (task: ${rest.slice(0, 30)})` : ''}`);
-              if (!rest) {
-                bot.sendMarkdown(chatId, `${_boundProj.icon || '🤖'} **${_boundProj.name}** 在线`)
-                  .then((msg) => {
-                    if (msg && msg.message_id) {
-                      trackBridgeReplyMapping(msg.message_id, inferSessionMapping(String(chatId), {
-                        agentKey: _boundKey || null,
-                        cwd: _boundProj.cwd,
-                        engine: _boundProj.engine || 'claude',
-                        logicalChatId: _boundKey ? `_bound_${_boundKey}` : String(chatId),
-                      }));
-                    }
-                  })
-                  .catch(() => { });
-                return;
-              }
+                  log('INFO', `Main nickname → cleared sticky, routing to main${rest ? ` (task: ${rest.slice(0, 30)})` : ''}`);
+                  if (!rest) {
+                    bot.sendMarkdown(chatId, `${_boundProj.icon || '🤖'} **${_boundProj.name}** 在线`)
+                      .then((msg) => {
+                        if (msg && msg.message_id) {
+                          trackBridgeReplyMapping(msg.message_id, inferSessionMapping(String(chatId), {
+                            agentKey: _boundKey || null,
+                            cwd: _boundProj.cwd,
+                            engine: _boundProj.engine || 'claude',
+                            logicalChatId: _boundKey ? `_bound_${_boundKey}` : String(chatId),
+                          }));
+                        }
+                      })
+                      .catch(() => {});
+                    return;
+                  }
               try {
                 await pipeline.processMessage(chatId, rest, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
               } catch (e) {
                 log('ERROR', `Team main-route handleCommand failed: ${e.message}`);
-                bot.sendMessage(chatId, `❌ 执行失败: ${e.message}`).catch(() => { });
+                bot.sendMessage(chatId, `❌ 执行失败: ${e.message}`).catch(() => {});
               }
               return;
             }
@@ -971,7 +971,7 @@ function createBridgeStarter(deps) {
             await pipeline.processMessage(chatId, text, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
           } catch (e) {
             log('ERROR', `Feishu handleCommand failed for ${chatId}: ${e.message}`);
-            bot.sendMessage(chatId, `❌ 命令执行失败: ${e.message}`).catch(() => { });
+            bot.sendMessage(chatId, `❌ 命令执行失败: ${e.message}`).catch(() => {});
           }
         }
       }, { log: (lvl, msg) => log(lvl, msg) });
@@ -998,9 +998,9 @@ function createBridgeStarter(deps) {
 
     if (!selfId) { log('WARN', '[IMESSAGE] self_id not configured — bridge disabled'); return null; }
 
-    let lastRowId = imessageIO.getMaxRowId();
+    let lastRowId  = imessageIO.getMaxRowId();
     let processing = false;
-    let running = true;
+    let running    = true;
 
     // Per-chat persistent bot instances (preserve state across polls)
     const chatBots = new Map();
