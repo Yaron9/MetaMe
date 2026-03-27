@@ -571,7 +571,12 @@ function createClaudeEngine(deps) {
 
   function projectKeyFromVirtualChatId(chatId) {
     const v = String(chatId || '');
-    if (v.startsWith('_agent_')) return v.slice(7) || null;
+    if (v.startsWith('_agent_')) {
+      const rest = v.slice(7);
+      const scopeIdx = rest.indexOf('::');
+      const key = scopeIdx >= 0 ? rest.slice(0, scopeIdx) : rest;
+      return key || null;
+    }
     if (v.startsWith('_scope_')) {
       const idx = v.lastIndexOf('__');
       if (idx > 7 && idx + 2 < v.length) return v.slice(idx + 2);
@@ -2132,14 +2137,14 @@ function createClaudeEngine(deps) {
           const allProjects = (config && config.projects) || {};
           const names = dispatchedTargets.map(k => (allProjects[k] && allProjects[k].name) || k).join('、');
           const doneMsg = await bot.sendMessage(chatId, `✉️ 已转达给 ${names}，处理中…`);
-          if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session, String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null);
+          if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session, projectKeyFromVirtualChatId(chatId));
           const wasNew = !session.started;
           if (wasNew) markSessionStarted(sessionChatId, engineName);
           return { ok: true };
         }
         const filesDesc = files && files.length > 0 ? `\n修改了 ${files.length} 个文件` : '';
         const doneMsg = await bot.sendMessage(chatId, `✅ 完成${filesDesc}`);
-        if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session, String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null);
+        if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session, projectKeyFromVirtualChatId(chatId));
         const wasNew = !session.started;
         if (wasNew) markSessionStarted(sessionChatId, engineName);
         return { ok: true };
@@ -2281,7 +2286,7 @@ function createClaudeEngine(deps) {
             log('ERROR', `sendMessage fallback also failed: ${e2.message}`);
           }
         }
-        const trackedAgentKey = String(chatId).startsWith('_agent_') ? String(chatId).slice(7) : null;
+        const trackedAgentKey = projectKeyFromVirtualChatId(chatId);
         if (replyMsg && replyMsg.message_id && session) {
           if (runtime.name === 'codex' && session.runtimeSessionObserved === false) {
             trackMsgSession(replyMsg.message_id, session, trackedAgentKey, { routeOnly: true });
@@ -2478,6 +2483,7 @@ function createClaudeEngine(deps) {
       codexApprovalPrivilegeRank,
       codexNeedsFallbackForRequestedPermissions,
       buildCodexFallbackBridgePrompt,
+      projectKeyFromVirtualChatId,
     },
   };
 }

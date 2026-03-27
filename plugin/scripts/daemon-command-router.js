@@ -138,7 +138,12 @@ function createCommandRouter(deps) {
 
   function projectKeyFromVirtualChatId(chatId) {
     const v = String(chatId || '');
-    if (v.startsWith('_agent_')) return v.slice(7) || null;
+    if (v.startsWith('_agent_')) {
+      const rest = v.slice(7);
+      const scopeIdx = rest.indexOf('::');
+      const key = scopeIdx >= 0 ? rest.slice(0, scopeIdx) : rest;
+      return key || null;
+    }
     if (v.startsWith('_scope_')) {
       const idx = v.lastIndexOf('__');
       if (idx > 7 && idx + 2 < v.length) return v.slice(idx + 2);

@@ -980,6 +980,20 @@ describe('daemon-claude-engine private helpers', () => {
     );
   });
 
+  it('extracts the base agent key from topic virtual chat ids', () => {
+    const state = { sessions: {} };
+    const engine = createEngineWithState(state);
+
+    assert.equal(
+      engine._private.projectKeyFromVirtualChatId('_agent_bing::thread:oc_topic_1:om_root_1'),
+      'bing'
+    );
+    assert.equal(
+      engine._private.projectKeyFromVirtualChatId('_agent_bing'),
+      'bing'
+    );
+  });
+
   it('keeps claude resume enabled for custom-provider session models', () => {
     const state = { sessions: {} };
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-engine-'));

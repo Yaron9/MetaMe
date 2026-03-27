@@ -357,4 +357,35 @@ describe('natural language continue routing', () => {
     assert.equal(askCalls.length, 1);
     assert.equal(askCalls[0].prompt, '继续上面的工作');
   });
+
+  it('attaches topic virtual agent chats using the base agent key before the thread suffix', async () => {
+    const attachCalls = [];
+    const deps = createDeps({
+      attachOrCreateSession: (...args) => attachCalls.push(args),
+      loadState: () => ({ sessions: {} }),
+    });
+    const { handleCommand } = createCommandRouter(deps);
+    const config = createConfig({
+      projects: {
+        bing: { cwd: '/repo/agents/bing', engine: 'codex', name: 'Jarvis · 丙' },
+      },
+    });
+
+    await handleCommand(
+      createBot([]),
+      '_agent_bing::thread:oc_topic_1:om_root_1',
+      '继续',
+      config,
+      null,
+      'user-1',
+      false
+    );
+
+    assert.deepEqual(attachCalls[0], [
+      '_agent_bing::thread:oc_topic_1:om_root_1',
+      '/repo/agents/bing',
+      'Jarvis · 丙',
+      'codex',
+    ]);
+  });
 });
