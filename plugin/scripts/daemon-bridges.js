@@ -4,7 +4,7 @@ let userAcl = null;
 try { userAcl = require('./daemon-user-acl'); } catch { /* optional */ }
 const { findTeamMember: _findTeamMember } = require('./daemon-team-dispatch');
 const { isRemoteMember } = require('./daemon-remote-dispatch');
-const { buildThreadChatId, rawChatId: _threadRawChatId } = require('./core/thread-chat-id');
+const { buildThreadChatId, isThreadChatId, rawChatId: _threadRawChatId } = require('./core/thread-chat-id');
 const imessageIO = (() => { try { return require('./daemon-siri-imessage'); } catch { return null; } })();
 const siriBridgeMod = (() => { try { return require('./daemon-siri-bridge'); } catch { return null; } })();
 const weixinBridgeMod = (() => { try { return require('./daemon-weixin-bridge'); } catch { return null; } })();
@@ -310,7 +310,12 @@ function createBridgeStarter(deps) {
       return;
     }
 
-    const virtualChatId = `_agent_${member.key}`;
+    // When dispatching from a topic thread, include the thread ID in the
+    // virtual session key so each topic gets its own independent session.
+    const realChatIdStr = String(realChatId || '');
+    const virtualChatId = isThreadChatId(realChatIdStr)
+      ? `_agent_${member.key}::${realChatIdStr}`
+      : `_agent_${member.key}`;
     const parentCwd = member.cwd || boundProj.cwd;
     const resolvedParentCwd = parentCwd.replace(/^~/, require('os').homedir());
     const memberCwd = _getMemberCwd(
@@ -880,7 +885,9 @@ function createBridgeStarter(deps) {
               // Priority 3: bare /stop → sticky
               if (!_targetKey && !_stopArg) _targetKey = _stickyKey;
               if (_targetKey) {
-                const vid = `_agent_${_targetKey}`;
+                const vid = isThreadChatId(String(pipelineChatId))
+                  ? `_agent_${_targetKey}::${pipelineChatId}`
+                  : `_agent_${_targetKey}`;
                 const member = _boundProj.team.find(t => t.key === _targetKey);
                 const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
                 pipeline.clearQueue(vid);
@@ -934,7 +941,10 @@ function createBridgeStarter(deps) {
                     bot.sendMarkdown(pipelineChatId, `${member.icon || '🤖'} **${member.name}** 在线`)
                       .then((msg) => {
                         if (msg && msg.message_id) {
-                          trackBridgeReplyMapping(msg.message_id, inferSessionMapping(`_agent_${member.key}`, {
+                          const _vidNick = isThreadChatId(String(pipelineChatId))
+                            ? `_agent_${member.key}::${pipelineChatId}`
+                            : `_agent_${member.key}`;
+                          trackBridgeReplyMapping(msg.message_id, inferSessionMapping(_vidNick, {
                             agentKey: member.key,
                             cwd: member.cwd || _boundProj.cwd,
                             engine: member.engine || _boundProj.engine || 'claude',
