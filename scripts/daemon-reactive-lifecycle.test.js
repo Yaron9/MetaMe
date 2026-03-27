@@ -797,3 +797,56 @@ describe('extractOutputSummary', () => {
     assert.ok(prompt.includes('sci_scout'), 'Should identify the delivering member');
   });
 });
+
+// ── loadWorkingMemory ─────────────────────────────────────────
+
+describe('loadWorkingMemory', () => {
+  it('returns file content when file exists', () => {
+    const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'lwm-'));
+    const memDir = path.join(tmpMeta, 'memory', 'now');
+    fs.mkdirSync(memDir, { recursive: true });
+    fs.writeFileSync(path.join(memDir, 'proj_memory.md'), '## Decisions\n- chose X', 'utf8');
+    try {
+      const result = loadWorkingMemory('proj', tmpMeta);
+      assert.equal(result, '## Decisions\n- chose X');
+    } finally {
+      fs.rmSync(tmpMeta, { recursive: true, force: true });
+    }
+  });
+
+  it('returns empty string when file is missing', () => {
+    const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'lwm-miss-'));
+    try {
+      const result = loadWorkingMemory('nonexistent', tmpMeta);
+      assert.equal(result, '');
+    } finally {
+      fs.rmSync(tmpMeta, { recursive: true, force: true });
+    }
+  });
+
+  it('trims whitespace from content', () => {
+    const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'lwm-trim-'));
+    const memDir = path.join(tmpMeta, 'memory', 'now');
+    fs.mkdirSync(memDir, { recursive: true });
+    fs.writeFileSync(path.join(memDir, 'proj_memory.md'), '  content with spaces  \n\n', 'utf8');
+    try {
+      const result = loadWorkingMemory('proj', tmpMeta);
+      assert.equal(result, 'content with spaces');
+    } finally {
+      fs.rmSync(tmpMeta, { recursive: true, force: true });
+    }
+  });
+
+  it('returns empty string for empty file', () => {
+    const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'lwm-empty-'));
+    const memDir = path.join(tmpMeta, 'memory', 'now');
+    fs.mkdirSync(memDir, { recursive: true });
+    fs.writeFileSync(path.join(memDir, 'proj_memory.md'), '', 'utf8');
+    try {
+      const result = loadWorkingMemory('proj', tmpMeta);
+      assert.equal(result, '');
+    } finally {
+      fs.rmSync(tmpMeta, { recursive: true, force: true });
+    }
+  });
+});

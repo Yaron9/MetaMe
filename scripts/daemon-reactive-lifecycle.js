@@ -1097,8 +1097,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
 
   // Depth gate (manifest max_depth overrides default)
   const rs = getReactiveState(st, parentKey);
-  const parentManifestForDepth = projectCwd ? loadProjectManifest(projectCwd) : null;
-  const maxDepth = parentManifestForDepth?.max_depth || rs.max_depth || 50;
+  const maxDepth = manifest?.max_depth || rs.max_depth || 50;
   if (rs.depth >= maxDepth) {
     deps.log('WARN', `Reactive: depth ${rs.depth} >= ${maxDepth}, pausing ${parentKey} (via member ${targetProject})`);
     setReactiveStatus(st, parentKey, 'paused', 'depth_exceeded');
@@ -1185,7 +1184,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
     target: parentKey,
     prompt: buildReactivePrompt(
       `[${targetProject} delivery]${verifierBlock}\n\n${summary}\n\nDecide next step.`,
-      { depth: rs.depth, maxDepth: parentManifestForDepth?.max_depth || rs.max_depth || 50, completionSignal: signal, workingMemory: parentWorkingMemory }
+      { depth: rs.depth, maxDepth: manifest?.max_depth || rs.max_depth || 50, completionSignal: signal, workingMemory: parentWorkingMemory }
     ),
     from: targetProject,
     _reactive: true,
