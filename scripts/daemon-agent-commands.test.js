@@ -12,6 +12,8 @@ function createHarness(options = {}) {
   const sessions = options.sessions || [];
   const sent = [];
   const attached = [];
+  const writes = [];
+  let backups = 0;
   const state = {
     sessions: {
       [chatId]: {
@@ -59,11 +61,15 @@ function createHarness(options = {}) {
     sessionRichLabel: (s) => s.sessionId,
     getSessionRecentContext: () => null,
     pendingBinds: new Map(),
-    pendingAgentFlows: new Map(),
+    pendingAgentFlows: options.pendingAgentFlows || new Map(),
+    pendingTeamFlows: options.pendingTeamFlows || new Map(),
     pendingActivations: new Map(),
+    writeConfigSafe: (nextCfg) => { writes.push(nextCfg); },
+    backupConfig: () => { backups += 1; },
+    execSync: () => {},
     doBindAgent: async () => ({ ok: false, error: 'unused' }),
     mergeAgentRole: async () => ({ ok: false, error: 'unused' }),
-    agentTools: null,
+    agentTools: options.agentTools || null,
     attachOrCreateSession: (...args) => { attached.push(args); },
     agentFlowTtlMs: () => 10 * 60 * 1000,
     agentBindTtlMs: () => 10 * 60 * 1000,
@@ -74,7 +80,7 @@ function createHarness(options = {}) {
     sendMarkdown: async (_chatId, text) => { sent.push(String(text)); },
   };
 
-  return { handleAgentCommand, bot, chatId, state, sent, attached };
+  return { handleAgentCommand, bot, chatId, state, sent, attached, writes, get backups() { return backups; } };
 }
 
 describe('daemon-agent-commands /resume engine resolution', () => {
@@ -441,5 +447,74 @@ describe('daemon-agent-commands /resume engine resolution', () => {
     assert.equal(handled, null);
     assert.equal(h.state.sessions[h.chatId].id, 'sid-current');
     assert.equal(h.state.sessions[h.chatId].engine, 'codex');
+  });
+});
+
+describe('daemon-agent-commands agent workflows', () => {
+  it('binds into the logical _bound_<projectKey> session namespace', async () => {
+    const h = createHarness({
+      agentTools: {
+        bindAgentToChat: async () => ({
+          ok: true,
+          data: {
+            projectKey: 'metame',
+            cwd: '/repo/main',
+            isNewProject: true,
+            project: { name: 'MetaMe', engine: 'codex' },
+          },
+        }),
+      },
+    });
+
+    const handled = await h.handleAgentCommand({
+      bot: h.bot,
+      chatId: h.chatId,
+      text: '/agent bind MetaMe /repo/main',
+      config: { projects: {} },
+    });
+
+    assert.equal(handled, true);
+    assert.deepEqual(h.attached, [['_bound_metame', '/repo/main', 'MetaMe', 'codex']]);
+  });
+
+  it('expires stale /agent new wizard flows before consuming plain text', async () => {
+    const pendingAgentFlows = new Map([
+      ['oc_test_chat', { step: 'name', dir: '/repo/main', __ts: Date.now() - (11 * 60 * 1000) }],
+    ]);
+    const h = createHarness({ pendingAgentFlows });
+
+    const handled = await h.handleAgentCommand({
+      bot: h.bot,
+      chatId: h.chatId,
+      text: '随便一句话',
+      config: { projects: {} },
+    });
+
+    assert.equal(handled, false);
+    assert.equal(pendingAgentFlows.has('oc_test_chat'), false);
+  });
+
+  it('finishes /agent new clone after naming without asking for a role description', async () => {
+    const pendingAgentFlows = new Map([
+      ['oc_test_chat', { step: 'name', dir: '/repo/clone', isClone: true, parentCwd: '/repo/parent', __ts: Date.now() }],
+    ]);
+    const h = createHarness({
+      pendingAgentFlows,
+      agentTools: {
+        createNewWorkspaceAgent: async () => ({ ok: true, data: {} }),
+      },
+    });
+
+    const handled = await h.handleAgentCommand({
+      bot: h.bot,
+      chatId: h.chatId,
+      text: '小分身',
+      config: { projects: {} },
+    });
+
+    assert.equal(handled, true);
+    assert.equal(pendingAgentFlows.has('oc_test_chat'), false);
+    assert.doesNotMatch(h.sent.join('\n'), /步骤3\/3/);
+    assert.match(h.sent[h.sent.length - 1], /创建完成/);
   });
 });

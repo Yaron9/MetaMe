@@ -17,8 +17,6 @@ const RECALL_PATTERNS = [
   /之前.{0,4}(?:说过|讨论过|聊过|提到过|商量过|做过的)/,
   // "还记得/记不记得" — asking if AI remembers (exclude "你记得" which is often imperative)
   /(?:还记得|记不记得|记得吗)/,
-  // "之前那个/上次那个" — referencing past artifacts
-  /(?:之前|上次|前几天)那个/,
   // English recall patterns
   /\b(?:last time|previously|remember when|do you remember|earlier we)\b/i,
 ];
@@ -31,6 +29,6 @@ module.exports = function detectMemoryRecall(prompt) {
     '- 搜索记忆: `node ~/.metame/memory-search.js "关键词1" "keyword2"`',
     '- 一次传 3-4 个关键词（中文+英文+函数名）',
     '- `--facts` 只搜事实，`--sessions` 只搜会话',
-    '- 统一召回: `require("./memory").assembleContext({ query, scope: { project, agent } })`',
+    '- 不要假设工作区里存在 `./memory` 模块；优先走 `memory-search.js` CLI 做召回',
   ].join('\n');
 };

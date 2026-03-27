@@ -12,16 +12,18 @@
 
 const { createDocRoute } = require('./doc-router');
 
+const AGENT_DOC_PATTERNS = [
+  /(?:agent|智能体|机器人|bot).{0,12}(文档|手册|说明|guide)/i,
+  /(?:怎么|如何|手册|文档|说明).{0,12}(配置|管理|使用).{0,12}(agent|智能体|机器人|bot)/i,
+  /(?:agent|智能体|机器人|bot).{0,12}(怎么|如何).{0,12}(配置|管理|使用)/i,
+];
+
 const routes = [
   createDocRoute({
-    patterns: [
-      /(?:创建|新建|添加|注册|绑定|配置|管理).{0,8}(?:agent|机器人|bot|智能体)/i,
-      /(?:agent|bot|智能体).{0,8}(?:创建|新建|添加|注册|绑定|配置|管理)/i,
-      /\b(?:create|add|register|bind|manage|setup|configure)\s+(?:an?\s+)?agent\b/i,
-    ],
-    title: 'Agent 管理提示',
+    patterns: AGENT_DOC_PATTERNS,
+    title: 'Agent 文档提示',
     docPath: '~/.metame/docs/agent-guide.md',
-    summary: '创建/管理/绑定 Agent',
+    summary: 'Agent 配置/管理/使用说明',
   }),
   createDocRoute({
     patterns: [
@@ -34,8 +36,8 @@ const routes = [
   }),
   createDocRoute({
     patterns: [
-      /(?:hook|intent|意图).{0,10}(?:配置|设置|开关|新增|添加|修改|怎么配|怎么设置|怎么改)/i,
-      /(?:配置|设置|开关|新增|添加|修改).{0,10}(?:hook|intent|意图)/i,
+      /(?:hook|intent|意图).{0,10}(?:配置|设置|开关|新增|添加|修改|怎么配|怎么设置|怎么改|原理)/i,
+      /(?:配置|设置|开关|新增|添加|修改|原理).{0,10}(?:hook|intent|意图)/i,
       /intent.?engine/i,
       /意图引擎|意图模块/,
     ],
@@ -45,10 +47,20 @@ const routes = [
   }),
 ];
 
-module.exports = function detectDocRouter(prompt) {
+function hasExplicitDocIntent(prompt) {
+  const text = String(prompt || '').trim();
+  if (!text) return false;
+  return AGENT_DOC_PATTERNS.some((pattern) => pattern.test(text)) ||
+    /(?:文档|手册|说明|guide|readme)/i.test(text);
+}
+
+function detectDocRouter(prompt) {
   const hints = routes
     .map((detect) => detect(prompt))
     .filter(Boolean);
 
   return hints.length ? hints.join('\n') : null;
-};
+}
+
+module.exports = detectDocRouter;
+module.exports.hasExplicitDocIntent = hasExplicitDocIntent;
