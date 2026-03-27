@@ -271,10 +271,9 @@ function runCompletionHooks(projectKey, projectCwd, deps) {
   // 1. Archive (if script exists)
   if (fs.existsSync(scripts.archiver)) {
     try {
-      const statePath = path.join(
-        deps.metameDir || path.join(os.homedir(), '.metame'),
-        'memory', 'now', `${projectKey}.md`
-      );
+      const metameDir = deps.metameDir || path.join(os.homedir(), '.metame');
+      const rPaths = resolveReactivePaths(projectKey, metameDir);
+      const statePath = rPaths.state;
       let projectName = projectKey;
       try {
         const stateContent = fs.readFileSync(statePath, 'utf8');

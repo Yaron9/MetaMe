@@ -25,7 +25,7 @@ function discoverLegacyKeys(metameDir) {
       const l2Match = file.match(/^(.+)_l2cache\.md$/);
       if (l2Match) { keys.add(l2Match[1]); continue; }
       // State files: <key>.md (but not <key>_memory.md or <key>_l2cache.md)
-      if (file.endsWith('.md') && !file.includes('_')) {
+      if (file.endsWith('.md') && !file.endsWith('_memory.md') && !file.endsWith('_l2cache.md')) {
         keys.add(file.replace(/\.md$/, ''));
       }
     }
@@ -90,6 +90,7 @@ function migrate(metameDir) {
       }
       try {
         fs.copyFileSync(src, dst);
+        fs.unlinkSync(src);
         report.migrated.push(`${key}/${label}`);
       } catch (e) {
         report.errors.push(`${key}/${label}: ${e.message}`);
