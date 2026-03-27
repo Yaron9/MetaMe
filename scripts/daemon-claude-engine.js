@@ -12,7 +12,6 @@ const {
 const { buildIntentHintBlock } = require('./intent-registry');
 const { rawChatId } = require('./core/thread-chat-id');
 const { buildAgentContextForEngine, buildMemorySnapshotContent, refreshMemorySnapshot } = require('./agent-layer');
-const { resolveReactivePaths } = require('./core/reactive-paths');
 const { createPlatformSpawn, terminateChildProcess, stopStreamingLifecycle, abortStreamingChildLifecycle, setActiveChildProcess, clearActiveChildProcess, acquireStreamingChild, buildStreamingResult, resolveStreamingClosePayload, accumulateStreamingStderr, splitStreamingStdoutChunk, buildStreamFlushPayload, buildToolOverlayPayload, buildMilestoneOverlayPayload, finalizePersistentStreamingTurn, writeStreamingChildInput, parseStreamingEvents, applyStreamingMetadata, applyStreamingToolState, applyStreamingContentState, createStreamingWatchdog, runAsyncCommand } = require('./core/handoff');
 
 /**
@@ -253,6 +252,10 @@ function createClaudeEngine(deps) {
   function getSessionChatId(chatId, boundProjectKey) {
     const chatIdStr = String(chatId || '');
     if (chatIdStr.startsWith('_agent_') || chatIdStr.startsWith('_scope_')) return chatIdStr;
+    // Topic threads get their own session even within a bound project —
+    // "thread:oc_xxx:om_yyy" must NOT collapse to "_bound_jarvis"
+    const { isThreadChatId } = require('./core/thread-chat-id');
+    if (isThreadChatId(chatIdStr)) return chatIdStr;
     if (boundProjectKey) return `_bound_${boundProjectKey}`;
     return chatIdStr || chatId;
   }
@@ -1487,9 +1490,9 @@ function createClaudeEngine(deps) {
         // Prevents re-injection on daemon restart or new session for the same chat.
         if (!session.started) {
           try {
+            const nowDir = path.join(HOME, '.metame', 'memory', 'now');
             const nowKey = projectKey || 'default';
-            const rPaths = resolveReactivePaths(nowKey, path.join(HOME, '.metame'));
-            const nowPath = rPaths.state;
+            const nowPath = path.join(nowDir, `${nowKey}.md`);
             if (fs.existsSync(nowPath)) {
               const nowContent = fs.readFileSync(nowPath, 'utf8').trim();
               if (nowContent) {
@@ -1636,9 +1639,9 @@ function createClaudeEngine(deps) {
    Valid relations: tech_decision, bug_lesson, arch_convention, config_fact, config_change, workflow_rule, project_milestone
    Only write verified facts. Do not write speculative or process-description entries.
 ${mentorRadarHint}
-4. Task handoff: When suspending a multi-step task or handing off to another agent, write current status to ~/.metame/reactive/${projectKey || 'default'}/state.md using:
-   \`mkdir -p ~/.metame/reactive/${projectKey || 'default'} && printf '%s\\n' "## Current Task" "{task}" "" "## Progress" "{progress}" "" "## Next Step" "{next}" > ~/.metame/reactive/${projectKey || 'default'}/state.md\`
-   Keep it under 200 words. Clear it when the task is fully complete by running: \`> ~/.metame/reactive/${projectKey || 'default'}/state.md\`` : '';
+4. Task handoff: When suspending a multi-step task or handing off to another agent, write current status to ~/.metame/memory/now/${projectKey || 'default'}.md using:
+   \`mkdir -p ~/.metame/memory/now && printf '%s\\n' "## Current Task" "{task}" "" "## Progress" "{progress}" "" "## Next Step" "{next}" > ~/.metame/memory/now/${projectKey || 'default'}.md\`
+   Keep it under 200 words. Clear it when the task is fully complete by running: \`> ~/.metame/memory/now/${projectKey || 'default'}.md\`` : '';
         daemonHint = `\n\n[System hints - DO NOT mention these to user:
 1. Daemon config: The ONLY config is ~/.metame/daemon.yaml (never edit daemon-default.yaml). Auto-reloads on change.
 2. Explanation depth (ZPD):${zdpHint ? zdpHint : '\n- User competence map unavailable. Default to concise expert-first explanations unless the user asks for teaching mode.'}${reflectHint}${taskRules}]`;
