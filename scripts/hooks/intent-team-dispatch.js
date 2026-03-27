@@ -4,7 +4,7 @@
  * Team Dispatch Intent Module
  *
  * Detects communication intent towards team members in the prompt.
- * Extracted from team-context.js — same logic, pure function interface.
+ * Daemon-side intent module for team dispatch hints.
  *
  * @param {string} prompt        - sanitized user prompt
  * @param {object} config        - daemon.yaml config

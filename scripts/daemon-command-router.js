@@ -1,6 +1,7 @@
 'use strict';
 
 const { resolveEngineModel } = require('./daemon-engine-runtime');
+const { createAgentIntentHandler } = require('./daemon-agent-intent');
 const { rawChatId: extractOriginalChatId } = require('./core/thread-chat-id');
 
 function createCommandRouter(deps) {
@@ -133,79 +134,6 @@ function createCommandRouter(deps) {
     // Any unrelated message cancels stale pending intent to avoid context stickiness.
     clearPendingMacConfirmation(chatId);
     return false;
-  }
-
-  function extractQuotedContent(input) {
-    const m = String(input || '').match(/[“"'「](.+?)[”"'」]/);
-    return m ? m[1].trim() : '';
-  }
-
-  function extractPathFromText(input) {
-    const m = String(input || '').match(/(?:~\/|\/|\.\/|\.\.\/)[^\s，。；;!！?？"“”'‘’`]+/);
-    if (!m) return '';
-    return m[0].replace(/[，。；;!！?？]+$/, '');
-  }
-
-  function extractAgentName(input) {
-    const text = String(input || '').trim();
-    const byNameField = text.match(/(?:名字|名称|叫做?|名为|named?)\s*(?:为)?\s*[“"'「]?([^\s，。；;!！?？"“”'‘’`]+)[”"'」]?/i);
-    if (byNameField) return byNameField[1].trim();
-    const byBind = text.match(/(?:bind|绑定)\s*(?:到|为|成)?\s*[“"'「]?([a-zA-Z0-9_\-\u4e00-\u9fa5]+)[”"'」]?/i);
-    if (byBind) return byBind[1].trim();
-    return '';
-  }
-
-  function deriveAgentName(input, workspaceDir) {
-    const explicit = extractAgentName(input);
-    if (explicit) return explicit;
-    if (workspaceDir) {
-      const basename = workspaceDir.split(/[/\\]/).filter(Boolean).pop();
-      if (basename) return basename;
-    }
-    return 'workspace-agent';
-  }
-
-  function deriveRoleDelta(input) {
-    const text = String(input || '').trim();
-    const quoted = extractQuotedContent(text);
-    if (quoted) return quoted;
-    const byVerb = text.match(/(?:改成|改为|变成|设为|更新为)\s*[:：]?\s*(.+)$/);
-    if (byVerb) return byVerb[1].trim();
-    return text;
-  }
-
-  function deriveCreateRoleDelta(input) {
-    const text = String(input || '').trim();
-    const quoted = extractQuotedContent(text);
-    if (quoted) return quoted;
-    const byRoleField = text.match(/(?:角色|职责|人设)\s*(?:是|为|:|：)?\s*(.+)$/i);
-    if (byRoleField) return byRoleField[1].trim();
-    return '';
-  }
-
-  function inferAgentEngineFromText(input) {
-    const text = String(input || '').trim().toLowerCase();
-    if (!text) return null;
-    if (/\bcodex\b/.test(text) || /柯德|科德/.test(text)) return 'codex';
-    return null;
-  }
-
-  function isLikelyDirectAgentAction(input) {
-    const text = String(input || '').trim();
-    return /^(?:请|帮我|麻烦|给我|给这个群|给当前群|在这个群|把这个群|把当前群|将这个群|这个群|当前群|本群|群里|我想|我要|我需要|创建|新建|新增|搞一个|加一个|create|bind|绑定|列出|查看|显示|有哪些|解绑|取消绑定|断开绑定|修改|调整)/i.test(text);
-  }
-
-  function looksLikeAgentIssueReport(input) {
-    const text = String(input || '').trim();
-    const hasIssueWords = /(用户反馈|反馈|报错|bug|问题|故障|异常|修复|改一下|修一下|任务|工单|代码)/i.test(text);
-    const hasAgentWords = /(agent|智能体|session|会话|目录|工作区|绑定|切换)/i.test(text);
-    return hasIssueWords && hasAgentWords;
-  }
-
-  function projectNameFromResult(data, fallbackName) {
-    if (data && data.project && data.project.name) return data.project.name;
-    if (data && data.projectKey) return data.projectKey;
-    return fallbackName || 'workspace-agent';
   }
 
   function projectKeyFromVirtualChatId(chatId) {
@@ -407,226 +335,20 @@ function createCommandRouter(deps) {
     });
   }
 
-  function _detectCloneIntent(text) {
-    if (!text || text.startsWith('/') || text.length < 3) return false;
-    const cloneKeywords = ['分身', '再造', '克隆', '副本', '另一个自己', '另一个我'];
-    const hasCloneKeyword = cloneKeywords.some(k => text.includes(k));
-    if (hasCloneKeyword) {
-      const excludePatterns = [/已经/, /存在/, /有了/, /好了/, /完成/, /搞定/, /配置好/, /怎么建/, /如何建/, /方法/, /步骤/];
-      if (excludePatterns.some(p => p.test(text))) return false;
-      return true;
-    }
-    const actionKeywords = ['新建', '创建', '造', '做一个', '加一个', '增加', '添加'];
-    const hasAction = actionKeywords.some(k => text.includes(k));
-    if (hasAction && /分身|数字/.test(text)) return true;
-    if (/让.*做分身|叫.*做分身|甲.*做分身/.test(text)) return true;
-    return false;
-  }
+  const tryHandleAgentIntent = createAgentIntentHandler({
+    agentTools,
+    handleAgentCommand,
+    attachOrCreateSession,
+    normalizeCwd,
+    getDefaultEngine,
+    loadConfig,
+    getBoundProjectForChat,
+    log,
+    pendingActivations,
+    hasFreshPendingFlow,
+  });
 
-  function _detectNewAgentIntent(text) {
-    if (!text || text.startsWith('/') || text.length < 3) return false;
-    if (_detectCloneIntent(text)) return false;
-    if (_detectTeamIntent(text)) return false;
-    const agentKeywords = ['agent', '助手', '机器人', '小助手'];
-    const hasAgentKeyword = agentKeywords.some(k => text.toLowerCase().includes(k.toLowerCase()));
-    const actionKeywords = ['新建', '创建', '造', '做一个', '加一个', '增加', '添加', '开一个'];
-    const hasAction = actionKeywords.some(k => text.includes(k));
-    if (hasAgentKeyword && hasAction) {
-      const excludePatterns = [/已经/, /存在/, /有了/, /好了/, /完成/, /搞定/, /配置好/, /怎么建/, /如何建/, /方法/, /步骤/, /是什么/, /哪个/];
-      if (excludePatterns.some(p => p.test(text))) return false;
-      return true;
-    }
-    if (/^(给我|帮我|我要|我想|给我加|帮我加)/.test(text) && hasAgentKeyword) return true;
-    return false;
-  }
-
-  function _detectTeamIntent(text) {
-    if (!text || text.startsWith('/') || text.length < 4) return false;
-    // Exclude: only mentioning team, no creation intent
-    if (/走team|用team|通过team|team里|team中|团队里|团队中|走团队|用团队|在team|在团队|team.*已经|团队.*已经|team.*讨论|团队.*讨论/.test(text)) return false;
-    // Positive match: team + action word
-    if ((text.includes('团队') || text.includes('工作组'))) {
-      if (/(新建|创建|造一个|加一个|组建|设置|建|搞)/.test(text)) {
-        if (/怎么|如何|方法|步骤/.test(text)) return false;
-        return true;
-      }
-    }
-    // Pattern: "建个团队" / "搞个团队"
-    if (/^(新建|创建|建|搞).*团队/.test(text)) return true;
-    return false;
-  }
-
-  async function tryHandleAgentIntent(bot, chatId, text, config) {
-    if (!agentTools || !text || text.startsWith('/')) return false;
-    const key = String(chatId);
-    if (hasFreshPendingFlow(key) || hasFreshPendingFlow(key + ':edit')) return false;
-    const input = text.trim();
-    if (!input) return false;
-
-    // Clone intent — route to /agent new clone wizard
-    if (_detectCloneIntent(input)) {
-      log('INFO', `[CloneIntent] "${input.slice(0, 80)}" → /agent new clone`);
-      await handleAgentCommand({ bot, chatId, text: '/agent new clone', config });
-      return true;
-    }
-
-    // New agent intent — route to /agent new wizard
-    if (_detectNewAgentIntent(input)) {
-      log('INFO', `[NewAgentIntent] "${input.slice(0, 80)}" → /agent new`);
-      await handleAgentCommand({ bot, chatId, text: '/agent new', config });
-      return true;
-    }
-
-    // Team creation intent — route to /agent new team wizard
-    if (_detectTeamIntent(input)) {
-      log('INFO', `[TeamIntent] "${input.slice(0, 80)}" → /agent new team`);
-      await handleAgentCommand({ bot, chatId, text: '/agent new team', config });
-      return true;
-    }
-
-    const directAction = isLikelyDirectAgentAction(input);
-    const issueReport = looksLikeAgentIssueReport(input);
-    if (issueReport && !directAction) return false;
-    const workspaceDir = extractPathFromText(input);
-    const hasWorkspacePath = !!workspaceDir;
-
-    // Exclude third-party product context — "智能体" about other companies is NOT about our agents
-    // Requires BOTH a company name AND agent-related keyword to trigger, avoiding false positives on generic verbs
-    const _hasThirdPartyName = /(阿里|百度|腾讯|字节|谷歌|google|openai|微软|microsoft|deepseek|豆包|通义|文心|kimi)/i.test(input);
-    const _hasAgentWord = /(智能体|agent|助手|机器人)/i.test(input);
-    const _isAboutOurAgents = /(我的|我们的|当前|这个群|这里的|metame)/i.test(input);
-    if (_hasThirdPartyName && _hasAgentWord && !_isAboutOurAgents) return false;
-
-    const hasAgentContext = /(agent|智能体|工作区|人设|绑定|当前群|这个群|chat|workspace)/i.test(input);
-    const wantsList = /(列出|查看|显示|有哪些|list|show)/i.test(input) && /(agent|智能体|工作区|绑定)/i.test(input);
-    const wantsUnbind = /(解绑|取消绑定|断开绑定|unbind|unassign)/i.test(input) && hasAgentContext;
-    const wantsEditRole =
-      ((/(角色|职责|人设)/i.test(input) && /(改|修改|调整|更新|变成|改成|改为)/i.test(input)) ||
-      /(把这个agent|把当前agent|当前群.*角色|当前群.*职责)/i.test(input));
-    const wantsCreate =
-      (/(创建|新建|新增|搞一个|加一个|create)/i.test(input) && /(agent|智能体|人设|工作区)/i.test(input) && (directAction || hasWorkspacePath));
-    const wantsBind =
-      !wantsCreate &&
-      (/(绑定|bind)/i.test(input) && hasAgentContext && (directAction || hasWorkspacePath));
-
-    if (!wantsList && !wantsUnbind && !wantsEditRole && !wantsCreate && !wantsBind) {
-      return false;
-    }
-
-    if (wantsList) {
-      const res = await agentTools.listAllAgents(chatId);
-      if (!res.ok) {
-        await bot.sendMessage(chatId, `❌ 查询 Agent 失败: ${res.error}`);
-        return true;
-      }
-      const agents = res.data.agents || [];
-      if (agents.length === 0) {
-        await bot.sendMessage(chatId, '暂无已配置的 Agent。你可以直接说“给这个群创建一个 Agent，目录是 ~/xxx”。');
-        return true;
-      }
-      const lines = ['📋 当前 Agent 列表', ''];
-      for (const a of agents) {
-        const marker = a.key === res.data.boundKey ? ' ◀ 当前' : '';
-        lines.push(`${a.icon || '🤖'} ${a.name}${marker}`);
-        lines.push(`目录: ${a.cwd}`);
-        lines.push(`Key: ${a.key}`);
-        lines.push('');
-      }
-      await bot.sendMessage(chatId, lines.join('\n').trimEnd());
-      return true;
-    }
-
-    if (wantsUnbind) {
-      const res = await agentTools.unbindCurrentAgent(chatId);
-      if (!res.ok) {
-        await bot.sendMessage(chatId, `❌ 解绑失败: ${res.error}`);
-        return true;
-      }
-      if (res.data.unbound) {
-        await bot.sendMessage(chatId, `✅ 已解绑当前群（原 Agent: ${res.data.previousProjectKey}）`);
-      } else {
-        await bot.sendMessage(chatId, '当前群没有绑定 Agent，无需解绑。');
-      }
-      return true;
-    }
-
-    if (wantsEditRole) {
-      const freshCfg = loadConfig();
-      const bound = getBoundProjectForChat(chatId, freshCfg);
-      if (!bound.project || !bound.project.cwd) {
-        await bot.sendMessage(chatId, '❌ 当前群未绑定 Agent。先说“给这个群绑定一个 Agent，目录是 ~/xxx”。');
-        return true;
-      }
-      // Lazy migration: ensure soul layer exists for agents created before this feature
-      if (agentTools && typeof agentTools.repairAgentSoul === 'function') {
-        await agentTools.repairAgentSoul(bound.project.cwd).catch(() => {});
-      }
-      const roleDelta = deriveRoleDelta(input);
-      const res = await agentTools.editAgentRoleDefinition(bound.project.cwd, roleDelta);
-      if (!res.ok) {
-        await bot.sendMessage(chatId, `❌ 更新角色失败: ${res.error}`);
-        return true;
-      }
-      await bot.sendMessage(chatId, res.data.created ? '✅ 已创建 CLAUDE.md 并写入角色定义' : '✅ 角色定义已更新到 CLAUDE.md');
-      return true;
-    }
-
-    if (wantsCreate) {
-      if (!workspaceDir) {
-        await bot.sendMessage(chatId, [
-          '我可以帮你创建 Agent，还差一个工作目录。',
-          '例如：`给这个群创建一个 Agent，目录是 ~/projects/foo`',
-          '也可以直接回我一个路径（`~/`、`/`、`./`、`../` 开头都行）。',
-        ].join('\n'));
-        return true;
-      }
-      const agentName = deriveAgentName(input, workspaceDir);
-      const roleDelta = deriveCreateRoleDelta(input);
-      const inferredEngine = inferAgentEngineFromText(input);
-      // Always skip binding creating chat — new group activates via /activate
-      const res = await agentTools.createNewWorkspaceAgent(agentName, workspaceDir, roleDelta, chatId, {
-        skipChatBinding: true,
-        engine: inferredEngine,
-      });
-      if (!res.ok) {
-        await bot.sendMessage(chatId, `❌ 创建 Agent 失败: ${res.error}`);
-        return true;
-      }
-      const data = res.data || {};
-      const projName = projectNameFromResult(data, agentName);
-      const engineTip = data.project && data.project.engine ? `\n引擎: ${data.project.engine}` : '';
-      if (data.projectKey && pendingActivations) {
-        pendingActivations.set(data.projectKey, {
-          agentKey: data.projectKey, agentName: projName, cwd: data.cwd,
-          createdByChatId: String(chatId), createdAt: Date.now(),
-        });
-      }
-      await bot.sendMessage(chatId,
-        `✅ Agent「${projName}」已创建\n目录: ${data.cwd || '（未知）'}${engineTip}\n\n` +
-        `**下一步**: 在新群里发送 \`/activate\` 完成绑定（30分钟内有效）`
-      );
-      return true;
-    }
-
-    if (wantsBind) {
-      const agentName = deriveAgentName(input, workspaceDir);
-      const inferredEngine = inferAgentEngineFromText(input);
-      const res = await agentTools.bindAgentToChat(chatId, agentName, workspaceDir || null, { engine: inferredEngine });
-      if (!res.ok) {
-        await bot.sendMessage(chatId, `❌ 绑定失败: ${res.error}`);
-        return true;
-      }
-      const data = res.data || {};
-      const projName = projectNameFromResult(data, agentName);
-      if (data.cwd) attachOrCreateSession(chatId, normalizeCwd(data.cwd), projName, (data.project && data.project.engine) || getDefaultEngine());
-      await bot.sendMessage(chatId, `✅ 已绑定 Agent\n名称: ${projName}\n目录: ${data.cwd || '（未知）'}`);
-      return true;
-    }
-
-    return false;
-  }
-
-  async function handleCommand(bot, chatId, text, config, executeTaskByName, senderId = null, readOnly = false, meta = {}) {
+  async function handleCommand(bot, chatId, text, config, executeTaskByName, senderId = null, readOnly = false, _meta = {}) {
     if (text && !text.startsWith('/chatid') && !text.startsWith('/myid')) log('INFO', `CMD [${String(chatId).slice(-8)}]: ${text.slice(0, 80)}`);
     const state = loadState();
 

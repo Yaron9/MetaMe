@@ -13,7 +13,7 @@
 |------|--------|------|
 | `session-analytics.js` | daemon-claude-engine, distill, memory-extract | 会话分析核心库 |
 | `mentor-engine.js` | daemon-claude-engine, daemon-admin-commands | AI 导师引擎 |
-| `intent-registry.js` | daemon-claude-engine, hooks/intent-engine | 意图识别注册表 |
+| `intent-registry.js` | daemon-claude-engine | 意图识别注册表（daemon 运行时注入） |
 | `daemon-command-session-route.js` | daemon-exec-commands, daemon-ops-commands | 会话路由解析 |
 | `daemon-siri-bridge.js` | daemon-bridges.js | Siri HTTP 桥接 |
 | `daemon-siri-imessage.js` | daemon-siri-bridge.js | iMessage 数据库读取 |

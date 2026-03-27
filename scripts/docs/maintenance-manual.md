@@ -179,7 +179,7 @@ feishu:
 
 在手机端（飞书/Telegram）发送以下任一方式触发创建向导：
 
-- 自然语言：`创建团队`、`新建工作组`、`建个团队` 等（`_detectTeamIntent` 识别，位于 `daemon-command-router.js`）
+- 自然语言：`创建团队`、`新建工作组`、`建个团队` 等（`daemon-agent-intent.js` 统一识别并路由）
 - 命令：`/agent new team`
 
 向导分三步，全部在 `daemon-agent-commands.js` 中实现：
@@ -354,7 +354,7 @@ Claude 看到 hook 注入:
 | `daemon-admin-commands.js` | `/dispatch peers` 查看配置 + `/dispatch to peer:project` 手动派发 |
 | `scripts/bin/dispatch_to` | 支持 `peer:project` 格式 → 写 `remote-pending.jsonl` |
 | `daemon-team-dispatch.js` | `buildTeamRosterHint()` 为远端成员生成 `peer:key` 格式命令 |
-| `hooks/team-context.js` | intent hook 注入远端 `peer:key` dispatch 命令 |
+| `hooks/intent-team-dispatch.js` | daemon 意图注入远端 `peer:key` dispatch 命令 |
 
 ### 管理命令
 

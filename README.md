@@ -614,11 +614,12 @@ Level mapping:
 
 ## Hook Optimizations (Default On)
 
-MetaMe installs and maintains core Claude hooks automatically on launch:
+MetaMe keeps Claude hooks minimal and non-essential:
 
-- `UserPromptSubmit` hook (`scripts/hooks/intent-engine.js`): Unified intent engine for team dispatch, ops assist, and task creation hints.
 - `UserPromptSubmit` hook (`scripts/signal-capture.js`): captures high-signal preference/task traces with layered filtering.
 - `Stop` hook (`scripts/hooks/stop-session-capture.js`): records session-end/tool-failure signals with watermark protection.
+
+Semantic intent recognition and prompt hint injection now run only inside the daemon runtime, so Claude and Codex share the same injection path.
 
 If hook installation fails, MetaMe logs and continues the session (non-blocking fallback).
 

@@ -25,7 +25,7 @@
 1. 配置：`~/.metame/daemon.yaml`、`scripts/daemon-default.yaml`
 2. 路由：`scripts/daemon-command-router.js`、`scripts/daemon-agent-tools.js`
 3. 执行：`scripts/daemon-engine-runtime.js`、`scripts/daemon-claude-engine.js`
-4. Hook拦截：`scripts/hooks/intent-engine.js`
+4. 语义注入：`scripts/intent-registry.js`、`scripts/daemon-claude-engine.js`
 5. 管理命令：`scripts/daemon-admin-commands.js`（`/engine`、`/doctor`、`/distill-model`）
 6. 会话存储：`scripts/daemon-session-store.js`
 

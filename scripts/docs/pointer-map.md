@@ -53,7 +53,7 @@
   - `scripts/daemon-agent-tools.js`
   - 关键点：自然语言提取 `codex` 关键词；默认 `claude` 不写 `engine` 字段，仅 `codex` 持久化 `engine: codex`；
     `bindAgentToChat()` 自动调用 `ensureAgentMetadata()` 建立 soul 层；
-    `_detectTeamIntent()` 自然语言意图识别（含负样本过滤），识别"建团队"意图后自动路由到 `/agent new team` 向导
+    `daemon-agent-intent.js` 统一处理 Agent/团队自然语言入口（含负样本过滤、Windows 路径识别、显式动作优先）
 
 - 会话命令与兼容边界：
   - `scripts/daemon-exec-commands.js`
@@ -113,7 +113,7 @@
     按昵称解析到远端 member 时自动走 `sendRemoteDispatch`
 
 - Intent Hook：
-  - `scripts/hooks/team-context.js`
+  - `scripts/hooks/intent-team-dispatch.js`
   - 关键点：检测通信意图 → 注入 dispatch_to 命令提示；远端成员自动带 `peer:key` 前缀
 
 ## Mentor Mode（Step 1-4）定位

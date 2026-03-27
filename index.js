@@ -756,39 +756,23 @@ function ensureHookInstalled() {
       console.log(`${icon("hook")} MetaMe: Stop session capture hook installed.`);
     }
 
-    // Migrate: remove standalone team-context.js hook (superseded by intent-engine)
+    // Migrate: remove obsolete semantic injection hooks.
+    // Intent routing now happens only inside the daemon runtime so Claude/Codex
+    // share one platform-agnostic path.
     if (settings.hooks?.UserPromptSubmit) {
       const before = settings.hooks.UserPromptSubmit.length;
       for (const entry of settings.hooks.UserPromptSubmit) {
         if (entry.hooks) {
-          entry.hooks = entry.hooks.filter(h => !(h.command && h.command.includes('team-context.js')));
+          entry.hooks = entry.hooks.filter((h) => {
+            const cmd = h && h.command ? String(h.command) : '';
+            return !(cmd.includes('team-context.js') || cmd.includes('intent-engine.js'));
+          });
         }
       }
       settings.hooks.UserPromptSubmit = settings.hooks.UserPromptSubmit.filter(
         entry => entry.hooks && entry.hooks.length > 0
       );
       if (settings.hooks.UserPromptSubmit.length !== before) modified = true;
-    }
-
-    // Ensure intent-engine hook (unified intent detection + hint injection)
-    const intentEngineScript = path.join(METAME_DIR, 'hooks', 'intent-engine.js').replace(/\\/g, '/');
-    const intentEngineCommand = `node "${intentEngineScript}"`;
-    const intentEngineInstalled = (settings.hooks?.UserPromptSubmit || []).some(entry =>
-      entry.hooks?.some(h => h.command && h.command.includes('intent-engine.js'))
-    );
-
-    if (!intentEngineInstalled) {
-      if (!settings.hooks) settings.hooks = {};
-      if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
-
-      settings.hooks.UserPromptSubmit.push({
-        hooks: [{
-          type: 'command',
-          command: intentEngineCommand,
-        }]
-      });
-      modified = true;
-      console.log(`${icon("hook")} MetaMe: Intent engine hook installed.`);
     }
 
     if (modified) {
