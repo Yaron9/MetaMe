@@ -231,6 +231,25 @@ describe('chat_agent_map session reuse (multi-engine format)', () => {
     await handleCommand(createBot(sent), 'oc_test123', '你好', config, null, 'user-1', false);
     assert.equal(attachCalls, 0, 'should NOT recreate session when legacy format engine matches');
   });
+
+  it('should keep topic-thread session ids isolated instead of collapsing to _bound_ keys', async () => {
+    const attachCalls = [];
+    const deps = createDeps({
+      loadState: () => ({ sessions: {} }),
+      attachOrCreateSession: (...args) => { attachCalls.push(args); },
+      getDefaultEngine: () => 'claude',
+    });
+    const { handleCommand } = createCommandRouter(deps);
+    const sent = [];
+    const config = createConfig({
+      feishu: { chat_agent_map: { 'oc_test123': 'personal' } },
+      projects: { personal: { cwd: '/Users/test/Agent_yaron', engine: 'claude', name: '小美' } },
+    });
+
+    await handleCommand(createBot(sent), 'thread:oc_test123:om_topic_1', '你好', config, null, 'user-1', false);
+    assert.equal(attachCalls.length, 1, 'should initialize exactly one session for a fresh topic thread');
+    assert.equal(attachCalls[0][0], 'thread:oc_test123:om_topic_1', 'topic thread should keep its own session key');
+  });
 });
 
 describe('natural language continue routing', () => {

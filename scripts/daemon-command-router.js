@@ -2,7 +2,7 @@
 
 const { resolveEngineModel } = require('./daemon-engine-runtime');
 const { createAgentIntentHandler } = require('./daemon-agent-intent');
-const { rawChatId: extractOriginalChatId } = require('./core/thread-chat-id');
+const { rawChatId: extractOriginalChatId, isThreadChatId } = require('./core/thread-chat-id');
 
 function createCommandRouter(deps) {
   const {
@@ -150,6 +150,9 @@ function createCommandRouter(deps) {
     const rawChatId = String(chatId || '');
     const inferredKey = projectKey || projectKeyFromVirtualChatId(rawChatId);
     if (rawChatId.startsWith('_agent_') || rawChatId.startsWith('_scope_')) return rawChatId;
+    // Feishu topics must keep per-thread isolation even when the thread is
+    // temporarily routed to a named agent/project via nickname or chat_agent_map.
+    if (isThreadChatId(rawChatId)) return rawChatId;
     return inferredKey ? `_bound_${inferredKey}` : rawChatId;
   }
 

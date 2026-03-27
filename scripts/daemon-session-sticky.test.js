@@ -604,6 +604,26 @@ describe('Session Sticky — Nickname switch in non-bound chat', () => {
     assert.ok(askClaudeCalls.length > 0 || attachCalls.length === 0,
       'nickname with body: should either go to askClaude or not create session');
   });
+
+  it('nickname switch inside a topic thread should keep the thread session key', async () => {
+    const { deps, attachCalls } = createDeps({
+      routeAgent: () => ({
+        key: 'yi',
+        proj: { cwd: '/Users/yaron/AGI/MetaMe/agents/yi', name: 'Jarvis-乙', icon: '🤖' },
+        rest: '',
+      }),
+    });
+    const router = createCommandRouter(deps);
+    const bot = createBot([]);
+
+    await router.handleCommand(bot, 'thread:oc_free_chat:om_topic_42', '乙', deps.loadConfig(), () => {});
+
+    assert.equal(attachCalls.length, 1,
+      'topic nickname switch: should initialize one session');
+    const [sessionChatId] = attachCalls[0];
+    assert.equal(sessionChatId, 'thread:oc_free_chat:om_topic_42',
+      'topic nickname switch: should stay on the topic thread session key');
+  });
 });
 
 describe('Session Sticky — Edge cases', () => {
