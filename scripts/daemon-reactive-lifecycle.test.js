@@ -492,7 +492,7 @@ describe('Event Log', () => {
       assert.ok(content.includes('phase\tresult'), 'Should contain TSV header');
       assert.ok(content.includes('topic\tdone\ttrue'), 'Should contain event row');
     } finally {
-      try { fs.unlinkSync(logPath); } catch { /* ok */ }
+      fs.rmSync(tmpMeta, { recursive: true, force: true });
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
