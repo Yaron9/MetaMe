@@ -70,7 +70,7 @@ const PERPETUAL_INTENTS = [
   {
     // User asks about event log or progress history
     pattern: /(事件|event).{0,5}(日志|log)|progress\.tsv|进度日志/i,
-    hint: () => '[永续任务] 事件日志: `tail ~/.metame/events/<project>.jsonl`\n进度表: `cat workspace/progress.tsv`',
+    hint: () => '[永续任务] 事件日志: `tail ~/.metame/reactive/<project>/events.jsonl`\n进度表: `cat workspace/progress.tsv`',
   },
 ];
 

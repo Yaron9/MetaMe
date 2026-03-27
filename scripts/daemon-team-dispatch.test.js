@@ -10,32 +10,37 @@ const {
   resolveDispatchActor,
   updateDispatchContextFiles,
 } = require('./daemon-team-dispatch');
+const { resolveReactivePaths } = require('./core/reactive-paths');
 
 describe('team-dispatch scoped context', () => {
-  it('prefers target-private now file and excludes shared context by default', () => {
+  it('prefers target-private state file and excludes shared context by default', () => {
     const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-team-dispatch-'));
+    const rp = resolveReactivePaths('builder', baseDir);
+    fs.mkdirSync(rp.dir, { recursive: true });
+    fs.writeFileSync(rp.state, 'PRIVATE builder progress', 'utf8');
     const nowDir = path.join(baseDir, 'memory', 'now');
     fs.mkdirSync(nowDir, { recursive: true });
-    fs.writeFileSync(path.join(nowDir, 'builder.md'), 'PRIVATE builder progress', 'utf8');
     fs.writeFileSync(path.join(nowDir, 'shared.md'), 'SHARED team progress', 'utf8');
 
     const text = buildEnrichedPrompt('builder', '实现修复', baseDir);
 
-    assert.match(text, /\[当前进度 now\/builder\.md\]/);
+    assert.match(text, /\[当前进度 builder\/state\.md\]/);
     assert.match(text, /PRIVATE builder progress/);
     assert.doesNotMatch(text, /SHARED team progress/);
   });
 
   it('includes shared context only when explicitly requested', () => {
     const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-team-dispatch-'));
+    const rp = resolveReactivePaths('builder', baseDir);
+    fs.mkdirSync(rp.dir, { recursive: true });
+    fs.writeFileSync(rp.state, 'PRIVATE builder progress', 'utf8');
     const nowDir = path.join(baseDir, 'memory', 'now');
     fs.mkdirSync(nowDir, { recursive: true });
-    fs.writeFileSync(path.join(nowDir, 'builder.md'), 'PRIVATE builder progress', 'utf8');
     fs.writeFileSync(path.join(nowDir, 'shared.md'), 'SHARED team progress', 'utf8');
 
     const text = buildEnrichedPrompt('builder', '实现修复', baseDir, { includeShared: true });
 
-    assert.match(text, /\[当前进度 now\/builder\.md\]/);
+    assert.match(text, /\[当前进度 builder\/state\.md\]/);
     assert.match(text, /\[共享进度 now\/shared\.md\]/);
     assert.match(text, /SHARED team progress/);
   });
@@ -60,7 +65,8 @@ describe('team-dispatch scoped context', () => {
       envelope: null,
     });
 
-    const targetNow = fs.readFileSync(path.join(baseDir, 'memory', 'now', 'builder.md'), 'utf8');
+    const rpBuilder = resolveReactivePaths('builder', baseDir);
+    const targetNow = fs.readFileSync(rpBuilder.state, 'utf8');
     assert.match(targetNow, /更新者.*👤 用户/);
     assert.equal(fs.existsSync(path.join(baseDir, 'memory', 'now', 'shared.md')), false);
 

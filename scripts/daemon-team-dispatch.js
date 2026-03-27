@@ -15,6 +15,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { resolveReactivePaths } = require('./core/reactive-paths');
 
 const METAME_DIR = path.join(os.homedir(), '.metame');
 
@@ -165,12 +166,12 @@ function updateDispatchContextFiles({ fs: fsMod = fs, path: pathMod = path, base
   const logWarn = (msg) => {
     if (typeof logger === 'function') logger(msg);
   };
-  const nowDir = pathMod.join(baseDir, 'memory', 'now');
+  const rp = resolveReactivePaths(targetProject, baseDir);
   const sharedDir = pathMod.join(baseDir, 'memory', 'shared');
-  const targetNowPath = pathMod.join(nowDir, `${targetProject}.md`);
-  const sharedNowPath = pathMod.join(nowDir, 'shared.md');
+  const targetNowPath = rp.state;
+  const sharedNowPath = pathMod.join(baseDir, 'memory', 'now', 'shared.md');
   const tasksFilePath = pathMod.join(sharedDir, 'tasks.md');
-  fsMod.mkdirSync(nowDir, { recursive: true });
+  fsMod.mkdirSync(rp.dir, { recursive: true });
 
   const projects = (config && config.projects) || {};
   const actor = resolveDispatchActor((fullMsg && fullMsg.source_sender_key) || (fullMsg && fullMsg.from), projects);
@@ -192,6 +193,7 @@ function updateDispatchContextFiles({ fs: fsMod = fs, path: pathMod = path, base
 
   if (!isSharedTeamTask) return { targetNowPath, sharedNowPath: null, tasksFilePath: null };
 
+  fsMod.mkdirSync(pathMod.dirname(sharedNowPath), { recursive: true });
   fsMod.writeFileSync(sharedNowPath, buildSharedNowContent({
     actor, target, title, prompt, timeStr,
     dispatchId: fullMsg.id, taskId, scopeId, chain: fullMsg.chain,
@@ -252,14 +254,14 @@ function updateDispatchContextFiles({ fs: fsMod = fs, path: pathMod = path, base
 function buildEnrichedPrompt(target, rawPrompt, metameDir, opts = {}) {
   const base = metameDir || METAME_DIR;
   const includeShared = !!(opts && opts.includeShared);
+  const rp = resolveReactivePaths(target, base);
   let ctx = '';
 
-  // 1. Target private now file
+  // 1. Target state file (reactive/<target>/state.md)
   try {
-    const targetNowFile = path.join(base, 'memory', 'now', `${target}.md`);
-    if (fs.existsSync(targetNowFile)) {
-      const content = fs.readFileSync(targetNowFile, 'utf8').trim();
-      if (content) ctx += `[当前进度 now/${target}.md]\n${content}\n\n`;
+    if (fs.existsSync(rp.state)) {
+      const content = fs.readFileSync(rp.state, 'utf8').trim();
+      if (content) ctx += `[当前进度 ${target}/state.md]\n${content}\n\n`;
     }
   } catch { /* non-critical */ }
 
@@ -274,13 +276,12 @@ function buildEnrichedPrompt(target, rawPrompt, metameDir, opts = {}) {
     } catch { /* non-critical */ }
   }
 
-  // 3+5. Structured memory (L1+L2) OR legacy _latest.md fallback
+  // 3+5. Structured memory (L1+L2) OR legacy latest.md fallback
   //       Single stat — structured memory supersedes raw last output
   let hasStructuredMemory = false;
   try {
-    const memFile = path.join(base, 'memory', 'now', `${target}_memory.md`);
-    if (fs.existsSync(memFile)) {
-      const content = fs.readFileSync(memFile, 'utf8').trim();
+    if (fs.existsSync(rp.memory)) {
+      const content = fs.readFileSync(rp.memory, 'utf8').trim();
       if (content) {
         ctx += `[Memory Context]\n${content}\n\n`;
         hasStructuredMemory = true;
@@ -291,9 +292,8 @@ function buildEnrichedPrompt(target, rawPrompt, metameDir, opts = {}) {
   if (!hasStructuredMemory) {
     // Fallback: raw last output (for non-reactive projects without memory system)
     try {
-      const latestFile = path.join(base, 'memory', 'agents', `${target}_latest.md`);
-      if (fs.existsSync(latestFile)) {
-        const content = fs.readFileSync(latestFile, 'utf8').trim();
+      if (fs.existsSync(rp.latest)) {
+        const content = fs.readFileSync(rp.latest, 'utf8').trim();
         if (content) ctx += `[${target} 上次产出]\n${content}\n\n`;
       }
     } catch { /* non-critical */ }

@@ -37,11 +37,11 @@ function makeTmpProject() {
     '- [t2] Test Topic Beta (priority: 2)',
     '', '## active', '', '## completed', '', '## abandoned', '',
   ].join('\n'));
-  // Create scientist state file at the real protocol path: <metameDir>/memory/now/scientist.md
+  // Create scientist state file at the real protocol path: <metameDir>/reactive/scientist/state.md
   const metameDir = path.join(dir, '.metame');
-  const statePath = path.join(metameDir, 'memory', 'now');
-  fs.mkdirSync(statePath, { recursive: true });
-  fs.writeFileSync(path.join(statePath, 'scientist.md'), [
+  const reactiveDir = path.join(metameDir, 'reactive', 'scientist');
+  fs.mkdirSync(reactiveDir, { recursive: true });
+  fs.writeFileSync(path.join(reactiveDir, 'state.md'), [
     '# 科研状态',
     'project: "Test Topic Alpha"',
     'phase: writing',

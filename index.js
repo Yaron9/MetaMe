@@ -552,6 +552,21 @@ const binUpdated = syncDirFiles(path.join(__dirname, 'scripts', 'bin'), path.joi
 // Hooks: Claude Code event hooks (Stop, PostToolUse, etc.)
 const hooksUpdated = syncDirFiles(path.join(__dirname, 'scripts', 'hooks'), path.join(METAME_DIR, 'hooks'));
 
+// Migrate legacy reactive flat paths to per-project directory structure
+try {
+  const { migrate } = require('./scripts/migrate-reactive-paths');
+  const migrationReport = migrate(METAME_DIR);
+  if (migrationReport.migrated.length > 0) {
+    console.log(`${icon("pkg")} Migrated ${migrationReport.migrated.length} reactive file(s) to per-project dirs.`);
+  }
+  if (migrationReport.errors.length > 0) {
+    console.log(`${icon("warn")} Reactive migration had ${migrationReport.errors.length} error(s).`);
+  }
+} catch (e) {
+  // Non-critical: migration failure should not block deploy
+  console.log(`${icon("warn")} Reactive path migration skipped: ${e.message}`);
+}
+
 const daemonCodeUpdated = scriptsUpdated || binUpdated || hooksUpdated;
 const shouldAutoRestartAfterDeploy = (() => {
   const [cmd] = process.argv.slice(2);

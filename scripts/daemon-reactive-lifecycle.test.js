@@ -7,6 +7,7 @@ const path = require('path');
 const os = require('os');
 const { handleReactiveOutput, parseReactiveSignals, replayEventLog, __test } = require('./daemon-reactive-lifecycle');
 const { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, loadProjectManifest, resolveProjectScripts, generateStateFile, buildRunningMemory, scanRelevantArtifacts, buildWorkingMemory, persistMemoryFiles, extractInlineFacts, extractOutputSummary, loadWorkingMemory } = __test;
+const { resolveReactivePaths } = require('./core/reactive-paths');
 
 // ── parseReactiveSignals ──────────────────────────────────────
 
@@ -399,24 +400,17 @@ describe('Event Log', () => {
 
   it('appendEvent creates file and writes JSON line', () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evtlog-test-'));
-    const origEventsDir = path.join(os.homedir(), '.metame', 'events');
-    // We need to test appendEvent but it writes to a hardcoded EVENTS_DIR.
-    // Instead, test via replayEventLog which reads from the same dir.
-    // Write directly to simulate appendEvent behavior for isolation.
-    const eventsDir = path.join(os.homedir(), '.metame', 'events');
-    fs.mkdirSync(eventsDir, { recursive: true });
     const testKey = `_test_evt_${Date.now()}`;
-    const logPath = path.join(eventsDir, `${testKey}.jsonl`);
+    const rp = resolveReactivePaths(testKey, tmpDir);
     try {
-      appendEvent(testKey, { type: 'PHASE_GATE', phase: 'topic', passed: true });
-      assert.ok(fs.existsSync(logPath), 'Event log file should exist');
-      const content = fs.readFileSync(logPath, 'utf8');
+      appendEvent(testKey, { type: 'PHASE_GATE', phase: 'topic', passed: true }, tmpDir);
+      assert.ok(fs.existsSync(rp.events), 'Event log file should exist');
+      const content = fs.readFileSync(rp.events, 'utf8');
       const parsed = JSON.parse(content.trim());
       assert.equal(parsed.type, 'PHASE_GATE');
       assert.equal(parsed.phase, 'topic');
       assert.ok(parsed.ts, 'Should have timestamp');
     } finally {
-      try { fs.unlinkSync(logPath); } catch { /* ok */ }
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
@@ -424,15 +418,14 @@ describe('Event Log', () => {
   it('replayEventLog derives phase from PHASE_GATE events', () => {
     const testKey = `_test_replay_${Date.now()}`;
     const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'evt-test-'));
-    const eventsDir = path.join(tmpMeta, 'events');
-    const logPath = path.join(eventsDir, `${testKey}.jsonl`);
+    const rp = resolveReactivePaths(testKey, tmpMeta);
     try {
-      fs.mkdirSync(eventsDir, { recursive: true });
+      fs.mkdirSync(rp.dir, { recursive: true });
       const events = [
         { ts: '2026-01-01T00:00:00Z', type: 'PHASE_GATE', phase: 'topic', passed: true, artifacts: ['a.md'] },
         { ts: '2026-01-02T00:00:00Z', type: 'PHASE_GATE', phase: 'literature', passed: true, artifacts: ['b.md'] },
       ];
-      fs.writeFileSync(logPath, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+      fs.writeFileSync(rp.events, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
       const result = replayEventLog(testKey, { log: () => {}, metameDir: tmpMeta });
       assert.equal(result.phase, 'literature');
       assert.equal(result.history.length, 2);
@@ -446,16 +439,15 @@ describe('Event Log', () => {
   it('replayEventLog handles MISSION_COMPLETE reset', () => {
     const testKey = `_test_replay_mc_${Date.now()}`;
     const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'evt-test-'));
-    const eventsDir = path.join(tmpMeta, 'events');
-    const logPath = path.join(eventsDir, `${testKey}.jsonl`);
+    const rp = resolveReactivePaths(testKey, tmpMeta);
     try {
-      fs.mkdirSync(eventsDir, { recursive: true });
+      fs.mkdirSync(rp.dir, { recursive: true });
       const events = [
         { ts: '2026-01-01T00:00:00Z', type: 'MISSION_START', mission_id: '1', mission_title: 'Test' },
         { ts: '2026-01-02T00:00:00Z', type: 'PHASE_GATE', phase: 'topic', passed: true },
         { ts: '2026-01-03T00:00:00Z', type: 'MISSION_COMPLETE' },
       ];
-      fs.writeFileSync(logPath, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+      fs.writeFileSync(rp.events, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
       const result = replayEventLog(testKey, { log: () => {}, metameDir: tmpMeta });
       assert.equal(result.phase, '');
       assert.equal(result.mission, null);
@@ -467,12 +459,11 @@ describe('Event Log', () => {
   it('replayEventLog tolerates malformed lines (Tolerant Reader)', () => {
     const testKey = `_test_replay_bad_${Date.now()}`;
     const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'evt-test-'));
-    const eventsDir = path.join(tmpMeta, 'events');
-    const logPath = path.join(eventsDir, `${testKey}.jsonl`);
+    const rp = resolveReactivePaths(testKey, tmpMeta);
     try {
-      fs.mkdirSync(eventsDir, { recursive: true });
+      fs.mkdirSync(rp.dir, { recursive: true });
       const content = '{"ts":"2026-01-01T00:00:00Z","type":"PHASE_GATE","phase":"topic","passed":true}\n{BROKEN LINE\n{"ts":"2026-01-02T00:00:00Z","type":"PHASE_GATE","phase":"design","passed":true}\n';
-      fs.writeFileSync(logPath, content, 'utf8');
+      fs.writeFileSync(rp.events, content, 'utf8');
       const warnings = [];
       const result = replayEventLog(testKey, { log: (level, msg) => { if (level === 'WARN') warnings.push(msg); }, metameDir: tmpMeta });
       assert.equal(result.phase, 'design');
@@ -487,14 +478,13 @@ describe('Event Log', () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tsv-test-'));
     const testKey = `_test_tsv_${Date.now()}`;
     const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'evt-test-'));
-    const eventsDir = path.join(tmpMeta, 'events');
-    const logPath = path.join(eventsDir, `${testKey}.jsonl`);
+    const rp = resolveReactivePaths(testKey, tmpMeta);
     try {
-      fs.mkdirSync(eventsDir, { recursive: true });
+      fs.mkdirSync(rp.dir, { recursive: true });
       const events = [
         { ts: '2026-01-01T00:00:00Z', type: 'PHASE_GATE', phase: 'topic', passed: true, artifacts: ['topic.md'], details: 'ok' },
       ];
-      fs.writeFileSync(logPath, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+      fs.writeFileSync(rp.events, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
       projectProgressTsv(tmpDir, testKey, tmpMeta);
       const tsvPath = path.join(tmpDir, 'workspace', 'progress.tsv');
       assert.ok(fs.existsSync(tsvPath), 'TSV file should exist');
@@ -584,8 +574,8 @@ describe('Generalization', () => {
 describe('buildRunningMemory', () => {
   it('returns decisions/lessons/trail from event log', () => {
     const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-l1-'));
-    const eventsDir = path.join(tmpMeta, 'events');
-    fs.mkdirSync(eventsDir, { recursive: true });
+    const rp = resolveReactivePaths('testproj', tmpMeta);
+    fs.mkdirSync(rp.dir, { recursive: true });
     try {
       const events = [
         { ts: '2026-01-01T00:00:00Z', type: 'MISSION_START', mission_id: '1', mission_title: 'Test Mission' },
@@ -597,7 +587,7 @@ describe('buildRunningMemory', () => {
         { ts: '2026-01-01T06:00:00Z', type: 'MEMBER_COMPLETE', member: 'scout' },
         { ts: '2026-01-01T07:00:00Z', type: 'PHASE_GATE', phase: 'literature', passed: true },
       ];
-      fs.writeFileSync(path.join(eventsDir, 'testproj.jsonl'), events.map(e => JSON.stringify(e)).join('\n') + '\n');
+      fs.writeFileSync(rp.events, events.map(e => JSON.stringify(e)).join('\n') + '\n');
 
       const result = buildRunningMemory('testproj', {}, { metameDir: tmpMeta, log: () => {} });
       assert.ok(result.includes('Recent Decisions'), 'Should have decisions section');
@@ -614,8 +604,8 @@ describe('buildRunningMemory', () => {
 
   it('returns empty string for empty event log', () => {
     const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-l1-empty-'));
-    const eventsDir = path.join(tmpMeta, 'events');
-    fs.mkdirSync(eventsDir, { recursive: true });
+    const rp = resolveReactivePaths('noproject', tmpMeta);
+    fs.mkdirSync(rp.dir, { recursive: true });
     try {
       const result = buildRunningMemory('noproject', {}, { metameDir: tmpMeta, log: () => {} });
       assert.equal(result, '');
@@ -656,17 +646,17 @@ describe('scanRelevantArtifacts', () => {
 });
 
 describe('persistMemoryFiles', () => {
-  it('creates _memory.md with merged content', () => {
+  it('creates memory.md with merged content', () => {
     const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'persist-mem-'));
-    const eventsDir = path.join(tmpMeta, 'events');
-    fs.mkdirSync(eventsDir, { recursive: true });
+    const rp = resolveReactivePaths('testproj', tmpMeta);
+    fs.mkdirSync(rp.dir, { recursive: true });
     try {
       const events = [
         { ts: '2026-01-01T00:00:00Z', type: 'MISSION_START', mission_id: '1', mission_title: 'Pruning Study' },
         { ts: '2026-01-01T01:00:00Z', type: 'MEMBER_COMPLETE', member: 'scout' },
         { ts: '2026-01-01T02:00:00Z', type: 'PHASE_GATE', phase: 'topic', passed: true },
       ];
-      fs.writeFileSync(path.join(eventsDir, 'testproj.jsonl'), events.map(e => JSON.stringify(e)).join('\n') + '\n');
+      fs.writeFileSync(rp.events, events.map(e => JSON.stringify(e)).join('\n') + '\n');
 
       const state = { reactive: { testproj: { depth: 5, max_depth: 50, status: 'running' } } };
       const deps = { metameDir: tmpMeta, log: () => {}, loadState: () => state };
@@ -803,9 +793,9 @@ describe('extractOutputSummary', () => {
 describe('loadWorkingMemory', () => {
   it('returns file content when file exists', () => {
     const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'lwm-'));
-    const memDir = path.join(tmpMeta, 'memory', 'now');
-    fs.mkdirSync(memDir, { recursive: true });
-    fs.writeFileSync(path.join(memDir, 'proj_memory.md'), '## Decisions\n- chose X', 'utf8');
+    const rp = resolveReactivePaths('proj', tmpMeta);
+    fs.mkdirSync(rp.dir, { recursive: true });
+    fs.writeFileSync(rp.memory, '## Decisions\n- chose X', 'utf8');
     try {
       const result = loadWorkingMemory('proj', tmpMeta);
       assert.equal(result, '## Decisions\n- chose X');
@@ -826,9 +816,9 @@ describe('loadWorkingMemory', () => {
 
   it('trims whitespace from content', () => {
     const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'lwm-trim-'));
-    const memDir = path.join(tmpMeta, 'memory', 'now');
-    fs.mkdirSync(memDir, { recursive: true });
-    fs.writeFileSync(path.join(memDir, 'proj_memory.md'), '  content with spaces  \n\n', 'utf8');
+    const rp = resolveReactivePaths('proj', tmpMeta);
+    fs.mkdirSync(rp.dir, { recursive: true });
+    fs.writeFileSync(rp.memory, '  content with spaces  \n\n', 'utf8');
     try {
       const result = loadWorkingMemory('proj', tmpMeta);
       assert.equal(result, 'content with spaces');
@@ -839,9 +829,9 @@ describe('loadWorkingMemory', () => {
 
   it('returns empty string for empty file', () => {
     const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), 'lwm-empty-'));
-    const memDir = path.join(tmpMeta, 'memory', 'now');
-    fs.mkdirSync(memDir, { recursive: true });
-    fs.writeFileSync(path.join(memDir, 'proj_memory.md'), '', 'utf8');
+    const rp = resolveReactivePaths('proj', tmpMeta);
+    fs.mkdirSync(rp.dir, { recursive: true });
+    fs.writeFileSync(rp.memory, '', 'utf8');
     try {
       const result = loadWorkingMemory('proj', tmpMeta);
       assert.equal(result, '');

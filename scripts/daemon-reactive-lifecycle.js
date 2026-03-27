@@ -6,7 +6,7 @@ const os = require('os');
 const { execSync } = require('child_process');
 const { buildReactivePrompt } = require('./core/reactive-prompt');
 const { calculateNextAction } = require('./core/reactive-signal');
-const EVENTS_DIR = path.join(os.homedir(), '.metame', 'events');
+const { resolveReactivePaths } = require('./core/reactive-paths');
 
 /**
  * daemon-reactive-lifecycle.js — Reactive Loop Lifecycle Module
@@ -18,7 +18,7 @@ const EVENTS_DIR = path.join(os.homedir(), '.metame', 'events');
  *   3. Fresh session — every reactive dispatch uses new_session: true
  *   4. Completion signal — configurable per project (default: MISSION_COMPLETE)
  *   5. Verifier hook — runs project verifier before waking parent
- *   6. Event sourcing — all state changes logged to ~/.metame/events/
+ *   6. Event sourcing — all state changes logged to ~/.metame/reactive/<key>/
  */
 
 // ── Signal parsing ──────────────────────────────────────────────
@@ -209,10 +209,9 @@ function readPhaseFromState(statePath) {
  * @returns {string}
  */
 function loadWorkingMemory(projectKey, metameDir) {
-  const memPath = path.join(
-    metameDir || path.join(os.homedir(), '.metame'),
-    'memory', 'now', `${projectKey}_memory.md`
-  );
+  const base = metameDir || path.join(os.homedir(), '.metame');
+  const paths = resolveReactivePaths(projectKey, base);
+  const memPath = paths.memory;
   try {
     const content = fs.readFileSync(memPath, 'utf8').trim();
     return content || '';
@@ -232,7 +231,8 @@ function runProjectVerifier(projectKey, config, deps) {
   if (!fs.existsSync(scripts.verifier)) return null;
 
   const metameDir = deps.metameDir || path.join(os.homedir(), '.metame');
-  const statePath = path.join(metameDir, 'memory', 'now', `${projectKey}.md`);
+  const paths = resolveReactivePaths(projectKey, metameDir);
+  const statePath = paths.state;
 
   // Read phase from event log (SoT), fall back to state file for backward compat
   const { phase: eventPhase } = replayEventLog(projectKey, deps);
@@ -352,12 +352,13 @@ function runCompletionHooks(projectKey, projectCwd, deps) {
 
 /**
  * Append an event to the project's event log.
- * Daemon-exclusive: agents cannot write to ~/.metame/events/.
+ * Daemon-exclusive: agents cannot write to ~/.metame/reactive/<key>/.
  */
 function appendEvent(projectKey, event, metameDir) {
-  const evDir = metameDir ? path.join(metameDir, 'events') : EVENTS_DIR;
-  fs.mkdirSync(evDir, { recursive: true });
-  const logPath = path.join(evDir, `${projectKey}.jsonl`);
+  const base = metameDir || path.join(os.homedir(), '.metame');
+  const paths = resolveReactivePaths(projectKey, base);
+  fs.mkdirSync(paths.dir, { recursive: true });
+  const logPath = paths.events;
   const line = JSON.stringify({ ts: new Date().toISOString(), ...event }) + '\n';
   fs.appendFileSync(logPath, line, 'utf8');
 }
@@ -371,8 +372,9 @@ function appendEvent(projectKey, event, metameDir) {
  * This function NEVER throws.
  */
 function replayEventLog(projectKey, deps) {
-  const evDir = deps?.metameDir ? path.join(deps.metameDir, 'events') : EVENTS_DIR;
-  const logPath = path.join(evDir, `${projectKey}.jsonl`);
+  const base = deps?.metameDir || path.join(os.homedir(), '.metame');
+  const paths = resolveReactivePaths(projectKey, base);
+  const logPath = paths.events;
   if (!fs.existsSync(logPath)) return { phase: '', mission: null, history: [] };
 
   const lines = fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
@@ -413,8 +415,9 @@ function projectProgressTsv(projectCwd, projectKey, metameDir) {
   const tsvPath = path.join(projectCwd, 'workspace', 'progress.tsv');
   const header = 'phase\tresult\tverifier_passed\tartifact\ttimestamp\tnotes\n';
 
-  const evDir = metameDir ? path.join(metameDir, 'events') : EVENTS_DIR;
-  const logPath = path.join(evDir, `${projectKey}.jsonl`);
+  const base = metameDir || path.join(os.homedir(), '.metame');
+  const paths = resolveReactivePaths(projectKey, base);
+  const logPath = paths.events;
   if (!fs.existsSync(logPath)) return;
 
   const lines = fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
@@ -451,7 +454,8 @@ function projectProgressTsv(projectCwd, projectKey, metameDir) {
  */
 function generateStateFile(projectKey, config, deps) {
   const metameDir = deps.metameDir || path.join(os.homedir(), '.metame');
-  const statePath = path.join(metameDir, 'memory', 'now', projectKey + '.md');
+  const paths = resolveReactivePaths(projectKey, metameDir);
+  const statePath = paths.state;
 
   const { phase, mission, history } = replayEventLog(projectKey, deps);
 
@@ -533,8 +537,8 @@ function reconcilePerpetualProjects(config, deps) {
  */
 function parseEventLog(projectKey, deps) {
   const metameDir = deps.metameDir || path.join(os.homedir(), '.metame');
-  const evDir = path.join(metameDir, 'events');
-  const logPath = path.join(evDir, `${projectKey}.jsonl`);
+  const paths = resolveReactivePaths(projectKey, metameDir);
+  const logPath = paths.events;
   if (!fs.existsSync(logPath)) return [];
 
   const raw = fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
@@ -741,9 +745,9 @@ function buildWorkingMemory(projectKey, config, deps) {
  */
 function persistMemoryFiles(projectKey, config, deps, opts = {}) {
   const metameDir = deps.metameDir || path.join(os.homedir(), '.metame');
-  const memDir = path.join(metameDir, 'memory', 'now');
-  fs.mkdirSync(memDir, { recursive: true });
-  const memPath = path.join(memDir, `${projectKey}_memory.md`);
+  const paths = resolveReactivePaths(projectKey, metameDir);
+  fs.mkdirSync(paths.dir, { recursive: true });
+  const memPath = paths.memory;
 
   // Single parse of event log — shared across L1 and round counting
   const events = parseEventLog(projectKey, deps);
@@ -776,15 +780,13 @@ function persistMemoryFiles(projectKey, config, deps, opts = {}) {
     l2 = buildWorkingMemory(projectKey, config, deps);
     // Stash L2 for next time
     try {
-      const l2CachePath = path.join(memDir, `${projectKey}_l2cache.md`);
-      fs.writeFileSync(l2CachePath, l2, 'utf8');
+      fs.writeFileSync(paths.l2cache, l2, 'utf8');
     } catch { /* non-critical */ }
   } else {
     // Read stale L2 from cache
     try {
-      const l2CachePath = path.join(memDir, `${projectKey}_l2cache.md`);
-      if (fs.existsSync(l2CachePath)) {
-        l2 = fs.readFileSync(l2CachePath, 'utf8').trim();
+      if (fs.existsSync(paths.l2cache)) {
+        l2 = fs.readFileSync(paths.l2cache, 'utf8').trim();
       }
     } catch { /* non-critical */ }
   }
