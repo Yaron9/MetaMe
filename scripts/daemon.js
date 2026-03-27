@@ -507,6 +507,7 @@ function createNullBot(onOutput) {
     deleteMessage: async () => { },
     sendFile: noop,
     downloadFile: noop,
+    notifyFinalOutput: async (text) => { if (onOutput) onOutput({ body: text, final: true }); return { message_id: '_virtual' }; },
   };
 }
 
@@ -610,6 +611,7 @@ function createStreamForwardBot(realBot, chatId, onOutput = null, opts = {}) {
     deleteMessage: async (_, msgId) => { await waitUntilReady(); return realBot.deleteMessage(chatId, msgId); },
     sendFile: async (_, filePath, caption) => { await waitUntilReady(); return realBot.sendFile(chatId, filePath, caption); },
     downloadFile: async (...args) => realBot.downloadFile(...args),
+    notifyFinalOutput: async (text) => { if (onOutput) onOutput({ body: text, final: true }); return { message_id: '_virtual' }; },
   };
 }
 
@@ -897,10 +899,11 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
 
   let _taskFinalized = false;
   const outputHandler = (output) => {
+    const isFinalOutput = !!(output && typeof output === 'object' && output.final);
     const outStr = typeof output === 'object' ? (output.body || JSON.stringify(output)) : String(output);
     const displayOut = envelope ? appendTeamTaskResumeHint(outStr, envelope.task_id, envelope.scope_id) : outStr;
     log('INFO', `Dispatch output from ${targetProject}: ${outStr.slice(0, 200)}`);
-    if (envelope && taskBoard && !_taskFinalized && outStr.trim().length > 2) {
+    if (!isFinalOutput && envelope && taskBoard && !_taskFinalized && outStr.trim().length > 2) {
       const status = inferTaskStatusFromOutput(outStr);
       const artifacts = extractArtifactPaths(outStr);
       const update = {
@@ -916,9 +919,9 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
       });
       _taskFinalized = true;
     }
-    if (replyFn && outStr.trim().length > 2) {
+    if (!isFinalOutput && replyFn && outStr.trim().length > 2) {
       replyFn(displayOut);
-    } else if (!replyFn && fullMsg.callback && fullMsg.from && config) {
+    } else if (!isFinalOutput && !replyFn && fullMsg.callback && fullMsg.from && config) {
       // Write result to sender's inbox before dispatching callback
       try {
         const inboxDir = path.join(os.homedir(), '.metame', 'memory', 'inbox', fullMsg.from);
@@ -954,6 +957,7 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
 
     // ── Reactive lifecycle hook ──
     try {
+      if (!isFinalOutput) return;
       handleReactiveOutput(targetProject, outStr, loadConfig(), {
         log,
         loadState,

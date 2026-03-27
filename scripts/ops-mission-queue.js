@@ -15,7 +15,12 @@ const os = require('os');
 
 const MISSIONS_FILE = 'workspace/missions.md';
 const SECTIONS = ['pending', 'active', 'completed', 'abandoned'];
-const METAME_DIR = path.join(os.homedir(), '.metame');
+const RECENT_LOG_LINES = 500;
+const ERROR_THRESHOLD = 3;
+
+function getMetameDir() {
+  return process.env.METAME_DIR || path.join(os.homedir(), '.metame');
+}
 
 // ── Mission file parser (same format as topic-pool) ──────────
 
@@ -86,6 +91,90 @@ function findMission(sections, id) {
   return null;
 }
 
+function normalizeLogLine(line) {
+  return String(line || '')
+    .replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z?/g, '<TS>')
+    .replace(/\d{10,}/g, '<ID>')
+    .replace(/\/tmp\/[^\s]+/g, '<TMP>')
+    .trim();
+}
+
+function collectRecurringErrors() {
+  const counts = {};
+  const logPath = path.join(getMetameDir(), 'daemon.log');
+  if (!fs.existsSync(logPath)) return counts;
+
+  try {
+    const content = fs.readFileSync(logPath, 'utf8');
+    const recent = content.split('\n').slice(-RECENT_LOG_LINES);
+    for (const line of recent) {
+      if (!/\bERR\b|\bWARN\b|\bError\b|\bfailed\b/i.test(line)) continue;
+      const normalized = normalizeLogLine(line);
+      if (normalized.length < 20) continue;
+      const key = normalized.slice(0, 120);
+      counts[key] = (counts[key] || 0) + 1;
+    }
+  } catch { /* ignore unreadable log */ }
+
+  return counts;
+}
+
+function parseRecurringErrorTitle(title) {
+  const m = String(title || '').match(/^Fix recurring error(?:\s*\(\d+x\))?:\s*(.+)$/i);
+  return m ? m[1].trim() : '';
+}
+
+function shouldKeepMission(title, cwd, recurringErrors, now) {
+  const recurringPattern = parseRecurringErrorTitle(title);
+  if (recurringPattern) {
+    return (recurringErrors[recurringPattern] || 0) >= ERROR_THRESHOLD;
+  }
+
+  const testMatch = String(title || '').match(/^Fix failing tests in (.+)$/i);
+  if (testMatch) {
+    const testName = testMatch[1].trim();
+    const testPath = path.join(cwd, 'scripts', testName);
+    if (!fs.existsSync(testPath)) return false;
+    try {
+      execSyncSafe(`node --test scripts/${testName}`, cwd, 30000);
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
+  const staleMatch = String(title || '').match(/^Investigate stale project:\s*(.+)$/i);
+  if (staleMatch) {
+    const projectKey = staleMatch[1].trim();
+    const fp = path.join(getMetameDir(), 'events', `${projectKey}.jsonl`);
+    if (!fs.existsSync(fp)) return false;
+    try {
+      const staleHours = (now - fs.statSync(fp).mtimeMs) / (60 * 60 * 1000);
+      return staleHours > 48;
+    } catch {
+      return true;
+    }
+  }
+
+  return true;
+}
+
+function pruneObsoleteMissions(cwd) {
+  const sections = readSections(cwd);
+  const recurringErrors = collectRecurringErrors();
+  const now = Date.now();
+  const pruned = [];
+
+  sections.pending = sections.pending.filter((mission) => {
+    const keep = shouldKeepMission(mission.title, cwd, recurringErrors, now);
+    if (!keep) pruned.push(mission);
+    return keep;
+  });
+
+  if (pruned.length > 0) writeSections(cwd, sections);
+  return { success: true, pruned: pruned.length, pruned_ids: pruned.map(m => m.id) };
+}
+
 // ── Standard queue commands ──────────────────────────────────
 
 function nextMission(cwd) {
@@ -134,6 +223,7 @@ function listMissions(cwd) {
 // ── Log scanner: generates missions from error patterns ──────
 
 function scanLogs(cwd) {
+  const pruneResult = pruneObsoleteMissions(cwd);
   const sections = readSections(cwd);
   const existingTitles = new Set(
     [...sections.pending, ...sections.active, ...sections.completed, ...sections.abandoned].map(t => t.title)
@@ -141,44 +231,18 @@ function scanLogs(cwd) {
 
   const newMissions = [];
   const now = Date.now();
-  const ONE_DAY = 24 * 60 * 60 * 1000;
+  const recurringErrors = collectRecurringErrors();
 
   // 1. Scan daemon log for repeated errors
-  const logPath = path.join(METAME_DIR, 'daemon.log');
-  if (fs.existsSync(logPath)) {
-    try {
-      const content = fs.readFileSync(logPath, 'utf8');
-      const lines = content.split('\n');
-      // Only look at recent lines (last 500)
-      const recent = lines.slice(-500);
-      const errorCounts = {};
-      for (const line of recent) {
-        if (!/\bERR\b|\bWARN\b|\bError\b|\bfailed\b/i.test(line)) continue;
-        // Normalize: strip timestamps and variable data
-        const normalized = line
-          .replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z?/g, '<TS>')
-          .replace(/\d{10,}/g, '<ID>')
-          .replace(/\/tmp\/[^\s]+/g, '<TMP>')
-          .trim();
-        if (normalized.length < 20) continue;
-        const key = normalized.slice(0, 120);
-        errorCounts[key] = (errorCounts[key] || 0) + 1;
-      }
-
-      // Generate missions for errors occurring 3+ times
-      // Dedup key is the pattern alone (not the count, which changes every scan)
-      for (const [pattern, count] of Object.entries(errorCounts)) {
-        if (count < 3) continue;
-        const dedupKey = `Fix recurring error: ${pattern.slice(0, 80)}`;
-        if (existingTitles.has(dedupKey)) continue;
-        // Use stable dedup key as title (count excluded to prevent duplicates)
-        newMissions.push({ title: dedupKey, priority: Math.max(1, 10 - count) });
-      }
-    } catch { /* skip unreadable log */ }
+  for (const [pattern, count] of Object.entries(recurringErrors)) {
+    if (count < ERROR_THRESHOLD) continue;
+    const dedupKey = `Fix recurring error: ${pattern.slice(0, 80)}`;
+    if (existingTitles.has(dedupKey)) continue;
+    newMissions.push({ title: dedupKey, priority: Math.max(1, 10 - count) });
   }
 
   // 2. Scan event logs for stuck/stale projects
-  const eventsDir = path.join(METAME_DIR, 'events');
+  const eventsDir = path.join(getMetameDir(), 'events');
   if (fs.existsSync(eventsDir)) {
     try {
       const evFiles = fs.readdirSync(eventsDir).filter(f => f.endsWith('.jsonl'));
@@ -248,11 +312,12 @@ if (require.main === module) {
     case 'activate': result = args[0] ? activateMission(cwd, args[0]) : { success: false, message: 'usage: activate <id>' }; break;
     case 'complete': result = args[0] ? completeMission(cwd, args[0]) : { success: false, message: 'usage: complete <id>' }; break;
     case 'list':     result = listMissions(cwd); break;
+    case 'prune':    result = pruneObsoleteMissions(cwd); break;
     case 'scan':     result = scanLogs(cwd); break;
-    default:         result = { success: false, message: `unknown: ${command}. Available: next, activate, complete, list, scan` };
+    default:         result = { success: false, message: `unknown: ${command}. Available: next, activate, complete, list, prune, scan` };
   }
 
   process.stdout.write(JSON.stringify(result) + '\n');
 }
 
-module.exports = { nextMission, activateMission, completeMission, listMissions, scanLogs };
+module.exports = { nextMission, activateMission, completeMission, listMissions, pruneObsoleteMissions, scanLogs };

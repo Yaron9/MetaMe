@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { handleReactiveOutput, parseReactiveSignals, replayEventLog, __test } = require('./daemon-reactive-lifecycle');
+const { bootstrapReactiveProject, handleReactiveOutput, parseReactiveSignals, replayEventLog, __test } = require('./daemon-reactive-lifecycle');
 const { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, loadProjectManifest, resolveProjectScripts, generateStateFile, buildRunningMemory, scanRelevantArtifacts, buildWorkingMemory, persistMemoryFiles, extractInlineFacts, extractOutputSummary, loadWorkingMemory } = __test;
 const { resolveReactivePaths } = require('./core/reactive-paths');
 
@@ -190,6 +190,73 @@ describe('handleReactiveOutput — reactive parent', () => {
     assert.ok(dispatches[0].prompt.includes('Warning:'), 'Should contain retry warning');
     assert.equal(dispatches[0].new_session, true);
     assert.equal(dispatches[0]._reactive, true);
+  });
+});
+
+describe('bootstrapReactiveProject', () => {
+  it('activates the first pending mission and dispatches a fresh reactive prompt', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ops-bootstrap-'));
+    const metameDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ops-bootstrap-metame-'));
+    try {
+      fs.mkdirSync(path.join(tmpDir, 'scripts'), { recursive: true });
+      fs.mkdirSync(path.join(tmpDir, 'workspace'), { recursive: true });
+      fs.mkdirSync(path.join(metameDir, 'events'), { recursive: true });
+      fs.mkdirSync(path.join(metameDir, 'memory', 'now'), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, 'perpetual.yaml'), 'completion_signal: MAINT_COMPLETE\nmission_queue: scripts/ops-mission-queue.js\n', 'utf8');
+      fs.writeFileSync(path.join(tmpDir, 'workspace', 'missions.md'), [
+        '# MetaMe Ops Missions',
+        '',
+        '## pending',
+        '- [ops-1] Refresh maintenance diagnosis (priority: 1)',
+        '',
+        '## active',
+        '',
+        '## completed',
+        '',
+        '## abandoned',
+        '',
+      ].join('\n'), 'utf8');
+      fs.copyFileSync(path.join(process.cwd(), 'scripts', 'ops-mission-queue.js'), path.join(tmpDir, 'scripts', 'ops-mission-queue.js'));
+
+      const state = { reactive: {}, budget: { date: '2026-03-27', tokens_used: 0 } };
+      const dispatches = [];
+      const config = {
+        projects: {
+          metame_ops: {
+            name: 'MetaMe Ops',
+            reactive: true,
+            cwd: tmpDir,
+          },
+        },
+      };
+      const result = bootstrapReactiveProject('metame_ops', config, {
+        metameDir,
+        log: () => {},
+        loadState: () => state,
+        saveState: () => {},
+        checkBudget: () => true,
+        handleDispatchItem: (item) => dispatches.push(item),
+      });
+
+      assert.equal(result.started, true);
+      assert.equal(result.mission, 'Refresh maintenance diagnosis');
+      assert.equal(dispatches.length, 1);
+      assert.equal(dispatches[0].target, 'metame_ops');
+      assert.equal(dispatches[0].new_session, true);
+      assert.match(dispatches[0].prompt, /NEXT_DISPATCH/);
+      assert.equal(state.reactive.metame_ops.status, 'running');
+
+      const queueContent = fs.readFileSync(path.join(tmpDir, 'workspace', 'missions.md'), 'utf8');
+      assert.match(queueContent, /## active[\s\S]*ops-1/);
+
+      const eventsPath = resolveReactivePaths('metame_ops', metameDir).events;
+      const events = fs.readFileSync(eventsPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      assert.equal(events[0].type, 'MISSION_START');
+      assert.equal(events[0].mission_title, 'Refresh maintenance diagnosis');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(metameDir, { recursive: true, force: true });
+    }
   });
 });
 

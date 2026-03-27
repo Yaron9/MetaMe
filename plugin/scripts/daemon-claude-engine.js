@@ -2203,6 +2203,10 @@ function createClaudeEngine(deps) {
           cleanOutput = `⚠️ **任务超时，以下是已完成的部分结果：**\n\n${cleanOutput}`;
         }
 
+        if (typeof bot.notifyFinalOutput === 'function') {
+          try { await bot.notifyFinalOutput(cleanOutput); } catch { /* non-critical */ }
+        }
+
         // Match current session to a project for colored card display.
         // Prefer the bound project (known by virtual chatId or chat_agent_map) — avoids ambiguity
         // when multiple projects share the same cwd (e.g. team members with parent project cwd).
@@ -2394,6 +2398,9 @@ function createClaudeEngine(deps) {
           if (retry.output) {
             markSessionStarted(sessionChatId, runtime.name);
             const { markedFiles: retryMarked, cleanOutput: retryClean } = parseFileMarkers(retry.output);
+            if (typeof bot.notifyFinalOutput === 'function') {
+              try { await bot.notifyFinalOutput(retryClean); } catch { /* non-critical */ }
+            }
             await bot.sendMarkdown(chatId, retryClean);
             await sendFileButtons(bot, chatId, mergeFileCollections(retryMarked, retry.files));
             return { ok: true };

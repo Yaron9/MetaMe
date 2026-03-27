@@ -258,6 +258,79 @@ function runProjectVerifier(projectKey, config, deps) {
   }
 }
 
+function sanitizeQueueId(id) {
+  return String(id || '').replace(/[^a-zA-Z0-9_-]/g, '');
+}
+
+function createMissionStartPrompt(title) {
+  return `New mission: "${title}"\n\nStart this mission. Read your CLAUDE.md for instructions, then decide on the first step using NEXT_DISPATCH.`;
+}
+
+function loadMissionQueueState(projectKey, projectCwd, deps) {
+  const manifest = loadProjectManifest(projectCwd);
+  const scripts = resolveProjectScripts(projectCwd, manifest);
+  if (!fs.existsSync(scripts.missionQueue)) {
+    return { manifest, scripts, listResult: null, activeMission: null, nextMission: null };
+  }
+
+  const relQueue = path.relative(projectCwd, scripts.missionQueue);
+  const queueEnv = { ...process.env, MISSION_CWD: projectCwd, TOPICS_CWD: projectCwd };
+  let listResult = null;
+  try {
+    const listOut = execSync(`node "${relQueue}" list`, {
+      cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: queueEnv,
+    }).trim();
+    listResult = JSON.parse(listOut);
+  } catch (e) {
+    deps.log('WARN', `Reactive: mission queue list failed for ${projectKey}: ${e.message}`);
+  }
+
+  const topics = Array.isArray(listResult && listResult.topics) ? listResult.topics : [];
+  return {
+    manifest,
+    scripts,
+    relQueue,
+    queueEnv,
+    listResult,
+    activeMission: topics.find(t => t.status === 'active') || null,
+    nextMission: topics.filter(t => t.status === 'pending').sort((a, b) => (a.priority || 999) - (b.priority || 999))[0] || null,
+  };
+}
+
+function activateQueuedMission(projectKey, projectCwd, deps) {
+  const queueState = loadMissionQueueState(projectKey, projectCwd, deps);
+  const { scripts, relQueue, queueEnv } = queueState;
+  if (!scripts || !fs.existsSync(scripts.missionQueue)) {
+    return { mission: null, prompt: null, missionId: null };
+  }
+
+  if (queueState.activeMission) {
+    return {
+      mission: queueState.activeMission.title,
+      missionId: queueState.activeMission.id || '',
+      prompt: createMissionStartPrompt(queueState.activeMission.title),
+      reusedActive: true,
+    };
+  }
+
+  if (!queueState.nextMission) return { mission: null, prompt: null, missionId: null };
+
+  try {
+    execSync(`node "${relQueue}" activate ${sanitizeQueueId(queueState.nextMission.id)}`, {
+      cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: queueEnv,
+    });
+  } catch (e) {
+    deps.log('WARN', `Reactive: mission activate failed for ${projectKey}: ${e.message}`);
+  }
+
+  return {
+    mission: queueState.nextMission.title,
+    missionId: queueState.nextMission.id || '',
+    prompt: createMissionStartPrompt(queueState.nextMission.title),
+    reusedActive: false,
+  };
+}
+
 /**
  * Run project-level completion hooks (archive + topic pool).
  * Platform only calls scripts if they exist — no business logic here.
@@ -298,8 +371,6 @@ function runCompletionHooks(projectKey, projectCwd, deps) {
   if (result.archived && fs.existsSync(scripts.missionQueue)) {
     const relQueue = path.relative(projectCwd, scripts.missionQueue);
     const queueEnv = { ...process.env, MISSION_CWD: projectCwd, TOPICS_CWD: projectCwd };
-    // Sanitize topic IDs to prevent shell injection (only allow alphanumeric, dash, underscore)
-    const sanitizeId = (id) => String(id || '').replace(/[^a-zA-Z0-9_-]/g, '');
     // 2a. Complete current active mission
     try {
       const listOut = execSync(`node "${relQueue}" list`, {
@@ -309,7 +380,7 @@ function runCompletionHooks(projectKey, projectCwd, deps) {
       if (listResult.success && Array.isArray(listResult.topics)) {
         const activeTopic = listResult.topics.find(t => t.status === 'active');
         if (activeTopic) {
-          execSync(`node "${relQueue}" complete ${sanitizeId(activeTopic.id)}`, {
+          execSync(`node "${relQueue}" complete ${sanitizeQueueId(activeTopic.id)}`, {
             cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: queueEnv,
           });
           deps.log('INFO', `Reactive: completed mission ${activeTopic.id}: ${activeTopic.title}`);
@@ -326,7 +397,7 @@ function runCompletionHooks(projectKey, projectCwd, deps) {
       const nextResult = JSON.parse(nextOut);
       if (nextResult.success && nextResult.topic) {
         try {
-          execSync(`node "${relQueue}" activate ${sanitizeId(nextResult.topic.id)}`, {
+          execSync(`node "${relQueue}" activate ${sanitizeQueueId(nextResult.topic.id)}`, {
             cwd: projectCwd, encoding: 'utf8', timeout: 10000, env: queueEnv,
           });
         } catch (e) {
@@ -334,7 +405,7 @@ function runCompletionHooks(projectKey, projectCwd, deps) {
         }
         result.nextMission = nextResult.topic.title;
         result.nextMissionId = nextResult.topic.id || '';
-        result.nextMissionPrompt = `New mission: "${nextResult.topic.title}"\n\nStart this mission. Read your CLAUDE.md for instructions, then decide on the first step using NEXT_DISPATCH.`;
+        result.nextMissionPrompt = createMissionStartPrompt(nextResult.topic.title);
         deps.log('INFO', `Reactive: next mission for ${projectKey}: ${nextResult.topic.title}`);
       }
     } catch (e) {
@@ -345,6 +416,66 @@ function runCompletionHooks(projectKey, projectCwd, deps) {
   }
 
   return result;
+}
+
+function bootstrapReactiveProject(projectKey, config, deps) {
+  if (!isReactiveParent(projectKey, config)) {
+    return { started: false, reason: 'not_reactive' };
+  }
+
+  const st = deps.loadState();
+  const rs = getReactiveState(st, projectKey);
+  if (!deps.checkBudget(config, st)) {
+    setReactiveStatus(st, projectKey, 'paused', 'budget_exceeded');
+    deps.saveState(st);
+    appendEvent(projectKey, { type: 'BUDGET_LIMIT', action: 'bootstrap_skip' }, deps.metameDir);
+    return { started: false, reason: 'budget_exceeded' };
+  }
+
+  const staleMinutes = config.projects?.[projectKey]?.stale_timeout_minutes || 120;
+  const lastUpdateMs = new Date(rs.updated_at || 0).getTime();
+  const recentlyUpdated = Number.isFinite(lastUpdateMs) && (Date.now() - lastUpdateMs) < staleMinutes * 60 * 1000;
+  if (rs.status === 'running' && isReactiveExecutionActive(projectKey, config, deps)) {
+    return { started: false, reason: 'already_running' };
+  }
+  if (rs.status === 'running' && recentlyUpdated) {
+    return { started: false, reason: 'recently_running' };
+  }
+
+  const projectCwd = resolveProjectCwd(projectKey, config);
+  if (!projectCwd) return { started: false, reason: 'cwd_missing' };
+
+  const activation = activateQueuedMission(projectKey, projectCwd, deps);
+  if (!activation.mission || !activation.prompt) {
+    setReactiveStatus(st, projectKey, 'idle', '');
+    rs.depth = 0;
+    deps.saveState(st);
+    return { started: false, reason: 'no_pending_mission' };
+  }
+
+  setReactiveStatus(st, projectKey, 'running', '');
+  rs.depth = 0;
+  rs.last_signal = 'MISSION_START';
+  deps.saveState(st);
+  appendEvent(projectKey, {
+    type: 'MISSION_START',
+    mission_id: activation.missionId || '',
+    mission_title: activation.mission,
+    bootstrap: true,
+    reused_active: !!activation.reusedActive,
+  }, deps.metameDir);
+  try { generateStateFile(projectKey, config, deps); } catch { /* non-critical */ }
+
+  deps.handleDispatchItem({
+    target: projectKey,
+    prompt: activation.prompt,
+    from: '_system',
+    _reactive: true,
+    _reactive_project: projectKey,
+    new_session: true,
+  }, config);
+
+  return { started: true, mission: activation.mission, missionId: activation.missionId || '' };
 }
 
 // ── Event Log (Event Sourcing) ──────────────────────────────────
@@ -1195,9 +1326,10 @@ function handleReactiveOutput(targetProject, output, config, deps) {
 }
 
 module.exports = {
+  bootstrapReactiveProject,
   handleReactiveOutput,
   parseReactiveSignals,
   reconcilePerpetualProjects,
   replayEventLog,
-  __test: { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, generateStateFile, loadProjectManifest, resolveProjectScripts, parseEventLog, buildRunningMemory, scanRelevantArtifacts, buildWorkingMemory, persistMemoryFiles, extractInlineFacts, extractOutputSummary, isReactiveExecutionActive, loadWorkingMemory },
+  __test: { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, generateStateFile, loadProjectManifest, resolveProjectScripts, parseEventLog, buildRunningMemory, scanRelevantArtifacts, buildWorkingMemory, persistMemoryFiles, extractInlineFacts, extractOutputSummary, isReactiveExecutionActive, loadWorkingMemory, activateQueuedMission, createMissionStartPrompt, sanitizeQueueId, loadMissionQueueState },
 };
