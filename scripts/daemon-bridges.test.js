@@ -8,6 +8,8 @@ const path = require('path');
 
 const telegramAdapterPath = require.resolve('./telegram-adapter.js');
 const originalTelegramAdapter = require.cache[telegramAdapterPath];
+const feishuAdapterPath = require.resolve('./feishu-adapter.js');
+const originalFeishuAdapter = require.cache[feishuAdapterPath];
 
 function flush() {
   return new Promise(resolve => setTimeout(resolve, 0));
@@ -23,6 +25,8 @@ describe('daemon-bridges telegram reply routing', () => {
   afterEach(() => {
     if (originalTelegramAdapter) require.cache[telegramAdapterPath] = originalTelegramAdapter;
     else delete require.cache[telegramAdapterPath];
+    if (originalFeishuAdapter) require.cache[feishuAdapterPath] = originalFeishuAdapter;
+    else delete require.cache[feishuAdapterPath];
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
 
@@ -154,6 +158,138 @@ describe('daemon-bridges telegram reply routing', () => {
     assert.equal(handled[0].chatId, '_agent_target');
     assert.equal(handled[0].text, '继续这个任务');
     assert.equal(state.team_sticky['1001'], 'target');
+    assert.equal(sent.length, 0);
+  });
+
+  it('inherits team member routing when a Feishu topic is opened from that member card', async () => {
+    const handled = [];
+    const sent = [];
+    const state = {
+      sessions: {},
+      team_sticky: {},
+      msg_sessions: {
+        om_root_agent_card: {
+          id: 'sid-jia',
+          cwd: tempHome,
+          engine: 'codex',
+          logicalChatId: '_agent_jia',
+          agentKey: 'jia',
+        },
+      },
+    };
+
+    require.cache[feishuAdapterPath] = {
+      id: feishuAdapterPath,
+      filename: feishuAdapterPath,
+      loaded: true,
+      exports: {
+        createBot() {
+          return {
+            async validateCredentials() { return { ok: true }; },
+            async startReceiving(handler) {
+              setImmediate(() => {
+                handler(
+                  'oc_team_1',
+                  '你好',
+                  {
+                    message: {
+                      root_id: 'om_root_agent_card',
+                      parent_id: 'om_root_agent_card',
+                    },
+                  },
+                  null,
+                  'ou_admin'
+                ).catch(() => {});
+              });
+              return {
+                stop() {},
+                reconnect() {},
+                isAlive() { return true; },
+              };
+            },
+            async sendMessage(chatId, text) {
+              sent.push({ chatId, text });
+              return { message_id: 'msg-send' };
+            },
+            async sendMarkdown(chatId, text) {
+              sent.push({ chatId, text, markdown: true });
+              return { message_id: 'msg-md' };
+            },
+            async downloadFile() {},
+            async sendTyping() {},
+            async editMessage() { return true; },
+            async deleteMessage() { return true; },
+          };
+        },
+      },
+    };
+
+    delete require.cache[require.resolve('./daemon-bridges.js')];
+    const { createBridgeStarter } = require('./daemon-bridges.js');
+
+    const bridge = createBridgeStarter({
+      fs,
+      path,
+      HOME: tempHome,
+      log: () => {},
+      sleep: async () => {},
+      loadConfig: () => ({
+        feishu: {
+          enabled: true,
+          app_id: 'cli_a_test',
+          app_secret: 'secret_test',
+          allowed_chat_ids: ['oc_team_1'],
+          chat_agent_map: { oc_team_1: 'main' },
+        },
+        projects: {
+          main: {
+            cwd: tempHome,
+            name: 'Main',
+            engine: 'codex',
+            team: [
+              { key: 'jia', name: 'Jarvis · 甲', icon: '🅰️', nicknames: ['甲'] },
+            ],
+          },
+        },
+      }),
+      loadState: () => state,
+      saveState: (next) => Object.assign(state, next),
+      getSession: () => ({ cwd: tempHome }),
+      restoreSessionFromReply: () => null,
+      handleCommand: async (_bot, chatId, text) => {
+        handled.push({ chatId, text });
+      },
+      pipeline: {
+        processMessage: async (chatId, text) => {
+          handled.push({ chatId, text });
+        },
+        isActive: () => false,
+        interruptActive: () => false,
+        clearQueue: () => {},
+      },
+      pendingActivations: new Map(),
+      activeProcesses: new Map(),
+      messageQueue: new Map(),
+    });
+
+    const running = await bridge.startFeishuBridge({
+      feishu: {
+        enabled: true,
+        app_id: 'cli_a_test',
+        app_secret: 'secret_test',
+        allowed_chat_ids: ['oc_team_1'],
+      },
+    }, async () => {});
+
+    await flush();
+    await flush();
+    running.stop();
+    await flush();
+
+    assert.equal(handled.length, 1);
+    assert.equal(handled[0].chatId, '_agent_jia::thread:oc_team_1:om_root_agent_card');
+    assert.equal(handled[0].text, '你好');
+    assert.equal(state.team_sticky['thread:oc_team_1:om_root_agent_card'], 'jia');
     assert.equal(sent.length, 0);
   });
 });

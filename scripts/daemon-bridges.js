@@ -817,14 +817,14 @@ function createBridgeStarter(deps) {
           let _replyMappingFound = false; // true = mapping exists (agentKey may be null = main)
           // Load state once for the entire routing block
           const _st = loadState();
+          const _parentMapping = parentId && _st.msg_sessions ? _st.msg_sessions[parentId] : null;
           // Quoted reply = explicit parentId but NOT a topic thread (topics always carry parentId=root_id)
           const _isQuotedReply = !!(parentId && !threadRootId);
-          if (_isQuotedReply) {
-            log('INFO', `Feishu reply metadata detected chat=${chatId} parentId=${parentId}`);
+          if (parentId) {
+            log('INFO', `Feishu reply metadata detected chat=${chatId} parentId=${parentId}${threadRootId ? ' topic=true' : ''}`);
           }
-          // In topic mode, session continuity is handled by pipelineChatId — skip msg_sessions lookup
           if (_isQuotedReply) {
-            const mapped = _st.msg_sessions && _st.msg_sessions[parentId];
+            const mapped = _parentMapping;
             if (mapped) {
               _replyMappingFound = true;
               if (typeof restoreSessionFromReply === 'function') {
@@ -843,6 +843,10 @@ function createBridgeStarter(deps) {
             } else {
               log('INFO', `Feishu reply parentId=${parentId} had no msg_sessions mapping`);
             }
+          } else if (threadRootId && _parentMapping) {
+            _replyMappingFound = true;
+            _replyAgentKey = _parentMapping.agentKey || null;
+            log('INFO', `Feishu topic inherited root mapping agentKey=${_replyAgentKey || 'main'} parentId=${parentId}`);
           }
 
           // Helper: set/clear sticky on shared state object and persist
@@ -857,13 +861,22 @@ function createBridgeStarter(deps) {
             if (_st.team_sticky) delete _st.team_sticky[_chatKey];
             saveState(_st);
           };
-          const _stickyKey = (_st.team_sticky || {})[_chatKey] || null;
+          let _stickyKey = (_st.team_sticky || {})[_chatKey] || null;
 
           // Team group routing: if bound project has a team array, check message for member nickname
           // Non-/stop slash commands bypass team routing → handled by main project
           const { key: _boundKey, project: _boundProj } = _getBoundProject(chatId, liveCfg);
           const _isTeamSlashCmd = trimmedText.startsWith('/') && !/^\/stop(\s|$)/i.test(trimmedText);
           if (_boundProj && Array.isArray(_boundProj.team) && _boundProj.team.length > 0 && !_isTeamSlashCmd) {
+            if (threadRootId && !_stickyKey && _replyAgentKey) {
+              const _topicRootMember = _boundProj.team.find(m => m.key === _replyAgentKey);
+              if (_topicRootMember) {
+                _setSticky(_topicRootMember.key);
+                _stickyKey = _topicRootMember.key;
+                log('INFO', `Topic root mapping → sticky set: ${_chatKey.slice(-8)} → ${_topicRootMember.key}`);
+              }
+            }
+
             // ── /stop precise routing for team groups ──
             const _stopMatch = trimmedText && trimmedText.match(/^\/stop(?:\s+(.+))?$/i);
             if (_stopMatch) {
