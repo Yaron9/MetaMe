@@ -540,9 +540,26 @@ if (syntaxErrors.length > 0) {
     const changed = syncDirFiles(group.srcDir, destDir, { fileList: group.fileList });
     return updated || changed;
   }, false);
-  if (scriptsUpdated) {
+if (scriptsUpdated) {
     console.log(`${icon("pkg")} Scripts synced to ~/.metame/.`);
   }
+}
+
+try {
+  const runtimeEnvFile = path.join(METAME_DIR, 'runtime-env.json');
+  const runtimeNodeModules = path.join(__dirname, 'node_modules');
+  const runtimeEnvPayload = {
+    metameRoot: __dirname,
+    nodeModules: runtimeNodeModules,
+    generatedAt: new Date().toISOString(),
+  };
+  const nextContent = JSON.stringify(runtimeEnvPayload, null, 2) + '\n';
+  const prevContent = fs.existsSync(runtimeEnvFile) ? fs.readFileSync(runtimeEnvFile, 'utf8') : '';
+  if (prevContent !== nextContent) {
+    fs.writeFileSync(runtimeEnvFile, nextContent, 'utf8');
+  }
+} catch (e) {
+  console.log(`${icon("warn")} Runtime env sync skipped: ${e.message}`);
 }
 
 // Docs: lazy-load references for CLAUDE.md pointer instructions

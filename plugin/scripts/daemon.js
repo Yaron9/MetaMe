@@ -36,9 +36,11 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execSync, execFileSync, execFile, spawn } = require('child_process');
+const { bootstrapRuntimeModulePaths } = require('./runtime-bootstrap');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
+bootstrapRuntimeModulePaths(METAME_DIR);
 const CONFIG_FILE = path.join(METAME_DIR, 'daemon.yaml');
 const STATE_FILE = path.join(METAME_DIR, 'daemon_state.json');
 const PID_FILE = path.join(METAME_DIR, 'daemon.pid');

@@ -1,6 +1,9 @@
 'use strict';
 
 const path = require('path');
+const { bootstrapRuntimeModulePaths } = require('./runtime-bootstrap');
+
+bootstrapRuntimeModulePaths(__dirname);
 
 let yaml;
 try {
