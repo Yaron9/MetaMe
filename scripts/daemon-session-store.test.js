@@ -768,6 +768,10 @@ describe('daemon-session-store codex metadata', () => {
       lastUser: 'You are wrong, check the resume logic again.',
       lastAssistant: '最终回复：resume 逻辑已重新检查。',
     });
+    assert.deepEqual(store.getSessionRecentDialogue('codex-user-like', 4), [
+      { role: 'user', text: 'You are wrong, check the resume logic again.' },
+      { role: 'assistant', text: '最终回复：resume 逻辑已重新检查。' },
+    ]);
   });
 
   it('keeps healthy Claude sessions visible when one project directory scan fails', () => {
@@ -823,6 +827,99 @@ describe('daemon-session-store codex metadata', () => {
     assert.equal(sessions.length, 1);
     assert.equal(sessions[0].sessionId, 'good-session');
     assert.equal(logs.some(entry => entry.message.includes('scanClaudeSessions project') && entry.message.includes('bad-project')), true);
+  });
+
+  it('uses latest agent_message as assistant fallback in recent codex dialogue', () => {
+    const state = { sessions: {} };
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
+    const codexDir = path.join(tempHome, '.codex');
+    fs.mkdirSync(codexDir, { recursive: true });
+    const rolloutPath = path.join(codexDir, 'fallback-rollout.jsonl');
+    fs.writeFileSync(rolloutPath, [
+      JSON.stringify({
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: '先别实现，先说下风险。' }],
+        },
+      }),
+      JSON.stringify({
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: '主要风险是恢复后还是看不出是哪段历史。' },
+      }),
+    ].join('\n'));
+
+    const db = new DatabaseSync(path.join(codexDir, 'state_5.sqlite'));
+    db.exec(`
+      CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        rollout_path TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        model_provider TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        title TEXT NOT NULL,
+        sandbox_policy TEXT NOT NULL,
+        approval_mode TEXT NOT NULL,
+        tokens_used INTEGER NOT NULL DEFAULT 0,
+        has_user_event INTEGER NOT NULL DEFAULT 0,
+        archived INTEGER NOT NULL DEFAULT 0,
+        archived_at INTEGER,
+        git_sha TEXT,
+        git_branch TEXT,
+        git_origin_url TEXT,
+        cli_version TEXT NOT NULL DEFAULT '',
+        first_user_message TEXT NOT NULL DEFAULT '',
+        agent_nickname TEXT,
+        agent_role TEXT,
+        memory_mode TEXT NOT NULL DEFAULT 'enabled'
+      );
+    `);
+    db.prepare(`
+      INSERT INTO threads (
+        id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+        sandbox_policy, approval_mode, tokens_used, has_user_event, archived, cli_version,
+        first_user_message, memory_mode
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'codex-fallback-dialogue',
+      rolloutPath,
+      1773214000,
+      1773216000,
+      'exec',
+      'openai',
+      '/tmp/shared-proj',
+      '先别实现，先说下风险。',
+      '{"type":"danger-full-access"}',
+      'never',
+      123,
+      0,
+      0,
+      '1.0.0',
+      '先别实现，先说下风险。',
+      'enabled'
+    );
+    db.close();
+
+    const store = createSessionStore({
+      fs,
+      path,
+      HOME: tempHome,
+      loadState: () => state,
+      saveState: (next) => {
+        state.sessions = next.sessions;
+      },
+      log: () => {},
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+
+    assert.deepEqual(store.getSessionRecentDialogue('codex-fallback-dialogue', 4), [
+      { role: 'user', text: '先别实现，先说下风险。' },
+      { role: 'assistant', text: '主要风险是恢复后还是看不出是哪段历史。' },
+    ]);
   });
 
   it('keeps Claude sessions visible when Codex DB scan fails', () => {

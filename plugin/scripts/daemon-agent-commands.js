@@ -39,6 +39,7 @@ function createAgentCommandHandler(deps) {
     loadSessionTags,
     sessionRichLabel,
     getSessionRecentContext,
+    getSessionRecentDialogue,
     pendingBinds,
     pendingAgentFlows,
     pendingTeamFlows,
@@ -421,11 +422,19 @@ function createAgentCommandHandler(deps) {
 
       // 读取最近对话片段，帮助确认是否切换到正确的 session
       const recentCtx = getSessionRecentContext ? getSessionRecentContext(targetSessionId) : null;
+      const recentDialogue = getSessionRecentDialogue ? getSessionRecentDialogue(targetSessionId, 4) : null;
       let msg = `✅ 已切换: **${label}**\n📁 ${path.basename(cwd)}`;
       if (selectedLogicalCurrent) {
         msg += '\n\n已恢复当前智能体会话。';
       }
-      if (recentCtx) {
+      if (Array.isArray(recentDialogue) && recentDialogue.length > 0) {
+        msg += '\n\n最近对话:';
+        for (const item of recentDialogue) {
+          const marker = item.role === 'assistant' ? '🤖' : '👤';
+          const snippet = String(item.text || '').replace(/\n/g, ' ').slice(0, 120);
+          if (snippet) msg += `\n${marker} ${snippet}`;
+        }
+      } else if (recentCtx) {
         if (recentCtx.lastUser) {
           const snippet = recentCtx.lastUser.replace(/\n/g, ' ').slice(0, 80);
           msg += `\n\n💬 上次你说: _${snippet}${recentCtx.lastUser.length > 80 ? '…' : ''}_`;

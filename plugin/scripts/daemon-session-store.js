@@ -352,6 +352,29 @@ function createSessionStore(deps) {
     return '';
   }
 
+  function extractRecentClaudeDialogueFromLines(lines, maxMessages = 4) {
+    const collected = [];
+    for (const line of lines) {
+      if (!line) continue;
+      try {
+        const d = JSON.parse(line);
+        if (d.type === 'user' && d.message && d.userType !== 'internal') {
+          const raw = _extractMessageText(d);
+          if (raw.length > 2) {
+            collected.push({ role: 'user', text: raw.slice(0, 160) });
+          }
+        } else if (d.type === 'assistant' && d.message) {
+          const raw = _extractMessageText(d);
+          if (raw.length > 2) {
+            collected.push({ role: 'assistant', text: raw.slice(0, 160) });
+          }
+        }
+      } catch { /* skip */ }
+      if (collected.length >= maxMessages) break;
+    }
+    return collected.reverse();
+  }
+
   function scanClaudeSessions() {
     try {
       if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return [];
@@ -635,6 +658,59 @@ function createSessionStore(deps) {
         : null;
     } catch {
       return null;
+    }
+  }
+
+  function parseCodexSessionRecentDialogue(sessionFile, maxMessages = 4) {
+    try {
+      if (!sessionFile || !fs.existsSync(sessionFile)) return [];
+      const lines = fs.readFileSync(sessionFile, 'utf8').split('\n').filter(Boolean);
+      const items = [];
+      let pendingAssistant = '';
+
+      function pushDialogueItem(role, text) {
+        const clean = String(text || '').trim();
+        if (!clean) return;
+        const clipped = clean.slice(0, 160);
+        const prev = items[items.length - 1];
+        if (prev && prev.role === role) {
+          prev.text = clipped;
+          return;
+        }
+        items.push({ role, text: clipped });
+      }
+
+      for (const line of lines) {
+        let entry;
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (entry.type === 'response_item' && entry.payload && entry.payload.type === 'message') {
+          const role = String(entry.payload.role || '').toLowerCase();
+          if (role !== 'user' && role !== 'assistant') continue;
+          const text = stripCodexInjectedHints(extractCodexMessageText(entry.payload.content || entry.payload));
+          if (!text) continue;
+          if (role === 'user') {
+            if (pendingAssistant) {
+              pushDialogueItem('assistant', pendingAssistant);
+              pendingAssistant = '';
+            }
+            pushDialogueItem('user', text);
+          } else {
+            pendingAssistant = '';
+            pushDialogueItem('assistant', text);
+          }
+        } else if (entry.type === 'event_msg' && entry.payload && entry.payload.type === 'agent_message') {
+          const text = stripCodexInjectedHints(extractCodexMessageText(entry.payload.message));
+          if (text) pendingAssistant = text;
+        }
+      }
+      if (pendingAssistant) pushDialogueItem('assistant', pendingAssistant);
+      return items.slice(-maxMessages);
+    } catch {
+      return [];
     }
   }
 
@@ -1173,6 +1249,32 @@ function createSessionStore(deps) {
     } catch { return null; }
   }
 
+  function getSessionRecentDialogue(sessionId, maxMessages = 4) {
+    try {
+      const limit = Math.max(1, Math.min(Number(maxMessages) || 4, 8));
+      const sessionFile = findSessionFile(sessionId);
+      if (sessionFile) {
+        const stat = fs.statSync(sessionFile);
+        const tailSize = Math.min(262144, stat.size);
+        const buf = Buffer.alloc(tailSize);
+        const fd = fs.openSync(sessionFile, 'r');
+        try {
+          fs.readSync(fd, buf, 0, tailSize, stat.size - tailSize);
+        } finally {
+          fs.closeSync(fd);
+        }
+        const lines = buf.toString('utf8').split('\n').reverse();
+        const dialogue = extractRecentClaudeDialogueFromLines(lines, limit);
+        return dialogue.length ? dialogue : null;
+      }
+      const codexFile = findCodexSessionFile(sessionId);
+      const dialogue = parseCodexSessionRecentDialogue(codexFile, limit);
+      return dialogue.length ? dialogue : null;
+    } catch {
+      return null;
+    }
+  }
+
   function markSessionStarted(chatId, engine) {
     const state = loadState();
     const s = state.sessions[chatId];
@@ -1368,6 +1470,7 @@ function createSessionStore(deps) {
     writeSessionName,
     markSessionStarted,
     getSessionRecentContext,
+    getSessionRecentDialogue,
     isEngineSessionValid,
     getCodexSessionSandboxProfile,
     getCodexSessionPermissionMode,
@@ -1378,6 +1481,7 @@ function createSessionStore(deps) {
       stripCodexInjectedHints,
       looksLikeInternalCodexPrompt,
       parseCodexSessionPreview,
+      parseCodexSessionRecentDialogue,
       buildPendingStateSessions,
     },
   };

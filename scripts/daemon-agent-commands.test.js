@@ -60,6 +60,7 @@ function createHarness(options = {}) {
     loadSessionTags: () => ({}),
     sessionRichLabel: (s) => s.sessionId,
     getSessionRecentContext: () => null,
+    getSessionRecentDialogue: (sid) => options.dialogueMap ? (options.dialogueMap[sid] || null) : null,
     pendingBinds: new Map(),
     pendingAgentFlows: options.pendingAgentFlows || new Map(),
     pendingTeamFlows: options.pendingTeamFlows || new Map(),
@@ -290,6 +291,55 @@ describe('daemon-agent-commands /resume engine resolution', () => {
     assert.equal(handled, true);
     assert.equal(h.state.sessions._bound_metame.engines.codex.id, 'sid-old-history');
     assert.doesNotMatch(h.sent[0], /优先恢复当前智能体会话/);
+  });
+
+  it('shows recent dialogue after switching to an explicit history session', async () => {
+    const h = createHarness({
+      chatId: 'bound-chat',
+      currentEngine: 'claude',
+      currentCwd: '/repo/main',
+      config: {
+        projects: {
+          metame: { cwd: '/repo/main', engine: 'codex' },
+        },
+        feishu: {
+          chat_agent_map: {
+            'bound-chat': 'metame',
+          },
+        },
+      },
+      virtualSessions: {
+        _bound_metame: {
+          cwd: '/repo/main',
+          engines: {
+            codex: { id: 'sid-current-logical', started: true },
+          },
+        },
+      },
+      sessions: [
+        { sessionId: 'sid-old-history', projectPath: '/repo/main', customTitle: 'old history', engine: 'codex' },
+      ],
+      dialogueMap: {
+        'sid-old-history': [
+          { role: 'user', text: '你先别继续实现，先评估下这个方案。' },
+          { role: 'assistant', text: '当前方案最大问题是状态和展示耦合得太紧。' },
+          { role: 'user', text: '那就只做 resume 成功后的最近对话。' },
+          { role: 'assistant', text: '这个范围最合适，成本低而且收益高。' },
+        ],
+      },
+    });
+
+    const handled = await h.handleAgentCommand({
+      bot: h.bot,
+      chatId: h.chatId,
+      text: '/resume sid-old-history',
+      config: { projects: {} },
+    });
+
+    assert.equal(handled, true);
+    assert.match(h.sent[0], /最近对话:/);
+    assert.match(h.sent[0], /状态和展示耦合得太紧/);
+    assert.match(h.sent[0], /这个范围最合适/);
   });
 
   it('still allows resuming the synthetic current logical session entry', async () => {

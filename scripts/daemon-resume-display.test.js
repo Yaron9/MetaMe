@@ -59,6 +59,10 @@ function createHarness(options = {}) {
       const map = options.contextMap || {};
       return map[sid] || null;
     },
+    getSessionRecentDialogue: (sid) => {
+      const map = options.dialogueMap || {};
+      return map[sid] || null;
+    },
   });
 
   const bot = {
@@ -107,6 +111,15 @@ const CONTEXT_MAP = {
     lastUser: 'Add chart component to dashboard',
     lastAssistant: 'Added the Chart component with responsive layout.',
   },
+};
+
+const DIALOGUE_MAP = {
+  'aaaa1111-0000-0000-0000-000000000001': [
+    { role: 'user', text: '先检查一下登录校验是不是漏了邮箱格式。' },
+    { role: 'assistant', text: '我看到前端和服务端各有一处校验不一致。' },
+    { role: 'user', text: '那你直接把两边统一掉。' },
+    { role: 'assistant', text: '已经统一，错误提示也改成同一套文案。' },
+  ],
 };
 
 describe('/resume display tests', () => {
@@ -158,6 +171,17 @@ describe('/resume display tests', () => {
     assert.ok(msg.includes('🤖'), 'Confirm msg should include assistant marker');
     assert.ok(msg.includes('login validation'), 'Should include last user question');
     assert.ok(msg.includes('validation logic'), 'Should include last AI reply');
+  });
+
+  it('/resume <id> prefers recent dialogue transcript when available', async () => {
+    const h = createHarness({ sessions: SESSIONS, contextMap: CONTEXT_MAP, dialogueMap: DIALOGUE_MAP });
+    const sid = SESSIONS[0].sessionId;
+    await h.handleSessionCommand({ bot: h.bot, chatId: h.chatId, text: `/resume ${sid}` });
+    assert.equal(h.sent.length, 1);
+    const msg = h.sent[0];
+    assert.ok(msg.includes('最近对话:'), 'Should include recent dialogue heading');
+    assert.ok(msg.includes('先检查一下登录校验'), 'Should include earlier user turn');
+    assert.ok(msg.includes('已经统一，错误提示也改成同一套文案'), 'Should include latest assistant turn');
   });
 
   it('/resume <id> with partial ID match works', async () => {

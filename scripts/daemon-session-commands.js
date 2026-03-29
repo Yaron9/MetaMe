@@ -30,6 +30,7 @@ function createSessionCommandHandler(deps) {
     sessionRichLabel,
     buildSessionCardElements,
     getSessionRecentContext,
+    getSessionRecentDialogue,
     getDefaultEngine = () => 'claude',
   } = deps;
 
@@ -430,11 +431,24 @@ function createSessionCommandHandler(deps) {
       const recentCtx = typeof getSessionRecentContext === 'function'
         ? getSessionRecentContext(target.sessionId)
         : null;
+      const recentDialogue = typeof getSessionRecentDialogue === 'function'
+        ? getSessionRecentDialogue(target.sessionId, 4)
+        : null;
       const title = target.customTitle || target.summary || target.sessionId.slice(0, 8);
       const lines = [`▶️ Resumed: ${title}`];
       if (attached.cwd) lines.push(`📁 ${path.basename(attached.cwd)}`);
-      if (recentCtx && recentCtx.lastUser) lines.push(`👤 ${String(recentCtx.lastUser).replace(/\n/g, ' ').slice(0, 80)}`);
-      if (recentCtx && recentCtx.lastAssistant) lines.push(`🤖 ${String(recentCtx.lastAssistant).replace(/\n/g, ' ').slice(0, 80)}`);
+      if (Array.isArray(recentDialogue) && recentDialogue.length > 0) {
+        lines.push('');
+        lines.push('最近对话:');
+        recentDialogue.forEach((item) => {
+          const marker = item.role === 'assistant' ? '🤖' : '👤';
+          const text = String(item.text || '').replace(/\n/g, ' ').slice(0, 120);
+          if (text) lines.push(`${marker} ${text}`);
+        });
+      } else {
+        if (recentCtx && recentCtx.lastUser) lines.push(`👤 ${String(recentCtx.lastUser).replace(/\n/g, ' ').slice(0, 80)}`);
+        if (recentCtx && recentCtx.lastAssistant) lines.push(`🤖 ${String(recentCtx.lastAssistant).replace(/\n/g, ' ').slice(0, 80)}`);
+      }
       await bot.sendMessage(chatId, lines.join('\n'));
       return true;
     }
