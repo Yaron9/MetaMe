@@ -161,6 +161,126 @@ describe('daemon-bridges telegram reply routing', () => {
     assert.equal(sent.length, 0);
   });
 
+  it('stops the replied team member using the reply logical chat id', async () => {
+    const updates = [[{
+      update_id: 1,
+      message: {
+        message_id: 201,
+        chat: { id: 1001 },
+        from: { id: 42 },
+        text: '/stop',
+        reply_to_message: { message_id: 321 },
+      },
+    }], []];
+    const sent = [];
+    const interrupts = [];
+    const clears = [];
+    const state = {
+      sessions: {},
+      team_sticky: { '1001': 'stick' },
+      msg_sessions: {
+        '321': {
+          id: 'sid-reply',
+          cwd: tempHome,
+          engine: 'claude',
+          logicalChatId: '_agent_target::thread:1001:321',
+          agentKey: 'target',
+        },
+      },
+    };
+
+    require.cache[telegramAdapterPath] = {
+      id: telegramAdapterPath,
+      filename: telegramAdapterPath,
+      loaded: true,
+      exports: {
+        createBot() {
+          let pollCount = 0;
+          return {
+            async getMe() { return { username: 'jarvis_test_bot' }; },
+            async getUpdates() {
+              pollCount += 1;
+              if (pollCount === 1) return updates.shift() || [];
+              await new Promise(resolve => setTimeout(resolve, 5));
+              return updates.shift() || [];
+            },
+            async sendMessage(chatId, text) {
+              sent.push({ chatId, text });
+              return { message_id: 999 };
+            },
+            async sendMarkdown(chatId, text) {
+              sent.push({ chatId, text, markdown: true });
+              return { message_id: 999 };
+            },
+            async answerCallback() {},
+            async downloadFile() {},
+            async sendTyping() {},
+          };
+        },
+      },
+    };
+
+    delete require.cache[require.resolve('./daemon-bridges.js')];
+    const { createBridgeStarter } = require('./daemon-bridges.js');
+
+    const bridge = createBridgeStarter({
+      fs,
+      path,
+      HOME: tempHome,
+      log: () => {},
+      sleep: async () => {},
+      loadConfig: () => ({
+        telegram: {
+          enabled: true,
+          bot_token: 'fake-token',
+          allowed_chat_ids: [1001],
+          chat_agent_map: { '1001': 'main' },
+        },
+        projects: {
+          main: {
+            cwd: tempHome,
+            name: 'Main',
+            engine: 'claude',
+            team: [
+              { key: 'stick', name: 'Stick', icon: 'S', nicknames: ['stick'] },
+              { key: 'target', name: 'Target', icon: 'T', nicknames: ['target'] },
+            ],
+          },
+        },
+      }),
+      loadState: () => state,
+      saveState: (next) => Object.assign(state, next),
+      getSession: () => ({ cwd: tempHome }),
+      restoreSessionFromReply: () => null,
+      handleCommand: async () => {},
+      pipeline: {
+        processMessage: async () => {},
+        isActive: () => false,
+        interruptActive: (chatId) => {
+          interrupts.push(chatId);
+          return true;
+        },
+        clearQueue: (chatId) => clears.push(chatId),
+      },
+      pendingActivations: new Map(),
+      activeProcesses: new Map(),
+      messageQueue: new Map(),
+    });
+
+    const running = await bridge.startTelegramBridge({
+      telegram: { enabled: true, bot_token: 'fake-token', allowed_chat_ids: [1001] },
+    }, async () => {});
+
+    await flush();
+    await flush();
+    running.stop();
+    await flush();
+
+    assert.deepEqual(clears, ['_agent_target::thread:1001:321']);
+    assert.deepEqual(interrupts, ['_agent_target::thread:1001:321']);
+    assert.match(sent[0].text, /Stopping T Target/);
+  });
+
   it('inherits team member routing when a Feishu topic is opened from that member card', async () => {
     const handled = [];
     const sent = [];
@@ -291,5 +411,135 @@ describe('daemon-bridges telegram reply routing', () => {
     assert.equal(handled[0].text, '你好');
     assert.equal(state.team_sticky['thread:oc_team_1:om_root_agent_card'], 'jia');
     assert.equal(sent.length, 0);
+  });
+
+  it('stops the replied Feishu team member using the reply logical chat id', async () => {
+    const sent = [];
+    const interrupts = [];
+    const clears = [];
+    const state = {
+      sessions: {},
+      team_sticky: { oc_team_1: 'stick' },
+      msg_sessions: {
+        om_reply_target: {
+          id: 'sid-jia',
+          cwd: tempHome,
+          engine: 'codex',
+          logicalChatId: '_agent_jia::thread:oc_team_1:om_reply_target',
+          agentKey: 'jia',
+        },
+      },
+    };
+
+    require.cache[feishuAdapterPath] = {
+      id: feishuAdapterPath,
+      filename: feishuAdapterPath,
+      loaded: true,
+      exports: {
+        createBot() {
+          return {
+            async validateCredentials() { return { ok: true }; },
+            async startReceiving(handler) {
+              setImmediate(() => {
+                handler(
+                  'oc_team_1',
+                  '/stop',
+                  {
+                    message: {
+                      parent_id: 'om_reply_target',
+                    },
+                  },
+                  null,
+                  null
+                ).catch(() => {});
+              });
+              return {
+                stop() {},
+                reconnect() {},
+                isAlive() { return true; },
+              };
+            },
+            async sendMessage(chatId, text) {
+              sent.push({ chatId, text });
+              return { message_id: 'msg-send' };
+            },
+            async sendMarkdown(chatId, text) {
+              sent.push({ chatId, text, markdown: true });
+              return { message_id: 'msg-md' };
+            },
+            async downloadFile() {},
+            async sendTyping() {},
+            async editMessage() { return true; },
+            async deleteMessage() { return true; },
+          };
+        },
+      },
+    };
+
+    delete require.cache[require.resolve('./daemon-bridges.js')];
+    const { createBridgeStarter } = require('./daemon-bridges.js');
+
+    const bridge = createBridgeStarter({
+      fs,
+      path,
+      HOME: tempHome,
+      log: () => {},
+      sleep: async () => {},
+      loadConfig: () => ({
+        feishu: {
+          enabled: true,
+          app_id: 'cli_a_test',
+          app_secret: 'secret_test',
+          allowed_chat_ids: ['oc_team_1'],
+          chat_agent_map: { oc_team_1: 'main' },
+        },
+        projects: {
+          main: {
+            cwd: tempHome,
+            name: 'Main',
+            engine: 'codex',
+            team: [
+              { key: 'stick', name: 'Stick', icon: 'S', nicknames: ['stick'] },
+              { key: 'jia', name: 'Jarvis · 甲', icon: '🅰️', nicknames: ['甲', 'jia'] },
+            ],
+          },
+        },
+      }),
+      loadState: () => state,
+      saveState: (next) => Object.assign(state, next),
+      getSession: () => ({ cwd: tempHome }),
+      restoreSessionFromReply: () => null,
+      handleCommand: async () => {},
+      pipeline: {
+        processMessage: async () => {},
+        isActive: () => false,
+        interruptActive: (chatId) => {
+          interrupts.push(chatId);
+          return true;
+        },
+        clearQueue: (chatId) => clears.push(chatId),
+      },
+      pendingActivations: new Map(),
+      activeProcesses: new Map(),
+      messageQueue: new Map(),
+    });
+
+    const running = await bridge.startFeishuBridge({
+      feishu: {
+        enabled: true,
+        app_id: 'cli_a_test',
+        app_secret: 'secret_test',
+        allowed_chat_ids: ['oc_team_1'],
+      },
+    }, async () => {});
+
+    await flush();
+    await flush();
+    running.stop();
+    await flush();
+
+    assert.deepEqual(clears, ['_agent_jia::thread:oc_team_1:om_reply_target']);
+    assert.deepEqual(interrupts, ['_agent_jia::thread:oc_team_1:om_reply_target']);
+    assert.match(sent[0].text, /Stopping .*Jarvis · 甲/);
   });
 });

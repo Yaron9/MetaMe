@@ -185,6 +185,19 @@ function createBridgeStarter(deps) {
     };
   }
 
+  function resolveReplyStopChatId(targetKey, fallbackChatId, replyMapping) {
+    const resolvedFallback = String(fallbackChatId || '').trim();
+    const mapping = replyMapping && typeof replyMapping === 'object' ? replyMapping : null;
+    const logicalChatId = String(mapping && mapping.logicalChatId || '').trim();
+    if (!logicalChatId) return resolvedFallback;
+    if (!targetKey) return logicalChatId;
+    const expectedPrefix = `_agent_${String(targetKey).trim()}`;
+    if (logicalChatId === expectedPrefix || logicalChatId.startsWith(`${expectedPrefix}::`)) {
+      return logicalChatId;
+    }
+    return resolvedFallback;
+  }
+
   // ── Team group helpers ─────────────────────────────────────────────────
   function _getBoundProject(chatId, cfg) {
     const map = {
@@ -559,9 +572,9 @@ function createBridgeStarter(deps) {
                     );
                     if (m) _targetKey = m.key;
                   }
-                  if (!_targetKey && !_stopArg) _targetKey = _stickyKey;
-                  if (_targetKey) {
-                    const vid = `_agent_${_targetKey}`;
+              if (!_targetKey && !_stopArg) _targetKey = _stickyKey;
+              if (_targetKey) {
+                    const vid = resolveReplyStopChatId(_targetKey, `_agent_${_targetKey}`, parentId ? (_st.msg_sessions && _st.msg_sessions[parentId]) : null);
                     const member = _boundProj.team.find(t => t.key === _targetKey);
                     const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
                     pipeline.clearQueue(vid);
@@ -814,6 +827,7 @@ function createBridgeStarter(deps) {
           log('INFO', `Feishu message from ${chatId}: ${text.slice(0, 50)}`);
           const parentId = extractFeishuReplyMessageId(event);
           let _replyAgentKey = null;
+          let _replyMapping = null;
           let _replyMappingFound = false; // true = mapping exists (agentKey may be null = main)
           // Load state once for the entire routing block
           const _st = loadState();
@@ -826,6 +840,7 @@ function createBridgeStarter(deps) {
           if (_isQuotedReply) {
             const mapped = _parentMapping;
             if (mapped) {
+              _replyMapping = mapped;
               _replyMappingFound = true;
               if (typeof restoreSessionFromReply === 'function') {
                 restoreSessionFromReply(chatId, mapped);
@@ -898,9 +913,10 @@ function createBridgeStarter(deps) {
               // Priority 3: bare /stop → sticky
               if (!_targetKey && !_stopArg) _targetKey = _stickyKey;
               if (_targetKey) {
-                const vid = isThreadChatId(String(pipelineChatId))
+                const fallbackVid = isThreadChatId(String(pipelineChatId))
                   ? `_agent_${_targetKey}::${pipelineChatId}`
                   : `_agent_${_targetKey}`;
+                const vid = resolveReplyStopChatId(_targetKey, fallbackVid, _isQuotedReply ? _replyMapping : null);
                 const member = _boundProj.team.find(t => t.key === _targetKey);
                 const label = member ? `${member.icon || '🤖'} ${member.name}` : _targetKey;
                 pipeline.clearQueue(vid);
