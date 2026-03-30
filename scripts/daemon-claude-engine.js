@@ -1238,7 +1238,19 @@ function createClaudeEngine(deps) {
         ? () => bot.sendCard(chatId, { title: _ackCardHeader.title, body: '🤔', color: _ackCardHeader.color })
         : () => (bot.sendMarkdown ? bot.sendMarkdown(chatId, '🤔') : bot.sendMessage(chatId, '🤔'));
       _ackFn()
-        .then(msg => { if (msg && msg.message_id) statusMsgId = msg.message_id; })
+        .then(msg => {
+          if (!(msg && msg.message_id)) return;
+          statusMsgId = msg.message_id;
+          const trackedAgentKey = projectKeyFromVirtualChatId(chatId);
+          const routeSession = {
+            cwd: (_ackBoundProj && _ackBoundProj.cwd) || HOME,
+            engine: (_ackBoundProj && _ackBoundProj.engine)
+              ? normalizeEngineName(_ackBoundProj.engine)
+              : getDefaultEngine(),
+            logicalChatId: chatId,
+          };
+          trackMsgSession(msg.message_id, routeSession, trackedAgentKey, { routeOnly: true });
+        })
         .catch(e => log('ERROR', `Failed to send ack to ${chatId}: ${e.message}`));
     }
     bot.sendTyping(chatId).catch(() => { });

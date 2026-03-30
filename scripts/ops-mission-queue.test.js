@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { pruneObsoleteMissions, scanLogs } = require('./ops-mission-queue');
+const { pruneObsoleteMissions, scanLogs, completeBootstrapMission } = require('./ops-mission-queue');
 
 function writeMissions(cwd, body) {
   fs.mkdirSync(path.join(cwd, 'workspace'), { recursive: true });
@@ -92,5 +92,37 @@ test('scanLogs adds stable recurring-error missions after pruning', () => {
     else process.env.METAME_DIR = prevMetameDir;
     fs.rmSync(cwd, { recursive: true, force: true });
     fs.rmSync(metameDir, { recursive: true, force: true });
+  }
+});
+
+test('completeBootstrapMission moves active bootstrap mission to completed', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'ops-bootstrap-'));
+
+  try {
+    writeMissions(cwd, [
+      '# MetaMe Ops Missions',
+      '',
+      '## pending',
+      '- [ops-20260330-001] Fix recurring error: sample warning',
+      '',
+      '## active',
+      '- [bootstrap-001] Scan daemon.log and events/ for recurring errors, produce initial diagnosis (priority: 1)',
+      '',
+      '## completed',
+      '',
+      '## abandoned',
+      '',
+    ].join('\n'));
+
+    const result = completeBootstrapMission(cwd);
+    assert.equal(result.completed, true);
+
+    const content = fs.readFileSync(path.join(cwd, 'workspace', 'missions.md'), 'utf8');
+    const activeSection = content.split('## completed')[0];
+    const completedSection = content.split('## completed')[1] || '';
+    assert.doesNotMatch(activeSection, /bootstrap-001/);
+    assert.match(completedSection, /bootstrap-001/);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
   }
 });

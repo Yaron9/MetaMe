@@ -17,6 +17,7 @@ const MISSIONS_FILE = 'workspace/missions.md';
 const SECTIONS = ['pending', 'active', 'completed', 'abandoned'];
 const RECENT_LOG_LINES = 500;
 const ERROR_THRESHOLD = 3;
+const BOOTSTRAP_MISSION_ID = 'bootstrap-001';
 
 function getMetameDir() {
   return process.env.METAME_DIR || path.join(os.homedir(), '.metame');
@@ -211,6 +212,20 @@ function completeMission(cwd, id) {
   return { success: true, topic: { id: mission.id, title: mission.title, status: 'completed' } };
 }
 
+function completeBootstrapMission(cwd) {
+  const sections = readSections(cwd);
+  const found = findMission(sections, BOOTSTRAP_MISSION_ID);
+  if (!found || found.section !== 'active') {
+    return { success: false, completed: false, reason: found ? `bootstrap_${found.section}` : 'bootstrap_missing' };
+  }
+
+  const mission = sections.active.splice(found.index, 1)[0];
+  mission.status = 'completed';
+  sections.completed.push(mission);
+  writeSections(cwd, sections);
+  return { success: true, completed: true, topic: { id: mission.id, title: mission.title, status: 'completed' } };
+}
+
 function listMissions(cwd) {
   const sections = readSections(cwd);
   const topics = [];
@@ -320,4 +335,12 @@ if (require.main === module) {
   process.stdout.write(JSON.stringify(result) + '\n');
 }
 
-module.exports = { nextMission, activateMission, completeMission, listMissions, pruneObsoleteMissions, scanLogs };
+module.exports = {
+  nextMission,
+  activateMission,
+  completeMission,
+  completeBootstrapMission,
+  listMissions,
+  pruneObsoleteMissions,
+  scanLogs,
+};

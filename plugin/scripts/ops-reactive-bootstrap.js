@@ -6,7 +6,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const yaml = require('./resolve-yaml');
-const { pruneObsoleteMissions, scanLogs } = require('./ops-mission-queue');
+const { pruneObsoleteMissions, scanLogs, completeBootstrapMission } = require('./ops-mission-queue');
 const { bootstrapReactiveProject } = require('./daemon-reactive-lifecycle');
 
 const HOME = os.homedir();
@@ -52,6 +52,40 @@ function dispatchReactiveItem(item) {
   return { success: true };
 }
 
+function buildScanSummary(pruned, scanned, bootstrapCompleted, bootstrap) {
+  const findings = [];
+
+  if ((pruned?.pruned || 0) > 0) {
+    findings.push(`pruned ${pruned.pruned} obsolete mission${pruned.pruned === 1 ? '' : 's'}`);
+  }
+  if ((scanned?.new_missions || 0) > 0) {
+    findings.push(`detected ${scanned.new_missions} new repair mission${scanned.new_missions === 1 ? '' : 's'}`);
+  }
+  if (bootstrapCompleted?.completed) {
+    findings.push('completed legacy bootstrap-001');
+  }
+  if (bootstrap?.started) {
+    const missionLabel = [bootstrap.missionId, bootstrap.mission].filter(Boolean).join(' ');
+    findings.push(`started repair ${missionLabel}`.trim());
+  }
+
+  const quiet = findings.length === 0;
+  const action = bootstrap?.started
+    ? 'repair_started'
+    : quiet
+      ? 'quiet_scan'
+      : 'findings_only';
+
+  return {
+    quiet,
+    action,
+    findings,
+    summary: quiet
+      ? 'ops-scan completed: no new recurring issues, no repair started'
+      : `ops-scan completed: ${findings.join('; ')}`,
+  };
+}
+
 function main() {
   const config = loadConfig();
   const project = config?.projects?.[PROJECT_KEY];
@@ -63,7 +97,7 @@ function main() {
   const cwd = project.cwd.replace(/^~/, HOME);
   const pruned = pruneObsoleteMissions(cwd);
   const scanned = scanLogs(cwd);
-
+  const bootstrapCompleted = completeBootstrapMission(cwd);
   const result = bootstrapReactiveProject(PROJECT_KEY, config, {
     metameDir: METAME_DIR,
     loadState,
@@ -73,14 +107,24 @@ function main() {
     log: () => {},
     notifyUser: () => {},
   });
+  const summary = buildScanSummary(pruned, scanned, bootstrapCompleted, result);
 
   process.stdout.write(JSON.stringify({
     success: true,
     pruned: pruned.pruned || 0,
     new_missions: scanned.new_missions || 0,
     total_pending: scanned.total_pending || 0,
+    bootstrap_completed: !!bootstrapCompleted.completed,
+    quiet: summary.quiet,
+    action: summary.action,
+    findings: summary.findings,
+    summary: summary.summary,
     bootstrap: result,
   }) + '\n');
 }
 
 if (require.main === module) main();
+
+module.exports = {
+  buildScanSummary,
+};

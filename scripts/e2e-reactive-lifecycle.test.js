@@ -22,13 +22,19 @@ function makeTmpProject() {
   for (const sub of ['workspace/notes', 'workspace/experiments', 'workspace/drafts', 'scripts']) {
     fs.mkdirSync(path.join(dir, sub), { recursive: true });
   }
-  // Copy real business scripts into fixture
-  const agentScientistScripts = path.join(__dirname, '..', '..', 'AgentScientist', 'scripts');
+  // Copy real business scripts and manifest into fixture
+  const agentScientistRoot = path.join(__dirname, '..', '..', 'AgentScientist');
+  const agentScientistScripts = path.join(agentScientistRoot, 'scripts');
   for (const script of ['research-verifier.js', 'research-archive.js', 'topic-pool.js']) {
     const src = path.join(agentScientistScripts, script);
     if (fs.existsSync(src)) {
       fs.copyFileSync(src, path.join(dir, 'scripts', script));
     }
+  }
+  // Copy perpetual.yaml so loadProjectManifest resolves correct completion_signal + script paths
+  const manifestSrc = path.join(agentScientistRoot, 'perpetual.yaml');
+  if (fs.existsSync(manifestSrc)) {
+    fs.copyFileSync(manifestSrc, path.join(dir, 'perpetual.yaml'));
   }
   // Create topics.md
   fs.writeFileSync(path.join(dir, 'workspace', 'topics.md'), [
@@ -37,10 +43,16 @@ function makeTmpProject() {
     '- [t2] Test Topic Beta (priority: 2)',
     '', '## active', '', '## completed', '', '## abandoned', '',
   ].join('\n'));
-  // Create scientist state file at the real protocol path: <metameDir>/reactive/scientist/state.md
+  // Create scientist reactive dir and seed event log so generateStateFile preserves phase history
   const metameDir = path.join(dir, '.metame');
   const reactiveDir = path.join(metameDir, 'reactive', 'scientist');
   fs.mkdirSync(reactiveDir, { recursive: true });
+  // Seed event log — event sourcing SoT; generateStateFile replays this to produce state.md
+  fs.writeFileSync(path.join(reactiveDir, 'events.jsonl'), [
+    JSON.stringify({ ts: '2026-03-01T00:00:00.000Z', type: 'MISSION_START', mission_id: 't1', mission_title: 'Test Topic Alpha' }),
+    JSON.stringify({ ts: '2026-03-01T00:00:00.000Z', type: 'PHASE_GATE', phase: 'topic', passed: true, details: 'OK', artifacts: [] }),
+    JSON.stringify({ ts: '2026-03-05T00:00:00.000Z', type: 'PHASE_GATE', phase: 'literature', passed: true, details: 'OK', artifacts: [] }),
+  ].join('\n') + '\n');
   fs.writeFileSync(path.join(reactiveDir, 'state.md'), [
     '# 科研状态',
     'project: "Test Topic Alpha"',

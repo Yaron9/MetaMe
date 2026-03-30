@@ -263,7 +263,7 @@ function sanitizeQueueId(id) {
 }
 
 function createMissionStartPrompt(title) {
-  return `New mission: "${title}"\n\nStart this mission. Read your CLAUDE.md for instructions, then decide on the first step using NEXT_DISPATCH.`;
+  return `新课题启动："${title}"\n\nStart this mission. Read your CLAUDE.md for instructions, then decide on the first step using NEXT_DISPATCH.`;
 }
 
 function loadMissionQueueState(projectKey, projectCwd, deps) {
@@ -412,7 +412,7 @@ function runCompletionHooks(projectKey, projectCwd, deps) {
       deps.log('WARN', `Reactive: mission queue query failed for ${projectKey}: ${e.message}`);
     }
   } else if (!result.archived && fs.existsSync(scripts.missionQueue)) {
-    deps.log('WARN', `Reactive: skipping mission queue for ${projectKey} — archive did not succeed`);
+    deps.log('WARN', `Reactive: skipping topic pool for ${projectKey} — archive failed`);
   }
 
   return result;
@@ -603,7 +603,7 @@ function generateStateFile(projectKey, config, deps) {
     `round: ${round}`,
     `last_update: "${new Date().toISOString()}"`,
     '',
-    '# Phase history (from event log)',
+    'history:',
   ];
 
   for (const h of history) {
@@ -1127,8 +1127,8 @@ function handleReactiveOutput(targetProject, output, config, deps) {
           logEvent(projectKey, { type: 'ARCHIVE', path: pCwd });
         }
         const notifyMsg = completionResult.nextMission
-          ? `\u2705 ${pName} mission completed. Next: ${completionResult.nextMission}`
-          : `\u2705 ${pName} mission completed. No pending missions — entering idle.`;
+          ? `\u2705 ${pName} 完成。下一课题：${completionResult.nextMission}`
+          : `\u2705 ${pName} 完成，无待处理课题`;
         if (deps.notifyUser) deps.notifyUser(notifyMsg);
 
         // Auto-start next mission if available — requires budget to be OK
@@ -1154,7 +1154,7 @@ function handleReactiveOutput(targetProject, output, config, deps) {
           }
         }
       } else {
-        if (deps.notifyUser) deps.notifyUser(`\u2705 ${pName} mission completed`);
+        if (deps.notifyUser) deps.notifyUser(`\u2705 ${pName} 完成`);
       }
       return;
     }

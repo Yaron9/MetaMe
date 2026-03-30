@@ -90,6 +90,33 @@ function createFakeCodexProcess(events) {
   return proc;
 }
 
+function createDelayedCodexProcess(events, closeDelayMs = 50) {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const stdin = new PassThrough();
+  const closeHandlers = [];
+  const proc = {
+    stdout,
+    stderr,
+    stdin,
+    pid: 12346,
+    kill: () => {},
+    on(event, handler) {
+      if (event === 'close') closeHandlers.push(handler);
+      return proc;
+    },
+  };
+  setImmediate(() => {
+    for (const event of events) stdout.write(`${JSON.stringify(event)}\n`);
+    stdout.end();
+    stderr.end();
+    setTimeout(() => {
+      for (const handler of closeHandlers) handler(0);
+    }, closeDelayMs);
+  });
+  return proc;
+}
+
 function createPersistentClaudeProcess() {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -404,6 +431,111 @@ describe('daemon-claude-engine private helpers', () => {
     assert.equal(tracked.approvalPolicy, 'never');
     assert.equal(tracked.permissionMode, 'danger-full-access');
     assert.ok(tracked.touchedAt > 0);
+  });
+
+  it('tracks the initial ack card immediately so topic replies can route before final output', async () => {
+    const state = {
+      sessions: {
+        _agent_jia: {
+          cwd: '/tmp/agent-jia',
+          engines: {
+            codex: {
+              id: 'fresh-local-placeholder',
+              started: false,
+              runtimeSessionObserved: false,
+              sandboxMode: 'danger-full-access',
+              approvalPolicy: 'never',
+              permissionMode: 'danger-full-access',
+            },
+          },
+        },
+      },
+    };
+
+    const testFs = { ...fs, appendFileSync: () => {}, mkdirSync: () => {}, writeFileSync: () => {} };
+    const engine = createClaudeEngine({
+      fs: testFs,
+      path,
+      spawn: () => createDelayedCodexProcess([
+        { type: 'item.completed', item: { type: 'agent_message', text: '甲正在处理中' } },
+        { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } },
+      ], 80),
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses: new Map(),
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({
+        projects: {
+          jia: { cwd: '/tmp/agent-jia', name: 'Jarvis · 甲', engine: 'codex' },
+        },
+      }),
+      loadState: () => state,
+      saveState: (next) => {
+        Object.assign(state, next);
+        state.sessions = next.sessions;
+      },
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: (chatId) => state.sessions[chatId] || null,
+      getSessionForEngine: (chatId, engineName) => {
+        const raw = state.sessions[chatId];
+        if (!raw) return null;
+        const slot = raw.engines && raw.engines[engineName];
+        return slot ? { cwd: raw.cwd, engine: engineName, logicalChatId: chatId, ...slot } : null;
+      },
+      createSession: () => ({ id: 'fresh-local-placeholder', cwd: '/tmp/agent-jia', engine: 'codex', logicalChatId: '_agent_jia', started: false, runtimeSessionObserved: false }),
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: () => null,
+      getCodexSessionPermissionMode: () => null,
+      getSessionRecentContext: () => null,
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getDefaultEngine: () => 'codex',
+    });
+
+    const bot = {
+      sendTyping: async () => {},
+      sendMessage: async () => ({ message_id: 'msg-send' }),
+      sendMarkdown: async () => ({ message_id: 'msg-md' }),
+      sendCard: async () => ({ message_id: 'msg-card' }),
+      editMessage: async () => true,
+      deleteMessage: async () => true,
+    };
+
+    const pending = engine.askClaude(bot, '_agent_jia', '继续安装', {
+      projects: {
+        jia: { cwd: '/tmp/agent-jia', name: 'Jarvis · 甲', engine: 'codex' },
+      },
+    }, false, 'ou_admin');
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(state.msg_sessions['msg-card'].logicalChatId, '_agent_jia');
+    assert.equal(state.msg_sessions['msg-card'].agentKey, 'jia');
+    assert.equal(state.msg_sessions['msg-card'].cwd, '/tmp/agent-jia');
+    assert.ok(!('id' in state.msg_sessions['msg-card']), 'ack mapping should be route-only before runtime session stabilizes');
+
+    const result = await pending;
+    assert.equal(result.ok, true);
   });
 
   it('forces bound chats back to configured cwd even when stored session cwd is polluted', async () => {
