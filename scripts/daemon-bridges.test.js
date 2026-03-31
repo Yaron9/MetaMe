@@ -413,6 +413,235 @@ describe('daemon-bridges telegram reply routing', () => {
     assert.equal(sent.length, 0);
   });
 
+  it('reuses the resumed logical team session when a new Feishu topic is opened after resume', async () => {
+    const handled = [];
+    const state = {
+      sessions: {},
+      team_sticky: { oc_team_1: 'jia' },
+      team_session_route: { oc_team_1: '_agent_jia' },
+      msg_sessions: {},
+    };
+
+    require.cache[feishuAdapterPath] = {
+      id: feishuAdapterPath,
+      filename: feishuAdapterPath,
+      loaded: true,
+      exports: {
+        createBot() {
+          return {
+            async validateCredentials() { return { ok: true }; },
+            async startReceiving(handler) {
+              setImmediate(() => {
+                handler(
+                  'oc_team_1',
+                  '继续安装这个 plugin',
+                  {
+                    message: {
+                      root_id: 'om_resume_followup',
+                      parent_id: 'om_resume_followup',
+                    },
+                  },
+                  null,
+                  'ou_admin'
+                ).catch(() => {});
+              });
+              return {
+                stop() {},
+                reconnect() {},
+                isAlive() { return true; },
+              };
+            },
+            async sendMessage() { return { message_id: 'msg-send' }; },
+            async sendMarkdown() { return { message_id: 'msg-md' }; },
+            async downloadFile() {},
+            async sendTyping() {},
+            async editMessage() { return true; },
+            async deleteMessage() { return true; },
+          };
+        },
+      },
+    };
+
+    delete require.cache[require.resolve('./daemon-bridges.js')];
+    const { createBridgeStarter } = require('./daemon-bridges.js');
+
+    const bridge = createBridgeStarter({
+      fs,
+      path,
+      HOME: tempHome,
+      log: () => {},
+      sleep: async () => {},
+      loadConfig: () => ({
+        feishu: {
+          enabled: true,
+          app_id: 'cli_a_test',
+          app_secret: 'secret_test',
+          allowed_chat_ids: ['oc_team_1'],
+          chat_agent_map: { oc_team_1: 'main' },
+        },
+        projects: {
+          main: {
+            cwd: tempHome,
+            name: 'Main',
+            engine: 'codex',
+            team: [
+              { key: 'jia', name: 'Jarvis · 甲', icon: '🅰️', nicknames: ['甲'] },
+            ],
+          },
+        },
+      }),
+      loadState: () => state,
+      saveState: (next) => Object.assign(state, next),
+      getSession: () => ({ cwd: tempHome }),
+      restoreSessionFromReply: () => null,
+      handleCommand: async () => {},
+      pipeline: {
+        processMessage: async (chatId, text) => {
+          handled.push({ chatId, text });
+        },
+        isActive: () => false,
+        interruptActive: () => false,
+        clearQueue: () => {},
+      },
+      pendingActivations: new Map(),
+      activeProcesses: new Map(),
+      messageQueue: new Map(),
+    });
+
+    const running = await bridge.startFeishuBridge({
+      feishu: {
+        enabled: true,
+        app_id: 'cli_a_test',
+        app_secret: 'secret_test',
+        allowed_chat_ids: ['oc_team_1'],
+      },
+    }, async () => {});
+
+    await flush();
+    await flush();
+    running.stop();
+    await flush();
+
+    assert.equal(handled.length, 1);
+    assert.equal(handled[0].chatId, '_agent_jia');
+    assert.equal(state.team_sticky['thread:oc_team_1:om_resume_followup'], 'jia');
+    assert.equal(state.team_sticky.oc_team_1, 'jia');
+  });
+
+  it('does not treat another member prefix route as a valid resumed logical session', async () => {
+    const handled = [];
+    const state = {
+      sessions: {},
+      team_sticky: { oc_team_1: 'jia' },
+      team_session_route: { oc_team_1: '_agent_jia2' },
+      msg_sessions: {},
+    };
+
+    require.cache[feishuAdapterPath] = {
+      id: feishuAdapterPath,
+      filename: feishuAdapterPath,
+      loaded: true,
+      exports: {
+        createBot() {
+          return {
+            async validateCredentials() { return { ok: true }; },
+            async startReceiving(handler) {
+              setImmediate(() => {
+                handler(
+                  'oc_team_1',
+                  '继续安装这个 plugin',
+                  {
+                    message: {
+                      root_id: 'om_resume_followup_2',
+                      parent_id: 'om_resume_followup_2',
+                    },
+                  },
+                  null,
+                  'ou_admin'
+                ).catch(() => {});
+              });
+              return {
+                stop() {},
+                reconnect() {},
+                isAlive() { return true; },
+              };
+            },
+            async sendMessage() { return { message_id: 'msg-send' }; },
+            async sendMarkdown() { return { message_id: 'msg-md' }; },
+            async downloadFile() {},
+            async sendTyping() {},
+            async editMessage() { return true; },
+            async deleteMessage() { return true; },
+          };
+        },
+      },
+    };
+
+    delete require.cache[require.resolve('./daemon-bridges.js')];
+    const { createBridgeStarter } = require('./daemon-bridges.js');
+
+    const bridge = createBridgeStarter({
+      fs,
+      path,
+      HOME: tempHome,
+      log: () => {},
+      sleep: async () => {},
+      loadConfig: () => ({
+        feishu: {
+          enabled: true,
+          app_id: 'cli_a_test',
+          app_secret: 'secret_test',
+          allowed_chat_ids: ['oc_team_1'],
+          chat_agent_map: { oc_team_1: 'main' },
+        },
+        projects: {
+          main: {
+            cwd: tempHome,
+            name: 'Main',
+            engine: 'codex',
+            team: [
+              { key: 'jia', name: 'Jarvis · 甲', icon: '🅰️', nicknames: ['甲'] },
+            ],
+          },
+        },
+      }),
+      loadState: () => state,
+      saveState: (next) => Object.assign(state, next),
+      getSession: () => ({ cwd: tempHome }),
+      restoreSessionFromReply: () => null,
+      handleCommand: async () => {},
+      pipeline: {
+        processMessage: async (chatId, text) => {
+          handled.push({ chatId, text });
+        },
+        isActive: () => false,
+        interruptActive: () => false,
+        clearQueue: () => {},
+      },
+      pendingActivations: new Map(),
+      activeProcesses: new Map(),
+      messageQueue: new Map(),
+    });
+
+    const running = await bridge.startFeishuBridge({
+      feishu: {
+        enabled: true,
+        app_id: 'cli_a_test',
+        app_secret: 'secret_test',
+        allowed_chat_ids: ['oc_team_1'],
+      },
+    }, async () => {});
+
+    await flush();
+    await flush();
+    running.stop();
+    await flush();
+
+    assert.equal(handled.length, 1);
+    assert.equal(handled[0].chatId, '_agent_jia::thread:oc_team_1:om_resume_followup_2');
+    assert.equal(state.team_session_route.oc_team_1, undefined);
+  });
+
   it('stops the replied Feishu team member using the reply logical chat id', async () => {
     const sent = [];
     const interrupts = [];

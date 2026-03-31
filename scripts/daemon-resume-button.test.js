@@ -52,6 +52,7 @@ function createSessionHarness(options = {}) {
   const cards = [];
   const state = { sessions: {} };
   if (options.stateSessions) Object.assign(state.sessions, options.stateSessions);
+  if (options.stateExtra && typeof options.stateExtra === 'object') Object.assign(state, options.stateExtra);
   let savedState = null;
 
   const { handleSessionCommand } = createSessionCommandHandler({
@@ -107,6 +108,7 @@ function createRouterHarness(options = {}) {
   const cards = [];
   const state = { sessions: {} };
   if (options.stateSessions) Object.assign(state.sessions, options.stateSessions);
+  if (options.stateExtra && typeof options.stateExtra === 'object') Object.assign(state, options.stateExtra);
   let savedState = null;
   let sessionCommandCalled = null;
 
@@ -184,11 +186,118 @@ describe('/resume button click flow', () => {
     assert.equal(h.sent.length, 1, 'should send exactly one confirmation message');
     assert.ok(h.sent[0].includes('▶️ Resumed'), 'should confirm session resumed');
     assert.ok(h.sent[0].includes('Fix login bug'), 'should include session title');
+    assert.ok(h.sent[0].includes(`ID: ${sid}`), 'should include the resumed session id');
 
     // Verify state was saved with new session
     const saved = h.getSavedState();
     assert.ok(saved, 'state should be saved');
     assert.ok(saved.sessions, 'sessions should exist in saved state');
+  });
+
+  it('/resume routes a team-group target onto the matched member session namespace', async () => {
+    const h = createSessionHarness({
+      chatId: 'team-chat',
+      config: {
+        projects: {
+          jarvis: {
+            cwd: '/repo/main',
+            engine: 'codex',
+            team: [
+              { key: 'jia', cwd: '/repo/jia', engine: 'codex', nicknames: ['甲'] },
+            ],
+          },
+        },
+        feishu: {
+          chat_agent_map: {
+            'team-chat': 'jarvis',
+          },
+        },
+      },
+      stateSessions: {
+        'team-chat': {
+          cwd: '/repo/main',
+          engine: 'codex',
+          started: true,
+        },
+      },
+      sessions: [
+        {
+          sessionId: '019d407c-cfe9-7ec0-88f8-580c36318fbd',
+          customTitle: 'https://x.com/dkundel/status/2038670330257109461?s=46',
+          projectPath: '/repo/jia',
+          engine: 'codex',
+        },
+      ],
+    });
+
+    const handled = await h.handleSessionCommand({
+      bot: h.bot,
+      chatId: h.chatId,
+      text: '/resume 019d407c-cfe9-7ec0-88f8-580c36318fbd',
+    });
+
+    assert.equal(handled, true);
+    const saved = h.getSavedState();
+    assert.equal(saved.sessions._agent_jia.engines.codex.id, '019d407c-cfe9-7ec0-88f8-580c36318fbd');
+    assert.equal(saved.team_sticky['team-chat'], 'jia');
+    assert.equal(saved.team_session_route['team-chat'], '_agent_jia');
+    assert.ok(h.sent[0].includes('ID: 019d407c-cfe9-7ec0-88f8-580c36318fbd'));
+  });
+
+  it('/resume clears team sticky when the target cwd does not belong to any member', async () => {
+    const h = createSessionHarness({
+      chatId: 'team-chat',
+      config: {
+        projects: {
+          jarvis: {
+            cwd: '/repo/main',
+            engine: 'codex',
+            team: [
+              { key: 'jia', cwd: '/repo/jia', engine: 'codex', nicknames: ['甲'] },
+            ],
+          },
+        },
+        feishu: {
+          chat_agent_map: {
+            'team-chat': 'jarvis',
+          },
+        },
+      },
+      stateSessions: {
+        _agent_jia: {
+          cwd: '/repo/jia',
+          engine: 'codex',
+          started: true,
+          engines: {
+            codex: { id: 'sid-jia-current', started: true },
+          },
+        },
+      },
+      stateExtra: {
+        team_sticky: { 'team-chat': 'jia' },
+        team_session_route: { 'team-chat': '_agent_jia' },
+      },
+      sessions: [
+        {
+          sessionId: 'sid-outside',
+          customTitle: 'external repo',
+          projectPath: '/repo/outside',
+          engine: 'codex',
+        },
+      ],
+    });
+
+    const handled = await h.handleSessionCommand({
+      bot: h.bot,
+      chatId: h.chatId,
+      text: '/resume sid-outside',
+    });
+
+    assert.equal(handled, true);
+    const saved = h.getSavedState();
+    assert.equal(saved.sessions._bound_jarvis.engines.codex.id, 'sid-outside');
+    assert.equal(saved.team_sticky['team-chat'], undefined);
+    assert.equal(saved.team_session_route['team-chat'], undefined);
   });
 
   it('/resume <sessionId> is not intercepted by other commands', async () => {
@@ -272,12 +381,15 @@ describe('/sessions card includes 👤🤖 context', () => {
     // Each session should have a div and action element
     const divs = elements.filter(e => e.tag === 'div');
     assert.ok(divs.length >= 2, 'should have at least 2 div elements');
+    assert.match(divs[0].text.content, /ID:/);
+    assert.match(divs[0].text.content, /aaaa1111-0000-0000/);
 
     // Check that buttons have correct /resume <id> commands
     const actions = elements.filter(e => e.tag === 'action');
     assert.ok(actions.length >= 2, 'should have at least 2 action elements');
     const btn1 = actions[0].actions[0];
     assert.equal(btn1.value.cmd, `/resume ${SESSIONS[0].sessionId}`, 'button should have /resume <full id>');
+    assert.match(btn1.text.content, /Resume aaaa1111-0000-0000/);
     const btn2 = actions[1].actions[0];
     assert.equal(btn2.value.cmd, `/resume ${SESSIONS[1].sessionId}`, 'button should have /resume <full id>');
   });

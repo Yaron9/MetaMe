@@ -184,7 +184,7 @@ describe('E2E: reactive cycle with fixture project', () => {
 
     // Auto-start dispatch must have fired
     assert.ok(dispatches.length > 0, 'auto-start dispatch must fire');
-    const autoStart = dispatches.find(d => d.target === 'scientist' && d.prompt.includes('新课题启动'));
+    const autoStart = dispatches.find(d => d.target === 'scientist' && d.prompt.includes('新任务启动'));
     assert.ok(autoStart, 'auto-start dispatch must target scientist with new topic');
     assert.ok(autoStart.prompt.includes('Test Topic Beta'), 'auto-start must mention next topic title');
     assert.equal(autoStart.new_session, true);

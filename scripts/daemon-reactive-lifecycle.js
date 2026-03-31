@@ -263,7 +263,7 @@ function sanitizeQueueId(id) {
 }
 
 function createMissionStartPrompt(title) {
-  return `新课题启动："${title}"\n\nStart this mission. Read your CLAUDE.md for instructions, then decide on the first step using NEXT_DISPATCH.`;
+  return `新任务启动："${title}"\n\nStart this mission. Read your CLAUDE.md for instructions, then decide on the first step using NEXT_DISPATCH.`;
 }
 
 function loadMissionQueueState(projectKey, projectCwd, deps) {
@@ -1127,8 +1127,8 @@ function handleReactiveOutput(targetProject, output, config, deps) {
           logEvent(projectKey, { type: 'ARCHIVE', path: pCwd });
         }
         const notifyMsg = completionResult.nextMission
-          ? `\u2705 ${pName} 完成。下一课题：${completionResult.nextMission}`
-          : `\u2705 ${pName} 完成，无待处理课题`;
+          ? `\u2705 ${pName} 完成。下一任务：${completionResult.nextMission}`
+          : `\u2705 ${pName} 完成，无待处理任务`;
         if (deps.notifyUser) deps.notifyUser(notifyMsg);
 
         // Auto-start next mission if available — requires budget to be OK

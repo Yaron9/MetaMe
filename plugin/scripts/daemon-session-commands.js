@@ -1,7 +1,11 @@
 'use strict';
 
 const { normalizeEngineName: _normalizeEngine } = require('./daemon-utils');
-const { rawChatId: _rawChatId } = require('./core/thread-chat-id');
+const {
+  resolveSessionRoute: _resolveSessionRoute,
+  resolveResumeRouteForTarget: _resolveResumeRouteForTarget,
+  applyResumeRouteState: _applyResumeRouteState,
+} = require('./core/team-session-route');
 
 function createSessionCommandHandler(deps) {
   const {
@@ -49,45 +53,16 @@ function createSessionCommandHandler(deps) {
     return available.length === 1 ? normalizeEngineName(available[0]) : getDefaultEngine();
   }
 
-  function buildBoundSessionChatId(projectKey) {
-    const key = String(projectKey || '').trim();
-    return key ? `_bound_${key}` : '';
-  }
-
   function getSessionRoute(chatId) {
-    const cfg = loadConfig();
-    const state = loadState();
-    const chatKey = String(chatId);
-    const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
-    const boundKey = agentMap[chatKey] || agentMap[_rawChatId(chatKey)] || null;
-    const boundProj = boundKey && cfg.projects ? cfg.projects[boundKey] : null;
-    const stickyKey = state && state.team_sticky ? (state.team_sticky[chatKey] || state.team_sticky[_rawChatId(chatKey)]) : null;
-    const stickyMember = stickyKey && boundProj && Array.isArray(boundProj.team)
-      ? boundProj.team.find((m) => m && m.key === stickyKey)
-      : null;
-
-    if (stickyMember) {
-      return {
-        sessionChatId: `_agent_${stickyMember.key}`,
-        cwd: stickyMember.cwd ? normalizeCwd(stickyMember.cwd) : (boundProj && boundProj.cwd ? normalizeCwd(boundProj.cwd) : null),
-        engine: normalizeEngineName(stickyMember.engine || (boundProj && boundProj.engine)),
-      };
-    }
-
-    if (boundProj) {
-      return {
-        sessionChatId: buildBoundSessionChatId(boundKey),
-        cwd: boundProj.cwd ? normalizeCwd(boundProj.cwd) : null,
-        engine: normalizeEngineName(boundProj.engine),
-      };
-    }
-
-    const rawSession = getSession(chatId);
-    return {
-      sessionChatId: String(chatId),
-      cwd: rawSession && rawSession.cwd ? normalizeCwd(rawSession.cwd) : null,
-      engine: inferStoredEngine(rawSession),
-    };
+    return _resolveSessionRoute({
+      chatId,
+      cfg: loadConfig(),
+      state: loadState(),
+      getSession,
+      normalizeCwd,
+      normalizeEngineName,
+      inferStoredEngine,
+    });
   }
 
   function getCurrentEngine(chatId) {
@@ -101,8 +76,8 @@ function createSessionCommandHandler(deps) {
   }
 
   // Write per-engine session slot, preserving cwd and other engine slots.
-  function attachEngineSession(state, chatId, engine, sessionId, cwd, meta = {}) {
-    const effectiveId = getSessionRoute(chatId).sessionChatId;
+  function attachEngineSession(state, chatId, engine, sessionId, cwd, meta = {}, options = {}) {
+    const effectiveId = options.sessionChatId || getSessionRoute(chatId).sessionChatId;
     const existing = state.sessions[effectiveId] || {};
     const existingEngines = existing.engines || {};
     const nextSlot = {
@@ -134,6 +109,17 @@ function createSessionCommandHandler(deps) {
     return null;
   }
 
+  function resolveResumeRouteForTarget(chatId, targetCwd, state, cfg) {
+    return _resolveResumeRouteForTarget({
+      chatId,
+      targetCwd,
+      cfg,
+      state,
+      normalizeCwd,
+      fallbackSessionChatId: getSessionRoute(chatId).sessionChatId,
+    });
+  }
+
   function resolveAttachableSession(engine, cwd, options = {}) {
     if (typeof findAttachableSession === 'function') {
       return findAttachableSession({ engine, cwd, ...options });
@@ -147,6 +133,9 @@ function createSessionCommandHandler(deps) {
 
   function attachResolvedTarget(state, chatId, engine, target, fallbackCwd) {
     const targetCwd = target && target.projectPath ? target.projectPath : fallbackCwd;
+    const cfg = loadConfig();
+    const resumeRoute = resolveResumeRouteForTarget(chatId, targetCwd, state, cfg);
+    _applyResumeRouteState(state, chatId, resumeRoute);
     if (target && target.pendingState) {
       attachEngineSession(state, chatId, engine, null, targetCwd, {
         started: false,
@@ -155,7 +144,7 @@ function createSessionCommandHandler(deps) {
         ...(target.sandboxMode ? { sandboxMode: target.sandboxMode } : {}),
         ...(target.approvalPolicy ? { approvalPolicy: target.approvalPolicy } : {}),
         ...(target.permissionMode ? { permissionMode: target.permissionMode } : {}),
-      });
+      }, { sessionChatId: resumeRoute.sessionChatId });
       return {
         cwd: targetCwd,
         pendingState: true,
@@ -166,7 +155,7 @@ function createSessionCommandHandler(deps) {
       started: true,
       runtimeSessionObserved: true,
       clearCompactContext: true,
-    });
+    }, { sessionChatId: resumeRoute.sessionChatId });
     return {
       cwd: targetCwd,
       pendingState: false,
@@ -437,6 +426,7 @@ function createSessionCommandHandler(deps) {
       const title = target.customTitle || target.summary || target.sessionId.slice(0, 8);
       const lines = [`▶️ Resumed: ${title}`];
       if (attached.cwd) lines.push(`📁 ${path.basename(attached.cwd)}`);
+      lines.push(`ID: ${target.sessionId}`);
       if (Array.isArray(recentDialogue) && recentDialogue.length > 0) {
         lines.push('');
         lines.push('最近对话:');

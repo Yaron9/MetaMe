@@ -5,6 +5,7 @@ try { userAcl = require('./daemon-user-acl'); } catch { /* optional */ }
 const { findTeamMember: _findTeamMember } = require('./daemon-team-dispatch');
 const { isRemoteMember } = require('./daemon-remote-dispatch');
 const { buildThreadChatId, isThreadChatId, rawChatId: _threadRawChatId } = require('./core/thread-chat-id');
+const { isAgentLogicalRouteForMember } = require('./core/team-session-route');
 const imessageIO = (() => { try { return require('./daemon-siri-imessage'); } catch { return null; } })();
 const siriBridgeMod = (() => { try { return require('./daemon-siri-bridge'); } catch { return null; } })();
 const weixinBridgeMod = (() => { try { return require('./daemon-weixin-bridge'); } catch { return null; } })();
@@ -326,9 +327,16 @@ function createBridgeStarter(deps) {
     // When dispatching from a topic thread, include the thread ID in the
     // virtual session key so each topic gets its own independent session.
     const realChatIdStr = String(realChatId || '');
-    const virtualChatId = isThreadChatId(realChatIdStr)
-      ? `_agent_${member.key}::${realChatIdStr}`
-      : `_agent_${member.key}`;
+    const state = loadState() || {};
+    const routeMap = state.team_session_route || {};
+    const rawChatKey = _threadRawChatId(realChatIdStr);
+    const preferredLogicalChatId = routeMap[realChatIdStr] || routeMap[rawChatKey] || '';
+    const expectedBaseChatId = `_agent_${member.key}`;
+    const virtualChatId = isAgentLogicalRouteForMember(preferredLogicalChatId, member.key)
+      ? preferredLogicalChatId
+      : (isThreadChatId(realChatIdStr)
+          ? `${expectedBaseChatId}::${realChatIdStr}`
+          : expectedBaseChatId);
     const parentCwd = member.cwd || boundProj.cwd;
     const resolvedParentCwd = parentCwd.replace(/^~/, require('os').homedir());
     const memberCwd = _getMemberCwd(
@@ -796,8 +804,9 @@ function createBridgeStarter(deps) {
             // Respect team_sticky: route to active agent same as text messages
             const _stFile = loadState();
             const _chatKeyFile = String(pipelineChatId);
+            const _rawChatKeyFile = _threadRawChatId(_chatKeyFile);
             const { project: _boundProjFile } = _getBoundProject(chatId, liveCfg);
-            const _stickyKeyFile = (_stFile.team_sticky || {})[_chatKeyFile];
+            const _stickyKeyFile = (_stFile.team_sticky || {})[_chatKeyFile] || (_stFile.team_sticky || {})[_rawChatKeyFile];
             if (_boundProjFile && Array.isArray(_boundProjFile.team) && _boundProjFile.team.length > 0 && _stickyKeyFile) {
               const _stickyMember = _boundProjFile.team.find(m => m.key === _stickyKeyFile);
               if (_stickyMember) {
@@ -867,16 +876,29 @@ function createBridgeStarter(deps) {
           // Helper: set/clear sticky on shared state object and persist
           // Use pipelineChatId so each topic gets independent sticky state
           const _chatKey = String(pipelineChatId);
+          const _rawChatKey = _threadRawChatId(_chatKey);
           const _setSticky = (key) => {
             if (!_st.team_sticky) _st.team_sticky = {};
             _st.team_sticky[_chatKey] = key;
+            if (_rawChatKey && _rawChatKey !== _chatKey) _st.team_sticky[_rawChatKey] = key;
+            if (_st.team_session_route) {
+              if (_st.team_session_route[_chatKey] && !isAgentLogicalRouteForMember(_st.team_session_route[_chatKey], key)) {
+                delete _st.team_session_route[_chatKey];
+              }
+              if (_rawChatKey && _rawChatKey !== _chatKey && _st.team_session_route[_rawChatKey] && !isAgentLogicalRouteForMember(_st.team_session_route[_rawChatKey], key)) {
+                delete _st.team_session_route[_rawChatKey];
+              }
+            }
             saveState(_st);
           };
           const _clearSticky = () => {
             if (_st.team_sticky) delete _st.team_sticky[_chatKey];
+            if (_st.team_sticky && _rawChatKey && _rawChatKey !== _chatKey) delete _st.team_sticky[_rawChatKey];
+            if (_st.team_session_route) delete _st.team_session_route[_chatKey];
+            if (_st.team_session_route && _rawChatKey && _rawChatKey !== _chatKey) delete _st.team_session_route[_rawChatKey];
             saveState(_st);
           };
-          let _stickyKey = (_st.team_sticky || {})[_chatKey] || null;
+          let _stickyKey = (_st.team_sticky || {})[_chatKey] || (_st.team_sticky || {})[_rawChatKey] || null;
 
           // Team group routing: if bound project has a team array, check message for member nickname
           // Non-/stop slash commands bypass team routing → handled by main project
@@ -1024,6 +1046,9 @@ function createBridgeStarter(deps) {
             if (_stickyKey) {
               const member = _boundProj.team.find(m => m.key === _stickyKey);
               if (member) {
+                if ((_st.team_sticky || {})[_chatKey] !== _stickyKey) {
+                  _setSticky(_stickyKey);
+                }
                 log('INFO', `Sticky route: → ${_stickyKey}`);
                 _dispatchToTeamMember(member, _boundProj, trimmedText, liveCfg, bot, pipelineChatId, executeTaskByName, acl);
                 return;

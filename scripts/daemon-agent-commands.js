@@ -18,6 +18,11 @@ const {
   handleSoulCommand,
 } = require('./daemon-agent-lifecycle');
 const { parseTeamMembers, createTeamWorkspace } = require('./daemon-team-workflow');
+const {
+  resolveSessionRoute: _resolveSessionRoute,
+  resolveResumeRouteForTarget: _resolveResumeRouteForTarget,
+  applyResumeRouteState: _applyResumeRouteState,
+} = require('./core/team-session-route');
 
 function createAgentCommandHandler(deps) {
   const {
@@ -72,45 +77,16 @@ function createAgentCommandHandler(deps) {
     return available.length === 1 ? normalizeEngineName(available[0]) : getDefaultEngine();
   }
 
-  function buildBoundSessionChatId(projectKey) {
-    const key = String(projectKey || '').trim();
-    return key ? `_bound_${key}` : '';
-  }
-
   function getSessionRoute(chatId) {
-    const cfg = loadConfig();
-    const state = loadState();
-    const chatKey = String(chatId);
-    const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
-    const boundKey = agentMap[chatKey] || null;
-    const boundProj = boundKey && cfg.projects ? cfg.projects[boundKey] : null;
-    const stickyKey = state && state.team_sticky ? state.team_sticky[chatKey] : null;
-    const stickyMember = stickyKey && boundProj && Array.isArray(boundProj.team)
-      ? boundProj.team.find((m) => m && m.key === stickyKey)
-      : null;
-
-    if (stickyMember) {
-      return {
-        sessionChatId: `_agent_${stickyMember.key}`,
-        cwd: stickyMember.cwd ? normalizeCwd(stickyMember.cwd) : (boundProj && boundProj.cwd ? normalizeCwd(boundProj.cwd) : null),
-        engine: normalizeEngineName(stickyMember.engine || (boundProj && boundProj.engine)),
-      };
-    }
-
-    if (boundProj) {
-      return {
-        sessionChatId: buildBoundSessionChatId(boundKey),
-        cwd: boundProj.cwd ? normalizeCwd(boundProj.cwd) : null,
-        engine: normalizeEngineName(boundProj.engine),
-      };
-    }
-
-    const rawSession = getSession(chatId);
-    return {
-      sessionChatId: String(chatId),
-      cwd: rawSession && rawSession.cwd ? normalizeCwd(rawSession.cwd) : null,
-      engine: inferStoredEngine(rawSession),
-    };
+    return _resolveSessionRoute({
+      chatId,
+      cfg: loadConfig(),
+      state: loadState(),
+      getSession,
+      normalizeCwd,
+      normalizeEngineName,
+      inferStoredEngine,
+    });
   }
 
   function getCurrentEngine(chatId) {
@@ -168,6 +144,17 @@ function createAgentCommandHandler(deps) {
       }
     }
     return null;
+  }
+
+  function resolveResumeRouteForSelection(chatId, route, targetCwd, cfg, state) {
+    return _resolveResumeRouteForTarget({
+      chatId,
+      targetCwd,
+      cfg,
+      state,
+      normalizeCwd,
+      fallbackSessionChatId: route.sessionChatId,
+    });
   }
 
   async function autoCreateSessionOnEmptyResume(bot, chatId, cwd, engine) {
@@ -389,10 +376,13 @@ function createAgentCommandHandler(deps) {
       }
       const sessionId = fullMatch.sessionId;
       const cwd = fullMatch.projectPath || (curSession && curSession.cwd) || HOME;
+      const targetSessionId = sessionId;
+      const targetCwd = cwd;
 
       const state2 = loadState();
       const cfgForEngine = loadConfig();
-      const sessionKey = route.sessionChatId;
+      const resumeRoute = resolveResumeRouteForSelection(chatId, route, targetCwd, cfgForEngine, state2);
+      const sessionKey = resumeRoute.sessionChatId;
       const existing = state2.sessions[sessionKey] || {};
       const existingEngine = normalizeEngineName(
         existing.engine
@@ -405,8 +395,6 @@ function createAgentCommandHandler(deps) {
         && currentLogical
         && currentLogical.id
         && sessionId === currentLogical.id;
-      const targetSessionId = sessionId;
-      const targetCwd = cwd;
       const existingEngines = existing.engines || {};
       state2.sessions[sessionKey] = {
         ...existing,
@@ -416,6 +404,7 @@ function createAgentCommandHandler(deps) {
         engine: engineByTargetCwd,
         engines: { ...existingEngines, [engineByTargetCwd]: { id: targetSessionId, started: true } },
       };
+      _applyResumeRouteState(state2, chatId, resumeRoute);
       saveState(state2);
       const name = fullMatch.customTitle;
       const label = name || (fullMatch.summary || fullMatch.firstPrompt || '').slice(0, 40) || targetSessionId.slice(0, 8);
@@ -423,7 +412,7 @@ function createAgentCommandHandler(deps) {
       // 读取最近对话片段，帮助确认是否切换到正确的 session
       const recentCtx = getSessionRecentContext ? getSessionRecentContext(targetSessionId) : null;
       const recentDialogue = getSessionRecentDialogue ? getSessionRecentDialogue(targetSessionId, 4) : null;
-      let msg = `✅ 已切换: **${label}**\n📁 ${path.basename(cwd)}`;
+      let msg = `✅ 已切换: **${label}**\n📁 ${path.basename(cwd)}\n🆔 \`${targetSessionId}\``;
       if (selectedLogicalCurrent) {
         msg += '\n\n已恢复当前智能体会话。';
       }

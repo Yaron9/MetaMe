@@ -293,6 +293,45 @@ describe('daemon-agent-commands /resume engine resolution', () => {
     assert.doesNotMatch(h.sent[0], /优先恢复当前智能体会话/);
   });
 
+  it('switches team-group resume targets onto the matched member session and sticky route', async () => {
+    const h = createHarness({
+      chatId: 'team-chat',
+      currentEngine: 'codex',
+      currentCwd: '/repo/main',
+      config: {
+        projects: {
+          jarvis: {
+            cwd: '/repo/main',
+            engine: 'codex',
+            team: [
+              { key: 'jia', cwd: '/repo/jia', engine: 'codex', nicknames: ['甲'] },
+            ],
+          },
+        },
+        feishu: {
+          chat_agent_map: {
+            'team-chat': 'jarvis',
+          },
+        },
+      },
+      sessions: [
+        { sessionId: 'sid-jia-history', projectPath: '/repo/jia', customTitle: 'jia x thread', engine: 'codex' },
+      ],
+    });
+
+    const handled = await h.handleAgentCommand({
+      bot: h.bot,
+      chatId: h.chatId,
+      text: '/resume sid-jia-history',
+      config: { projects: {} },
+    });
+
+    assert.equal(handled, true);
+    assert.equal(h.state.sessions._agent_jia.id, 'sid-jia-history');
+    assert.equal(h.state.team_sticky['team-chat'], 'jia');
+    assert.match(h.sent[0], /sid-jia-history/);
+  });
+
   it('shows recent dialogue after switching to an explicit history session', async () => {
     const h = createHarness({
       chatId: 'bound-chat',

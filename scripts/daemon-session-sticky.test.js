@@ -447,6 +447,27 @@ describe('Session Sticky — Team members (team_sticky)', () => {
     assert.equal(initLogs.length, 0,
       'jia: should not log SESSION-INIT');
   });
+
+  it('jia raw-chat sticky should apply to a new topic thread without creating a new session', async () => {
+    const { deps, attachCalls, logEntries } = createDeps();
+    const router = createCommandRouter(deps);
+    const bot = createBot([]);
+
+    await router.handleCommand(
+      bot,
+      'thread:oc_280f2c243f348d8f688580f882996bcd:om_resume_followup',
+      '接着刚才那个插件会话继续',
+      deps.loadConfig(),
+      () => {}
+    );
+
+    assert.equal(attachCalls.length, 0,
+      'jia topic follow-up: should reuse raw-chat sticky session');
+
+    const initLogs = logEntries.filter(e => e.msg.includes('SESSION-INIT'));
+    assert.equal(initLogs.length, 0,
+      'jia topic follow-up: should not log SESSION-INIT');
+  });
 });
 
 describe('Session Sticky — Virtual chatId agents (_agent_*)', () => {

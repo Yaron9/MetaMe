@@ -1,6 +1,10 @@
 'use strict';
 
 const { normalizeEngineName: _normalizeEngine } = require('./daemon-utils');
+const {
+  buildBoundSessionChatId,
+  resolveSessionRoute: _resolveSessionRoute,
+} = require('./core/team-session-route');
 
 function createCommandSessionResolver(deps) {
   const {
@@ -27,11 +31,6 @@ function createCommandSessionResolver(deps) {
     return available.length === 1 ? normalizeEngineName(available[0]) : getDefaultEngine();
   }
 
-  function buildBoundSessionChatId(projectKey) {
-    const key = String(projectKey || '').trim();
-    return key ? `_bound_${key}` : '';
-  }
-
   function normalizeRouteCwd(cwd) {
     if (!cwd) return null;
     try {
@@ -48,39 +47,15 @@ function createCommandSessionResolver(deps) {
   }
 
   function getSessionRoute(chatId) {
-    const cfg = loadConfig();
-    const state = loadState();
-    const chatKey = String(chatId);
-    const agentMap = { ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}), ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}) };
-    const boundKey = agentMap[chatKey] || null;
-    const boundProj = boundKey && cfg.projects ? cfg.projects[boundKey] : null;
-    const stickyKey = state && state.team_sticky ? state.team_sticky[chatKey] : null;
-    const stickyMember = stickyKey && boundProj && Array.isArray(boundProj.team)
-      ? boundProj.team.find((m) => m && m.key === stickyKey)
-      : null;
-
-    if (stickyMember) {
-      return {
-        sessionChatId: `_agent_${stickyMember.key}`,
-        cwd: normalizeRouteCwd(stickyMember.cwd || (boundProj && boundProj.cwd) || null),
-        engine: normalizeEngineName(stickyMember.engine || (boundProj && boundProj.engine)),
-      };
-    }
-
-    if (boundProj) {
-      return {
-        sessionChatId: buildBoundSessionChatId(boundKey),
-        cwd: normalizeRouteCwd(boundProj.cwd || null),
-        engine: normalizeEngineName(boundProj.engine),
-      };
-    }
-
-    const rawSession = getSession(chatId);
-    return {
-      sessionChatId: String(chatId),
-      cwd: rawSession && rawSession.cwd ? normalizeRouteCwd(rawSession.cwd) : null,
-      engine: inferStoredEngine(rawSession),
-    };
+    return _resolveSessionRoute({
+      chatId,
+      cfg: loadConfig(),
+      state: loadState(),
+      getSession,
+      normalizeCwd: normalizeRouteCwd,
+      normalizeEngineName,
+      inferStoredEngine,
+    });
   }
 
   function getActiveSession(chatId) {

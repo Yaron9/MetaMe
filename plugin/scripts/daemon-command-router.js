@@ -163,6 +163,7 @@ function createCommandRouter(deps) {
 
   function resolveCurrentSessionContext(chatId, config) {
     const chatIdStr = String(chatId || '');
+    const threadScoped = isThreadChatId(chatIdStr);
     const chatAgentMap = {
       ...(config && config.telegram ? config.telegram.chat_agent_map : {}),
       ...(config && config.feishu ? config.feishu.chat_agent_map : {}),
@@ -172,10 +173,19 @@ function createCommandRouter(deps) {
     const _rawChatId = extractOriginalChatId(chatIdStr);
     const mappedKey = chatAgentMap[chatIdStr] || chatAgentMap[_rawChatId] || projectKeyFromVirtualChatId(chatIdStr);
     const mappedProject = mappedKey && config && config.projects ? config.projects[mappedKey] : null;
-    const preferredEngine = String((mappedProject && mappedProject.engine) || getDefaultEngine()).toLowerCase();
     const state = loadState() || {};
     const sessions = state.sessions || {};
+    const stickyKey = state.team_sticky ? (state.team_sticky[chatIdStr] || state.team_sticky[_rawChatId]) : null;
+    const stickyMember = threadScoped && stickyKey && mappedProject && Array.isArray(mappedProject.team)
+      ? mappedProject.team.find((member) => member && member.key === stickyKey)
+      : null;
+    const preferredEngine = String(
+      (stickyMember && stickyMember.engine)
+      || (mappedProject && mappedProject.engine)
+      || getDefaultEngine()
+    ).toLowerCase();
     const candidateIds = [
+      stickyMember ? `_agent_${stickyMember.key}` : null,
       mappedKey ? buildSessionChatId(chatIdStr, mappedKey) : null,
       buildSessionChatId(chatIdStr),
       chatIdStr,
@@ -212,7 +222,8 @@ function createCommandRouter(deps) {
       ...(cfg.imessage ? cfg.imessage.chat_agent_map : {}),
       ...(cfg.siri_bridge ? cfg.siri_bridge.chat_agent_map : {}),
     };
-    const key = map[String(chatId)];
+    const chatIdStr = String(chatId);
+    const key = map[chatIdStr] || map[extractOriginalChatId(chatIdStr)];
     const proj = key && cfg.projects ? cfg.projects[key] : null;
     return { key: key || null, project: proj || null };
   }
@@ -387,17 +398,23 @@ function createCommandRouter(deps) {
     };
     const _chatIdStr = String(chatId);
     const _rawChatId2 = extractOriginalChatId(_chatIdStr);
+    const _threadScoped = isThreadChatId(_chatIdStr);
     const mappedKey = chatAgentMap[_chatIdStr] ||
       chatAgentMap[_rawChatId2] ||
       projectKeyFromVirtualChatId(_chatIdStr);
     if (mappedKey && config.projects && config.projects[mappedKey]) {
       const proj = config.projects[mappedKey];
-      const projCwd = normalizeCwd(proj.cwd);
-      const sessionChatId = buildSessionChatId(chatId, mappedKey);
+      const stickyKey = state && state.team_sticky ? (state.team_sticky[_chatIdStr] || state.team_sticky[_rawChatId2]) : null;
+      const stickyMember = _threadScoped && stickyKey && Array.isArray(proj.team)
+        ? proj.team.find((member) => member && member.key === stickyKey)
+        : null;
+      const targetEngine = (stickyMember && stickyMember.engine) || proj.engine || getDefaultEngine();
+      const projCwd = normalizeCwd((stickyMember && stickyMember.cwd) || proj.cwd);
+      const sessionChatId = stickyMember ? `_agent_${stickyMember.key}` : buildSessionChatId(chatId, mappedKey);
       const sessions = loadState().sessions || {};
       const cur = sessions[sessionChatId];
       const rawSession = sessions[String(chatId)];
-      const projEngine = String((proj && proj.engine) || getDefaultEngine()).toLowerCase();
+      const projEngine = String(targetEngine).toLowerCase();
       // Multi-engine format stores engines in cur.engines object; legacy format uses cur.engine string.
       // Check whether the session already has a slot for the project's configured engine.
       const curHasEngine = cur && (
@@ -408,6 +425,7 @@ function createCommandRouter(deps) {
       );
       const isVirtualSession = _chatIdStr.startsWith('_agent_') || _chatIdStr.startsWith('_scope_');
       const shouldReattachForCwdChange =
+        !stickyMember &&
         !isVirtualSession &&
         !!cur &&
         !!curHasEngine &&
@@ -416,7 +434,7 @@ function createCommandRouter(deps) {
       if (!cur || !curHasEngine || shouldReattachForCwdChange) {
         const initReason = !cur ? 'no-session' : (!curHasEngine ? 'engine-missing' : 'cwd-changed');
         log('INFO', `SESSION-INIT [${String(sessionChatId).slice(-32)}] ${initReason}`);
-        attachOrCreateSession(sessionChatId, projCwd, proj.name || mappedKey, proj.engine || getDefaultEngine());
+        attachOrCreateSession(sessionChatId, projCwd, proj.name || mappedKey, targetEngine);
       }
     }
 

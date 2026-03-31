@@ -960,6 +960,7 @@ function createSessionStore(deps) {
     const proj = s.projectPath ? path.basename(s.projectPath) : '~';
     const ago = getSessionRelativeTimeLabel(s);
     const shortId = s.sessionId.slice(0, 8);
+    const visibleId = s.sessionId.slice(0, 18);
     const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 3);
     const engineLabel = (s.engine || 'claude') === 'codex' ? 'codex' : 'claude';
 
@@ -972,6 +973,7 @@ function createSessionStore(deps) {
     if (firstSnippet) line += `\n   📝 ${firstSnippet}`;
     if (lastUserSnippet && lastUserSnippet !== firstSnippet) line += `\n   💬 ${lastUserSnippet}`;
     if (lastAiSnippet) line += `\n   🤖 ${lastAiSnippet}`;
+    line += `\n   ID ${visibleId}`;
     line += `\n   /resume ${shortId}`;
     return line;
   }
@@ -984,11 +986,12 @@ function createSessionStore(deps) {
       const title = sessionDisplayTitle(s, 60, sessionTags);
       const proj = s.projectPath ? path.basename(s.projectPath) : '~';
       const ago = getSessionRelativeTimeLabel(s);
-      const shortId = s.sessionId.slice(0, 6);
+      const visibleId = s.sessionId.slice(0, 18);
       const tags = (sessionTags[s.sessionId] && sessionTags[s.sessionId].tags || []).slice(0, 4);
       const engineLabel = (s.engine || 'claude') === 'codex' ? 'codex' : 'claude';
 
       let desc = `**${i + 1}. ${title}**\n📁${proj} · ${ago} · ${engineLabel}`;
+      desc += `\nID: ${visibleId}`;
       if (tags.length) desc += `\n${tags.map(t => `\`${t}\``).join(' ')}`;
       // Show first prompt, last user message, and last assistant reply
       const firstSnippet = _cleanSnippet(s.firstPrompt, 50);
@@ -998,7 +1001,7 @@ function createSessionStore(deps) {
       if (lastUserSnippet && lastUserSnippet !== firstSnippet) desc += `\n💬 ${lastUserSnippet}`;
       if (lastAiSnippet) desc += `\n🤖 ${lastAiSnippet}`;
       elements.push({ tag: 'div', text: { tag: 'lark_md', content: desc } });
-      elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Switch #${shortId}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
+      elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: `▶️ Resume ${visibleId}` }, type: 'primary', value: { cmd: `/resume ${s.sessionId}` } }] });
     });
     return elements;
   }
