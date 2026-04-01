@@ -9,8 +9,9 @@
     "files": [
         "index.js",
         "scripts/",
-        "!scripts/*.test.js",
+        "!scripts/**/*.test.js",
         "!scripts/test_daemon.js",
+        "!scripts/sync-readme.js",
         "!scripts/hooks/test-*.js",
         "!scripts/daemon.yaml",
         "!scripts/daemon.yaml.bak",
