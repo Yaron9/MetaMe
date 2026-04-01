@@ -431,7 +431,8 @@ function createCommandRouter(deps) {
         !!curHasEngine &&
         cur.cwd !== projCwd &&
         !rawHasEngine;
-      if (!cur || !curHasEngine || shouldReattachForCwdChange) {
+      const _isControlCmd = text && /^\/(stop|quit)$/.test(text.trim());
+      if (!_isControlCmd && (!cur || !curHasEngine || shouldReattachForCwdChange)) {
         const initReason = !cur ? 'no-session' : (!curHasEngine ? 'engine-missing' : 'cwd-changed');
         log('INFO', `SESSION-INIT [${String(sessionChatId).slice(-32)}] ${initReason}`);
         attachOrCreateSession(sessionChatId, projCwd, proj.name || mappedKey, targetEngine);

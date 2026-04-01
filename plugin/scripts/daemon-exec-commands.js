@@ -4,6 +4,7 @@ const { classifyTaskUsage } = require('./usage-classifier');
 const { normalizeModel } = require('./daemon-task-scheduler');
 const { resolveEngineModel } = require('./daemon-engine-runtime');
 const { createCommandSessionResolver } = require('./daemon-command-session-route');
+const { isThreadChatId: _isThreadChatId, rawChatId: _rawThreadChatId } = require('./core/thread-chat-id');
 
 function createExecCommandHandler(deps) {
   const {
@@ -218,7 +219,12 @@ function createExecCommandHandler(deps) {
       const _pl = pipeline && pipeline.current;
       if (_pl) {
         _pl.clearQueue(chatId);
-        const stopped = _pl.interruptActive(chatId);
+        let stopped = _pl.interruptActive(chatId);
+        if (!stopped && _isThreadChatId(chatId)) {
+          // Thread-scoped /stop: fall back to raw chatId (task may be keyed at group level).
+          // Do NOT clearQueue(_raw) — that would discard queued tasks from other threads.
+          stopped = _pl.interruptActive(_rawThreadChatId(chatId));
+        }
         if (stopped) {
           await bot.sendMessage(chatId, '⏹ Stopping current engine task...');
         } else {
@@ -226,7 +232,8 @@ function createExecCommandHandler(deps) {
         }
       } else {
         // Fallback: direct activeProcesses manipulation (pipeline not yet initialized)
-        const proc = activeProcesses.get(chatId);
+        const _raw = _isThreadChatId(chatId) ? _rawThreadChatId(chatId) : null;
+        const proc = activeProcesses.get(chatId) || (_raw && activeProcesses.get(_raw));
         if (proc && proc.child) {
           proc.aborted = true;
           const signal = proc.killSignal || 'SIGTERM';
@@ -248,9 +255,12 @@ function createExecCommandHandler(deps) {
       const _pl = pipeline && pipeline.current;
       if (_pl) {
         _pl.clearQueue(chatId);
-        _pl.interruptActive(chatId);
+        if (!_pl.interruptActive(chatId) && _isThreadChatId(chatId)) {
+          _pl.interruptActive(_rawThreadChatId(chatId));
+        }
       } else {
-        const proc = activeProcesses.get(chatId);
+        const _raw = _isThreadChatId(chatId) ? _rawThreadChatId(chatId) : null;
+        const proc = activeProcesses.get(chatId) || (_raw && activeProcesses.get(_raw));
         if (proc && proc.child) {
           proc.aborted = true;
           const signal = proc.killSignal || 'SIGTERM';
