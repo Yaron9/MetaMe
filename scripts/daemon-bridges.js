@@ -224,6 +224,21 @@ function createBridgeStarter(deps) {
       },
     });
   }
+
+  function _createPipelineTarget({ pipelineChatId, effectiveChatId, bot }) {
+    const replyChatId = String(pipelineChatId || '').trim();
+    const processChatId = String(effectiveChatId || pipelineChatId || '').trim();
+    if (!replyChatId || !processChatId) {
+      return { processChatId: replyChatId || processChatId, bot };
+    }
+    if (replyChatId === processChatId) {
+      return { processChatId, bot };
+    }
+    return {
+      processChatId,
+      bot: _createTeamProxyBot(bot, replyChatId),
+    };
+  }
   // Get team member's working directory inside the source tree, never under ~/.metame.
   // Creates agents/<key>/ directory by default, or ensures an explicit member.cwd exists.
   function _getMemberCwd(parentCwd, key, explicitCwd = null) {
@@ -877,6 +892,13 @@ function createBridgeStarter(deps) {
           // Use pipelineChatId so each topic gets independent sticky state
           const _chatKey = String(pipelineChatId);
           const _rawChatKey = _threadRawChatId(_chatKey);
+          const _topicMainRoute = !!(
+            threadRootId
+            && _parentMapping
+            && !_isQuotedReply
+            && _parentMapping.logicalChatId
+            && !String(_parentMapping.logicalChatId).startsWith('_agent_')
+          );
           const _setSticky = (key) => {
             if (!_st.team_sticky) _st.team_sticky = {};
             _st.team_sticky[_chatKey] = key;
@@ -899,6 +921,11 @@ function createBridgeStarter(deps) {
             saveState(_st);
           };
           let _stickyKey = (_st.team_sticky || {})[_chatKey] || (_st.team_sticky || {})[_rawChatKey] || null;
+          const _pipelineTarget = _createPipelineTarget({
+            pipelineChatId,
+            effectiveChatId: _topicMainRoute ? chatId : pipelineChatId,
+            bot,
+          });
 
           // Team group routing: if bound project has a team array, check message for member nickname
           // Non-/stop slash commands bypass team routing → handled by main project
@@ -978,7 +1005,13 @@ function createBridgeStarter(deps) {
               // Cases b & c: no agentKey (main agent) or stale/unknown agentKey
               _clearSticky();
               log('INFO', `Quoted reply → route to main (agentKey=${_replyAgentKey} mappingFound=${_replyMappingFound})`);
-              await pipeline.processMessage(pipelineChatId, trimmedText, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
+              await pipeline.processMessage(_pipelineTarget.processChatId, trimmedText, {
+                bot: _pipelineTarget.bot,
+                config: liveCfg,
+                executeTaskByName,
+                senderId: acl.senderId,
+                readOnly: acl.readOnly,
+              });
               return;
             }
             // 1. Explicit nickname → route + set sticky
@@ -1034,7 +1067,13 @@ function createBridgeStarter(deps) {
                     return;
                   }
               try {
-                await pipeline.processMessage(pipelineChatId, rest, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
+                await pipeline.processMessage(_pipelineTarget.processChatId, rest, {
+                  bot: _pipelineTarget.bot,
+                  config: liveCfg,
+                  executeTaskByName,
+                  senderId: acl.senderId,
+                  readOnly: acl.readOnly,
+                });
               } catch (e) {
                 log('ERROR', `Team main-route handleCommand failed: ${e.message}`);
                 bot.sendMessage(pipelineChatId, `❌ 执行失败: ${e.message}`).catch(() => {});
@@ -1058,7 +1097,13 @@ function createBridgeStarter(deps) {
           }
 
           try {
-            await pipeline.processMessage(pipelineChatId, text, { bot, config: liveCfg, executeTaskByName, senderId: acl.senderId, readOnly: acl.readOnly });
+            await pipeline.processMessage(_pipelineTarget.processChatId, text, {
+              bot: _pipelineTarget.bot,
+              config: liveCfg,
+              executeTaskByName,
+              senderId: acl.senderId,
+              readOnly: acl.readOnly,
+            });
           } catch (e) {
             log('ERROR', `Feishu handleCommand failed for ${chatId}: ${e.message}`);
             bot.sendMessage(pipelineChatId, `❌ 命令执行失败: ${e.message}`).catch(() => {});
