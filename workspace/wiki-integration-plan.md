@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS wiki_topics (
 **主题注册责任点（明确）：**
 - `saveFacts()` 批次写入后，对满足门槛的 dirty tags 调用 `upsertWikiTopic(tag)`
   - 门槛：该 tag 的 active raw facts ≥ 5 AND 30d 内有新增
-  - slug 由 `core/wiki-model.js::toSlug(tag)` 生成：
+  - slug 由 `core/wiki-slug.js::toSlug(tag)` 生成：
     ```javascript
     function toSlug(tag) {
       const base = tag.toLowerCase()
@@ -231,7 +231,8 @@ staleness: 0.0
 
    c. 检查 wiki_pages.staleness：
       - 不存在 OR staleness ≥ 0.4 → 重建
-      - staleness < 0.4 AND slug NOT IN failed_slugs_last_run → 跳过
+      - slug 在 failedSlugsMap（loadFailedSlugs 返回）中且满足重试条件 → 重建（绕过 0.4 阈值）
+      - 其余 → 跳过
 
    d. callHaiku(prompt, env, 30000, { model: 'haiku' })
       → 失败：记录到 failed_slugs，continue 下一页
@@ -240,19 +241,20 @@ staleness: 0.0
       - 校验失败策略：剥除无效链接（`[[bad-slug]]` → `bad-slug`），不拒绝整页
       - 剥除的链接记录到审计日志，不阻断写入流程
 
-   f. BEGIN TRANSACTION：
-      - UPSERT wiki_pages（
-          primary_topic = topic.tag,
-          slug = topic.slug,
-          raw_source_count = totalCount,       -- Step 1 无截断总数，非 rawFacts.length
-          raw_source_ids = rawFacts.map(r=>r.id),  -- top 30 facts 的 ID 列表
-          capsule_refs = capsuleFiles,         -- 步骤 b 查询到的 capsule 文件名列表
-          staleness = 0,
-          new_facts_since_build = 0,
-          last_built_at = datetime('now')）
-        注：primary_topic 由调用方赋值，非 LLM；rebuild 时 raw_source_ids/capsule_refs 全量替换
-      - 写 ~/.metame/wiki/<slug>.md（frontmatter + content）
-      COMMIT（写 DB 成功但文件写失败 → ROLLBACK，记录 failed_slugs）
+   f. 两步分离（DB 是真相源，文件是可重建缓存，无需跨步骤事务）：
+
+      Step f-1：wiki-reflect-build.js 负责
+        BEGIN TRANSACTION
+          UPSERT wiki_pages（primary_topic, slug, raw_source_count=totalCount,
+            raw_source_ids, capsule_refs, staleness=0, new_facts_since_build=0,
+            last_built_at=datetime('now')）
+        COMMIT
+        → 失败：ROLLBACK，记录 failed_slugs，continue（跳过文件导出）
+
+      Step f-2：wiki-reflect-export.js 负责（在 f-1 COMMIT 成功后调用）
+        exportWikiPage(slug, frontmatter, content, outputDir)
+        → 失败：仅记录 export_failed_slugs，不回滚 DB
+          （DB 已有正确内容，下次 /wiki sync 会重新导出）
 
 4. 重建 _index.md
 5. 释放进程锁
@@ -381,83 +383,184 @@ function searchWikiAndFacts(db, query, { trackSearch = true } = {}) {
 
 ## 八、新增/修改文件清单（Unix 哲学：一文件一职责）
 
-### 新增文件
+### 职责边界图（先看全局）
 
-**core/ — 纯逻辑，零副作用，全部可单测**
+```
+memory-wiki-schema.js  ← DDL only（建表 + triggers）
+                              ↓
+core/wiki-slug.js      ← 纯函数：string → string（toSlug, sanitizeFts5）
+core/wiki-staleness.js ← 纯函数：numbers → number（calcStaleness 只做计算）
+core/wiki-prompt.js    ← 纯函数：data → string（buildWikiPrompt, validateWikilinks）
+core/wiki-db.js        ← DB 读写（CRUD + staleness UPDATE + searchWikiAndFacts）
+                              ↓
+wiki-reflect-query.js  ← 读 DB（无写，无 LLM，无文件 IO）
+wiki-reflect-build.js  ← 调 LLM + 写 DB（无文件 IO）
+wiki-reflect-export.js ← 写文件（无 DB，无 LLM）
+wiki-reflect.js        ← 编排器（持锁，按序调用上面三个）
+daemon-wiki.js         ← 用户命令（调编排器，格式化 Feishu 消息）
+```
 
-| 文件 | 单一职责 | 导出 | 行数 |
-|------|---------|------|------|
-| `core/wiki-slug.js` | slug 生成、碰撞处理、FTS5 输入安全 | `toSlug`, `sanitizeFts5` | ~50 |
-| `core/wiki-staleness.js` | staleness 公式计算、dirty-tag 聚合 | `calcStaleness`, `updateStalenessForTags` | ~60 |
-| `core/wiki-prompt.js` | Haiku prompt 构建、wikilink 校验与剥除 | `buildWikiPrompt`, `validateWikilinks` | ~70 |
-| `core/wiki-db.js` | wiki_pages / wiki_topics CRUD（纯 SQL 封装）| `getWikiPage`, `upsertWikiPage`, `upsertWikiTopic`, `listWikiTopics`, `searchWikiAndFacts` | ~100 |
+关键规则：
+- `core/wiki-staleness.js` 只导出 `calcStaleness`（纯函数）；`updateStalenessForTags`（含 DB 写）归 `core/wiki-db.js`
+- `wiki-reflect-build.js` 不碰文件 IO；`wiki-reflect-export.js` 不碰 DB
+- `core/wiki-prompt.js::validateWikilinks(content, allowedSlugs)` 白名单显式入参，无隐藏 DB 依赖
 
-**scripts/ — 有副作用的执行层，每文件一个流程**
+---
 
-| 文件 | 单一职责 | 调用 | 行数 |
-|------|---------|------|------|
-| `memory-wiki-schema.js` | wiki 表 DDL + FTS5 triggers（一次性初始化）| 由 `memory.js` init 时 require | ~80 |
-| `wiki-reflect-query.js` | 从 memory.db 查 raw facts（两步：COUNT + top30）和 capsule 摘要 | `queryRawFacts(db, tag)` → `{totalCount, facts, capsuleRefs}` | ~60 |
-| `wiki-reflect-build.js` | 单页合成：LLM call → 校验 → DB+文件写入（事务） | `buildWikiPage(db, topic, queryResult, opts)` | ~100 |
-| `wiki-reflect-export.js` | 文件系统导出：原子写（tmp→rename）+ `_index.md` 重建 | `exportWikiPage(slug, frontmatter, content, dir)`, `rebuildIndex(db, dir)` | ~80 |
-| `wiki-reflect.js` | **编排器**：进程锁 → 遍历 topics → 调 query/build/export → 审计日志 | 组合上面三个模块 | ~80 |
-| `daemon-wiki.js` | `/wiki` 命令路由与 Feishu 消息格式化 | — | ~150 |
+### 新增文件与完整接口签名
 
-**test/**
+**`core/wiki-slug.js`** — 纯函数，~50 行
+```javascript
+toSlug(tag: string) → string          // 空串抛异常；碰撞由调用方处理
+sanitizeFts5(input: string) → string|null  // null 表示不可查询
+```
 
-| 文件 | 覆盖 | 行数 |
-|------|------|------|
-| `core/wiki-slug.test.js` | toSlug 边界、碰撞、空串、危险字符 | ~50 |
-| `core/wiki-staleness.test.js` | staleness 公式、批量更新、primary_topic 精确匹配 | ~60 |
-| `core/wiki-prompt.test.js` | prompt 构建、wikilink 校验、无效链接剥除 | ~60 |
-| `wiki-reflect.test.js` | 端到端：mock callHaiku + 临时 DB，覆盖并发锁、失败重试、事务回滚 | ~120 |
-| `daemon-wiki.test.js` | 命令解析、E2E 链路（/wiki pin → sync → research → GC）| ~150 |
+**`core/wiki-staleness.js`** — 纯函数，~30 行
+```javascript
+calcStaleness(newFacts: number, rawSourceCount: number) → number  // [0,1]
+// updateStalenessForTags 含 DB 写 → 移到 core/wiki-db.js
+```
+
+**`core/wiki-prompt.js`** — 纯函数，~70 行
+```javascript
+buildWikiPrompt(topic: {tag,slug,label}, facts: object[], capsuleExcerpts: string, allowedSlugs: string[]) → string
+validateWikilinks(content: string, allowedSlugs: string[]) → { content: string, stripped: string[] }
+// 返回清洗后正文 + 被剥除的无效 slug 列表（供审计日志）
+```
+
+**`core/wiki-db.js`** — DB 读写，~120 行
+```javascript
+// wiki_pages CRUD
+getWikiPageBySlug(db, slug)                          → row | null
+listWikiPages(db, { limit=20, orderBy='updated_at' }) → row[]
+getStalePages(db, threshold=0.4)                      → row[]   // for /wiki sync
+upsertWikiPage(db, { slug, primary_topic, title, content, raw_source_ids,
+                     capsule_refs, raw_source_count, topic_tags })  → void
+resetPageStaleness(db, slug, rawSourceCount)          → void   // wiki-reflect 重建后调用
+
+// wiki_topics CRUD
+upsertWikiTopic(db, tag, { label, pinned=0, force=false }) → { slug, isNew }
+// slug 碰撞：追加 -2/-3，最多 10 次；空串抛异常；force=true 跳过门槛
+checkTopicThreshold(db, tag)  → boolean
+// 同时满足两个独立条件才返回 true：
+//   条件1：SELECT COUNT(*) >= 5（lifetime，全量 active raw facts，无时间限制）
+//   条件2：SELECT COUNT(*) >= 1 WHERE created_at >= datetime('now','-30 days')（UTC）
+// 两条分开查询，逻辑 AND，任一不满足返回 false
+listWikiTopics(db)             → row[]
+
+// 搜索
+searchWikiAndFacts(db, query, { trackSearch=true }) → { wikiPages, facts }
+
+// staleness（含 DB 写，不属于纯函数层）
+updateStalenessForTags(db, dirtyTagCounts: Map<tag,count>) → void
+```
+
+**`memory-wiki-schema.js`** — DDL only，~80 行
+- 建 wiki_pages、wiki_topics 表
+- 建 wiki_pages_fts + 三个 trigger（INSERT/UPDATE/DELETE）
+- 幂等（IF NOT EXISTS + IF NOT EXISTS trigger）
+
+**`wiki-reflect-query.js`** — 读 DB，~60 行
+```javascript
+queryRawFacts(db, tag) → { totalCount: number, facts: object[], capsuleExcerpts: string }
+// totalCount = COUNT（无 LIMIT，staleness 分母）
+// facts = top 30（ORDER BY search_count DESC，LLM prompt 用）
+// capsuleExcerpts = 相关 capsule 文件前 200 字拼接（辅助背景）
+```
+
+**`wiki-reflect-build.js`** — 调 LLM + 写 DB，**不碰文件**，~100 行
+```javascript
+buildWikiPage(db, topic, queryResult, { allowedSlugs, providers })
+→ { slug, content, strippedLinks: string[], rawSourceIds: string[] } | null
+// null = LLM 失败；DB 写用 resetPageStaleness；事务在此文件内
+```
+
+**`wiki-reflect-export.js`** — 写文件，**不碰 DB**，~80 行
+```javascript
+exportWikiPage(slug, frontmatter, content, outputDir) → void
+// 先写 <slug>.md.tmp，成功后 rename（原子性）
+// 若 .tmp 已存在（上次中断）先删除再写
+rebuildIndex(pages: object[], outputDir) → void
+// pages 由调用方从 DB 查询传入，此文件不直接访问 DB
+```
+
+**`wiki-reflect.js`** — 编排器，~100 行
+```javascript
+// 职责：进程锁 → 读 topics → 循环（query→build→export）→ 失败收集 → 审计日志
+
+// failed_slugs 读写接口（本文件负责）：
+// loadFailedSlugs(logPath) → Map<slug, { retries, next_retry: ISO-string }>
+//   读最近一条日志 failed_slugs 数组转为 Map
+
+// 本轮重试判断：
+//   retries < 3 AND Date.now() >= Date.parse(next_retry) → 加入本轮（绕过 0.4 阈值）
+//   retries >= 3 → 标记 permanent_error，本轮跳过
+//   permanent_error 存储：在审计日志对象中写 { slug, retries: 3, next_retry: null, permanent_error: true }
+
+// 审计日志格式（追加到 wiki_reflect_log.jsonl）：
+// {
+//   ts: string,                           // ISO-8601
+//   slugs_built: string[],
+//   export_failed_slugs: string[],        // DB 已写成功，文件写失败（下次重新导出）
+//   failed_slugs: [                       // LLM/DB 失败
+//     { slug, retries: number, next_retry: string }  // next_retry = now + 2^retries days
+//   ],
+//   stripped_links: { [slug]: string[] },
+//   duration_ms: number
+// }
+```
+
+**`daemon-wiki.js`** — 命令 handler，~150 行
+```javascript
+// 子命令分发：/wiki → listWikiPages；/wiki research → searchWikiAndFacts（trackSearch:true）
+// /wiki page <slug> → getWikiPageBySlug；/wiki sync → wiki-reflect（staleness≥0.4，与周任务相同）
+// /wiki pin <tag> <title> → upsertWikiTopic(force:true, pinned:1)
+```
+
+---
+
+### 测试文件
+
+| 文件 | 覆盖要点 | 行数 |
+|------|---------|------|
+| `core/wiki-slug.test.js` | toSlug 边界/碰撞/空串/危险字符，sanitizeFts5 | ~50 |
+| `core/wiki-staleness.test.js` | calcStaleness 公式边界（0/1 极值） | ~30 |
+| `core/wiki-prompt.test.js` | buildWikiPrompt 结构，validateWikilinks 剥除+返回列表 | ~60 |
+| `core/wiki-db.test.js` | checkTopicThreshold SQL、updateStalenessForTags 精确匹配 primary_topic | ~80 |
+| `wiki-reflect.test.js` | mock callHaiku + 临时 DB：并发锁、失败重试退避、事务回滚、tmp 文件恢复 | ~120 |
+| `daemon-wiki.test.js` | E2E：/wiki pin → saveFacts → /wiki sync → /wiki research → GC 清理 | ~150 |
+
+---
 
 ### 修改文件
 
-| 文件 | 改动范围 |
-|------|---------|
-| `scripts/memory.js` | `require('./memory-wiki-schema')` 初始化；`saveFacts` 后调 `updateStalenessForTags` |
+| 文件 | 改动 |
+|------|------|
+| `scripts/memory.js` | require wiki-schema；`saveFacts` 后调 `updateStalenessForTags` + `checkTopicThreshold`/`upsertWikiTopic` |
 | `scripts/memory-search.js` | CLI 扩展：调 `searchWikiAndFacts`，透传 `trackSearch` |
-| `scripts/memory-gc.js` | 新增 wiki 孤儿页三步清理 |
-| `scripts/memory-index.js` | 扫描 wiki/ 目录 |
+| `scripts/memory-gc.js` | wiki 孤儿页三步清理：DELETE wiki_pages → unlink .md → 清理 wiki_topics |
+| `scripts/memory-index.js` | 扫描 wiki/ 目录纳入 INDEX.md |
 | `scripts/daemon-command-router.js` | 注册 /wiki 路由 |
-| `scripts/daemon-default.yaml` | 新增 wiki-reflect 定时任务（每周一 03:00）|
-
-### 职责边界图
-
-```
-memory-wiki-schema.js  ← 表结构（DDL only）
-core/wiki-db.js        ← CRUD（SQL only，无文件 IO）
-core/wiki-slug.js      ← 纯函数（string → string）
-core/wiki-staleness.js ← 纯函数（numbers → number）+ DB UPDATE
-core/wiki-prompt.js    ← 纯函数（data → string）+ wikilink 校验
-
-wiki-reflect-query.js  ← 读 DB（无写，无 LLM）
-wiki-reflect-build.js  ← 写 DB + 调 LLM（无文件 IO）
-wiki-reflect-export.js ← 写文件（无 DB，无 LLM）
-wiki-reflect.js        ← 编排器（组合上面三个，持锁）
-daemon-wiki.js         ← 用户命令（调编排器 + 格式化回复）
-```
+| `scripts/daemon-default.yaml` | 新增 wiki-reflect 定时任务（周一 03:00）|
 
 ---
 
 ## 九、实现顺序
 
-**Phase 1（完整可用闭环，用户可真实使用）：**
-1. `memory-wiki-schema.js` — 建表 + FTS5 + triggers（DDL only）
-2. `core/wiki-slug.js` — toSlug + sanitizeFts5（纯函数，先写测试）
-3. `core/wiki-staleness.js` — staleness 公式 + updateStalenessForTags（先写测试）
-4. `core/wiki-prompt.js` — buildWikiPrompt + validateWikilinks（先写测试）
-5. `core/wiki-db.js` — CRUD：getWikiPage / upsertWikiPage / upsertWikiTopic / searchWikiAndFacts
-6. `memory.js` — require wiki-schema；saveFacts 后调 updateStalenessForTags
-7. `wiki-reflect-query.js` — queryRawFacts（两步 COUNT + top30）
-8. `wiki-reflect-build.js` — 单页合成（LLM + 校验 + DB 事务）
-9. `wiki-reflect-export.js` — 原子文件写入 + _index.md 重建
-10. `wiki-reflect.js` — 编排器（进程锁 + 循环 + 失败重试 + 审计日志）
-11. `daemon-wiki.js` — /wiki 命令 handler
+**Phase 1（完整可用闭环）：**
+1. `memory-wiki-schema.js` — DDL only（无外部依赖，最先建）
+2. `core/wiki-slug.js` + 测试 — 纯函数，先测后写
+3. `core/wiki-staleness.js` + 测试 — 纯函数，calcStaleness only
+4. `core/wiki-prompt.js` + 测试 — 纯函数，validateWikilinks 需 allowedSlugs 显式入参
+5. `core/wiki-db.js` + 测试 — 依赖 schema，补全所有签名（含 checkTopicThreshold、updateStalenessForTags、listWikiPages、getStalePages）
+6. `memory.js` — require wiki-schema；saveFacts 后依次调 updateStalenessForTags + checkTopicThreshold/upsertWikiTopic
+7. `wiki-reflect-query.js` — queryRawFacts（COUNT + top30 + capsuleExcerpts）
+8. `wiki-reflect-export.js` — 先于 build 定义文件写契约（tmp→rename + rebuildIndex）
+9. `wiki-reflect-build.js` — 依赖 export 契约；LLM call + DB 写（无文件 IO）
+10. `wiki-reflect.js` — 编排器（锁 + 循环 + failed_slugs 退避 + 审计日志）
+11. `daemon-wiki.js` — 依赖 wiki-db.js 完整 API
 12. `daemon-command-router.js` — 路由注册（Phase 1 必须）
-13. 单测全覆盖
+13. 全测试（含 E2E daemon-wiki.test.js）
 
 **Phase 2（集成调度 + 用户入口补全）：**
 7. `daemon-default.yaml` — 定时任务（周一 03:00 本地时区）
@@ -480,12 +583,15 @@ daemon-wiki.js         ← 用户命令（调编排器 + 格式化回复）
 | staleness 公式 | `new_facts / (raw_source_count + new_facts)`，仅统计 raw facts |
 | staleness 阈值 | 统一 ≥ 0.4，`/wiki sync` 与周任务相同 |
 | staleness 更新粒度 | `saveFacts` 批次聚合 dirty tags，一次 UPDATE |
-| trackSearch 语义 | 用户命令 `true`，系统内部 `false`，实现在 `memory.js::searchWikiAndFacts` |
+| trackSearch 语义 | 用户命令 `true`，系统内部 `false`，实现在 `core/wiki-db.js::searchWikiAndFacts` |
+| updateStalenessForTags 归属 | `core/wiki-db.js`（含 DB 写，非纯函数）；`core/wiki-staleness.js` 只导出 `calcStaleness` 纯函数 |
+| failed_slugs 退避 | 最多重试 3 次（间隔 1d/2d/4d），超出写 `permanent_error`，持久化在 `wiki_reflect_log.jsonl` |
+| topic 门槛 SQL | `checkTopicThreshold(db, tag)`，判定用 UTC（`datetime('now')` 默认 UTC）|
 | tag 匹配 | `json_each` + `lower(trim(...))`，入口归一化 |
 | topic 注册责任 | `saveFacts` 后自动 upsert（≥5 raw facts + 30d）+ 用户 `/wiki pin` |
 | pinned 字段 | 在 `wiki_topics.pinned`，GC 用 subquery，NOT NULL slug 防 NOT IN 失效 |
 | 进程锁 | `wiki-reflect.lock`（O_EXCL，10min 超时）|
-| 事务边界 | 每页 BEGIN/COMMIT，写文件失败 ROLLBACK，记 failed_slugs |
+| 事务边界 | build 只负责 DB 事务（BEGIN/COMMIT）；文件写失败不回滚 DB（DB 是真相源，文件是缓存，记 export_failed_slugs 下次重导）|
 | 失败重试 | `wiki_reflect_log.jsonl` 记录 failed_slugs，下次优先 |
 | callHaiku 签名 | `callHaiku(text, buildDistillEnv(), 30000, { model: 'haiku' })` |
 | GC 三步 | DELETE wiki_pages → unlink .md → 可选清理 wiki_topics |
@@ -494,7 +600,7 @@ daemon-wiki.js         ← 用户命令（调编排器 + 格式化回复）
 | `/wiki research` 答案 | 零 LLM 零 token，程序格式化；无命中给 `/wiki add` 引导 |
 | wiki_output_dir | 可配置，默认 `~/.metame/wiki/` |
 | last_built_at vs updated_at | `last_built_at` = wiki-reflect 重建内容时间（用户可见）；`updated_at` = 行修改时间（含 staleness 自增），不对外展示 |
-| 页与 topic 基数 | 1:1（wiki_topics.slug ↔ wiki_pages.slug）；`topic_tags` 可含多个 tag 供跨主题检索命中，但每页只属于一个 primary topic |
+| topic_tags V1 规则 | V1：`topic_tags = JSON_ARRAY(primary_topic)`（单值，由 wiki-reflect-build.js 写入）；V2 再扩展多 tag 跨主题检索 |
 | staleness 自增实现 | `dirtyTagCounts: Map<tag, count>`，`saveFacts` 按本批命中数自增，不查 watermark |
 | primary_topic 归属 | `wiki_pages.primary_topic` = 主责 tag（1:1 wiki_topics.tag），staleness 只对 `primary_topic` 精确更新；`topic_tags` 含次级 tag 仅供检索，不触发 staleness |
 | slug 安全生成 | `toSlug(tag)`: 只保留字母/数字/中文/空格/连字符，其余剥除，`/:\[\]?` 等路径危险字符不允许 |
@@ -514,11 +620,11 @@ daemon-wiki.js         ← 用户命令（调编排器 + 格式化回复）
 | 优先级 | 项目 | 要求 |
 |--------|------|------|
 | High | 文件写入原子性 | 先写 `<slug>.md.tmp`，COMMIT 成功后 rename；`_index.md` 重建失败不阻塞；启动时若检测到 `.tmp` 文件则视为上次中断，重建并清理 |
-| Medium | failed_slugs 持久化 | `wiki_reflect_log.jsonl` 每次运行追加一行：`{ts, status, slugs_built, failed_slugs: ["session-management", ...], duration_ms}`；下次运行先读最近一条，`failed_slugs` 绕过 staleness 阈值直接重建，最多重试 3 次（每次指数退避 +1d），超出则标记 `error:permanent` |
+| Medium | failed_slugs 持久化 | `wiki_reflect_log.jsonl` 每次运行追加一行，`failed_slugs` 为对象数组（与 Section 8 一致）：`{ ts, slugs_built, export_failed_slugs, failed_slugs: [{ slug, retries, next_retry }], stripped_links, duration_ms }`；`loadFailedSlugs` 读最近一条转为 Map；retries < 3 AND now >= next_retry 则本轮重建（绕过 0.4 阈值）；retries >= 3 标记 permanent_error |
 | Medium | topic 门槛 SQL | `SELECT COUNT(*) FROM memory_items mi JOIN json_each(mi.tags) jt ON lower(trim(jt.value))=lower(:tag) WHERE mi.state='active' AND (mi.relation NOT IN (...) OR mi.relation IS NULL) AND mi.created_at >= datetime('now','-30 days')` — 统一 UTC（`datetime('now')` 是 UTC，与现有 nightly-reflect 一致）|
 | Medium | topic_tags 生成规则 | V1 收敛为 `topic_tags = JSON_ARRAY(primary_topic)`（单值），次级 tag 等 V2 再扩展；rebuild 时 topic_tags 由程序写入，非 LLM 决定 |
 | Low | E2E 测试链 | `daemon-wiki.test.js` 必须覆盖：`/wiki pin` → `saveFacts` → `/wiki sync` → `/wiki research` → GC 文件清理 的完整链路 |
 
 ---
 
-_文档版本: v1.4 — Unix 哲学模块化重构，Codex 放行（88/100）_
+_文档版本: v1.7 — Codex 放行（Go，8/10）_
