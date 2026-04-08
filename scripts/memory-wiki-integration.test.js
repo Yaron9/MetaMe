@@ -46,13 +46,13 @@ function buildTestDb() {
   return db;
 }
 
-// Seed N active raw facts with a given tag
-function seedFacts(db, tag, n) {
+// Seed N facts with a given state and tag
+function seedFacts(db, tag, n, state = 'active') {
   for (let i = 0; i < n; i++) {
     db.prepare(`
       INSERT INTO memory_items (id, kind, state, content, tags, created_at)
-      VALUES (?, 'insight', 'active', 'fact content', ?, datetime('now'))
-    `).run(`id_${tag}_${i}`, JSON.stringify([tag]));
+      VALUES (?, 'insight', ?, 'fact content', ?, datetime('now'))
+    `).run(`id_${tag}_${state}_${i}`, state, JSON.stringify([tag]));
   }
 }
 
@@ -84,11 +84,11 @@ test('updateStalenessForTags increments staleness on existing wiki pages', () =>
   db.close();
 });
 
-test('checkTopicThreshold returns false for tags with < 5 active facts', () => {
+test('checkTopicThreshold returns false for tags with < 5 facts (active or candidate)', () => {
   const db = buildTestDb();
   const { checkTopicThreshold } = require('./core/wiki-db');
 
-  seedFacts(db, 'sparse-topic', 3);
+  seedFacts(db, 'sparse-topic', 3, 'candidate');
   const passes = checkTopicThreshold(db, 'sparse-topic');
   assert.equal(passes, false, 'should not pass threshold with only 3 facts');
   db.close();
@@ -98,9 +98,20 @@ test('checkTopicThreshold returns true when tag has ≥5 active facts including 
   const db = buildTestDb();
   const { checkTopicThreshold } = require('./core/wiki-db');
 
-  seedFacts(db, 'dense-topic', 6);
+  seedFacts(db, 'dense-topic', 6, 'active');
   const passes = checkTopicThreshold(db, 'dense-topic');
   assert.equal(passes, true, 'should pass threshold with 6 active facts all recent');
+  db.close();
+});
+
+test('checkTopicThreshold returns true with ≥5 candidate facts (no active needed)', () => {
+  const db = buildTestDb();
+  const { checkTopicThreshold } = require('./core/wiki-db');
+
+  // Simulate facts freshly saved by saveFacts (state='candidate')
+  seedFacts(db, 'candidate-topic', 6, 'candidate');
+  const passes = checkTopicThreshold(db, 'candidate-topic');
+  assert.equal(passes, true, 'should pass threshold with 6 candidate facts (state=candidate)');
   db.close();
 });
 

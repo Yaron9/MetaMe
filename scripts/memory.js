@@ -48,12 +48,6 @@ function getDb() {
   _db.exec('PRAGMA journal_mode = WAL');
   _db.exec('PRAGMA busy_timeout = 3000');
 
-  // Apply wiki schema (idempotent)
-  try {
-    const { applyWikiSchema } = require('./memory-wiki-schema');
-    applyWikiSchema(_db);
-  } catch { /* non-fatal: wiki schema optional */ }
-
   _db.exec(`
     CREATE TABLE IF NOT EXISTS memory_items (
       id              TEXT PRIMARY KEY,
@@ -113,6 +107,12 @@ function getDb() {
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_project ON memory_items(project)'); } catch { }
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_scope ON memory_items(scope)'); } catch { }
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_supersedes ON memory_items(supersedes_id)'); } catch { }
+
+  // Apply wiki schema after memory_items is fully initialized (idempotent, non-fatal)
+  try {
+    const { applyWikiSchema } = require('./memory-wiki-schema');
+    applyWikiSchema(_db);
+  } catch { /* non-fatal: wiki schema optional */ }
 
   return _db;
 }
