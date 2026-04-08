@@ -15,7 +15,7 @@
 'use strict';
 
 const { buildWikiPrompt, validateWikilinks } = require('./core/wiki-prompt');
-const { upsertWikiPage } = require('./core/wiki-db');
+const { upsertWikiPage, resetPageStaleness } = require('./core/wiki-db');
 
 const LLM_TIMEOUT_MS = 30000;
 
@@ -72,16 +72,8 @@ async function buildWikiPage(db, topic, queryResult, { allowedSlugs = [], provid
       word_count: content.split(/\s+/).filter(Boolean).length,
     });
 
-    // Reset staleness counters (last_built_at = now)
-    db.prepare(`
-      UPDATE wiki_pages
-      SET staleness = 0.0,
-          new_facts_since_build = 0,
-          raw_source_count = ?,
-          last_built_at = datetime('now'),
-          updated_at = datetime('now')
-      WHERE slug = ?
-    `).run(totalCount, topic.slug);
+    // Reset staleness counters via canonical helper (staleness=0, last_built_at=now)
+    resetPageStaleness(db, topic.slug, totalCount);
 
     db.prepare('COMMIT').run();
   } catch (err) {

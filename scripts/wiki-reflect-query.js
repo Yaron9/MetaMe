@@ -4,7 +4,7 @@
  * wiki-reflect-query.js — DB read layer for wiki-reflect
  *
  * Fetches raw facts and capsule excerpts for a topic.
- * No DB writes, no LLM calls, no file IO.
+ * No DB writes, no LLM calls. File reads (capsule excerpts) are intentional and non-fatal.
  *
  * Exports:
  *   queryRawFacts(db, tag, { capsulesDir }) → { totalCount, facts, capsuleExcerpts }
