@@ -66,7 +66,7 @@ async function main() {
       return;
     }
 
-    // Default: search both facts and sessions, all queries in parallel
+    // Default: search facts, sessions, and wiki pages in parallel
     const factResults = await searchMulti(queries, {
       searchFn: q => useAsync ? memory.searchFactsAsync(q, { limit: 5 }) : Promise.resolve(memory.searchFacts(q, { limit: 5 })),
       type: 'fact',
@@ -79,7 +79,22 @@ async function main() {
       limit: 3,
     });
 
-    console.log(JSON.stringify([...factResults, ...sessionResults], null, 2));
+    // Wiki pages (if available)
+    let wikiResults = [];
+    if (typeof memory.searchWikiAndFacts === 'function') {
+      try {
+        const allWiki = [];
+        for (const q of queries) {
+          const { wikiPages } = memory.searchWikiAndFacts(q, { trackSearch: true });
+          for (const p of (wikiPages || [])) {
+            allWiki.push({ type: 'wiki', slug: p.slug, title: p.title, excerpt: p.excerpt, last_built_at: p.last_built_at });
+          }
+        }
+        wikiResults = allWiki.slice(0, 5);
+      } catch { /* wiki not available */ }
+    }
+
+    console.log(JSON.stringify([...wikiResults, ...factResults, ...sessionResults], null, 2));
 
   } catch (e) {
     console.log('[]');

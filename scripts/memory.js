@@ -108,11 +108,17 @@ function getDb() {
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_scope ON memory_items(scope)'); } catch { }
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_supersedes ON memory_items(supersedes_id)'); } catch { }
 
+  // Migration: add relation column if not present (existing DBs)
+  try { _db.exec('ALTER TABLE memory_items ADD COLUMN relation TEXT'); } catch { /* column already exists */ }
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_relation ON memory_items(relation)'); } catch { }
+
   // Apply wiki schema after memory_items is fully initialized (idempotent, non-fatal)
   try {
     const { applyWikiSchema } = require('./memory-wiki-schema');
     applyWikiSchema(_db);
-  } catch { /* non-fatal: wiki schema optional */ }
+  } catch (err) {
+    process.stderr.write(`[memory] wiki schema init failed: ${err.message}\n`);
+  }
 
   return _db;
 }
@@ -134,16 +140,16 @@ function saveMemoryItem(item) {
   const stmt = db.prepare(`
     INSERT INTO memory_items (id, kind, state, title, content, summary, confidence,
       project, scope, task_key, session_id, agent_key, supersedes_id,
-      source_type, source_id, search_count, last_searched_at, tags,
+      source_type, source_id, relation, search_count, last_searched_at, tags,
       created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
     ON CONFLICT(id) DO UPDATE SET
       kind=excluded.kind, state=excluded.state, title=excluded.title,
       content=excluded.content, summary=excluded.summary, confidence=excluded.confidence,
       project=excluded.project, scope=excluded.scope, task_key=excluded.task_key,
       session_id=excluded.session_id, agent_key=excluded.agent_key,
       supersedes_id=excluded.supersedes_id, source_type=excluded.source_type,
-      source_id=excluded.source_id, tags=excluded.tags,
+      source_id=excluded.source_id, relation=excluded.relation, tags=excluded.tags,
       updated_at=datetime('now')
   `);
   stmt.run(
@@ -162,6 +168,7 @@ function saveMemoryItem(item) {
     item.supersedes_id || null,
     item.source_type || null,
     item.source_id || null,
+    item.relation || null,
     item.search_count || 0,
     item.last_searched_at || null,
     typeof item.tags === 'string' ? item.tags : JSON.stringify(Array.isArray(item.tags) ? item.tags : []),
@@ -356,6 +363,7 @@ function saveFacts(sessionId, project, facts, { scope = null, source_type = null
         session_id: sessionId,
         source_type: f.source_type || source_type || 'session',
         source_id: sessionId,
+        relation: f.relation,
         tags,
       });
       savedFacts.push({
@@ -386,12 +394,13 @@ function saveFacts(sessionId, project, facts, { scope = null, source_type = null
         updateStalenessForTags(db, dirtyTagCounts);
 
         // Promote tags that cross the threshold to wiki topics
+        // Use force:true since we already checked the threshold — avoids double-query
         for (const [tag] of dirtyTagCounts) {
           try {
             if (checkTopicThreshold(db, tag)) {
-              upsertWikiTopic(db, tag, { force: false });
+              upsertWikiTopic(db, tag, { force: true });
             }
-          } catch { /* threshold not met or slug error: skip */ }
+          } catch { /* slug error or collision: skip */ }
         }
       }
     } catch { /* wiki not available: non-fatal */ }
@@ -503,6 +512,20 @@ function forceClose() {
   if (_db) { _db.close(); _db = null; }
 }
 
+/**
+ * Search wiki pages + memory facts via FTS5.
+ * Thin wrapper over core/wiki-db::searchWikiAndFacts that provides the DB instance.
+ * trackSearch: true → increments search_count on matched facts.
+ */
+function searchWikiAndFacts(query, { trackSearch = true } = {}) {
+  try {
+    const { searchWikiAndFacts: fn } = require('./core/wiki-db');
+    return fn(getDb(), query, { trackSearch });
+  } catch {
+    return { wikiPages: [], facts: [] };
+  }
+}
+
 module.exports = {
   // core
   saveMemoryItem,
@@ -512,6 +535,8 @@ module.exports = {
   bumpSearchCount,
   readWorkingMemory,
   assembleContext,
+  // wiki
+  searchWikiAndFacts,
   // compatibility
   saveSession,
   saveFacts,
