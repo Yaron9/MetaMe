@@ -379,36 +379,85 @@ function searchWikiAndFacts(db, query, { trackSearch = true } = {}) {
 
 ---
 
-## 八、新增/修改文件清单
+## 八、新增/修改文件清单（Unix 哲学：一文件一职责）
 
-**新增：**
-| 文件 | 用途 | 行数估计 |
-|------|------|---------|
-| `scripts/daemon-wiki.js` | /wiki 命令 handler | ~200 行 |
-| `scripts/wiki-reflect.js` | 合成引擎（带进程锁、事务、失败重试）| ~300 行 |
-| `scripts/core/wiki-model.js` | staleness / slug / prompt / wikilink 校验 | ~180 行 |
-| `scripts/daemon-wiki.test.js` | 集成测试 | ~150 行 |
-| `scripts/wiki-reflect.test.js` | 单测（mock callHaiku）| ~120 行 |
+### 新增文件
 
-**修改：**
-- `scripts/memory.js`
-- `scripts/memory-search.js`
-- `scripts/memory-gc.js`
-- `scripts/memory-index.js`
-- `scripts/daemon-command-router.js`
-- `scripts/daemon-default.yaml`
+**core/ — 纯逻辑，零副作用，全部可单测**
+
+| 文件 | 单一职责 | 导出 | 行数 |
+|------|---------|------|------|
+| `core/wiki-slug.js` | slug 生成、碰撞处理、FTS5 输入安全 | `toSlug`, `sanitizeFts5` | ~50 |
+| `core/wiki-staleness.js` | staleness 公式计算、dirty-tag 聚合 | `calcStaleness`, `updateStalenessForTags` | ~60 |
+| `core/wiki-prompt.js` | Haiku prompt 构建、wikilink 校验与剥除 | `buildWikiPrompt`, `validateWikilinks` | ~70 |
+| `core/wiki-db.js` | wiki_pages / wiki_topics CRUD（纯 SQL 封装）| `getWikiPage`, `upsertWikiPage`, `upsertWikiTopic`, `listWikiTopics`, `searchWikiAndFacts` | ~100 |
+
+**scripts/ — 有副作用的执行层，每文件一个流程**
+
+| 文件 | 单一职责 | 调用 | 行数 |
+|------|---------|------|------|
+| `memory-wiki-schema.js` | wiki 表 DDL + FTS5 triggers（一次性初始化）| 由 `memory.js` init 时 require | ~80 |
+| `wiki-reflect-query.js` | 从 memory.db 查 raw facts（两步：COUNT + top30）和 capsule 摘要 | `queryRawFacts(db, tag)` → `{totalCount, facts, capsuleRefs}` | ~60 |
+| `wiki-reflect-build.js` | 单页合成：LLM call → 校验 → DB+文件写入（事务） | `buildWikiPage(db, topic, queryResult, opts)` | ~100 |
+| `wiki-reflect-export.js` | 文件系统导出：原子写（tmp→rename）+ `_index.md` 重建 | `exportWikiPage(slug, frontmatter, content, dir)`, `rebuildIndex(db, dir)` | ~80 |
+| `wiki-reflect.js` | **编排器**：进程锁 → 遍历 topics → 调 query/build/export → 审计日志 | 组合上面三个模块 | ~80 |
+| `daemon-wiki.js` | `/wiki` 命令路由与 Feishu 消息格式化 | — | ~150 |
+
+**test/**
+
+| 文件 | 覆盖 | 行数 |
+|------|------|------|
+| `core/wiki-slug.test.js` | toSlug 边界、碰撞、空串、危险字符 | ~50 |
+| `core/wiki-staleness.test.js` | staleness 公式、批量更新、primary_topic 精确匹配 | ~60 |
+| `core/wiki-prompt.test.js` | prompt 构建、wikilink 校验、无效链接剥除 | ~60 |
+| `wiki-reflect.test.js` | 端到端：mock callHaiku + 临时 DB，覆盖并发锁、失败重试、事务回滚 | ~120 |
+| `daemon-wiki.test.js` | 命令解析、E2E 链路（/wiki pin → sync → research → GC）| ~150 |
+
+### 修改文件
+
+| 文件 | 改动范围 |
+|------|---------|
+| `scripts/memory.js` | `require('./memory-wiki-schema')` 初始化；`saveFacts` 后调 `updateStalenessForTags` |
+| `scripts/memory-search.js` | CLI 扩展：调 `searchWikiAndFacts`，透传 `trackSearch` |
+| `scripts/memory-gc.js` | 新增 wiki 孤儿页三步清理 |
+| `scripts/memory-index.js` | 扫描 wiki/ 目录 |
+| `scripts/daemon-command-router.js` | 注册 /wiki 路由 |
+| `scripts/daemon-default.yaml` | 新增 wiki-reflect 定时任务（每周一 03:00）|
+
+### 职责边界图
+
+```
+memory-wiki-schema.js  ← 表结构（DDL only）
+core/wiki-db.js        ← CRUD（SQL only，无文件 IO）
+core/wiki-slug.js      ← 纯函数（string → string）
+core/wiki-staleness.js ← 纯函数（numbers → number）+ DB UPDATE
+core/wiki-prompt.js    ← 纯函数（data → string）+ wikilink 校验
+
+wiki-reflect-query.js  ← 读 DB（无写，无 LLM）
+wiki-reflect-build.js  ← 写 DB + 调 LLM（无文件 IO）
+wiki-reflect-export.js ← 写文件（无 DB，无 LLM）
+wiki-reflect.js        ← 编排器（组合上面三个，持锁）
+daemon-wiki.js         ← 用户命令（调编排器 + 格式化回复）
+```
 
 ---
 
 ## 九、实现顺序
 
 **Phase 1（完整可用闭环，用户可真实使用）：**
-1. `memory.js` — 建表 + FTS5 + triggers + staleness 入口 + searchWikiAndFacts + upsertWikiTopic
-2. `core/wiki-model.js` — slug / staleness 公式 / prompt builder / wikilink 校验
-3. `wiki-reflect.js` — 合成引擎（进程锁、事务、失败重试）
-4. `daemon-wiki.js` — `/wiki` `/wiki research` `/wiki page` `/wiki sync` `/wiki pin`
-5. `daemon-command-router.js` — 路由注册（Phase 1，否则命令无法触发）
-6. 单测（mock callHaiku，覆盖 staleness 公式、wikilink 校验、并发锁）
+1. `memory-wiki-schema.js` — 建表 + FTS5 + triggers（DDL only）
+2. `core/wiki-slug.js` — toSlug + sanitizeFts5（纯函数，先写测试）
+3. `core/wiki-staleness.js` — staleness 公式 + updateStalenessForTags（先写测试）
+4. `core/wiki-prompt.js` — buildWikiPrompt + validateWikilinks（先写测试）
+5. `core/wiki-db.js` — CRUD：getWikiPage / upsertWikiPage / upsertWikiTopic / searchWikiAndFacts
+6. `memory.js` — require wiki-schema；saveFacts 后调 updateStalenessForTags
+7. `wiki-reflect-query.js` — queryRawFacts（两步 COUNT + top30）
+8. `wiki-reflect-build.js` — 单页合成（LLM + 校验 + DB 事务）
+9. `wiki-reflect-export.js` — 原子文件写入 + _index.md 重建
+10. `wiki-reflect.js` — 编排器（进程锁 + 循环 + 失败重试 + 审计日志）
+11. `daemon-wiki.js` — /wiki 命令 handler
+12. `daemon-command-router.js` — 路由注册（Phase 1 必须）
+13. 单测全覆盖
 
 **Phase 2（集成调度 + 用户入口补全）：**
 7. `daemon-default.yaml` — 定时任务（周一 03:00 本地时区）
@@ -472,4 +521,4 @@ function searchWikiAndFacts(db, query, { trackSearch = true } = {}) {
 
 ---
 
-_文档版本: v1.3 — Codex 放行（88/100）_
+_文档版本: v1.4 — Unix 哲学模块化重构，Codex 放行（88/100）_
