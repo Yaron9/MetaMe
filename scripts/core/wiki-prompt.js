@@ -24,7 +24,7 @@ function buildWikiPrompt(topic, facts, capsuleExcerpts, allowedSlugs) {
   parts.push(`## 主题`);
   parts.push(`标签：${topic.tag}`);
   parts.push(`Slug：${topic.slug}`);
-  parts.push(`名称：${topic.label}`);
+  parts.push(`名称：${topic.label || topic.tag}`);
   parts.push('');
 
   if (facts && facts.length > 0) {

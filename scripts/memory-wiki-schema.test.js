@@ -77,10 +77,18 @@ test('UPDATE wiki_pages syncs content to FTS', () => {
   // Verify the wiki_pages row has been updated
   assert.equal(page.content, 'Updated content about memory.', 'wiki_pages content should be updated');
 
-  // FTS rowid entry should still exist after UPDATE (trigger deleted old + inserted new)
-  const ftsRow = db.prepare('SELECT rowid FROM wiki_pages_fts WHERE rowid = ?').get(page.rowid);
-  assert.ok(ftsRow, 'wiki_pages_fts should still contain rowid after UPDATE trigger');
-  assert.equal(ftsRow.rowid, page.rowid);
+  // FTS content should reflect updated text (trigger deleted old + inserted new)
+  const ftsMatch = db.prepare(
+    "SELECT rowid FROM wiki_pages_fts WHERE wiki_pages_fts MATCH 'Updated'"
+  ).get();
+  assert.ok(ftsMatch, 'wiki_pages_fts should match updated content after UPDATE trigger');
+  assert.equal(ftsMatch.rowid, page.rowid, 'matched rowid should equal wiki_pages rowid');
+
+  // Old content should no longer match
+  const oldMatch = db.prepare(
+    "SELECT rowid FROM wiki_pages_fts WHERE wiki_pages_fts MATCH 'Initial'"
+  ).get();
+  assert.equal(oldMatch, undefined, 'old content should not match in FTS after UPDATE');
   db.close();
 });
 
