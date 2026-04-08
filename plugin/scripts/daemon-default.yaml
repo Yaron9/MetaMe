@@ -164,6 +164,7 @@ budget:
 daemon:
   model: sonnet  # sonnet, opus, haiku — model for mobile sessions
   log_max_size: 1048576
+  wiki_output_dir: ~/Documents/MetaMe-Wiki  # Obsidian vault directory for wiki pages
   heartbeat_check_interval: 60
   # Skip all permission prompts for mobile sessions (full access)
   # Mobile users can't click "allow" — so we pre-authorize everything.

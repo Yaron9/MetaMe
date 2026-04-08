@@ -470,7 +470,10 @@ function createCommandRouter(deps) {
         callHaiku: (...args) => providerMod.callHaiku(...args),
         buildDistillEnv: (...args) => providerMod.buildDistillEnv(...args),
       } : null;
-      const { handleWikiCommand } = createWikiCommandHandler({ getDb, providers: wikiProviders, log });
+      const wikiOutputDir = config && config.daemon && config.daemon.wiki_output_dir
+        ? config.daemon.wiki_output_dir.replace(/^~/, process.env.HOME || '')
+        : null;
+      const { handleWikiCommand } = createWikiCommandHandler({ getDb, providers: wikiProviders, wikiOutputDir, log });
       if (await handleWikiCommand({ bot, chatId, text })) return;
     }
 

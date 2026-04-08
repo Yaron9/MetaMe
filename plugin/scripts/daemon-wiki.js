@@ -9,10 +9,15 @@
  *   /wiki page <slug>         — show full content of a page
  *   /wiki sync                — force rebuild stale pages (staleness ≥ 0.4)
  *   /wiki pin <tag> [title]   — manually register a topic (force=true, pinned=1)
+ *   /wiki open                — open Obsidian vault
  *
  * Exports:
  *   createWikiCommandHandler(deps) → { handleWikiCommand }
  */
+
+const os = require('os');
+const path = require('path');
+const { execSync } = require('child_process');
 
 const {
   listWikiPages,
@@ -22,13 +27,17 @@ const {
 } = require('./core/wiki-db');
 
 const STALENESS_THRESHOLD = 0.4;
+const DEFAULT_WIKI_DIR = path.join(os.homedir(), 'Documents', 'MetaMe-Wiki');
 
 function createWikiCommandHandler(deps) {
   const {
     getDb,                    // () → DatabaseSync
     providers,                // { callHaiku, buildDistillEnv }
+    wikiOutputDir,            // optional — path to Obsidian vault wiki folder
     log = () => {},
   } = deps;
+
+  const outputDir = wikiOutputDir || DEFAULT_WIKI_DIR;
 
   /**
    * Main entry point. Returns true if /wiki command was handled.
@@ -61,6 +70,10 @@ function createWikiCommandHandler(deps) {
     if (trimmed === '/wiki pin' || trimmed.startsWith('/wiki pin ')) {
       const args = trimmed.slice(10).trim();
       await _handlePin(bot, chatId, args);
+      return true;
+    }
+    if (trimmed === '/wiki open') {
+      await _handleOpen(bot, chatId);
       return true;
     }
     if (trimmed === '/wiki help' || trimmed === '/wiki ?') {
@@ -186,6 +199,7 @@ function createWikiCommandHandler(deps) {
       const { runWikiReflect } = require('./wiki-reflect');
       const result = await runWikiReflect(db, {
         providers,
+        outputDir,
         threshold: STALENESS_THRESHOLD,
       });
 
@@ -239,6 +253,32 @@ function createWikiCommandHandler(deps) {
     }
   }
 
+  async function _handleOpen(bot, chatId) {
+    try {
+      // Ensure the vault directory exists (may not yet have any pages)
+      const fs = require('fs');
+      if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir, { recursive: true });
+      }
+      // Try Obsidian URI first (opens vault by path if already configured)
+      const vaultName = path.basename(outputDir);
+      try {
+        execSync(`open "obsidian://open?vault=${encodeURIComponent(vaultName)}"`, { timeout: 5000 });
+      } catch {
+        // Fallback: open folder in Finder — user can then drag into Obsidian
+        execSync(`open "${outputDir}"`, { timeout: 5000 });
+      }
+      await bot.sendMessage(chatId,
+        `📂 已打开 Obsidian vault: \`${outputDir}\`\n\n` +
+        `如果是第一次打开，请在 Obsidian 里选 **Open folder as vault** 并选择该目录。\n` +
+        `之后用 \`/wiki sync\` 生成页面。`
+      );
+    } catch (err) {
+      log('ERROR', `[wiki-open] ${err.message}`);
+      await bot.sendMessage(chatId, `❌ 打开失败: ${err.message}\n\nVault 路径: \`${outputDir}\``);
+    }
+  }
+
   async function _handleHelp(bot, chatId) {
     await bot.sendMessage(chatId, [
       '📚 **Wiki 命令**',
@@ -248,6 +288,7 @@ function createWikiCommandHandler(deps) {
       '`/wiki page <slug>` — 查看页面全文',
       '`/wiki sync` — 重建陈旧页面',
       '`/wiki pin <标签> [标题]` — 手工注册主题',
+      '`/wiki open` — 在 Obsidian 中打开 vault',
     ].join('\n'));
   }
 
