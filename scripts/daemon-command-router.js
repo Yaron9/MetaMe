@@ -3,6 +3,7 @@
 const { resolveEngineModel } = require('./daemon-engine-runtime');
 const { createAgentIntentHandler } = require('./daemon-agent-intent');
 const { rawChatId: extractOriginalChatId, isThreadChatId } = require('./core/thread-chat-id');
+const { createWikiCommandHandler } = require('./daemon-wiki');
 
 function createCommandRouter(deps) {
   const {
@@ -30,6 +31,7 @@ function createCommandRouter(deps) {
     pendingActivations,
     agentFlowTtlMs,
     getDefaultEngine,
+    getDb,              // optional — () → DatabaseSync (for wiki commands)
   } = deps;
 
 
@@ -460,6 +462,16 @@ function createCommandRouter(deps) {
 
     if (await handleOpsCommand({ bot, chatId, text, config })) {
       return;
+    }
+
+    // /wiki — knowledge wiki commands
+    if (text.startsWith('/wiki') && getDb) {
+      const wikiProviders = providerMod ? {
+        callHaiku: (...args) => providerMod.callHaiku(...args),
+        buildDistillEnv: (...args) => providerMod.buildDistillEnv(...args),
+      } : null;
+      const { handleWikiCommand } = createWikiCommandHandler({ getDb, providers: wikiProviders, log });
+      if (await handleWikiCommand({ bot, chatId, text })) return;
     }
 
     // /btw — quick side question (read-only, concise, bypasses cooldown)

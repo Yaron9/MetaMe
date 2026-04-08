@@ -108,6 +108,12 @@ function getDb() {
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_scope ON memory_items(scope)'); } catch { }
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_supersedes ON memory_items(supersedes_id)'); } catch { }
 
+  // Apply wiki schema after memory_items is fully initialized (idempotent, non-fatal)
+  try {
+    const { applyWikiSchema } = require('./memory-wiki-schema');
+    applyWikiSchema(_db);
+  } catch { /* non-fatal: wiki schema optional */ }
+
   return _db;
 }
 
@@ -359,6 +365,38 @@ function saveFacts(sessionId, project, facts, { scope = null, source_type = null
       saved++;
     } catch { skipped++; }
   }
+  // Wiki integration: update staleness + promote eligible topics (non-fatal)
+  if (savedFacts.length > 0) {
+    try {
+      const { updateStalenessForTags, checkTopicThreshold, upsertWikiTopic } = require('./core/wiki-db');
+      const db = getDb();
+
+      // Build tag → new-fact count map from saved facts' tags
+      const dirtyTagCounts = new Map();
+      for (const f of savedFacts) {
+        const tags = Array.isArray(f.tags) ? f.tags : [];
+        for (const tag of tags) {
+          if (tag && typeof tag === 'string') {
+            dirtyTagCounts.set(tag, (dirtyTagCounts.get(tag) || 0) + 1);
+          }
+        }
+      }
+
+      if (dirtyTagCounts.size > 0) {
+        updateStalenessForTags(db, dirtyTagCounts);
+
+        // Promote tags that cross the threshold to wiki topics
+        for (const [tag] of dirtyTagCounts) {
+          try {
+            if (checkTopicThreshold(db, tag)) {
+              upsertWikiTopic(db, tag, { force: false });
+            }
+          } catch { /* threshold not met or slug error: skip */ }
+        }
+      }
+    } catch { /* wiki not available: non-fatal */ }
+  }
+
   return { saved, skipped, superseded: 0, savedFacts };
 }
 
