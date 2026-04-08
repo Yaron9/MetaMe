@@ -12,8 +12,6 @@
  *     → { slug, content, strippedLinks, rawSourceIds } | null
  */
 
-'use strict';
-
 const { buildWikiPrompt, validateWikilinks } = require('./core/wiki-prompt');
 const { upsertWikiPage, resetPageStaleness } = require('./core/wiki-db');
 

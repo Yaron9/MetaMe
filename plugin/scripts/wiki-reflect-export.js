@@ -29,7 +29,8 @@ const DEFAULT_WIKI_DIR = path.join(os.homedir(), '.metame', 'wiki');
 function exportWikiPage(slug, frontmatter, content, outputDir = DEFAULT_WIKI_DIR) {
   _ensureDir(outputDir);
 
-  const yaml = _buildFrontmatter(frontmatter);
+  // Ensure slug in frontmatter matches the positional slug argument
+  const yaml = _buildFrontmatter({ ...frontmatter, slug });
   const fileContent = `${yaml}\n${content}\n`;
   const filePath = path.join(outputDir, `${slug}.md`);
   const tmpPath = `${filePath}.tmp`;
