@@ -1,6 +1,12 @@
 'use strict';
 
 const { normalizeEngineName: _normalizeEngine } = require('./daemon-utils');
+
+function stripMd(s) {
+  return String(s || '')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1') // [text](url) → text
+    .replace(/[*_`#>~|]/g, '');               // inline markers
+}
 const {
   getBoundProject,
   createWorkspaceAgent,
@@ -420,16 +426,16 @@ function createAgentCommandHandler(deps) {
         msg += '\n\n最近对话:';
         for (const item of recentDialogue) {
           const marker = item.role === 'assistant' ? '🤖' : '👤';
-          const snippet = String(item.text || '').replace(/\n/g, ' ').slice(0, 120);
+          const snippet = stripMd(String(item.text || '').replace(/\n/g, ' ')).slice(0, 120);
           if (snippet) msg += `\n${marker} ${snippet}`;
         }
       } else if (recentCtx) {
         if (recentCtx.lastUser) {
-          const snippet = recentCtx.lastUser.replace(/\n/g, ' ').slice(0, 80);
-          msg += `\n\n💬 上次你说: _${snippet}${recentCtx.lastUser.length > 80 ? '…' : ''}_`;
+          const snippet = stripMd(recentCtx.lastUser.replace(/\n/g, ' ')).slice(0, 80);
+          msg += `\n\n💬 上次你说: ${snippet}${recentCtx.lastUser.length > 80 ? '…' : ''}`;
         }
         if (recentCtx.lastAssistant) {
-          const snippet = recentCtx.lastAssistant.replace(/\n/g, ' ').slice(0, 80);
+          const snippet = stripMd(recentCtx.lastAssistant.replace(/\n/g, ' ')).slice(0, 80);
           msg += `\n🤖 上次回复: ${snippet}${recentCtx.lastAssistant.length > 80 ? '…' : ''}`;
         }
       }
