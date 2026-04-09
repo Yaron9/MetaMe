@@ -2148,14 +2148,30 @@ function createClaudeEngine(deps) {
         if (dispatchedTargets.length > 0) {
           const allProjects = (config && config.projects) || {};
           const names = dispatchedTargets.map(k => (allProjects[k] && allProjects[k].name) || k).join('、');
-          const doneMsg = await bot.sendMessage(chatId, `✉️ 已转达给 ${names}，处理中…`);
+          const fwdText = `✉️ 已转达给 ${names}，处理中…`;
+          let doneMsg;
+          if (statusMsgId && bot.editMessage) {
+            await bot.editMessage(chatId, statusMsgId, fwdText, _ackCardHeader).catch(() => {});
+            doneMsg = { message_id: statusMsgId };
+          } else {
+            if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => {});
+            doneMsg = await bot.sendMessage(chatId, fwdText);
+          }
           if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session, projectKeyFromVirtualChatId(chatId));
           const wasNew = !session.started;
           if (wasNew) markSessionStarted(sessionChatId, engineName);
           return { ok: true };
         }
         const filesDesc = files && files.length > 0 ? `\n修改了 ${files.length} 个文件` : '';
-        const doneMsg = await bot.sendMessage(chatId, `✅ 完成${filesDesc}`);
+        const doneText = `✅ 完成${filesDesc}`;
+        let doneMsg;
+        if (statusMsgId && bot.editMessage) {
+          await bot.editMessage(chatId, statusMsgId, doneText, _ackCardHeader).catch(() => {});
+          doneMsg = { message_id: statusMsgId };
+        } else {
+          if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => {});
+          doneMsg = await bot.sendMessage(chatId, doneText);
+        }
         if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session, projectKeyFromVirtualChatId(chatId));
         const wasNew = !session.started;
         if (wasNew) markSessionStarted(sessionChatId, engineName);
