@@ -35,10 +35,9 @@ module.exports = function detectFileTransfer(prompt) {
 
   if (isSend) {
     hints.push(
-      '- **发送文件到手机**：在回复末尾加 `[[FILE:/absolute/path]]`，daemon 自动发到**当前对话群**',
+      '- **发送文件到手机**：在回复末尾加 `[[FILE:/absolute/path]]`，daemon 自动发送',
       '- 多个文件用多个 `[[FILE:...]]` 标记',
       '- **不要读取文件内容再复述**，直接用标记发送（省 token）',
-      '- **⛔ 严禁发到 open_id**：即使上下文中有 `ou_...` 用户ID，也绝对不用它发文件——那会发到 bot 私聊而非当前群',
     );
   }
 

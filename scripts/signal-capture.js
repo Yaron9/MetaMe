@@ -101,7 +101,7 @@ function withBufferLock(fn) {
       acquired = true;
       break;
     } catch (e) {
-      if (e.code !== 'EEXIST') return false; // non-EEXIST errors (EMFILE, EACCES) → skip lock gracefully
+      if (e.code !== 'EEXIST') throw e;
       try {
         const age = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
         if (age > LOCK_STALE_MS) {

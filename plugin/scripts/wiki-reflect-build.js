@@ -3,7 +3,7 @@
 /**
  * wiki-reflect-build.js — LLM call + DB write layer for wiki-reflect
  *
- * Calls callHaiku to generate wiki article content, validates [[wikilinks]],
+ * Calls Sonnet to generate wiki article content, validates [[wikilinks]],
  * then writes the result to DB in a transaction.
  * No file IO.
  *
@@ -15,7 +15,7 @@
 const { buildWikiPrompt, validateWikilinks } = require('./core/wiki-prompt');
 const { upsertWikiPage, resetPageStaleness } = require('./core/wiki-db');
 
-const LLM_TIMEOUT_MS = 30000;
+const LLM_TIMEOUT_MS = 60000; // Sonnet needs more time than Haiku
 
 /**
  * Build a wiki page: call LLM, validate links, write to DB.
@@ -38,7 +38,7 @@ async function buildWikiPage(db, topic, queryResult, { allowedSlugs = [], provid
   let rawContent;
   try {
     const env = buildDistillEnv();
-    rawContent = await callHaiku(prompt, env, LLM_TIMEOUT_MS, { model: 'haiku' });
+    rawContent = await callHaiku(prompt, env, LLM_TIMEOUT_MS, { model: 'sonnet' });
   } catch (err) {
     // LLM failure → return null (caller logs to failed_slugs)
     return null;

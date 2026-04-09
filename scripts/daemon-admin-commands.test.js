@@ -79,6 +79,43 @@ describe('daemon-admin-commands /tasks', () => {
   });
 });
 
+describe('daemon-admin-commands /status perpetual', () => {
+  it('renders configured reactive project state', async () => {
+    const sent = [];
+    const { handleAdminCommand } = createHandler(() => ({ general: [], project: [] }));
+    const projectKey = `reactive_test_${process.pid}`;
+
+    const res = await handleAdminCommand({
+      bot: createBot(sent),
+      chatId: 'mobile-user-reactive',
+      text: '/status perpetual',
+      config: {
+        projects: {
+          [projectKey]: { reactive: true, icon: '🔬', name: 'Scientist' },
+        },
+      },
+      state: {
+        reactive: {
+          [projectKey]: {
+            status: 'running',
+            depth: 2,
+            max_depth: 5,
+            last_signal: 'NEXT_DISPATCH',
+            updated_at: '2026-04-09T00:00:00.000Z',
+          },
+        },
+      },
+    });
+
+    assert.equal(res.handled, true);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0], /\*\*Perpetual Projects\*\*/);
+    assert.match(sent[0], new RegExp(`🔬 \\*\\*Scientist\\*\\* \\(\`${projectKey}\`\\)`));
+    assert.match(sent[0], /Status: running \| Phase: - \| Depth: 2\/5/);
+    assert.match(sent[0], /Last signal: NEXT_DISPATCH/);
+  });
+});
+
 describe('daemon-admin-commands /weixin', () => {
   it('shows weixin status from config and auth store', async () => {
     const sent = [];

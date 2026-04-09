@@ -140,39 +140,6 @@
   - `scripts/memory.js`：`saveFactLabels()` 原子写入 API
   - `scripts/memory-nightly-reflect.js`：`synthesized_insight` 回写、知识胶囊聚合与 `knowledge_capsule` 回写
 
-## 永续任务系统（Perpetual Task Engine）
-
-- Reactive 生命周期引擎：
-  - `scripts/daemon-reactive-lifecycle.js`
-  - 关键点：`handleReactiveOutput()` 通用任务链引擎（领域无关）；
-    `parseReactiveSignals()` 信号解析（NEXT_DISPATCH + 可配完成信号）；
-    `reconcilePerpetualProjects()` 停滞检测（零 token，heartbeat 驱动）；
-    `replayEventLog()` 事件溯源状态重放；
-    `generateStateFile()` 从 event log 生成 `now/<key>.md`（投影）；
-    `appendEvent()` 追加事件到 `~/.metame/events/<key>.jsonl`（唯一 SoT）；
-    `loadProjectManifest()` 读取项目 `perpetual.yaml`（convention over config）；
-    `resolveProjectScripts()` 按约定/manifest 发现 verifier/archiver/mission-queue 脚本
-
-- daemon.js 接入点：
-  - `scripts/daemon.js` `outputHandler` 内 `handleReactiveOutput` 调用（try/catch 隔离）
-  - `scripts/daemon.js` `physiologicalHeartbeat` 内 `reconcilePerpetualProjects` 调用
-
-- 可观测命令：
-  - `scripts/daemon-admin-commands.js`
-  - 关键点：`/status perpetual`（或 `/status reactive`）显示所有永续项目状态
-
-- 设计文档：
-  - `docs/perpetual-task-system-design.md`（v4，含 4 份附录）
-  - `docs/perpetual-task-system-plan.md`（实施计划，Phase A-C）
-
-- 项目清单协议：
-  - `<cwd>/perpetual.yaml` — 可选，声明 completion_signal / verifier / archiver / mission_queue 路径
-  - 不存在时使用默认约定：`scripts/verifier.js`、`scripts/archiver.js`、`scripts/mission-queue.js`、信号 `MISSION_COMPLETE`
-
-- 事件日志：
-  - `~/.metame/events/<projectKey>.jsonl` — append-only，daemon 独占写入
-  - Event 类型：MISSION_START / DISPATCH / MEMBER_COMPLETE / PHASE_GATE / DEPTH_LIMIT / BUDGET_LIMIT / MISSION_COMPLETE / ARCHIVE / STALE / INFRA_PAUSE
-
 ## 运行时数据位置
 
 - 画像：`~/.claude_profile.yaml`
@@ -184,7 +151,6 @@
 - 复盘文档：`~/.metame/memory/postmortems/`
 - Dispatch 队列：`~/.metame/dispatch/pending.jsonl`（本地 socket 降级）
 - 远端 Dispatch 队列：`~/.metame/dispatch/remote-pending.jsonl`（跨设备中继）
-- **永续任务事件日志**：`~/.metame/events/<projectKey>.jsonl`（唯一 SoT，append-only）
 - 共享进度白板：`~/.metame/memory/now/shared.md`
 - Agent 最新产出：`~/.metame/memory/agents/{key}_latest.md`
 - Agent 收件箱：`~/.metame/memory/inbox/{key}/`（未读），`read/`（已归档）

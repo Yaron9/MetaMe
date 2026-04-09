@@ -163,12 +163,12 @@ process.stdin.on('end', () => {
     // Skip empty or very short messages
     // Chinese chars carry more info per char, so use weighted length
     const weightedLen = [...prompt].reduce((sum, ch) => sum + (ch.charCodeAt(0) > 0x2e80 ? 3 : 1), 0);
-    if (weightedLen < 15) {
+    if (!isMeta && weightedLen < 15) {
       process.exit(0);
     }
 
     // Hard cap to prevent giant prompt pastes from poisoning distill budget.
-    if (prompt.length > ABSOLUTE_MAX_CAPTURE_CHARS) {
+    if (!isMeta && prompt.length > ABSOLUTE_MAX_CAPTURE_CHARS) {
       process.exit(0);
     }
     if (prompt.length > MAX_CAPTURE_CHARS) {
