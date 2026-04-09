@@ -2675,3 +2675,220 @@ describe('daemon-claude-engine private helpers', () => {
     assert.equal(logs.some((entry) => entry.includes('timeout for chatId chat-close-buffered')), false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Auto-sync: daemon picks up newer CLI sessions from same project directory
+// ---------------------------------------------------------------------------
+describe('auto-sync: session switch when CLI session is newer', () => {
+  const BASE_MTIME = 1_700_000_000_000; // arbitrary baseline ms epoch
+
+  function createAutoSyncEngine({ listRecentSessionsOverride, findSessionFileOverride, hasWarmOverride, sessionId = 'old-session-id', sessionChatId = '_bound_metame' } = {}) {
+    const state = {
+      sessions: {
+        [sessionChatId]: {
+          cwd: '/tmp/autosync-project',
+          engines: {
+            claude: {
+              id: sessionId,
+              started: true,
+            },
+          },
+        },
+      },
+    };
+
+    // Capture all saveState calls so we can verify auto-sync patch fired
+    // (the spawn will overwrite with its own session id, so we track intermediate saves)
+    const saveHistory = [];
+
+    const testFs = {
+      ...fs,
+      appendFileSync: () => {},
+      mkdirSync: () => {},
+      writeFileSync: () => {},
+      statSync: (p) => {
+        if (p && p.includes(sessionId)) return { mtimeMs: BASE_MTIME };
+        return fs.statSync(p);
+      },
+    };
+
+    const engine = createClaudeEngine({
+      fs: testFs,
+      path,
+      spawn: () => {
+        const stdout = new PassThrough();
+        const stderr = new PassThrough();
+        const stdin = new PassThrough();
+        const proc = {
+          stdout, stderr, stdin, pid: 55001,
+          kill: () => {},
+          on(event, handler) {
+            if (event === 'close') setImmediate(() => handler(0));
+            return proc;
+          },
+        };
+        setImmediate(() => {
+          stdout.write('{"kind":"session","id":"spawned-new"}\n');
+          stdout.write('{"kind":"assistant","text":"ok"}\n');
+          stdout.end();
+          stderr.end();
+        });
+        return proc;
+      },
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses: new Map(),
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({ projects: { metame: { cwd: '/tmp/autosync-project', name: 'MetaMe' } } }),
+      loadState: () => state,
+      saveState: (next) => {
+        const snap = next.sessions && next.sessions[sessionChatId] && next.sessions[sessionChatId].engines;
+        if (snap && snap.claude) saveHistory.push(snap.claude.id);
+        Object.assign(state, next);
+        state.sessions = next.sessions;
+      },
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: findSessionFileOverride || ((sid) => `/tmp/.sessions/${sid}.jsonl`),
+      listRecentSessions: listRecentSessionsOverride || (() => []),
+      getSession: (id) => state.sessions[id] || null,
+      getSessionForEngine: (id, eng) => {
+        const raw = state.sessions[id];
+        if (!raw) return null;
+        const slot = raw.engines && raw.engines[eng];
+        return slot ? { cwd: raw.cwd, engine: eng, logicalChatId: id, ...slot } : null;
+      },
+      createSession: () => ({ id: 'fresh', cwd: '/tmp/autosync-project', started: false, engine: 'claude', logicalChatId: sessionChatId }),
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: () => null,
+      getCodexSessionPermissionMode: () => null,
+      getSessionRecentContext: () => null,
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getDefaultEngine: () => 'claude',
+      getEngineRuntime: () => ({
+        name: 'claude',
+        binary: 'claude',
+        buildArgs: () => ['-p'],
+        buildEnv: () => ({ ...process.env }),
+        parseStreamEvent: (line) => {
+          const raw = JSON.parse(line);
+          if (raw.kind === 'session') return [{ type: 'session', sessionId: raw.id }];
+          if (raw.kind === 'assistant') return [{ type: 'assistant', text: raw.text }];
+          return [];
+        },
+        classifyError: () => null,
+        killSignal: 'SIGTERM',
+        timeouts: { idleMs: 500, toolMs: 500, ceilingMs: 2000 },
+      }),
+      warmPool: {
+        acquireWarm: () => null,
+        storeWarm: () => {},
+        releaseWarm: () => {},
+        hasWarm: hasWarmOverride || (() => false),
+        _pool: new Map(),
+      },
+    });
+
+    return { engine, state, saveHistory };
+  }
+
+  const bot = {
+    sendTyping: async () => {},
+    sendMessage: async () => ({ message_id: 'msg-autosync' }),
+    sendMarkdown: async () => ({ message_id: 'msg-autosync-md' }),
+    sendCard: async () => ({ message_id: 'msg-autosync-card' }),
+    editMessage: async () => true,
+    deleteMessage: async () => true,
+  };
+
+  it('switches to a newer CLI session when daemon is idle', async () => {
+    const { engine, saveHistory } = createAutoSyncEngine({
+      listRecentSessionsOverride: () => [
+        { sessionId: 'new-session-id', fileMtime: BASE_MTIME + 120_000 }, // 2 min newer
+      ],
+    });
+
+    const notifMessages = [];
+    const spyBot = {
+      ...bot,
+      sendMessage: async (chatId, text) => { notifMessages.push({ chatId, text }); return { message_id: 'msg-autosync' }; },
+    };
+
+    await engine.askClaude(spyBot, '_bound_metame', 'hello', {
+      projects: { metame: { cwd: '/tmp/autosync-project' } },
+      feishu: { allowed_chat_ids: [] },
+    }, false, 'ou_admin');
+
+    // Auto-sync must have patched state to new-session-id at some point during the call
+    assert.ok(saveHistory.includes('new-session-id'), `expected auto-sync patch to new-session-id; saveHistory=${JSON.stringify(saveHistory)}`);
+    // Notification must have been sent to the user
+    const syncNotif = notifMessages.find(m => m.text && m.text.includes('new-ses'));
+    assert.ok(syncNotif, 'bot.sendMessage should be called with the auto-sync notification');
+  });
+
+  it('does not switch when warm process exists', async () => {
+    const { engine, saveHistory } = createAutoSyncEngine({
+      hasWarmOverride: () => true, // warm pool has a live process
+      listRecentSessionsOverride: () => [
+        { sessionId: 'new-session-id', fileMtime: BASE_MTIME + 120_000 },
+      ],
+    });
+
+    await engine.askClaude(bot, '_bound_metame', 'hello', {
+      projects: { metame: { cwd: '/tmp/autosync-project' } },
+      feishu: { allowed_chat_ids: [] },
+    }, false, 'ou_admin');
+
+    assert.ok(!saveHistory.includes('new-session-id'), 'session should NOT switch when warm process exists');
+  });
+
+  it('does not switch for agent chats (_agent_ prefix)', async () => {
+    const { engine, saveHistory } = createAutoSyncEngine({
+      sessionId: 'old-agent-sess',
+      sessionChatId: '_agent_jia',
+      listRecentSessionsOverride: () => [
+        { sessionId: 'new-agent-sess', fileMtime: BASE_MTIME + 120_000 },
+      ],
+    });
+
+    await engine.askClaude(bot, '_agent_jia', 'hello', {
+      projects: { jia: { cwd: '/tmp/autosync-project', engine: 'claude' } },
+      feishu: { allowed_chat_ids: [] },
+    }, false, 'ou_admin');
+
+    assert.ok(!saveHistory.includes('new-agent-sess'), 'should NOT auto-sync agent chats');
+  });
+
+  it('does not switch when mtime gap is less than 60 seconds', async () => {
+    const { engine, saveHistory } = createAutoSyncEngine({
+      listRecentSessionsOverride: () => [
+        { sessionId: 'barely-newer', fileMtime: BASE_MTIME + 30_000 }, // only 30s newer
+      ],
+    });
+
+    await engine.askClaude(bot, '_bound_metame', 'hello', {
+      projects: { metame: { cwd: '/tmp/autosync-project' } },
+      feishu: { allowed_chat_ids: [] },
+    }, false, 'ou_admin');
+
+    assert.ok(!saveHistory.includes('barely-newer'), 'should NOT switch for sessions < 60s newer');
+  });
+});

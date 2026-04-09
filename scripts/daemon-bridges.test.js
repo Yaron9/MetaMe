@@ -1057,4 +1057,119 @@ describe('daemon-bridges telegram reply routing', () => {
     assert.deepEqual(interrupts, ['_agent_jia::thread:oc_team_1:om_reply_target']);
     assert.match(sent[0].text, /Stopping .*Jarvis · 甲/);
   });
+
+  it('restores session and evicts warm pool when following up in a Feishu topic thread', async () => {
+    const handled = [];
+    const restoreCalls = [];
+    const warmEvictions = [];
+    const state = {
+      sessions: {},
+      team_sticky: {},
+      msg_sessions: {
+        om_root_message: {
+          id: 'sess-root-abc123',
+          cwd: tempHome,
+          engine: 'claude',
+          logicalChatId: '_bound_metame',
+          agentKey: null,
+        },
+      },
+    };
+
+    require.cache[feishuAdapterPath] = {
+      id: feishuAdapterPath,
+      filename: feishuAdapterPath,
+      loaded: true,
+      exports: {
+        createBot() {
+          return {
+            async validateCredentials() { return { ok: true }; },
+            async startReceiving(handler) {
+              setImmediate(() => {
+                // Simulate a topic follow-up: root_id points to the original message
+                handler(
+                  'oc_main_chat',
+                  '继续上次的话题',
+                  {
+                    message: {
+                      root_id: 'om_root_message',
+                      parent_id: 'om_root_message',
+                    },
+                  },
+                  null,
+                  'ou_admin'
+                ).catch(() => {});
+              });
+              return { stop() {}, reconnect() {}, isAlive() { return true; } };
+            },
+            async sendMessage(chatId, text) { return { message_id: 'msg-topic' }; },
+            async sendMarkdown(chatId, text) { return { message_id: 'msg-topic-md' }; },
+            async downloadFile() {},
+            async sendTyping() {},
+            async editMessage() { return true; },
+            async deleteMessage() { return true; },
+          };
+        },
+      },
+    };
+
+    delete require.cache[require.resolve('./daemon-bridges.js')];
+    const { createBridgeStarter } = require('./daemon-bridges.js');
+
+    const bridge = createBridgeStarter({
+      fs,
+      path,
+      HOME: tempHome,
+      log: () => {},
+      sleep: async () => {},
+      loadConfig: () => ({
+        feishu: {
+          enabled: true,
+          app_id: 'cli_a_test',
+          app_secret: 'secret_test',
+          allowed_chat_ids: ['oc_main_chat'],
+          chat_agent_map: {},
+        },
+        projects: {
+          metame: { cwd: tempHome, name: 'MetaMe', engine: 'claude' },
+        },
+      }),
+      loadState: () => state,
+      saveState: (next) => Object.assign(state, next),
+      getSession: () => ({ cwd: tempHome }),
+      restoreSessionFromReply: (chatId, mapped) => {
+        restoreCalls.push({ chatId, mapped });
+        return mapped;
+      },
+      releaseWarmPool: (key) => { warmEvictions.push(key); },
+      handleCommand: async (_bot, chatId, text) => { handled.push({ chatId, text }); },
+      pipeline: {
+        processMessage: async (chatId, text) => { handled.push({ chatId, text }); },
+        isActive: () => false,
+        interruptActive: () => false,
+        clearQueue: () => {},
+      },
+      pendingActivations: new Map(),
+      activeProcesses: new Map(),
+      messageQueue: new Map(),
+    });
+
+    const running = await bridge.startFeishuBridge({
+      feishu: {
+        enabled: true,
+        app_id: 'cli_a_test',
+        app_secret: 'secret_test',
+        allowed_chat_ids: ['oc_main_chat'],
+      },
+    }, async () => {});
+
+    await flush();
+    await flush();
+    running.stop();
+    await flush();
+
+    assert.equal(restoreCalls.length, 1, 'restoreSessionFromReply should be called once');
+    assert.equal(restoreCalls[0].mapped.id, 'sess-root-abc123', 'should restore the root session id');
+    assert.ok(warmEvictions.includes('_bound_metame'), 'should evict warm pool for the logical session key');
+  });
 });

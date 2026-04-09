@@ -1992,6 +1992,10 @@ const { handleAdminCommand } = createAdminCommandHandler({
   getDistillModel,
 });
 
+// Warm process pool for eliminating Claude CLI cold-start latency
+// Must be created before createSessionCommandHandler so releaseWarmPool can be passed in.
+const warmPool = createWarmPool({ log });
+
 const { handleSessionCommand } = createSessionCommandHandler({
   fs,
   path,
@@ -2021,13 +2025,11 @@ const { handleSessionCommand } = createSessionCommandHandler({
   getSessionRecentDialogue,
   sessionLabel,
   getDefaultEngine,
+  releaseWarmPool: (key) => warmPool.releaseWarm(key),
 });
 
 // Message queue for messages received while a task is running
 const messageQueue = new Map(); // chatId -> { messages: string[], notified: false }
-
-// Warm process pool for eliminating Claude CLI cold-start latency
-const warmPool = createWarmPool({ log });
 
 const { spawnClaudeAsync, askClaude } = createClaudeEngine({
   fs,
@@ -2258,6 +2260,7 @@ const { startTelegramBridge, startFeishuBridge, startWeixinBridge, startImessage
   saveState,
   getSession,
   restoreSessionFromReply,
+  releaseWarmPool: (key) => warmPool.releaseWarm(key),
   handleCommand,
   pipeline,
   pendingActivations,

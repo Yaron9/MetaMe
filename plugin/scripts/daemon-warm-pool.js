@@ -162,6 +162,20 @@ function createWarmPool(deps) {
   }
 
   /**
+   * Non-destructive validity check. Returns true if a live warm process exists for the key.
+   * Mirrors acquireWarm's dead-process checks without consuming the entry.
+   */
+  function hasWarm(sessionKey) {
+    const entry = pool.get(sessionKey);
+    if (!entry) return false;
+    if (entry.child.killed || entry.child.exitCode !== null) {
+      _cleanup(sessionKey);
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Build the stream-json user message for stdin.
    */
   function buildStreamMessage(prompt, sessionId) {
@@ -179,6 +193,7 @@ function createWarmPool(deps) {
     releaseWarm,
     releaseAll,
     buildStreamMessage,
+    hasWarm,
     _pool: pool,
   };
 }

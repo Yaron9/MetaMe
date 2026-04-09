@@ -36,6 +36,7 @@ function createSessionCommandHandler(deps) {
     getSessionRecentContext,
     getSessionRecentDialogue,
     getDefaultEngine = () => 'claude',
+    releaseWarmPool,
   } = deps;
 
   function normalizeEngineName(name) {
@@ -412,10 +413,13 @@ function createSessionCommandHandler(deps) {
         return true;
       }
 
+      const sessionKeyForWarm = getSessionRoute(chatId).sessionChatId;
       const state2 = loadState();
       const targetEngine = normalizeEngineName(target.engine) || getCurrentEngine(chatId);
       const attached = attachResolvedTarget(state2, chatId, targetEngine, target, target.projectPath || HOME);
       saveState(state2);
+      // Evict warm process so next spawn uses --resume <new-session-id>
+      if (typeof releaseWarmPool === 'function') releaseWarmPool(sessionKeyForWarm);
 
       const recentCtx = typeof getSessionRecentContext === 'function'
         ? getSessionRecentContext(target.sessionId)

@@ -24,6 +24,7 @@ function createBridgeStarter(deps) {
     saveState,
     getSession,
     restoreSessionFromReply,
+    releaseWarmPool,
     handleCommand,
     pipeline,            // message pipeline for per-chatId serial execution
     pendingActivations,  // optional — used to show smart activation hint
@@ -877,6 +878,11 @@ function createBridgeStarter(deps) {
               }
               if (mapped.id) {
                 log('INFO', `Session restored via reply: ${mapped.id.slice(0, 8)} (${path.basename(mapped.cwd)})`);
+                // Evict warm process so next spawn uses --resume with the restored session
+                if (typeof releaseWarmPool === 'function') {
+                  const _logicalKey = String(mapped.logicalChatId || '').trim();
+                  if (_logicalKey) releaseWarmPool(_logicalKey);
+                }
               }
               _replyAgentKey = mapped.agentKey || null;
             } else {
@@ -886,6 +892,16 @@ function createBridgeStarter(deps) {
             _replyMappingFound = true;
             _replyAgentKey = _parentMapping.agentKey || null;
             log('INFO', `Feishu topic inherited root mapping agentKey=${_replyAgentKey || 'main'} parentId=${parentId}`);
+            // Restore session from topic root (same as quoted reply) so 指定回复 resumes context
+            if (_parentMapping.id && typeof restoreSessionFromReply === 'function') {
+              restoreSessionFromReply(chatId, _parentMapping);
+              log('INFO', `Session restored via topic root: ${_parentMapping.id.slice(0, 8)} (${path.basename(_parentMapping.cwd || '~')})`);
+              // Evict warm process so next spawn uses --resume with the restored session
+              if (typeof releaseWarmPool === 'function') {
+                const _logicalKey = String(_parentMapping.logicalChatId || '').trim();
+                if (_logicalKey) releaseWarmPool(_logicalKey);
+              }
+            }
           }
 
           // Helper: set/clear sticky on shared state object and persist

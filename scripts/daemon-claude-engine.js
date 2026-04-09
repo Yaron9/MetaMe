@@ -84,6 +84,7 @@ function createClaudeEngine(deps) {
     isContentFile,
     sendFileButtons,
     findSessionFile,
+    listRecentSessions,
     getSession,
     getSessionForEngine,
     createSession,
@@ -102,6 +103,7 @@ function createClaudeEngine(deps) {
     touchInteraction,
     statusThrottleMs = 3000,
     fallbackThrottleMs = 8000,
+    autoSyncMinGapMs = 60_000,
     getEngineRuntime: injectedGetEngineRuntime,
     getDefaultEngine: _getDefaultEngine,
     warmPool,
@@ -1360,6 +1362,36 @@ function createClaudeEngine(deps) {
         log('WARN', `[SessionCwd] correcting session cwd for ${sessionChatId}: ${session.cwd || 'unknown'} -> ${effectiveCwd}`);
         session = { ...session, cwd: effectiveCwd };
         await patchSessionSerialized(sessionChatId, (cur) => ({ ...cur, cwd: effectiveCwd }));
+      }
+
+      // Auto-sync: when daemon is idle (no warm process), check if a newer Claude session exists
+      // in the project directory (e.g., created from Claude Code CLI on the same computer).
+      // This keeps phone (Feishu/mobile) and computer (Claude Code CLI) sessions in sync.
+      const _hasWarm = !!(warmPool && typeof warmPool.hasWarm === 'function' && warmPool.hasWarm(sessionChatId));
+      if (runtime.name === 'claude' && !String(sessionChatId).startsWith('_agent_') &&
+          !_hasWarm && session.started && session.id && session.id !== '__continue__' && session.cwd) {
+        const _recentInProject = typeof listRecentSessions === 'function'
+          ? listRecentSessions(2, session.cwd, 'claude') : [];
+        const _currentMtime = (() => {
+          try {
+            const _f = typeof findSessionFile === 'function' ? findSessionFile(session.id) : null;
+            return _f ? fs.statSync(_f).mtimeMs : 0;
+          } catch { return 0; }
+        })();
+        const _newerSession = _recentInProject.find(
+          s => s.sessionId !== session.id && (s.fileMtime || 0) - _currentMtime > autoSyncMinGapMs
+        );
+        if (_newerSession) {
+          const _gapSec = Math.round(((_newerSession.fileMtime || 0) - _currentMtime) / 1000);
+          log('INFO', `[AutoSync] ${String(sessionChatId).slice(-8)}: switching ${session.id.slice(0, 8)} -> ${_newerSession.sessionId.slice(0, 8)} (newer by ${_gapSec}s)`);
+          await patchSessionSerialized(sessionChatId, (cur) => {
+            const _engines = { ...(cur.engines || {}) };
+            _engines.claude = { ...(_engines.claude || {}), id: _newerSession.sessionId, started: true };
+            return { ...cur, engines: _engines };
+          });
+          session = { ...session, id: _newerSession.sessionId };
+          bot.sendMessage(chatId, `🔄 已自动同步到最新 session：\`${_newerSession.sessionId.slice(0, 8)}\``).catch(() => { });
+        }
       }
 
       // Warm pool: check if a persistent process is available for this session (Claude only).
