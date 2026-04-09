@@ -9,6 +9,10 @@
  * Exports:
  *   exportWikiPage(slug, frontmatter, content, outputDir) → void
  *   rebuildIndex(pages, outputDir) → void
+ *   exportSessionSummary(entry, outputDir, options) → string
+ *   rebuildSessionsIndex(entries, outputDir) → void
+ *   exportCapsuleFile(sourcePath, outputDir) → string|null
+ *   rebuildCapsulesIndex(capsuleFiles, outputDir) → void
  */
 
 const fs = require('fs');
@@ -51,8 +55,10 @@ function exportWikiPage(slug, frontmatter, content, outputDir = DEFAULT_WIKI_DIR
  *                 raw_source_count: number }>} pages
  * @param {string} [outputDir]
  */
-function rebuildIndex(pages, outputDir = DEFAULT_WIKI_DIR) {
+function rebuildIndex(pages, outputDir = DEFAULT_WIKI_DIR, options = {}) {
   _ensureDir(outputDir);
+  const sessionCount = Number(options.sessionCount) || 0;
+  const capsuleCount = Number(options.capsuleCount) || 0;
 
   const now = new Date().toISOString().slice(0, 10);
   const lines = [
@@ -77,12 +83,146 @@ function rebuildIndex(pages, outputDir = DEFAULT_WIKI_DIR) {
     );
   }
 
+  lines.push('', '## Navigation', '');
+  lines.push(`- [[sessions/_index|Session Summaries]]${sessionCount > 0 ? ` (${sessionCount})` : ''}`);
+  lines.push(`- [[capsules/_index|Knowledge Capsules]]${capsuleCount > 0 ? ` (${capsuleCount})` : ''}`);
+
   const content = lines.join('\n') + '\n';
   const filePath = path.join(outputDir, '_index.md');
   const tmpPath = `${filePath}.tmp`;
 
   try { fs.unlinkSync(tmpPath); } catch { /* not present */ }
   fs.writeFileSync(tmpPath, content, 'utf8');
+  fs.renameSync(tmpPath, filePath);
+}
+
+function exportSessionSummary(entry, outputDir = DEFAULT_WIKI_DIR, options = {}) {
+  const sessionsDir = path.join(outputDir, 'sessions');
+  _ensureDir(sessionsDir);
+
+  const created = String(entry.created_at || '').slice(0, 10);
+  const sessionId = String(entry.session_id || entry.id || '');
+  const project = String(entry.project || 'unknown');
+  const slug = _sanitizeSlug(`${created || 'session'}-${project}-${sessionId.slice(-8)}`, 'session');
+  const tags = _safeJsonArray(entry.tags);
+  const filePath = path.join(sessionsDir, `${slug}.md`);
+  const tmpPath = `${filePath}.tmp`;
+  const body = String(entry.content || '').trim() || '(empty)';
+  const related = _collectSessionRelated(project, tags, options);
+  const yaml = [
+    '---',
+    `title: ${_yamlStr(entry.title || body.slice(0, 40) || sessionId || slug)}`,
+    `session_id: ${_yamlStr(sessionId)}`,
+    `project: ${_yamlStr(project)}`,
+    `scope: ${_yamlStr(String(entry.scope || ''))}`,
+    `created: ${created}`,
+    `tags: ${JSON.stringify(tags)}`,
+    'type: session-summary',
+    '---',
+    '',
+  ].join('\n');
+
+  const parts = [yaml, '## Summary', '', body];
+  if (related.wiki.length > 0 || related.capsules.length > 0) {
+    parts.push('', '## Related Knowledge', '');
+    for (const item of related.wiki) parts.push(`- Wiki: [[${item.path}|${item.label}]]`);
+    for (const item of related.capsules) parts.push(`- Capsule: [[${item.path}|${item.label}]]`);
+  }
+
+  try { fs.unlinkSync(tmpPath); } catch { /* not present */ }
+  fs.writeFileSync(tmpPath, parts.join('\n') + '\n', 'utf8');
+  fs.renameSync(tmpPath, filePath);
+  return filePath;
+}
+
+function rebuildSessionsIndex(entries, outputDir = DEFAULT_WIKI_DIR) {
+  const sessionsDir = path.join(outputDir, 'sessions');
+  _ensureDir(sessionsDir);
+  const lines = [
+    '---',
+    'title: Session Summaries',
+    `updated: ${new Date().toISOString().slice(0, 10)}`,
+    'type: session-index',
+    '---',
+    '',
+    '# Session Summaries',
+    '',
+    `> ${entries.length} sessions`,
+    '',
+  ];
+
+  const grouped = new Map();
+  for (const entry of entries) {
+    const project = String(entry.project || 'unknown');
+    if (!grouped.has(project)) grouped.set(project, []);
+    grouped.get(project).push(entry);
+  }
+
+  for (const [project, items] of [...grouped.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    lines.push(`## ${project}`, '');
+    for (const entry of items) {
+      const created = String(entry.created_at || '').slice(0, 10);
+      const sessionId = String(entry.session_id || entry.id || '');
+      const slug = _sanitizeSlug(`${created || 'session'}-${project}-${sessionId.slice(-8)}`, 'session');
+      const preview = String(entry.content || '').replace(/\s+/g, ' ').slice(0, 100);
+      lines.push(`- [[sessions/${slug}|${created} · ${project}]]`);
+      if (preview) lines.push(`  ${preview}`);
+    }
+    lines.push('');
+  }
+
+  const filePath = path.join(sessionsDir, '_index.md');
+  const tmpPath = `${filePath}.tmp`;
+  try { fs.unlinkSync(tmpPath); } catch { /* not present */ }
+  fs.writeFileSync(tmpPath, lines.join('\n') + '\n', 'utf8');
+  fs.renameSync(tmpPath, filePath);
+}
+
+function exportCapsuleFile(sourcePath, outputDir = DEFAULT_WIKI_DIR) {
+  const capsulesDir = path.join(outputDir, 'capsules');
+  _ensureDir(capsulesDir);
+
+  const source = String(sourcePath || '');
+  const base = path.basename(source);
+  if (!source || !base.endsWith('.md') || !fs.existsSync(source)) return null;
+
+  const targetPath = path.join(capsulesDir, base);
+  const tmpPath = `${targetPath}.tmp`;
+  const content = fs.readFileSync(source, 'utf8');
+
+  try { fs.unlinkSync(tmpPath); } catch { /* not present */ }
+  fs.writeFileSync(tmpPath, content.endsWith('\n') ? content : `${content}\n`, 'utf8');
+  fs.renameSync(tmpPath, targetPath);
+  return targetPath;
+}
+
+function rebuildCapsulesIndex(capsuleFiles, outputDir = DEFAULT_WIKI_DIR) {
+  const capsulesDir = path.join(outputDir, 'capsules');
+  _ensureDir(capsulesDir);
+
+  const lines = [
+    '---',
+    'title: Knowledge Capsules',
+    `updated: ${new Date().toISOString().slice(0, 10)}`,
+    'type: capsule-index',
+    '---',
+    '',
+    '# Knowledge Capsules',
+    '',
+    `> ${capsuleFiles.length} capsules`,
+    '',
+  ];
+
+  for (const sourcePath of capsuleFiles) {
+    const base = path.basename(String(sourcePath || ''), '.md');
+    if (!base) continue;
+    lines.push(`- [[capsules/${base}|${base}]]`);
+  }
+
+  const filePath = path.join(capsulesDir, '_index.md');
+  const tmpPath = `${filePath}.tmp`;
+  try { fs.unlinkSync(tmpPath); } catch { /* not present */ }
+  fs.writeFileSync(tmpPath, lines.join('\n') + '\n', 'utf8');
   fs.renameSync(tmpPath, filePath);
 }
 
@@ -122,4 +262,72 @@ function _yamlStr(s) {
   return str;
 }
 
-module.exports = { exportWikiPage, rebuildIndex };
+function _sanitizeSlug(input, fallback = 'item') {
+  const cleaned = String(input || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return cleaned || fallback;
+}
+
+function _safeJsonArray(raw) {
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function _collectSessionRelated(project, tags, options = {}) {
+  const wikiPages = Array.isArray(options.wikiPages) ? options.wikiPages : [];
+  const capsuleFiles = Array.isArray(options.capsuleFiles) ? options.capsuleFiles : [];
+  const candidates = new Set([
+    String(project || '').trim().toLowerCase(),
+    ...tags.map(tag => String(tag || '').trim().toLowerCase()),
+  ]);
+
+  const wiki = [];
+  for (const page of wikiPages) {
+    const slug = String(page.slug || '').trim();
+    const topic = String(page.primary_topic || '').trim().toLowerCase();
+    if (!slug) continue;
+    if (candidates.has(slug.toLowerCase()) || candidates.has(topic)) {
+      wiki.push({ path: slug, label: page.title || slug });
+    }
+  }
+
+  const capsules = [];
+  for (const file of capsuleFiles) {
+    const base = path.basename(String(file || ''), '.md');
+    const lower = base.toLowerCase();
+    if ([...candidates].some(token => token && lower.includes(token.replace(/\s+/g, '-')))) {
+      capsules.push({ path: `capsules/${base}`, label: base });
+    }
+  }
+
+  return {
+    wiki: _dedupeRelated(wiki),
+    capsules: _dedupeRelated(capsules),
+  };
+}
+
+function _dedupeRelated(items) {
+  const seen = new Set();
+  return items.filter(item => {
+    const key = `${item.path}|${item.label}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+module.exports = {
+  exportWikiPage,
+  rebuildIndex,
+  exportSessionSummary,
+  rebuildSessionsIndex,
+  exportCapsuleFile,
+  rebuildCapsulesIndex,
+};

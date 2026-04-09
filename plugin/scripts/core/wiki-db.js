@@ -22,6 +22,7 @@
  *
  *   // search
  *   searchWikiAndFacts(db, query, { trackSearch=true }) → { wikiPages, facts }
+ *   listRecentSessionSummaries(db, { limit=200 }) → row[]
  *
  *   // staleness
  *   updateStalenessForTags(db, dirtyTagCounts: Map<string, number>) → void
@@ -263,6 +264,26 @@ function listWikiTopics(db) {
   return db.prepare('SELECT * FROM wiki_topics ORDER BY created_at DESC').all();
 }
 
+function listRecentSessionSummaries(db, { limit = 200 } = {}) {
+  return db.prepare(`
+    SELECT
+      id,
+      session_id,
+      project,
+      scope,
+      title,
+      content,
+      tags,
+      created_at,
+      updated_at
+    FROM memory_items
+    WHERE kind = 'episode'
+      AND state = 'active'
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).all(limit);
+}
+
 // ── Search ────────────────────────────────────────────────────────────────────
 
 /**
@@ -336,7 +357,10 @@ function _trackSearch(db, ids) {
 
 /**
  * Update staleness for wiki pages matching dirty tags.
- * Only updates rows where lower(trim(primary_topic)) = lower(trim(tag)).
+ * Routes through wiki_topics (the canonical tag registry) so that casing
+ * differences between fact tags and wiki_pages.primary_topic are bridged.
+ * RHS expressions in a single UPDATE see pre-update column values (SQLite semantics),
+ * so new_facts_since_build in the staleness formula is the original value.
  *
  * @param {object} db
  * @param {Map<string, number>} dirtyTagCounts
@@ -345,8 +369,7 @@ function updateStalenessForTags(db, dirtyTagCounts) {
   for (const [tag, newCount] of dirtyTagCounts) {
     if (newCount <= 0) continue;
 
-    // Fetch current row to compute staleness via calcStaleness
-    // Use SQL-level update with arithmetic for correctness without extra round-trips
+    // Match via wiki_topics.tag (canonical registry) → wiki_pages.slug
     db.prepare(`
       UPDATE wiki_pages
       SET new_facts_since_build = new_facts_since_build + ?,
@@ -355,7 +378,9 @@ function updateStalenessForTags(db, dirtyTagCounts) {
             / NULLIF(raw_source_count + new_facts_since_build + ?, 0)
           ),
           updated_at = datetime('now')
-      WHERE lower(trim(primary_topic)) = lower(trim(?))
+      WHERE slug IN (
+        SELECT slug FROM wiki_topics WHERE lower(trim(tag)) = lower(trim(?))
+      )
     `).run(newCount, newCount, newCount, tag);
   }
 }
@@ -371,6 +396,7 @@ module.exports = {
   upsertWikiTopic,
   checkTopicThreshold,
   listWikiTopics,
+  listRecentSessionSummaries,
   // search
   searchWikiAndFacts,
   // staleness

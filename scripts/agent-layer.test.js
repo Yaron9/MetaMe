@@ -13,6 +13,7 @@ const {
   repairAgentLayer,
   buildAgentContextForEngine,
   buildMemorySnapshotContent,
+  selectSnapshotContext,
   refreshMemorySnapshot,
 } = require('./agent-layer');
 
@@ -167,5 +168,53 @@ describe('agent-layer', () => {
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  it('selectSnapshotContext prefers matching project hints before global fallback', () => {
+    const memoryApi = {
+      recentSessions({ project }) {
+        if (project === 'metame') return [{ created_at: '2025-01-02', summary: 'MetaMe session', keywords: 'metame' }];
+        return [];
+      },
+      recentFacts({ project }) {
+        if (project === 'metame') return [{ relation: 'rule', value: 'Prefer scripts/ as source of truth' }];
+        return [{ relation: 'global', value: 'fallback should not be used here' }];
+      },
+    };
+
+    const result = selectSnapshotContext(memoryApi, {
+      projectHints: ['metame', 'MetaMe', 'metame_ops'],
+      sessionLimit: 5,
+      factLimit: 10,
+    });
+
+    assert.equal(result.matchedProject, 'metame');
+    assert.equal(result.usedFallback, false);
+    assert.equal(result.sessions.length, 1);
+    assert.equal(result.facts.length, 1);
+    assert.match(result.sessions[0].summary, /MetaMe session/);
+  });
+
+  it('selectSnapshotContext falls back to global memory when project-scoped recall is empty', () => {
+    const memoryApi = {
+      recentSessions({ project }) {
+        return project ? [] : [{ created_at: '2025-01-03', summary: 'Global session', keywords: 'global' }];
+      },
+      recentFacts({ project }) {
+        return project ? [] : [{ relation: 'fact', value: 'Global fact' }];
+      },
+    };
+
+    const result = selectSnapshotContext(memoryApi, {
+      projectHints: ['metame', 'daemon'],
+      sessionLimit: 5,
+      factLimit: 10,
+    });
+
+    assert.equal(result.matchedProject, null);
+    assert.equal(result.usedFallback, true);
+    assert.equal(result.sessions.length, 1);
+    assert.equal(result.facts.length, 1);
+    assert.match(result.facts[0].value, /Global fact/);
   });
 });

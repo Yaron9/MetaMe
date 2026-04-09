@@ -19,13 +19,20 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const { listWikiTopics, getWikiPageBySlug, listWikiPages } = require('./core/wiki-db');
+const { listWikiTopics, getWikiPageBySlug, listWikiPages, listRecentSessionSummaries } = require('./core/wiki-db');
 const { queryRawFacts } = require('./wiki-reflect-query');
 const { buildWikiPage } = require('./wiki-reflect-build');
-const { exportWikiPage, rebuildIndex } = require('./wiki-reflect-export');
+const {
+  exportWikiPage,
+  rebuildIndex,
+  exportSessionSummary,
+  rebuildSessionsIndex,
+  exportCapsuleFile,
+  rebuildCapsulesIndex,
+} = require('./wiki-reflect-export');
 
 const DEFAULT_WIKI_DIR = path.join(os.homedir(), '.metame', 'wiki');
-const DEFAULT_CAPSULES_DIR = path.join(os.homedir(), '.metame', 'capsules');
+const DEFAULT_CAPSULES_DIR = path.join(os.homedir(), '.metame', 'memory', 'capsules');
 const DEFAULT_LOG_PATH = path.join(os.homedir(), '.metame', 'wiki_reflect_log.jsonl');
 const LOCK_FILE = path.join(os.homedir(), '.metame', 'wiki-reflect.lock');
 const LOCK_MAX_AGE_MS = 10 * 60 * 1000; // 10 minutes
@@ -132,9 +139,9 @@ async function runWikiReflect(db, {
           exportWikiPage(slug, frontmatter, buildResult.content, outputDir);
           built.push(slug);
         } catch (exportErr) {
-          // DB write succeeded, file write failed — log separately, DB is truth source
+          // DB write succeeded, file write failed — log separately.
+          // Do NOT push to built: callers must not assume the file exists.
           exportFailed.push(slug);
-          built.push(slug); // page was built successfully in DB
         }
 
       } catch (err) {
@@ -149,11 +156,28 @@ async function runWikiReflect(db, {
       }
     }
 
-    // 5. Rebuild index
+    // 5. Rebuild index — per-operation try/catch so one failure doesn't suppress the rest
+    let allPages = [];
+    let sessions = [];
+    try { allPages = listWikiPages(db, { limit: 1000, orderBy: 'title' }); } catch { /* non-fatal */ }
+    try { sessions = listRecentSessionSummaries(db, { limit: 200 }); } catch { /* non-fatal */ }
+    const capsuleFiles = _listCapsuleFiles(capsulesDir);
+
     try {
-      const allPages = listWikiPages(db, { limit: 1000, orderBy: 'title' });
-      rebuildIndex(allPages, outputDir);
-    } catch { /* non-fatal */ }
+      rebuildIndex(allPages, outputDir, { sessionCount: sessions.length, capsuleCount: capsuleFiles.length });
+    } catch { /* non-fatal — _index.md not updated */ }
+
+    for (const entry of sessions) {
+      try { exportSessionSummary(entry, outputDir, { wikiPages: allPages, capsuleFiles }); }
+      catch { /* non-fatal — skip this session */ }
+    }
+    try { rebuildSessionsIndex(sessions, outputDir); } catch { /* non-fatal */ }
+
+    for (const capsuleFile of capsuleFiles) {
+      try { exportCapsuleFile(capsuleFile, outputDir); }
+      catch { /* non-fatal — skip this capsule */ }
+    }
+    try { rebuildCapsulesIndex(capsuleFiles, outputDir); } catch { /* non-fatal */ }
 
   } finally {
     // 6. Release lock
@@ -201,6 +225,17 @@ function _acquireLock(lockFile) {
 
 function _releaseLock(lockFile) {
   try { fs.unlinkSync(lockFile); } catch { /* ignore */ }
+}
+
+function _listCapsuleFiles(capsulesDir) {
+  try {
+    if (!fs.existsSync(capsulesDir)) return [];
+    return fs.readdirSync(capsulesDir)
+      .filter(name => name.endsWith('.md'))
+      .map(name => path.join(capsulesDir, name));
+  } catch {
+    return [];
+  }
 }
 
 // ── failed_slugs helpers ──────────────────────────────────────────────────────

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { DatabaseSync } = require('node:sqlite');
 const { applyWikiSchema } = require('./memory-wiki-schema');
 const { upsertWikiTopic, getWikiPageBySlug } = require('./core/wiki-db');
-const { buildWikiPage } = require('./wiki-reflect-build');
+const { buildWikiPage, buildFallbackWikiContent } = require('./wiki-reflect-build');
 
 function buildTestDb() {
   const db = new DatabaseSync(':memory:');
@@ -60,7 +60,7 @@ test('buildWikiPage writes page to DB and returns result', async () => {
   db.close();
 });
 
-test('buildWikiPage returns null when LLM fails', async () => {
+test('buildWikiPage returns null when LLM throws (retry scheduled by caller)', async () => {
   const db = buildTestDb();
   upsertWikiTopic(db, 'session', { force: true });
 
@@ -69,15 +69,12 @@ test('buildWikiPage returns null when LLM fails', async () => {
     providers: makeProviders({ shouldFail: true }),
   });
 
-  assert.equal(result, null, 'should return null on LLM failure');
-
-  // DB should not have any wiki page
-  const page = getWikiPageBySlug(db, 'session');
-  assert.equal(page, null, 'no wiki page should be written on LLM failure');
+  assert.strictEqual(result, null, 'LLM failure must return null so caller can enqueue retry');
+  assert.strictEqual(getWikiPageBySlug(db, 'session'), null, 'no DB row should be written on LLM failure');
   db.close();
 });
 
-test('buildWikiPage returns null on empty LLM response', async () => {
+test('buildWikiPage returns null when LLM response is empty (retry scheduled by caller)', async () => {
   const db = buildTestDb();
 
   const result = await buildWikiPage(db, TOPIC, QUERY_RESULT, {
@@ -85,7 +82,7 @@ test('buildWikiPage returns null on empty LLM response', async () => {
     providers: makeProviders({ response: '  ' }),
   });
 
-  assert.equal(result, null, 'should return null on empty LLM response');
+  assert.strictEqual(result, null, 'empty LLM response must return null so caller can enqueue retry');
   db.close();
 });
 
@@ -143,4 +140,11 @@ test('buildWikiPage uses topic.tag as title when label is missing', async () => 
   const page = getWikiPageBySlug(db, 'session');
   assert.equal(page.title, 'session', 'should fall back to tag as title');
   db.close();
+});
+
+test('buildFallbackWikiContent produces readable markdown from facts', () => {
+  const content = buildFallbackWikiContent(TOPIC, QUERY_RESULT);
+  assert.match(content, /## 概览/);
+  assert.match(content, /## 关键事实/);
+  assert.match(content, /Session init/);
 });

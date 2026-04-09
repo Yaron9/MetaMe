@@ -285,6 +285,41 @@ function buildMemorySnapshotContent(sessions = [], facts = []) {
   return lines.join('\n');
 }
 
+function selectSnapshotContext(memoryApi, {
+  projectHints = [],
+  sessionLimit = 5,
+  factLimit = 10,
+} = {}) {
+  if (!memoryApi || typeof memoryApi.recentSessions !== 'function') {
+    return { sessions: [], facts: [], matchedProject: null, usedFallback: false };
+  }
+
+  const fetchFacts = typeof memoryApi.recentFacts === 'function'
+    ? (project) => memoryApi.recentFacts({ limit: factLimit, project: project || null })
+    : () => [];
+
+  const candidates = Array.from(new Set(
+    (Array.isArray(projectHints) ? projectHints : [projectHints])
+      .map(v => String(v || '').trim())
+      .filter(Boolean)
+  ));
+
+  for (const candidate of candidates) {
+    const sessions = memoryApi.recentSessions({ limit: sessionLimit, project: candidate });
+    const facts = fetchFacts(candidate);
+    if (sessions.length > 0 || facts.length > 0) {
+      return { sessions, facts, matchedProject: candidate, usedFallback: false };
+    }
+  }
+
+  return {
+    sessions: memoryApi.recentSessions({ limit: sessionLimit }),
+    facts: fetchFacts(null),
+    matchedProject: null,
+    usedFallback: true,
+  };
+}
+
 /**
  * Overwrite memory-snapshot.md for the given agent.
  * Returns true on success, false if the agent directory doesn't exist yet.
@@ -318,5 +353,6 @@ module.exports = {
   buildAgentContextForEngine,
   buildAgentContextForProject,
   buildMemorySnapshotContent,
+  selectSnapshotContext,
   refreshMemorySnapshot,
 };

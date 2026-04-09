@@ -25,7 +25,7 @@ const LLM_TIMEOUT_MS = 60000; // Sonnet needs more time than Haiku
  * @param {{ totalCount: number, facts: object[], capsuleExcerpts: string }} queryResult
  * @param {{ allowedSlugs: string[], providers: { callHaiku: Function, buildDistillEnv: Function } }} opts
  * @returns {{ slug: string, content: string, strippedLinks: string[], rawSourceIds: string[] } | null}
- *   Returns null on LLM failure. DB write failure throws (caller handles).
+ *   Returns null on LLM failure (caller enqueues for retry). DB write failure throws.
  */
 async function buildWikiPage(db, topic, queryResult, { allowedSlugs = [], providers }) {
   const { callHaiku, buildDistillEnv } = providers;
@@ -34,18 +34,17 @@ async function buildWikiPage(db, topic, queryResult, { allowedSlugs = [], provid
   // Build prompt
   const prompt = buildWikiPrompt(topic, facts, capsuleExcerpts, allowedSlugs);
 
-  // Call LLM
+  // Call LLM — return null on failure so caller can schedule exponential-backoff retry
   let rawContent;
   try {
     const env = buildDistillEnv();
     rawContent = await callHaiku(prompt, env, LLM_TIMEOUT_MS, { model: 'sonnet' });
-  } catch (err) {
-    // LLM failure → return null (caller logs to failed_slugs)
+  } catch {
     return null;
   }
 
   if (!rawContent || typeof rawContent !== 'string' || !rawContent.trim()) {
-    return null;
+    return null; // Empty response — treat as failure, schedule retry
   }
 
   // Validate and strip illegal [[wikilinks]]
@@ -82,4 +81,37 @@ async function buildWikiPage(db, topic, queryResult, { allowedSlugs = [], provid
   return { slug: topic.slug, content, strippedLinks, rawSourceIds };
 }
 
-module.exports = { buildWikiPage };
+function buildFallbackWikiContent(topic, queryResult) {
+  const { totalCount = 0, facts = [], capsuleExcerpts = '' } = queryResult || {};
+  const title = topic.label || topic.tag || topic.slug || '未命名主题';
+  const lines = [
+    `## 概览`,
+    '',
+    `${title} 当前基于 ${totalCount} 条已归档记忆自动生成。以下内容由事实汇总得到，供 Obsidian 检索与人工补充使用。`,
+  ];
+
+  if (capsuleExcerpts && capsuleExcerpts.trim()) {
+    lines.push('', '## 背景补充', '', capsuleExcerpts.trim());
+  }
+
+  if (facts.length > 0) {
+    lines.push('', '## 关键事实', '');
+    facts.slice(0, 12).forEach((fact, index) => {
+      const factTitle = (fact.title || `事实 ${index + 1}`).trim();
+      const content = String(fact.content || '').trim();
+      const meta = [];
+      if (typeof fact.confidence === 'number') meta.push(`可信度 ${fact.confidence}`);
+      if (typeof fact.search_count === 'number') meta.push(`检索 ${fact.search_count}`);
+      lines.push(`### ${index + 1}. ${factTitle}`);
+      if (meta.length > 0) lines.push('', meta.join(' · '));
+      if (content) lines.push('', content);
+      lines.push('');
+    });
+  } else {
+    lines.push('', '## 当前状态', '', '该主题已注册，但暂时没有可用于汇总的事实。');
+  }
+
+  return lines.join('\n').trim();
+}
+
+module.exports = { buildWikiPage, buildFallbackWikiContent };

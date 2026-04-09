@@ -5,7 +5,14 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { exportWikiPage, rebuildIndex } = require('./wiki-reflect-export');
+const {
+  exportWikiPage,
+  rebuildIndex,
+  exportSessionSummary,
+  rebuildSessionsIndex,
+  exportCapsuleFile,
+  rebuildCapsulesIndex,
+} = require('./wiki-reflect-export');
 
 function makeTmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-export-test-'));
@@ -129,6 +136,132 @@ test('rebuildIndex is atomic — no .tmp file remains', () => {
     rebuildIndex([], dir);
     const tmpPath = path.join(dir, '_index.md.tmp');
     assert.ok(!fs.existsSync(tmpPath), 'no .tmp should remain after rebuild');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rebuildIndex adds session summaries navigation', () => {
+  const dir = makeTmpDir();
+  try {
+    rebuildIndex([], dir, { sessionCount: 75 });
+    const content = fs.readFileSync(path.join(dir, '_index.md'), 'utf8');
+    assert.ok(content.includes('[[sessions/_index|Session Summaries]] (75)'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rebuildIndex adds capsules navigation', () => {
+  const dir = makeTmpDir();
+  try {
+    rebuildIndex([], dir, { capsuleCount: 2 });
+    const content = fs.readFileSync(path.join(dir, '_index.md'), 'utf8');
+    assert.ok(content.includes('[[capsules/_index|Knowledge Capsules]] (2)'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('exportSessionSummary writes session markdown under sessions/', () => {
+  const dir = makeTmpDir();
+  try {
+    const filePath = exportSessionSummary({
+      id: 'mi_ses_123',
+      session_id: 'session-12345678',
+      project: 'MetaMe',
+      scope: null,
+      title: 'MetaMe summary',
+      content: 'This session fixed resume routing.',
+      tags: JSON.stringify(['resume', 'routing']),
+      created_at: '2026-04-09 12:00:00',
+    }, dir, {
+      wikiPages: [{ slug: 'daemon', title: 'Daemon', primary_topic: 'daemon' }],
+      capsuleFiles: ['/tmp/metame-daemon-playbook.md'],
+    });
+    assert.ok(fs.existsSync(filePath), 'session summary file should exist');
+    const content = fs.readFileSync(filePath, 'utf8');
+    assert.ok(content.includes('type: session-summary'));
+    assert.ok(content.includes('## Summary'));
+    assert.ok(content.includes('This session fixed resume routing.'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('exportSessionSummary includes related knowledge links when tags match', () => {
+  const dir = makeTmpDir();
+  try {
+    const filePath = exportSessionSummary({
+      session_id: 'session-12345678',
+      project: 'MetaMe',
+      title: 'MetaMe summary',
+      content: 'This session touched daemon resume routing.',
+      tags: JSON.stringify(['daemon']),
+      created_at: '2026-04-09 12:00:00',
+    }, dir, {
+      wikiPages: [{ slug: 'daemon', title: 'Daemon', primary_topic: 'daemon' }],
+      capsuleFiles: ['/tmp/metame-daemon-playbook.md'],
+    });
+    const content = fs.readFileSync(filePath, 'utf8');
+    assert.ok(content.includes('## Related Knowledge'));
+    assert.ok(content.includes('[[daemon|Daemon]]'));
+    assert.ok(content.includes('[[capsules/metame-daemon-playbook|metame-daemon-playbook]]'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rebuildSessionsIndex creates sessions/_index.md', () => {
+  const dir = makeTmpDir();
+  try {
+    rebuildSessionsIndex([{
+      id: 'mi_ses_1',
+      session_id: 'session-abcdef12',
+      project: 'MetaMe',
+      content: 'A compact summary of the session.',
+      created_at: '2026-04-09 12:00:00',
+    }], dir);
+    const indexPath = path.join(dir, 'sessions', '_index.md');
+    assert.ok(fs.existsSync(indexPath), 'session index should exist');
+    const content = fs.readFileSync(indexPath, 'utf8');
+    assert.ok(content.includes('Session Summaries'));
+    assert.ok(content.includes('MetaMe'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('exportCapsuleFile copies markdown under capsules/', () => {
+  const dir = makeTmpDir();
+  const sourceDir = makeTmpDir();
+  try {
+    const sourcePath = path.join(sourceDir, 'metame-daemon-playbook.md');
+    fs.writeFileSync(sourcePath, '# Capsule\n\nUseful content.\n', 'utf8');
+    const targetPath = exportCapsuleFile(sourcePath, dir);
+    assert.ok(targetPath, 'should return target path');
+    assert.ok(fs.existsSync(targetPath), 'capsule file should exist');
+    const content = fs.readFileSync(targetPath, 'utf8');
+    assert.ok(content.includes('Useful content.'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(sourceDir, { recursive: true, force: true });
+  }
+});
+
+test('rebuildCapsulesIndex creates capsules/_index.md', () => {
+  const dir = makeTmpDir();
+  try {
+    rebuildCapsulesIndex([
+      '/tmp/metame-daemon-playbook.md',
+      '/tmp/nightly-reflect-playbook.md',
+    ], dir);
+    const indexPath = path.join(dir, 'capsules', '_index.md');
+    assert.ok(fs.existsSync(indexPath), 'capsule index should exist');
+    const content = fs.readFileSync(indexPath, 'utf8');
+    assert.ok(content.includes('Knowledge Capsules'));
+    assert.ok(content.includes('[[capsules/metame-daemon-playbook|metame-daemon-playbook]]'));
+    assert.ok(content.includes('2 capsules'));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

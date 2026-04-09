@@ -15,7 +15,7 @@ const path = require('path');
 const os = require('os');
 
 const DERIVED_RELATIONS = ['synthesized_insight', 'knowledge_capsule'];
-const DEFAULT_CAPSULES_DIR = path.join(os.homedir(), '.metame', 'capsules');
+const DEFAULT_CAPSULES_DIR = path.join(os.homedir(), '.metame', 'memory', 'capsules');
 const CAPSULE_EXCERPT_CHARS = 200;
 const CAPSULE_MAX = 3;
 const FACTS_LIMIT = 30;
@@ -36,25 +36,26 @@ function queryRawFacts(db, tag, { capsulesDir = DEFAULT_CAPSULES_DIR } = {}) {
   const placeholders = DERIVED_RELATIONS.map(() => '?').join(', ');
 
   // Step 1: total count (staleness denominator, no LIMIT)
+  // Include 'candidate' so topics promoted via saveFacts aren't skipped on first build.
   const countRow = db.prepare(`
     SELECT COUNT(*) as cnt
     FROM memory_items mi
     JOIN json_each(mi.tags) jt ON lower(trim(jt.value)) = lower(trim(?))
-    WHERE mi.state = 'active'
+    WHERE mi.state IN ('active', 'candidate')
       AND (mi.relation NOT IN (${placeholders}) OR mi.relation IS NULL)
   `).get(tag, ...DERIVED_RELATIONS);
 
   const totalCount = countRow ? countRow.cnt : 0;
 
-  // Step 2: top 30 for LLM prompt
+  // Step 2: top 30 for LLM prompt — include candidates so first build isn't empty
   const facts = db.prepare(`
     SELECT mi.id, mi.title, mi.content, mi.confidence, mi.search_count,
            mi.created_at, mi.tags
     FROM memory_items mi
     JOIN json_each(mi.tags) jt ON lower(trim(jt.value)) = lower(trim(?))
-    WHERE mi.state = 'active'
+    WHERE mi.state IN ('active', 'candidate')
       AND (mi.relation NOT IN (${placeholders}) OR mi.relation IS NULL)
-    ORDER BY mi.search_count DESC, mi.confidence DESC
+    ORDER BY mi.state ASC, mi.search_count DESC, mi.confidence DESC
     LIMIT ?
   `).all(tag, ...DERIVED_RELATIONS, FACTS_LIMIT);
 

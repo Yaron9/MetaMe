@@ -478,6 +478,27 @@ function recentSessions({ limit = 3, project = null, scope = null } = {}) {
   }));
 }
 
+function recentFacts({ limit = 5, project = null, scope = null } = {}) {
+  return searchMemoryItems(null, {
+    state: 'active',
+    project: project || null,
+    scope: scope || null,
+    limit,
+  })
+    .filter(r => r.kind === 'insight' || r.kind === 'convention')
+    .map(r => ({
+      id: r.id,
+      entity: (r.title || '').split(' · ')[0] || r.title || '',
+      relation: (r.title || '').split(' · ')[1] || '',
+      value: r.content,
+      confidence: r.confidence >= 0.9 ? 'high' : r.confidence >= 0.6 ? 'medium' : 'low',
+      project: r.project,
+      scope: r.scope,
+      tags: _parseTags(r.tags),
+      created_at: r.created_at,
+    }));
+}
+
 function stats() {
   const db = getDb();
   const row = db.prepare(
@@ -545,6 +566,7 @@ module.exports = {
   searchFactsAsync,
   searchSessions,
   recentSessions,
+  recentFacts,
   stats,
   // lifecycle
   acquire,

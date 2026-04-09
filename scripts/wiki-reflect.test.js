@@ -119,7 +119,7 @@ test('runWikiReflect skips pages below staleness threshold', async () => {
   db.close();
 });
 
-test('runWikiReflect records failed slug when LLM fails', async () => {
+test('runWikiReflect enqueues page in failed[] when LLM fails (no file, retry scheduled)', async () => {
   const db = buildTestDb();
   const dir = makeTmpDir();
 
@@ -132,18 +132,18 @@ test('runWikiReflect records failed slug when LLM fails', async () => {
       providers: makeProviders({ shouldFail: true }),
     });
 
-    assert.ok(!result.built.includes('broken'), 'broken should not be in built');
-    assert.equal(result.failed.length, 1);
+    assert.ok(!result.built.includes('broken'), 'LLM failure must NOT be in built[]');
+    assert.equal(result.failed.length, 1, 'should be enqueued in failed[]');
     assert.equal(result.failed[0].slug, 'broken');
     assert.equal(result.failed[0].retries, 1);
-    assert.ok(result.failed[0].next_retry, 'should have a next_retry time');
+    assert.strictEqual(getWikiPageBySlug(db, 'broken'), null, 'no DB row written on LLM failure');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
   db.close();
 });
 
-test('runWikiReflect marks permanent_error after 3 retries', async () => {
+test('runWikiReflect escalates to permanent_error after MAX_RETRIES LLM failures', async () => {
   const db = buildTestDb();
   const dir = makeTmpDir();
   const logPath = path.join(dir, 'log.jsonl');
@@ -153,7 +153,7 @@ test('runWikiReflect marks permanent_error after 3 retries', async () => {
     seedFact(db, 'badtopic');
     const failingProviders = makeProviders({ shouldFail: true });
 
-    // Simulate 2 previous failures in the log
+    // Simulate 2 previous failures — next retry has already passed
     const prevLog = {
       ts: new Date().toISOString(),
       slugs_built: [],
@@ -172,10 +172,11 @@ test('runWikiReflect marks permanent_error after 3 retries', async () => {
       threshold: 0.4,
     });
 
-    assert.equal(result.failed.length, 1);
-    assert.equal(result.failed[0].retries, 3);
-    assert.equal(result.failed[0].permanent_error, true);
-    assert.equal(result.failed[0].next_retry, null);
+    // retries goes 2→3 which equals MAX_RETRIES (3), so permanent_error=true
+    assert.ok(!result.built.includes('badtopic'), 'still-failing page must not be in built[]');
+    assert.equal(result.failed.length, 1, 'should remain in failed[]');
+    assert.ok(result.failed[0].permanent_error, 'should be marked permanent_error after MAX_RETRIES');
+    assert.strictEqual(result.failed[0].next_retry, null, 'permanent_error entries get null next_retry');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

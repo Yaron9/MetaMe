@@ -10,7 +10,7 @@ const {
   _private: { resolveCodexPermissionProfile },
 } = require('./daemon-engine-runtime');
 const { rawChatId } = require('./core/thread-chat-id');
-const { buildAgentContextForEngine, buildMemorySnapshotContent, refreshMemorySnapshot } = require('./agent-layer');
+const { buildAgentContextForEngine, buildMemorySnapshotContent, selectSnapshotContext, refreshMemorySnapshot } = require('./agent-layer');
 const {
   adaptDaemonHintForEngine,
   buildAgentHint,
@@ -2386,12 +2386,18 @@ function createClaudeEngine(deps) {
           setImmediate(async () => {
             try {
               const memory = require('./memory');
-              const pKey = boundProjectKey || '';
-              const sessions = memory.recentSessions({ limit: 5, project: pKey });
-              const factsRaw = memory.searchFacts('', { limit: 10, project: pKey });
-              const facts = Array.isArray(factsRaw) ? factsRaw : [];
+              const snapshotCtx = selectSnapshotContext(memory, {
+                projectHints: [
+                  boundProjectKey,
+                  boundProject.project_key,
+                  boundProject.name,
+                  boundProject.agent_id,
+                ],
+                sessionLimit: 5,
+                factLimit: 10,
+              });
               memory.close();
-              const snapshotContent = buildMemorySnapshotContent(sessions, facts);
+              const snapshotContent = buildMemorySnapshotContent(snapshotCtx.sessions, snapshotCtx.facts);
               const agentId = boundProject.agent_id;
               if (refreshMemorySnapshot(agentId, snapshotContent, HOME)) {
                 log('DEBUG', `[AGENT] Memory snapshot refreshed for ${agentId}`);
