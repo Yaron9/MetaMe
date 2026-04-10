@@ -2387,7 +2387,7 @@ async function main() {
   }
 
   // Config validation: warn on unknown/suspect fields
-  const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'weixin', 'heartbeat', 'budget', 'projects', 'imessage', 'siri_bridge'];
+  const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'weixin', 'heartbeat', 'budget', 'projects', 'imessage', 'siri_bridge', 'hooks'];
   const KNOWN_DAEMON = [
     'model',          // legacy (still valid as fallback)
     'models',         // per-engine model map: { claude, codex }
@@ -2402,6 +2402,8 @@ async function main() {
     'mac_control_mode',
     'enable_nl_mac_control',
     'enable_nl_mac_fallback',
+    'wiki_output_dir',       // wiki export path (used by daemon-command-router)
+    'skill_evolution_notify', // whether to notify on skill evolution (used by daemon-task-scheduler)
   ];
   for (const key of Object.keys(config)) {
     if (!KNOWN_SECTIONS.includes(key)) log('WARN', `Config: unknown section "${key}" (typo?)`);
