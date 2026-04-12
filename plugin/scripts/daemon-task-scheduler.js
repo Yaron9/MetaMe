@@ -660,7 +660,7 @@ function createTaskScheduler(deps) {
     return found || null;
   }
 
-  function startHeartbeat(config, notifyFn, notifyPersonalFn) {
+  function startHeartbeat(config, notifyFn, notifyPersonalFn, adminNotifyFn) {
     const { all: tasks } = getAllTasks(config);
 
     const enabledTasks = tasks.filter(t => t.enabled !== false);
@@ -787,10 +787,12 @@ function createTaskScheduler(deps) {
               }
               if (task.notify && notifyFn && !result.skipped) {
                 const proj = task._project || null;
+                // Tasks without a project are system-level — send to admin chat only
+                const sendFn = proj ? notifyFn : (adminNotifyFn || notifyFn);
                 if (result.success) {
-                  notifyFn(`✅ *${task.name}* completed\n\n${result.output}`, proj);
+                  sendFn(`✅ *${task.name}* completed\n\n${result.output}`, proj);
                 } else {
-                  notifyFn(`❌ *${task.name}* failed: ${result.error}`, proj);
+                  sendFn(`❌ *${task.name}* failed: ${result.error}`, proj);
                 }
               }
             })

@@ -2512,7 +2512,7 @@ async function main() {
   };
 
   // Start heartbeat scheduler
-  let heartbeatTimer = startHeartbeat(config, notifyFn, notifyPersonalFn);
+  let heartbeatTimer = startHeartbeat(config, notifyFn, notifyPersonalFn, adminNotifyFn);
 
   let shuttingDown = false;
   function spawnReplacementDaemon(reason) {

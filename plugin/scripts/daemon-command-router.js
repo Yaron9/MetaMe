@@ -613,7 +613,31 @@ function createCommandRouter(deps) {
       await bot.sendMessage(chatId, 'Daily token budget exceeded.');
       return;
     }
-    const claudeResult = await askClaude(bot, chatId, text, config, readOnly, senderId);
+
+    // --- "修" shortcut: inject latest health report as context ---
+    let effectiveText = text;
+    if (text.trim() === '修') {
+      const reportFile = require('path').join(require('os').homedir(), '.metame', 'health-report-latest.json');
+      try {
+        const raw = require('fs').readFileSync(reportFile, 'utf8');
+        const report = JSON.parse(raw);
+        const ageMs = Date.now() - new Date(report.generated_at).getTime();
+        if (ageMs < 48 * 60 * 60 * 1000) { // only if report is within 48h
+          const issues = (report.analysis && report.analysis.issues || [])
+            .map(i => `- ${i.name}（×${i.count}）：${i.fix}`)
+            .join('\n');
+          effectiveText = `请根据以下 daemon 健康报告修复问题：\n\n` +
+            `摘要：${report.analysis.summary}\n` +
+            `建议行动：${report.analysis.action}\n\n` +
+            `问题清单：\n${issues}\n\n` +
+            `报告时间：${report.generated_at}\n` +
+            `请先读取 ~/.metame/daemon.log 确认问题，然后修复 /Users/yaron/AGI/MetaMe/scripts/ 中的对应代码。`;
+          log('INFO', `[health-scan] "修" shortcut: injected health report (${report.total_errors} errors)`);
+        }
+      } catch { /* no report or stale — fall through with original text */ }
+    }
+
+    const claudeResult = await askClaude(bot, chatId, effectiveText, config, readOnly, senderId);
     const claudeFailed = !!(claudeResult && claudeResult.ok === false);
     const claudeAborted = !!(claudeResult && claudeResult.error === 'Stopped by user');
     if (claudeFailed && !claudeAborted && !macLocalFirst && macFallbackEnabled && allowLocalMacControl) {
