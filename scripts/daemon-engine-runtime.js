@@ -22,7 +22,7 @@ const ENGINE_TIMEOUT_DEFAULTS = Object.freeze({
     ceilingMs: null,
   }),
   claude: Object.freeze({
-    idleMs: 5 * 60 * 1000,
+    idleMs: 20 * 60 * 1000,
     toolMs: 25 * 60 * 1000,
     ceilingMs: null,
   }),
