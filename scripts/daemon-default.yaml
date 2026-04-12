@@ -116,6 +116,16 @@ heartbeat:
       notify: false
       enabled: true
 
+    # Embedding 索引：消费 embedding_queue，生成向量嵌入，30 分钟冷却
+    - name: embedding-index
+      type: script
+      command: node ~/.metame/daemon-embedding.js
+      interval: 30m
+      timeout: 600
+      require_idle: false
+      notify: false
+      enabled: true
+
     # Legacy flat tasks (no project isolation). New tasks should go under projects: above.
     # Examples — uncomment or add your own:
     #

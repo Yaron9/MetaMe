@@ -109,6 +109,16 @@ function vectorSearch(db, queryEmbedding) {
 }
 
 /**
+ * Check if any content_chunks have stored embeddings.
+ * Avoids wasting OpenAI API calls when no embeddings exist yet.
+ */
+function hasStoredEmbeddings(db) {
+  try {
+    return !!db.prepare('SELECT 1 FROM content_chunks WHERE embedding IS NOT NULL LIMIT 1').get();
+  } catch { return false; }
+}
+
+/**
  * Aggregate chunk-level vector results to page-level.
  * Per slug: keep max score and best chunk text as excerpt.
  * @param {{ page_slug: string, chunk_text: string, score: number }[]} chunks
@@ -190,7 +200,7 @@ async function hybridSearchWiki(db, query, { ftsOnly = false, trackSearch = true
   let vectorPages = new Map();
   const hasEmbeddings = !ftsOnly && isEmbeddingAvailable();
 
-  if (hasEmbeddings) {
+  if (hasEmbeddings && hasStoredEmbeddings(db)) {
     try {
       const queryEmb = await getEmbedding(query);
       if (queryEmb) {
@@ -282,5 +292,5 @@ async function hybridSearchWiki(db, query, { ftsOnly = false, trackSearch = true
 
 module.exports = {
   hybridSearchWiki,
-  _internal: { dotProduct, topK, ftsSearch, vectorSearch, aggregateChunksToPages, rrfFuse, normalizeScores },
+  _internal: { dotProduct, topK, ftsSearch, vectorSearch, aggregateChunksToPages, rrfFuse, normalizeScores, hasStoredEmbeddings },
 };

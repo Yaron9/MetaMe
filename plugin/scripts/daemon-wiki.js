@@ -123,7 +123,14 @@ function createWikiCommandHandler(deps) {
     }
 
     const db = getDb();
-    const { wikiPages, facts } = searchWikiAndFacts(db, query, { trackSearch: true });
+    let wikiPages, facts;
+    try {
+      const { hybridSearchWiki } = require('./core/hybrid-search');
+      ({ wikiPages, facts } = await hybridSearchWiki(db, query, { trackSearch: true }));
+    } catch (err) {
+      log('WARN', `[wiki-research] hybrid search fallback to FTS: ${err.message}`);
+      ({ wikiPages, facts } = searchWikiAndFacts(db, query, { trackSearch: true }));
+    }
 
     if (wikiPages.length === 0 && facts.length === 0) {
       await bot.sendMessage(chatId,
@@ -206,6 +213,13 @@ function createWikiCommandHandler(deps) {
       const lines = ['✅ Wiki 重建完成'];
       if (result.built.length > 0) {
         lines.push(`• 重建: ${result.built.join(', ')}`);
+        try {
+          const { execFile } = require('child_process');
+          const embScript = path.join(os.homedir(), '.metame', 'daemon-embedding.js');
+          execFile('node', [embScript], { timeout: 120000, stdio: 'ignore' }, (err) => {
+            if (err) log('WARN', `[wiki-sync] embedding trigger failed: ${err.message}`);
+          });
+        } catch { }
       }
       if (result.failed.length > 0) {
         lines.push(`• 失败: ${result.failed.map(f => f.slug).join(', ')}`);
