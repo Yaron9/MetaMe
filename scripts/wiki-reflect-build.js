@@ -13,7 +13,8 @@
  */
 
 const { buildWikiPrompt, validateWikilinks } = require('./core/wiki-prompt');
-const { upsertWikiPage, resetPageStaleness } = require('./core/wiki-db');
+const { upsertWikiPage, resetPageStaleness, appendWikiTimeline } = require('./core/wiki-db');
+const { chunkText } = require('./core/chunker');
 
 const LLM_TIMEOUT_MS = 60000; // Sonnet needs more time than Haiku
 
@@ -71,6 +72,35 @@ async function buildWikiPage(db, topic, queryResult, { allowedSlugs = [], provid
 
     // Reset staleness counters via canonical helper (staleness=0, last_built_at=now)
     resetPageStaleness(db, topic.slug, totalCount);
+
+    // ── Chunk content + enqueue embeddings ──────────────────────────────────
+    // Clean stale embedding_queue entries for this page's old chunks
+    const oldChunkIds = db.prepare(
+      'SELECT id FROM content_chunks WHERE page_slug = ?',
+    ).all(topic.slug).map(r => r.id);
+    if (oldChunkIds.length > 0) {
+      const ph = oldChunkIds.map(() => '?').join(', ');
+      db.prepare(`DELETE FROM embedding_queue WHERE item_type = 'chunk' AND item_id IN (${ph})`).run(...oldChunkIds);
+    }
+    // Delete old chunks
+    db.prepare('DELETE FROM content_chunks WHERE page_slug = ?').run(topic.slug);
+
+    // Create new chunks + enqueue
+    const chunks = chunkText(content, { targetWords: 300 });
+    const insertChunk = db.prepare(
+      'INSERT INTO content_chunks (id, page_slug, chunk_text, chunk_idx) VALUES (?, ?, ?, ?)',
+    );
+    const enqueue = db.prepare(
+      "INSERT INTO embedding_queue (item_type, item_id) VALUES ('chunk', ?)",
+    );
+    for (let i = 0; i < chunks.length; i++) {
+      const chunkId = `ck_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      insertChunk.run(chunkId, topic.slug, chunks[i], i);
+      enqueue.run(chunkId);
+    }
+
+    // Append evidence to timeline (compiled truth was just rewritten above)
+    appendWikiTimeline(db, topic.slug, `基于 ${totalCount} 条 facts 重建 (${rawSourceIds.length} 条直接引用, ${chunks.length} chunks)`);
 
     db.prepare('COMMIT').run();
   } catch (err) {

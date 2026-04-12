@@ -11,6 +11,8 @@
  *   wiki_pages       — topic knowledge pages
  *   wiki_topics      — controlled topic registry
  *   wiki_pages_fts   — FTS5 virtual table (content table, trigram tokenizer)
+ *   content_chunks   — chunked page content with optional vector embeddings
+ *   embedding_queue  — durable async queue for embedding generation
  *
  * Triggers:
  *   wiki_pages_fts_insert / wiki_pages_fts_update / wiki_pages_fts_delete
@@ -41,6 +43,9 @@ function applyWikiSchema(db) {
       updated_at            TEXT DEFAULT (datetime('now'))
     )
   `);
+
+  // Migration: add timeline column for Compiled Truth + Timeline model (existing DBs)
+  try { db.exec("ALTER TABLE wiki_pages ADD COLUMN timeline TEXT DEFAULT ''"); } catch { /* column already exists */ }
 
   // ── wiki_topics ─────────────────────────────────────────────────────────────
   db.exec(`
@@ -74,9 +79,14 @@ function applyWikiSchema(db) {
     END
   `);
 
+  // DROP+CREATE to upgrade existing unguarded trigger on deployed DBs
+  db.exec('DROP TRIGGER IF EXISTS wiki_pages_fts_update');
   db.exec(`
-    CREATE TRIGGER IF NOT EXISTS wiki_pages_fts_update
-      AFTER UPDATE ON wiki_pages BEGIN
+    CREATE TRIGGER wiki_pages_fts_update
+      AFTER UPDATE ON wiki_pages
+      WHEN old.slug IS NOT new.slug OR old.title IS NOT new.title
+        OR old.content IS NOT new.content OR old.topic_tags IS NOT new.topic_tags
+    BEGIN
       INSERT INTO wiki_pages_fts(wiki_pages_fts, rowid, slug, title, content, topic_tags)
         VALUES ('delete', old.rowid, old.slug, old.title, old.content, old.topic_tags);
       INSERT INTO wiki_pages_fts(rowid, slug, title, content, topic_tags)
@@ -90,6 +100,34 @@ function applyWikiSchema(db) {
       INSERT INTO wiki_pages_fts(wiki_pages_fts, rowid, slug, title, content, topic_tags)
         VALUES ('delete', old.rowid, old.slug, old.title, old.content, old.topic_tags);
     END
+  `);
+
+  // ── content_chunks (vector embedding storage for wiki pages) ────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS content_chunks (
+      id              TEXT PRIMARY KEY,
+      page_slug       TEXT NOT NULL,
+      chunk_text      TEXT NOT NULL,
+      chunk_idx       INTEGER NOT NULL,
+      embedding       BLOB,
+      embedding_model TEXT,
+      embedding_dim   INTEGER,
+      created_at      TEXT DEFAULT (datetime('now'))
+    )
+  `);
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_chunks_slug ON content_chunks(page_slug)'); } catch { }
+
+  // ── embedding_queue (durable async queue for embedding generation) ──────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS embedding_queue (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      item_type   TEXT NOT NULL,
+      item_id     TEXT NOT NULL,
+      model       TEXT DEFAULT 'text-embedding-3-small',
+      attempts    INTEGER DEFAULT 0,
+      last_error  TEXT,
+      created_at  TEXT DEFAULT (datetime('now'))
+    )
   `);
 }
 

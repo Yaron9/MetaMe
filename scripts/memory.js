@@ -47,6 +47,7 @@ function getDb() {
 
   _db.exec('PRAGMA journal_mode = WAL');
   _db.exec('PRAGMA busy_timeout = 3000');
+  _db.exec('PRAGMA foreign_keys = ON');
 
   _db.exec(`
     CREATE TABLE IF NOT EXISTS memory_items (
@@ -547,6 +548,19 @@ function searchWikiAndFacts(query, { trackSearch = true } = {}) {
   }
 }
 
+/**
+ * Hybrid wiki search (FTS5 + vector + RRF fusion).
+ * Falls back to pure FTS5 if hybrid-search module is unavailable.
+ */
+async function hybridSearchWiki(query, { ftsOnly = false, expand = false, trackSearch = true } = {}) {
+  try {
+    const { hybridSearchWiki: fn } = require('./core/hybrid-search');
+    return await fn(getDb(), query, { ftsOnly, trackSearch });
+  } catch {
+    return searchWikiAndFacts(query, { trackSearch });
+  }
+}
+
 module.exports = {
   // core
   saveMemoryItem,
@@ -558,6 +572,7 @@ module.exports = {
   assembleContext,
   // wiki
   searchWikiAndFacts,
+  hybridSearchWiki,
   // compatibility
   saveSession,
   saveFacts,

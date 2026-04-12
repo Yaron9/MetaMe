@@ -3,14 +3,15 @@
  * memory-search.js — Cross-session memory recall CLI
  *
  * Usage:
- *   node memory-search.js "<query>"                # hybrid search (QMD + FTS5)
+ *   node memory-search.js "<query>"                # hybrid search (FTS5 + vector + RRF)
  *   node memory-search.js "<q1>" "<q2>" "<q3>"     # multi-keyword parallel search
  *   node memory-search.js --facts "<query>"         # search facts only
  *   node memory-search.js --sessions "<query>"      # search sessions only
+ *   node memory-search.js --fts-only "<query>"      # force pure FTS5 (no vector)
  *   node memory-search.js --recent                  # show recent sessions
  *
  * Multi-keyword: results are deduplicated by fact ID, best rank wins.
- * Async: uses QMD hybrid search (BM25 + vector) when available, falls back to FTS5.
+ * Hybrid: uses FTS5 + vector embeddings + RRF fusion when available, falls back to FTS5.
  */
 
 'use strict';
@@ -31,8 +32,20 @@ if (!memoryPath) {
 const memory = require(memoryPath);
 
 const args = process.argv.slice(2);
-const mode = args[0] && args[0].startsWith('--') ? args[0] : null;
-const queries = mode ? args.slice(1) : args;
+// Parse flags: allow multiple -- flags before queries
+const flags = new Set();
+let firstQueryIdx = 0;
+for (let i = 0; i < args.length; i++) {
+  if (args[i].startsWith('--')) { flags.add(args[i]); firstQueryIdx = i + 1; }
+  else break;
+}
+const mode = flags.has('--facts') ? '--facts'
+  : flags.has('--sessions') ? '--sessions'
+  : flags.has('--recent') ? '--recent'
+  : flags.has('--fts-only') ? '--fts-only'
+  : null;
+const ftsOnly = flags.has('--fts-only');
+const queries = args.slice(firstQueryIdx);
 
 async function main() {
   try {
@@ -79,20 +92,35 @@ async function main() {
       limit: 3,
     });
 
-    // Wiki pages (if available)
+    // Wiki pages — hybrid search (FTS5 + vector + RRF) when available
     let wikiResults = [];
-    if (typeof memory.searchWikiAndFacts === 'function') {
-      try {
-        const allWiki = [];
-        for (const q of queries) {
-          const { wikiPages } = memory.searchWikiAndFacts(q, { trackSearch: true });
-          for (const p of (wikiPages || [])) {
-            allWiki.push({ type: 'wiki', slug: p.slug, title: p.title, excerpt: p.excerpt, last_built_at: p.last_built_at });
+    const useHybrid = typeof memory.hybridSearchWiki === 'function';
+    try {
+      const allWiki = [];
+      const seen = new Set();
+      for (const q of queries) {
+        const { wikiPages } = useHybrid
+          ? await memory.hybridSearchWiki(q, { ftsOnly, trackSearch: true })
+          : (typeof memory.searchWikiAndFacts === 'function'
+            ? memory.searchWikiAndFacts(q, { trackSearch: true })
+            : { wikiPages: [] });
+        for (const p of (wikiPages || [])) {
+          if (!seen.has(p.slug)) {
+            seen.add(p.slug);
+            allWiki.push({
+              type: 'wiki',
+              slug: p.slug,
+              title: p.title,
+              excerpt: p.excerpt,
+              score: p.score,
+              stale: p.stale,
+              source: p.source,
+            });
           }
         }
-        wikiResults = allWiki.slice(0, 5);
-      } catch { /* wiki not available */ }
-    }
+      }
+      wikiResults = allWiki.slice(0, 5);
+    } catch { /* wiki not available */ }
 
     console.log(JSON.stringify([...wikiResults, ...factResults, ...sessionResults], null, 2));
 

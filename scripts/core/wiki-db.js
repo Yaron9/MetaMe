@@ -284,6 +284,24 @@ function listRecentSessionSummaries(db, { limit = 200 } = {}) {
   `).all(limit);
 }
 
+// ── Timeline ──────────────────────────────────────────────────────────────────
+
+/**
+ * Append a timestamped entry to a wiki page's timeline (evidence trail).
+ * Does NOT touch content (compiled truth) — timeline is append-only.
+ *
+ * @param {object} db
+ * @param {string} slug
+ * @param {string} entry — free-text description of what happened
+ */
+function appendWikiTimeline(db, slug, entry) {
+  const ts = new Date().toISOString().slice(0, 10);
+  const line = `[${ts}] ${entry}`;
+  db.prepare(
+    `UPDATE wiki_pages SET timeline = COALESCE(timeline, '') || ? || char(10), updated_at = datetime('now') WHERE slug = ?`,
+  ).run(line, slug);
+}
+
 // ── Search ────────────────────────────────────────────────────────────────────
 
 /**
@@ -310,6 +328,11 @@ function searchWikiAndFacts(db, query, { trackSearch = true } = {}) {
     ORDER BY rank
     LIMIT 5
   `).all(safeQuery);
+
+  // Add stale flag to wiki results (staleness >= 0.3 means compiled truth may be outdated)
+  for (const wp of wikiPages) {
+    wp.stale = typeof wp.staleness === 'number' && wp.staleness >= 0.3;
+  }
 
   // 2. FTS5 search memory_items_fts — graceful fallback if table doesn't exist
   let facts = [];
@@ -392,6 +415,7 @@ module.exports = {
   getStalePages,
   upsertWikiPage,
   resetPageStaleness,
+  appendWikiTimeline,
   // wiki_topics
   upsertWikiTopic,
   checkTopicThreshold,
