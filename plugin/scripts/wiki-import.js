@@ -186,4 +186,4 @@ async function runWikiImport(db, inputPath, { providers, noCluster = false, log 
   return stats;
 }
 
-module.exports = { runWikiImport, scanFiles, generateUniqueSlug };
+module.exports = { runWikiImport, scanFiles, generateUniqueSlug, waitForEmbeddingDrain };

@@ -80,6 +80,11 @@ function createWikiCommandHandler(deps) {
       await _handleHelp(bot, chatId);
       return true;
     }
+    if (trimmed === '/wiki import' || trimmed.startsWith('/wiki import ')) {
+      const args = trimmed.slice(12).trim();
+      await _handleImport(bot, chatId, args);
+      return true;
+    }
     // Unknown /wiki subcommand — show help
     if (trimmed.startsWith('/wiki ')) {
       await _handleHelp(bot, chatId);
@@ -228,6 +233,59 @@ function createWikiCommandHandler(deps) {
         lines.push(`• 文件导出失败 (DB 已更新): ${result.exportFailed.join(', ')}`);
       }
       await bot.sendMessage(chatId, lines.join('\n'));
+
+      // Phased doc + cluster rebuild (wiki-import feature extension)
+      const { listStaleDocSources } = require('./core/wiki-db');
+      const { buildDocWikiPage } = require('./wiki-reflect-build');
+      const { extractText } = require('./wiki-extract');
+      const allDocSlugsForSync = db.prepare("SELECT slug FROM doc_sources WHERE status='active'").all().map(r => r.slug);
+      const staleDocSources = listStaleDocSources(db);
+      const builtDocSlugs = [];
+      for (const docSrc of staleDocSources) {
+        try {
+          const { text } = await extractText(docSrc.file_path);
+          const docResult = await buildDocWikiPage(db, docSrc, text, { allowedSlugs: allDocSlugsForSync, providers });
+          if (docResult) {
+            db.prepare("UPDATE doc_sources SET content_stale=0, built_at=? WHERE id=?")
+              .run(new Date().toISOString(), docSrc.id);
+            builtDocSlugs.push(docSrc.slug);
+          }
+        } catch (docErr) {
+          db.prepare("UPDATE doc_sources SET error_message=? WHERE id=?").run(docErr.message, docSrc.id);
+          log('WARN', `[wiki-sync] doc rebuild failed ${docSrc.slug}: ${docErr.message}`);
+        }
+      }
+      // Cascade stale cluster pages
+      if (builtDocSlugs.length > 0) {
+        const ph = builtDocSlugs.map(() => '?').join(',');
+        const affected = db.prepare(`SELECT DISTINCT page_slug FROM wiki_page_doc_sources
+          WHERE role='cluster_member' AND doc_source_id IN
+          (SELECT id FROM doc_sources WHERE slug IN (${ph}))`).all(...builtDocSlugs).map(r => r.page_slug);
+        if (affected.length) {
+          db.prepare(`UPDATE wiki_pages SET staleness=1 WHERE slug IN (${affected.map(() => '?').join(',')})`).run(...affected);
+        }
+      }
+      // Rebuild stale cluster pages after embedding drain
+      const { waitForEmbeddingDrain } = require('./wiki-import');
+      const phase1ChunkIds = builtDocSlugs.flatMap(slug =>
+        db.prepare("SELECT id FROM content_chunks WHERE page_slug=?").all(slug).map(c => c.id)
+      );
+      const drainedOk = await waitForEmbeddingDrain(db, phase1ChunkIds, (msg) => log('INFO', msg));
+      if (drainedOk) {
+        const { buildTopicClusterPage } = require('./wiki-reflect-build');
+        const { getClusterMemberIds } = require('./core/wiki-db');
+        const staleClusterPages = db.prepare("SELECT * FROM wiki_pages WHERE source_type='topic_cluster' AND staleness=1").all();
+        for (const cp of staleClusterPages) {
+          const memberIds = getClusterMemberIds(db, cp.slug);
+          const getDocSrcById = db.prepare("SELECT * FROM doc_sources WHERE id=?");
+          const docRows = memberIds.map(id => getDocSrcById.get(id)).filter(Boolean);
+          try {
+            await buildTopicClusterPage(db, docRows, { allowedSlugs: allDocSlugsForSync, providers, existingClusters: [] });
+          } catch (clErr) {
+            log('WARN', `[wiki-sync] cluster rebuild failed ${cp.slug}: ${clErr.message}`);
+          }
+        }
+      }
     } catch (err) {
       log('ERROR', `[wiki-sync] ${err.message}`);
       if (err.message.includes('another instance')) {
@@ -293,6 +351,46 @@ function createWikiCommandHandler(deps) {
     }
   }
 
+  async function _handleImport(bot, chatId, args) {
+    const noCluster = args.includes('--no-cluster');
+    const inputPath = args.replace('--no-cluster', '').trim();
+
+    if (!inputPath) {
+      await bot.sendMessage(chatId, '用法: `/wiki import <路径或文件>` [--no-cluster]\n\n示例:\n`/wiki import ~/Documents/notes`\n`/wiki import ~/report.pdf`');
+      return;
+    }
+
+    const resolvedPath = inputPath.replace(/^~/, require('node:os').homedir());
+
+    let stat;
+    try { stat = require('node:fs').statSync(resolvedPath); }
+    catch { await bot.sendMessage(chatId, `❌ 路径不存在: ${resolvedPath}`); return; }
+
+    const isDir = stat.isDirectory();
+    await bot.sendMessage(chatId, `⏳ 开始导入 ${isDir ? '目录' : '文件'}: \`${resolvedPath}\`\n${noCluster ? '（跳过聚类）' : '（含自动聚类）'}`);
+
+    const { runWikiImport } = require('./wiki-import');
+    const db = getDb();
+    const logFn = (msg) => { log('INFO', msg); };
+
+    try {
+      const stats = await runWikiImport(db, resolvedPath, {
+        providers, noCluster, log: logFn,
+      });
+      await bot.sendMessage(chatId,
+        `✅ 导入完成\n\n` +
+        `- 新建/更新页面: ${stats.imported}\n` +
+        `- 跳过 (未变更): ${stats.skipped}\n` +
+        `- 失败: ${stats.failed}\n` +
+        `- 聚类页面: ${stats.clusters}\n\n` +
+        `使用 \`/wiki\` 查看全部页面`
+      );
+    } catch (err) {
+      log('ERROR', `[wiki-import] ${err.message}`);
+      await bot.sendMessage(chatId, `❌ 导入失败: ${err.message}`);
+    }
+  }
+
   async function _handleHelp(bot, chatId) {
     await bot.sendMessage(chatId, [
       '📚 **Wiki 命令**',
@@ -301,6 +399,7 @@ function createWikiCommandHandler(deps) {
       '`/wiki research <关键词>` — 搜索知识',
       '`/wiki page <slug>` — 查看页面全文',
       '`/wiki sync` — 重建陈旧页面',
+      '`/wiki import <路径>` — 导入本地文档 (md/txt/PDF)',
       '`/wiki pin <标签> [标题]` — 手工注册主题',
       '`/wiki open` — 在 Obsidian 中打开 vault',
     ].join('\n'));
