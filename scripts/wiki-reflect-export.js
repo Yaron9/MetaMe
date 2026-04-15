@@ -294,6 +294,55 @@ function rebuildReflectDirIndex(fileNames, subdir, outputDir = DEFAULT_WIKI_DIR)
   fs.renameSync(tmpPath, filePath);
 }
 
+/**
+ * Export all doc/cluster wiki pages from DB to Obsidian vault.
+ * Called by runWikiReflect after the memory-topic loop.
+ * Pages with empty content are skipped.
+ *
+ * @param {object} db — DatabaseSync instance
+ * @param {string} [outputDir]
+ * @returns {{ exported: string[], skipped: string[] }}
+ */
+function exportDocPages(db, outputDir = DEFAULT_WIKI_DIR) {
+  _ensureDir(outputDir);
+  const rows = db.prepare(
+    `SELECT slug, title, primary_topic, source_type, content,
+            topic_tags, created_at, last_built_at, raw_source_count, staleness
+     FROM wiki_pages
+     WHERE source_type IN ('doc', 'topic_cluster')
+       AND content IS NOT NULL AND content != ''`
+  ).all();
+
+  const exported = [];
+  const skipped = [];
+
+  for (const row of rows) {
+    try {
+      const tags = (() => {
+        try {
+          const p = JSON.parse(row.topic_tags || '[]');
+          return Array.isArray(p) ? p : [];
+        } catch { return []; }
+      })();
+      const frontmatter = {
+        title: row.title || row.slug,
+        slug: row.slug,
+        tags,
+        created: (row.created_at || '').slice(0, 10),
+        last_built: (row.last_built_at || '').slice(0, 10),
+        raw_sources: row.raw_source_count || 0,
+        staleness: row.staleness || 0,
+      };
+      exportWikiPage(row.slug, frontmatter, row.content, outputDir);
+      exported.push(row.slug);
+    } catch {
+      skipped.push(row.slug);
+    }
+  }
+
+  return { exported, skipped };
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function _ensureDir(dir) {
@@ -398,6 +447,7 @@ module.exports = {
   rebuildSessionsIndex,
   exportCapsuleFile,
   rebuildCapsulesIndex,
-  exportReflectDir,        // new
-  rebuildReflectDirIndex,  // new
+  exportReflectDir,
+  rebuildReflectDirIndex,
+  exportDocPages,          // new
 };

@@ -12,8 +12,9 @@ const {
   rebuildSessionsIndex,
   exportCapsuleFile,
   rebuildCapsulesIndex,
-  exportReflectDir,        // add this
-  rebuildReflectDirIndex,  // add this
+  exportReflectDir,
+  rebuildReflectDirIndex,
+  exportDocPages,          // add this
 } = require('./wiki-reflect-export');
 
 function makeTmpDir() {
@@ -337,5 +338,76 @@ test('rebuildReflectDirIndex uses "Operational Lessons" label for lessons subdir
   rebuildReflectDirIndex(['2026-04-11-nightly-reflect.md'], 'lessons', tmp);
   const content = fs.readFileSync(path.join(tmp, 'lessons', '_index.md'), 'utf8');
   assert.ok(content.includes('Operational Lessons'));
+  fs.rmSync(tmp, { recursive: true });
+});
+
+// ── exportDocPages ────────────────────────────────────────────
+test('exportDocPages exports doc and cluster pages, skips memory pages', (_t) => {
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE wiki_pages (
+      slug TEXT PRIMARY KEY,
+      title TEXT,
+      primary_topic TEXT,
+      source_type TEXT,
+      content TEXT,
+      topic_tags TEXT,
+      created_at TEXT,
+      last_built_at TEXT,
+      raw_source_count INTEGER DEFAULT 0,
+      staleness REAL DEFAULT 0
+    )
+  `);
+  db.prepare('INSERT INTO wiki_pages VALUES (?,?,?,?,?,?,?,?,?,?)').run(
+    'doc-test', 'Doc Test', 'doc-test', 'doc',
+    '## Content\nHello.', '[]', '2026-04-15', '2026-04-15', 3, 0.0
+  );
+  db.prepare('INSERT INTO wiki_pages VALUES (?,?,?,?,?,?,?,?,?,?)').run(
+    'cluster-test', 'Cluster Test', 'cluster-test', 'topic_cluster',
+    '## Cluster\nSynthesis.', '[]', '2026-04-15', '2026-04-15', 5, 0.0
+  );
+  // memory page — must NOT be exported
+  db.prepare('INSERT INTO wiki_pages VALUES (?,?,?,?,?,?,?,?,?,?)').run(
+    'mem-topic', 'Memory Topic', 'mem-topic', 'memory',
+    '## Memory.', '[]', '2026-04-15', '2026-04-15', 2, 0.0
+  );
+
+  const tmp = makeTmpDir();
+  const { exported, skipped } = exportDocPages(db, tmp);
+
+  assert.ok(fs.existsSync(path.join(tmp, 'doc-test.md')), 'doc page exported');
+  assert.ok(fs.existsSync(path.join(tmp, 'cluster-test.md')), 'cluster page exported');
+  assert.ok(!fs.existsSync(path.join(tmp, 'mem-topic.md')), 'memory page not exported');
+  assert.strictEqual(exported.length, 2);
+  assert.strictEqual(skipped.length, 0);
+
+  const content = fs.readFileSync(path.join(tmp, 'doc-test.md'), 'utf8');
+  assert.ok(content.includes('slug: doc-test'), 'has slug frontmatter');
+  assert.ok(content.includes('## Content'), 'has body content');
+
+  db.close();
+  fs.rmSync(tmp, { recursive: true });
+});
+
+test('exportDocPages skips pages with empty content', (_t) => {
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE wiki_pages (
+      slug TEXT PRIMARY KEY, title TEXT, primary_topic TEXT, source_type TEXT,
+      content TEXT, topic_tags TEXT, created_at TEXT, last_built_at TEXT,
+      raw_source_count INTEGER DEFAULT 0, staleness REAL DEFAULT 0
+    )
+  `);
+  db.prepare('INSERT INTO wiki_pages VALUES (?,?,?,?,?,?,?,?,?,?)').run(
+    'empty-doc', 'Empty', 'empty-doc', 'doc',
+    '', '[]', '2026-04-15', '2026-04-15', 0, 0.0
+  );
+
+  const tmp = makeTmpDir();
+  const { exported } = exportDocPages(db, tmp);
+  assert.strictEqual(exported.length, 0);
+  db.close();
   fs.rmSync(tmp, { recursive: true });
 });
