@@ -107,6 +107,27 @@ heartbeat:
       notify: false
       enabled: true
 
+    # wiki-sync: 每天 02:30 把所有 wiki 页面（记忆主题、doc/cluster 页、decisions/lessons）同步到 Obsidian vault
+    # 前置条件: daemon.wiki_output_dir 已配置，如: ~/Documents/ObsidianVault/MetaMe/wiki
+    - name: wiki-sync
+      type: script
+      command: >-
+        node -e "
+        const path=require('path'),os=require('os');
+        const {DatabaseSync}=require('node:sqlite');
+        const {runWikiReflect}=require(path.join(os.homedir(),'.metame','wiki-reflect'));
+        const providers=require(path.join(os.homedir(),'.metame','providers'));
+        const db=new DatabaseSync(path.join(os.homedir(),'.metame','memory.db'));
+        const outDir=path.join(os.homedir(),'Documents/ObsidianVault/MetaMe/wiki');
+        runWikiReflect(db,{providers,outputDir:outDir}).then(r=>{
+          console.log('wiki-sync done',JSON.stringify(r));db.close();
+        }).catch(e=>{console.error(e.message);db.close();process.exit(1);});
+        "
+      at: "02:30"
+      require_idle: true
+      notify: false
+      enabled: false  # set to true after verifying wiki_output_dir is correct
+
     # 记忆索引：每天 01:30 更新 ~/.metame/memory/INDEX.md
     - name: memory-index
       type: script
