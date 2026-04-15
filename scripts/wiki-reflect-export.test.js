@@ -308,6 +308,15 @@ test('exportReflectDir returns empty array when srcDir missing', (_t) => {
   fs.rmSync(tmp, { recursive: true });
 });
 
+test('exportReflectDir returns empty array when srcDir is a file not a dir', (_t) => {
+  const tmp = makeTmpDir();
+  const notADir = path.join(tmp, 'file.md');
+  fs.writeFileSync(notADir, '# hello', 'utf8');
+  const result = exportReflectDir(notADir, 'decisions', tmp);
+  assert.deepStrictEqual(result, []);
+  fs.rmSync(tmp, { recursive: true });
+});
+
 test('rebuildReflectDirIndex writes _index.md with entries', (_t) => {
   const tmp = makeTmpDir();
   const outDir = path.join(tmp, 'vault');

@@ -236,7 +236,7 @@ function rebuildCapsulesIndex(capsuleFiles, outputDir = DEFAULT_WIKI_DIR) {
  * @returns {string[]}      — list of destination file paths written
  */
 function exportReflectDir(srcDir, subdir, outputDir = DEFAULT_WIKI_DIR) {
-  if (!fs.existsSync(srcDir)) return [];
+  if (!fs.existsSync(srcDir) || !fs.statSync(srcDir).isDirectory()) return [];
   const destDir = path.join(outputDir, subdir);
   _ensureDir(destDir);
 
