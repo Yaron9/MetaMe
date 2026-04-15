@@ -471,6 +471,36 @@ describe('wiki-db', () => {
     });
   });
 
+  // ── doc_sources schema ────────────────────────────────────────────────────────
+  describe('doc_sources schema', () => {
+    it('creates doc_sources table', () => {
+      const db = openTestDb();
+      const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='doc_sources'").get();
+      assert.ok(row, 'doc_sources table should exist');
+    });
+
+    it('creates wiki_page_doc_sources table', () => {
+      const db = openTestDb();
+      const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='wiki_page_doc_sources'").get();
+      assert.ok(row, 'wiki_page_doc_sources table should exist');
+    });
+
+    it('wiki_pages has source_type column defaulting to memory', () => {
+      const db = openTestDb();
+      const { upsertWikiPage } = require('./wiki-db');
+      upsertWikiPage(db, { slug: 'test-schema', primary_topic: 'test-schema', title: 'T', content: 'C' });
+      const row = db.prepare("SELECT source_type FROM wiki_pages WHERE slug='test-schema'").get();
+      assert.equal(row.source_type, 'memory');
+    });
+
+    it('wiki_pages has membership_hash and cluster_size columns', () => {
+      const db = openTestDb();
+      const cols = db.prepare("PRAGMA table_info(wiki_pages)").all().map(c => c.name);
+      assert.ok(cols.includes('membership_hash'));
+      assert.ok(cols.includes('cluster_size'));
+    });
+  });
+
   // ── upsertWikiTopic with force=true ─────────────────────────────────────────
   describe('upsertWikiTopic force=true', () => {
     it('force=true skips threshold check', () => {
