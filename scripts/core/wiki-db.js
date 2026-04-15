@@ -489,9 +489,16 @@ function getClusterMemberIds(db, pageSlug) {
 }
 
 function replaceClusterMembers(db, pageSlug, docSourceIds) {
-  db.prepare("DELETE FROM wiki_page_doc_sources WHERE page_slug=? AND role='cluster_member'").run(pageSlug);
-  const ins = db.prepare("INSERT INTO wiki_page_doc_sources (page_slug, doc_source_id, role) VALUES (?,?,'cluster_member')");
-  for (const id of docSourceIds) ins.run(pageSlug, id);
+  db.exec('BEGIN');
+  try {
+    db.prepare("DELETE FROM wiki_page_doc_sources WHERE page_slug=? AND role='cluster_member'").run(pageSlug);
+    const ins = db.prepare("INSERT INTO wiki_page_doc_sources (page_slug, doc_source_id, role) VALUES (?,?,'cluster_member')");
+    for (const id of docSourceIds) ins.run(pageSlug, id);
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
 }
 
 function listClusterPages(db) {

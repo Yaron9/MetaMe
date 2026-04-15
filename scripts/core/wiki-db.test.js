@@ -609,4 +609,28 @@ describe('cluster CRUD', () => {
     const ids = getClusterMemberIds(db, 'cluster-test');
     assert.ok(ids.includes(docRow.id));
   });
+
+  it('listStaleDocSources returns only active stale rows', () => {
+    const { upsertDocSource, listStaleDocSources } = require('./wiki-db');
+    const db = openTestDb();
+    upsertDocSource(db, { filePath: '/tmp/stale.md', fileHash: 'h1', mtimeMs: 1, sizeBytes: 1, fileType: 'md', extractor: 'direct', extractStatus: 'ok', extractedTextHash: 'th1', title: 'S', slug: 'stale-doc' });
+    const rows = listStaleDocSources(db);
+    assert.ok(rows.some(r => r.slug === 'stale-doc'));
+  });
+
+  it('replaceClusterMembers atomically replaces member set', () => {
+    const { upsertDocSource, upsertDocPageLink, replaceClusterMembers, getClusterMemberIds } = require('./wiki-db');
+    const { upsertWikiPage } = require('./wiki-db');
+    const db = openTestDb();
+    upsertDocSource(db, { filePath: '/tmp/m1.md', fileHash: 'h1', mtimeMs: 1, sizeBytes: 1, fileType: 'md', extractor: 'direct', extractStatus: 'ok', extractedTextHash: 'th1', title: 'M1', slug: 'm1' });
+    upsertDocSource(db, { filePath: '/tmp/m2.md', fileHash: 'h2', mtimeMs: 1, sizeBytes: 1, fileType: 'md', extractor: 'direct', extractStatus: 'ok', extractedTextHash: 'th2', title: 'M2', slug: 'm2' });
+    upsertWikiPage(db, { slug: 'cluster-rep', primary_topic: 'cluster-rep', title: 'CR', content: 'C', source_type: 'topic_cluster' });
+    const d1 = db.prepare("SELECT id FROM doc_sources WHERE slug='m1'").get();
+    const d2 = db.prepare("SELECT id FROM doc_sources WHERE slug='m2'").get();
+    upsertDocPageLink(db, 'cluster-rep', d1.id, 'cluster_member');
+    replaceClusterMembers(db, 'cluster-rep', [d2.id]);
+    const ids = getClusterMemberIds(db, 'cluster-rep');
+    assert.equal(ids.length, 1);
+    assert.equal(ids[0], d2.id);
+  });
 });
