@@ -83,6 +83,9 @@ function upsertWikiPage(db, {
   raw_source_count = 0,
   topic_tags = '[]',
   word_count = 0,
+  source_type = 'memory',
+  membership_hash = null,
+  cluster_size = null,
 }) {
   const rawSourceIdsStr = typeof raw_source_ids === 'string'
     ? raw_source_ids : JSON.stringify(raw_source_ids);
@@ -105,18 +108,22 @@ function upsertWikiPage(db, {
           raw_source_count = ?,
           topic_tags = ?,
           word_count = ?,
+          source_type = ?,
+          membership_hash = ?,
+          cluster_size = ?,
           updated_at = datetime('now')
       WHERE slug = ?
-    `).run(primary_topic, title, content, rawSourceIdsStr, capsuleRefsStr, raw_source_count, topicTagsStr, word_count, slug);
+    `).run(primary_topic, title, content, rawSourceIdsStr, capsuleRefsStr, raw_source_count, topicTagsStr, word_count, source_type, membership_hash, cluster_size, slug);
   } else {
     const id = `wp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     db.prepare(`
       INSERT INTO wiki_pages
         (id, slug, primary_topic, title, content, raw_source_ids, capsule_refs,
          raw_source_count, topic_tags, word_count, staleness, new_facts_since_build,
+         source_type, membership_hash, cluster_size,
          created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, 0, datetime('now'), datetime('now'))
-    `).run(id, slug, primary_topic, title, content, rawSourceIdsStr, capsuleRefsStr, raw_source_count, topicTagsStr, word_count);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, 0, ?, ?, ?, datetime('now'), datetime('now'))
+    `).run(id, slug, primary_topic, title, content, rawSourceIdsStr, capsuleRefsStr, raw_source_count, topicTagsStr, word_count, source_type, membership_hash, cluster_size);
   }
 }
 
@@ -408,6 +415,91 @@ function updateStalenessForTags(db, dirtyTagCounts) {
   }
 }
 
+// ── doc_sources CRUD ──────────────────────────────────────────────────────────
+
+function upsertDocSource(db, { filePath, fileHash, mtimeMs, sizeBytes, fileType,
+    extractor, extractStatus, extractedTextHash, title, slug }) {
+  const now = new Date().toISOString();
+  const existing = db.prepare('SELECT file_hash, extracted_text_hash FROM doc_sources WHERE file_path=?').get(filePath);
+  const hashChanged = !existing
+    || existing.file_hash !== fileHash
+    || existing.extracted_text_hash !== (extractedTextHash || null);
+
+  db.prepare(`
+    INSERT INTO doc_sources
+      (file_path, file_hash, mtime_ms, size_bytes, extracted_text_hash, file_type, extractor,
+       extract_status, title, slug, status, indexed_at, last_seen_at, content_stale)
+    VALUES (?,?,?,?,?,?,?,?,?,?,'active',?,?,?)
+    ON CONFLICT(file_path) DO UPDATE SET
+      file_hash=excluded.file_hash,
+      mtime_ms=excluded.mtime_ms,
+      size_bytes=excluded.size_bytes,
+      extracted_text_hash=excluded.extracted_text_hash,
+      extractor=excluded.extractor,
+      extract_status=excluded.extract_status,
+      title=excluded.title,
+      status='active',
+      last_seen_at=excluded.last_seen_at,
+      content_stale=CASE
+        WHEN excluded.file_hash != doc_sources.file_hash
+          OR COALESCE(excluded.extracted_text_hash,'') != COALESCE(doc_sources.extracted_text_hash,'')
+        THEN 1
+        ELSE doc_sources.content_stale
+      END
+  `).run(
+    filePath, fileHash, mtimeMs || null, sizeBytes || null,
+    extractedTextHash || null, fileType, extractor || null,
+    extractStatus || 'pending', title || null, slug,
+    now, now, hashChanged ? 1 : 0
+  );
+}
+
+function getDocSourceByPath(db, filePath) {
+  return db.prepare('SELECT * FROM doc_sources WHERE file_path=?').get(filePath) || null;
+}
+
+function getDocSourceBySlug(db, slug) {
+  return db.prepare('SELECT * FROM doc_sources WHERE slug=?').get(slug) || null;
+}
+
+function listStaleDocSources(db) {
+  return db.prepare("SELECT * FROM doc_sources WHERE content_stale=1 AND status='active'").all();
+}
+
+function markDocSourcesMissing(db, seenPaths) {
+  const set = new Set(seenPaths);
+  const all = db.prepare("SELECT id, file_path FROM doc_sources WHERE status='active'").all();
+  const missingIds = all.filter(r => !set.has(r.file_path)).map(r => r.id);
+  if (missingIds.length === 0) return;
+  const ph = missingIds.map(() => '?').join(',');
+  db.prepare(`UPDATE doc_sources SET status='missing' WHERE id IN (${ph})`).run(...missingIds);
+}
+
+function upsertDocPageLink(db, pageSlug, docSourceId, role) {
+  db.prepare(`
+    INSERT OR IGNORE INTO wiki_page_doc_sources (page_slug, doc_source_id, role)
+    VALUES (?, ?, ?)
+  `).run(pageSlug, docSourceId, role);
+}
+
+function getClusterMemberIds(db, pageSlug) {
+  return db.prepare(
+    "SELECT doc_source_id FROM wiki_page_doc_sources WHERE page_slug=? AND role='cluster_member'"
+  ).all(pageSlug).map(r => r.doc_source_id);
+}
+
+function replaceClusterMembers(db, pageSlug, docSourceIds) {
+  db.prepare("DELETE FROM wiki_page_doc_sources WHERE page_slug=? AND role='cluster_member'").run(pageSlug);
+  const ins = db.prepare("INSERT INTO wiki_page_doc_sources (page_slug, doc_source_id, role) VALUES (?,?,'cluster_member')");
+  for (const id of docSourceIds) ins.run(pageSlug, id);
+}
+
+function listClusterPages(db) {
+  return db.prepare(
+    "SELECT slug, membership_hash, cluster_size FROM wiki_pages WHERE source_type='topic_cluster'"
+  ).all();
+}
+
 module.exports = {
   // wiki_pages
   getWikiPageBySlug,
@@ -425,4 +517,15 @@ module.exports = {
   searchWikiAndFacts,
   // staleness
   updateStalenessForTags,
+  // doc_sources CRUD
+  upsertDocSource,
+  getDocSourceByPath,
+  getDocSourceBySlug,
+  listStaleDocSources,
+  markDocSourcesMissing,
+  // wiki_page_doc_sources CRUD
+  upsertDocPageLink,
+  getClusterMemberIds,
+  replaceClusterMembers,
+  listClusterPages,
 };
