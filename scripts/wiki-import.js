@@ -54,38 +54,49 @@ async function waitForEmbeddingDrain(db, chunkIds, log = () => {}) {
 }
 
 async function runWikiImport(db, inputPath, { providers, noCluster = false, log = () => {} } = {}) {
+  if (!fs.existsSync(inputPath)) {
+    log(`[wiki-import] ERROR: path does not exist: ${inputPath}`);
+    return { imported: 0, skipped: 0, failed: 0, clusters: 0 };
+  }
+
   log(`[wiki-import] scanning: ${inputPath}`);
   const files = scanFiles(inputPath);
   log(`[wiki-import] found ${files.length} supported files`);
 
   const seenPaths = [];
   const stats = { imported: 0, skipped: 0, failed: 0, clusters: 0 };
+  const extractedTexts = new Map();
 
   // Phase 0: Extract + hash check + upsert doc_sources
   for (const filePath of files) {
     seenPaths.push(filePath);
-    const stat = fs.statSync(filePath);
-    const existing = getDocSourceByPath(db, filePath);
+    try {
+      const stat = fs.statSync(filePath);
+      const existing = getDocSourceByPath(db, filePath);
 
-    if (existing && existing.mtime_ms === stat.mtimeMs && existing.size_bytes === stat.size) {
-      if (!existing.content_stale) { stats.skipped++; continue; }
-    }
+      if (existing && existing.mtime_ms === stat.mtimeMs && existing.size_bytes === stat.size) {
+        if (!existing.content_stale) { stats.skipped++; continue; }
+      }
 
-    const { text, title, extractor, extractStatus, errorMessage } = await extractText(filePath);
-    const fileHash = sha256(fs.readFileSync(filePath));
-    const extractedTextHash = text ? sha256(text) : null;
-    const baseSlug = slugFromFilename(filePath);
-    const slug = existing ? existing.slug : generateUniqueSlug(db, baseSlug);
+      const { text, title, extractor, extractStatus, errorMessage } = await extractText(filePath);
+      if (text) extractedTexts.set(filePath, text);
+      const fileHash = sha256(fs.readFileSync(filePath));
+      const extractedTextHash = text ? sha256(text) : null;
+      const baseSlug = slugFromFilename(filePath);
+      const slug = existing ? existing.slug : generateUniqueSlug(db, baseSlug);
 
-    upsertDocSource(db, {
-      filePath, fileHash,
-      mtimeMs: stat.mtimeMs, sizeBytes: stat.size,
-      extractedTextHash, fileType: path.extname(filePath).slice(1).toLowerCase(),
-      extractor, extractStatus, title, slug,
-    });
+      upsertDocSource(db, {
+        filePath, fileHash,
+        mtimeMs: stat.mtimeMs, sizeBytes: stat.size,
+        extractedTextHash, fileType: path.extname(filePath).slice(1).toLowerCase(),
+        extractor, extractStatus, title, slug,
+      });
 
-    if (extractStatus !== 'ok') {
-      log(`[wiki-import] SKIP ${path.basename(filePath)}: ${errorMessage || extractStatus}`);
+      if (extractStatus !== 'ok') {
+        log(`[wiki-import] SKIP ${path.basename(filePath)}: ${errorMessage || extractStatus}`);
+      }
+    } catch (err) {
+      log(`[wiki-import] Phase 0 error for ${path.basename(filePath)}: ${err.message}`);
     }
   }
 
@@ -102,7 +113,7 @@ async function runWikiImport(db, inputPath, { providers, noCluster = false, log 
       continue;
     }
     try {
-      const { text } = await extractText(docSrc.file_path);
+      const text = extractedTexts.get(docSrc.file_path) || '';
       const allowedSlugs = files.map(f => slugFromFilename(f));
       const result = await buildDocWikiPage(db, docSrc, text, { allowedSlugs, providers });
       if (result) {
@@ -135,7 +146,7 @@ async function runWikiImport(db, inputPath, { providers, noCluster = false, log 
   }
 
   // Phase 3: Clustering (Tier 2)
-  if (!noCluster && files.length >= 3) {
+  if (!noCluster) {
     const drained = await waitForEmbeddingDrain(db, allChunkIds, log);
     if (drained) {
       const allDocSlugs = db.prepare("SELECT slug FROM doc_sources WHERE status='active' AND extract_status='ok'").all().map(r => r.slug);
@@ -149,8 +160,9 @@ async function runWikiImport(db, inputPath, { providers, noCluster = false, log 
           memberIds: getClusterMemberIds(db, cp.slug),
         }));
 
+        const getDocBySlug = db.prepare("SELECT * FROM doc_sources WHERE slug=?");
         for (const memberSlugs of clusters) {
-          const docRows = memberSlugs.map(s => db.prepare("SELECT * FROM doc_sources WHERE slug=?").get(s)).filter(Boolean);
+          const docRows = memberSlugs.map(s => getDocBySlug.get(s)).filter(Boolean);
           try {
             // buildTopicClusterPage returns { slug, strippedLinks } or null
             const clusterResult = await buildTopicClusterPage(db, docRows, {
