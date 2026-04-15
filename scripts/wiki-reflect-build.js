@@ -10,6 +10,10 @@
  * Exports:
  *   buildWikiPage(db, topic, queryResult, { allowedSlugs, providers })
  *     → { slug, content, strippedLinks, rawSourceIds } | null
+ *   generateWikiContent(prompt, providers, allowedSlugs)
+ *     → { content, strippedLinks } | null
+ *   writeWikiPageWithChunks(db, pageSpec, content, { docSourceIds, role })
+ *     → void
  */
 
 const { buildWikiPrompt, validateWikilinks } = require('./core/wiki-prompt');
@@ -19,23 +23,17 @@ const { chunkText } = require('./core/chunker');
 const LLM_TIMEOUT_MS = 60000; // Sonnet needs more time than Haiku
 
 /**
- * Build a wiki page: call LLM, validate links, write to DB.
+ * Call the LLM with a prompt and validate [[wikilinks]] in the response.
  *
- * @param {object} db - DatabaseSync instance
- * @param {{ tag: string, slug: string, label: string }} topic
- * @param {{ totalCount: number, facts: object[], capsuleExcerpts: string }} queryResult
- * @param {{ allowedSlugs: string[], providers: { callHaiku: Function, buildDistillEnv: Function } }} opts
- * @returns {{ slug: string, content: string, strippedLinks: string[], rawSourceIds: string[] } | null}
- *   Returns null on LLM failure (caller enqueues for retry). DB write failure throws.
+ * @param {string} prompt
+ * @param {{ callHaiku: Function, buildDistillEnv: Function }} providers
+ * @param {string[]} allowedSlugs
+ * @returns {{ content: string, strippedLinks: string[] } | null}
+ *   Returns null on LLM failure or empty response (caller enqueues for retry).
  */
-async function buildWikiPage(db, topic, queryResult, { allowedSlugs = [], providers }) {
+async function generateWikiContent(prompt, providers, allowedSlugs) {
   const { callHaiku, buildDistillEnv } = providers;
-  const { totalCount, facts, capsuleExcerpts } = queryResult;
 
-  // Build prompt
-  const prompt = buildWikiPrompt(topic, facts, capsuleExcerpts, allowedSlugs);
-
-  // Call LLM — return null on failure so caller can schedule exponential-backoff retry
   let rawContent;
   try {
     const env = buildDistillEnv();
@@ -50,40 +48,68 @@ async function buildWikiPage(db, topic, queryResult, { allowedSlugs = [], provid
 
   // Validate and strip illegal [[wikilinks]]
   const { content, stripped: strippedLinks } = validateWikilinks(rawContent.trim(), allowedSlugs);
+  return { content, strippedLinks };
+}
 
-  // Collect source IDs from facts
-  const rawSourceIds = facts.map(f => f.id).filter(Boolean);
+/**
+ * Atomic DB write: upsert wiki_page, reset staleness, replace chunks, enqueue
+ * embeddings, and optionally link doc_sources. All inside a single transaction.
+ *
+ * @param {object} db - DatabaseSync instance
+ * @param {{ slug: string, title: string, primary_topic: string, source_type?: string,
+ *           raw_source_ids?: string, capsule_refs?: string, raw_source_count?: number,
+ *           topic_tags?: string, word_count?: number, membership_hash?: string,
+ *           cluster_size?: number }} pageSpec
+ * @param {string} content
+ * @param {{ docSourceIds?: number[], role?: string }} opts
+ */
+function writeWikiPageWithChunks(db, pageSpec, content, { docSourceIds = [], role } = {}) {
+  const {
+    slug,
+    title,
+    primary_topic,
+    source_type = 'memory',
+    raw_source_ids,
+    capsule_refs,
+    raw_source_count = 0,
+    topic_tags,
+    membership_hash,
+    cluster_size,
+  } = pageSpec;
 
-  // Write to DB in a transaction
-  const topicTagsArr = [topic.tag];
+  const wordCount = content.split(/\s+/).filter(Boolean).length;
+
   db.prepare('BEGIN').run();
   try {
     upsertWikiPage(db, {
-      slug: topic.slug,
-      primary_topic: topic.tag,
-      title: topic.label || topic.tag,
+      slug,
+      primary_topic,
+      title,
       content,
-      raw_source_ids: JSON.stringify(rawSourceIds),
-      capsule_refs: '[]',
-      raw_source_count: totalCount,
-      topic_tags: JSON.stringify(topicTagsArr),
-      word_count: content.split(/\s+/).filter(Boolean).length,
+      raw_source_ids: raw_source_ids !== undefined ? raw_source_ids : '[]',
+      capsule_refs: capsule_refs !== undefined ? capsule_refs : '[]',
+      raw_source_count,
+      topic_tags: topic_tags !== undefined ? topic_tags : '[]',
+      word_count: wordCount,
+      source_type,
+      membership_hash: membership_hash !== undefined ? membership_hash : null,
+      cluster_size: cluster_size !== undefined ? cluster_size : null,
     });
 
     // Reset staleness counters via canonical helper (staleness=0, last_built_at=now)
-    resetPageStaleness(db, topic.slug, totalCount);
+    resetPageStaleness(db, slug, raw_source_count);
 
     // ── Chunk content + enqueue embeddings ──────────────────────────────────
     // Clean stale embedding_queue entries for this page's old chunks
     const oldChunkIds = db.prepare(
       'SELECT id FROM content_chunks WHERE page_slug = ?',
-    ).all(topic.slug).map(r => r.id);
+    ).all(slug).map(r => r.id);
     if (oldChunkIds.length > 0) {
       const ph = oldChunkIds.map(() => '?').join(', ');
       db.prepare(`DELETE FROM embedding_queue WHERE item_type = 'chunk' AND item_id IN (${ph})`).run(...oldChunkIds);
     }
     // Delete old chunks
-    db.prepare('DELETE FROM content_chunks WHERE page_slug = ?').run(topic.slug);
+    db.prepare('DELETE FROM content_chunks WHERE page_slug = ?').run(slug);
 
     // Create new chunks + enqueue
     const chunks = chunkText(content, { targetWords: 300 });
@@ -95,18 +121,68 @@ async function buildWikiPage(db, topic, queryResult, { allowedSlugs = [], provid
     );
     for (let i = 0; i < chunks.length; i++) {
       const chunkId = `ck_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      insertChunk.run(chunkId, topic.slug, chunks[i], i);
+      insertChunk.run(chunkId, slug, chunks[i], i);
       enqueue.run(chunkId);
     }
 
-    // Append evidence to timeline (compiled truth was just rewritten above)
-    appendWikiTimeline(db, topic.slug, `基于 ${totalCount} 条 facts 重建 (${rawSourceIds.length} 条直接引用, ${chunks.length} chunks)`);
+    // Link doc_sources if provided
+    if (docSourceIds.length > 0) {
+      const insertLink = db.prepare(
+        'INSERT OR IGNORE INTO wiki_page_doc_sources (page_slug, doc_source_id, role) VALUES (?, ?, ?)',
+      );
+      const effectiveRole = role || 'primary';
+      for (const docId of docSourceIds) {
+        insertLink.run(slug, docId, effectiveRole);
+      }
+    }
 
     db.prepare('COMMIT').run();
   } catch (err) {
     try { db.prepare('ROLLBACK').run(); } catch { /* ignore */ }
     throw err; // propagate DB errors to caller
   }
+}
+
+/**
+ * Build a wiki page: call LLM, validate links, write to DB.
+ *
+ * @param {object} db - DatabaseSync instance
+ * @param {{ tag: string, slug: string, label: string }} topic
+ * @param {{ totalCount: number, facts: object[], capsuleExcerpts: string }} queryResult
+ * @param {{ allowedSlugs: string[], providers: { callHaiku: Function, buildDistillEnv: Function } }} opts
+ * @returns {{ slug: string, content: string, strippedLinks: string[], rawSourceIds: string[] } | null}
+ *   Returns null on LLM failure (caller enqueues for retry). DB write failure throws.
+ */
+async function buildWikiPage(db, topic, queryResult, { allowedSlugs = [], providers }) {
+  const { totalCount, facts, capsuleExcerpts } = queryResult;
+
+  // Build prompt
+  const prompt = buildWikiPrompt(topic, facts, capsuleExcerpts, allowedSlugs);
+
+  // Call LLM — return null on failure so caller can schedule exponential-backoff retry
+  const llmResult = await generateWikiContent(prompt, providers, allowedSlugs);
+  if (!llmResult) return null;
+
+  const { content, strippedLinks } = llmResult;
+
+  // Collect source IDs from facts
+  const rawSourceIds = facts.map(f => f.id).filter(Boolean);
+
+  // Write to DB in a transaction
+  const topicTagsArr = [topic.tag];
+  writeWikiPageWithChunks(db, {
+    slug: topic.slug,
+    primary_topic: topic.tag,
+    title: topic.label || topic.tag,
+    raw_source_ids: JSON.stringify(rawSourceIds),
+    capsule_refs: '[]',
+    raw_source_count: totalCount,
+    topic_tags: JSON.stringify(topicTagsArr),
+  }, content, { docSourceIds: [] });
+
+  // Append evidence to timeline (compiled truth was just rewritten above)
+  const chunks = chunkText(content, { targetWords: 300 });
+  appendWikiTimeline(db, topic.slug, `基于 ${totalCount} 条 facts 重建 (${rawSourceIds.length} 条直接引用, ${chunks.length} chunks)`);
 
   return { slug: topic.slug, content, strippedLinks, rawSourceIds };
 }
@@ -144,4 +220,4 @@ function buildFallbackWikiContent(topic, queryResult) {
   return lines.join('\n').trim();
 }
 
-module.exports = { buildWikiPage, buildFallbackWikiContent };
+module.exports = { buildWikiPage, buildFallbackWikiContent, generateWikiContent, writeWikiPageWithChunks };
