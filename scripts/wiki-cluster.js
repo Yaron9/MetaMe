@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 
 function cosineSimilarity(a, b) {
+  if (a.length !== b.length) return 0;
   let dot = 0, normA = 0, normB = 0;
   for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i];
@@ -99,6 +100,7 @@ function getDocEmbeddings(db, slugs) {
   for (const row of rows) {
     if (!bySlug[row.page_slug]) bySlug[row.page_slug] = [];
     const buf = Buffer.isBuffer(row.embedding) ? row.embedding : Buffer.from(row.embedding);
+    if (buf.byteLength % 4 !== 0) continue; // skip corrupt/truncated embedding row
     bySlug[row.page_slug].push(new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4));
   }
 
