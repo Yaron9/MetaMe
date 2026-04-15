@@ -30,7 +30,9 @@ function scanFiles(inputPath) {
 function generateUniqueSlug(db, base) {
   let candidate = base;
   let n = 2;
-  while (db.prepare('SELECT 1 FROM wiki_pages WHERE slug=?').get(candidate)) {
+  const checkWiki = db.prepare('SELECT 1 FROM wiki_pages WHERE slug=?');
+  const checkDoc = db.prepare('SELECT 1 FROM doc_sources WHERE slug=?');
+  while (checkWiki.get(candidate) || checkDoc.get(candidate)) {
     candidate = `${base}-${n++}`;
   }
   return candidate;

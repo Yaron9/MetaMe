@@ -270,7 +270,6 @@ async function buildDocWikiPage(db, docSource, extractedText, { allowedSlugs, pr
     raw_source_ids: '[]',
     topic_tags: '[]',
     raw_source_count: 0,
-    word_count: content.split(/\s+/).length,
   }, content, { docSourceIds: [docSourceId], role: 'primary' });
 
   return { slug, content, strippedLinks };
@@ -305,7 +304,6 @@ async function buildTopicClusterPage(db, docSourceRows, { allowedSlugs, provider
     raw_source_ids: '[]',
     raw_source_count: 0,
     topic_tags: '[]',
-    word_count: content.split(/\s+/).length,
     membership_hash: mHash,
     cluster_size: memberIds.length,
   }, content, { docSourceIds: memberIds, role: 'cluster_member' });

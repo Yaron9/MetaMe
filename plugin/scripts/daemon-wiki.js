@@ -17,7 +17,7 @@
 
 const os = require('os');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 
 const {
   listWikiPages,
@@ -286,6 +286,15 @@ function createWikiCommandHandler(deps) {
           }
         }
       }
+      if (staleDocSources.length > 0) {
+        const docMsg = [];
+        if (builtDocSlugs.length > 0) docMsg.push(`• 文档页面重建: ${builtDocSlugs.join(', ')}`);
+        const docFailed = staleDocSources.length - builtDocSlugs.length;
+        if (docFailed > 0) docMsg.push(`• 文档重建失败: ${docFailed} 个（见日志）`);
+        if (docMsg.length > 0) {
+          await bot.sendMessage(chatId, `📄 文档页面同步\n\n${docMsg.join('\n')}`);
+        }
+      }
     } catch (err) {
       log('ERROR', `[wiki-sync] ${err.message}`);
       if (err.message.includes('another instance')) {
@@ -335,10 +344,10 @@ function createWikiCommandHandler(deps) {
       // Try Obsidian URI first (opens vault by path if already configured)
       const vaultName = path.basename(outputDir);
       try {
-        execSync(`open "obsidian://open?vault=${encodeURIComponent(vaultName)}"`, { timeout: 5000 });
+        execFileSync('open', [`obsidian://open?vault=${encodeURIComponent(vaultName)}`], { timeout: 5000 });
       } catch {
         // Fallback: open folder in Finder — user can then drag into Obsidian
-        execSync(`open "${outputDir}"`, { timeout: 5000 });
+        execFileSync('open', [outputDir], { timeout: 5000 });
       }
       await bot.sendMessage(chatId,
         `📂 已打开 Obsidian vault: \`${outputDir}\`\n\n` +
