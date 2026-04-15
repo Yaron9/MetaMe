@@ -189,3 +189,68 @@ async function runWikiImport(db, inputPath, { providers, noCluster = false, log 
 }
 
 module.exports = { runWikiImport, scanFiles, generateUniqueSlug, waitForEmbeddingDrain };
+
+// ── CLI entry point ──────────────────────────────────────────────────────────
+// Usage: node wiki-import.js <path> [--no-cluster]
+//
+//   <path>        File or directory to import (.pdf / .md / .txt)
+//   --no-cluster  Skip Tier 2 clustering step
+//
+// Output: JSON on stdout, progress on stderr
+//   {"imported":3,"skipped":1,"failed":0,"clusters":1}
+//
+if (require.main === module) {
+  (async () => {
+    const { DatabaseSync } = require('node:sqlite');
+    const { DB_PATH } = require('./memory.js');
+    const { applyWikiSchema } = require('./memory-wiki-schema.js');
+    const { callHaiku, buildDistillEnv } = require('./providers.js');
+
+    const args = process.argv.slice(2);
+    if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
+      process.stderr.write([
+        'Usage: node wiki-import.js <path> [--no-cluster]',
+        '',
+        '  <path>        File or directory (.pdf / .md / .txt)',
+        '  --no-cluster  Skip Tier 2 embedding-based clustering',
+        '',
+        'Examples:',
+        '  node ~/.metame/wiki-import.js ~/papers/',
+        '  node ~/.metame/wiki-import.js ~/papers/paper.pdf',
+      ].join('\n') + '\n');
+      process.exit(0);
+    }
+
+    const inputPath = args.find(a => !a.startsWith('--'));
+    const noCluster = args.includes('--no-cluster');
+
+    if (!inputPath) {
+      process.stderr.write('Error: path argument required\n');
+      process.exit(1);
+    }
+
+    let db;
+    try {
+      db = new DatabaseSync(DB_PATH);
+      applyWikiSchema(db);
+    } catch (err) {
+      process.stderr.write(`Error: failed to open DB at ${DB_PATH}: ${err.message}\n`);
+      process.exit(1);
+    }
+
+    try {
+      const stats = await runWikiImport(db, inputPath, {
+        providers: { callHaiku, buildDistillEnv },
+        noCluster,
+        log: (msg) => process.stderr.write(msg + '\n'),
+      });
+      process.stdout.write(JSON.stringify(stats) + '\n');
+      process.exit(0);
+    } catch (err) {
+      process.stderr.write(`Error: ${err.message}\n`);
+      process.exit(1);
+    } finally {
+      try { db.close(); } catch { /* ignore */ }
+    }
+  })();
+}

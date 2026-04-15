@@ -1,7 +1,9 @@
 'use strict';
 
 /**
- * core/embedding.js — OpenAI embedding adapter (zero dependencies beyond native fetch)
+ * core/embedding.js — Embedding adapter with two backends:
+ *   1. OpenAI text-embedding-3-small (512-dim) — requires OPENAI_API_KEY
+ *   2. Ollama bge-m3 (1024-dim, local) — fallback when OpenAI key absent
  *
  * Exports:
  *   getEmbedding(text)          → Float32Array | null
@@ -10,25 +12,59 @@
  *   bufferToEmbedding(blob)     → Float32Array  (for SQLite BLOB read)
  *   isEmbeddingAvailable()      → boolean
  *
- * Config:
- *   OPENAI_API_KEY env var required. Without it, all functions degrade gracefully (return null).
- *   Model: text-embedding-3-small, 512 dimensions, L2-normalized.
+ * Backend selection (automatic):
+ *   OPENAI_API_KEY set  → OpenAI (512-dim)
+ *   ollama installed    → bge-m3 via localhost:11434 (1024-dim)
+ *   neither             → all functions return null gracefully
  */
 
-const MODEL = 'text-embedding-3-small';
-const DIMENSIONS = 512;
+const { existsSync } = require('node:fs');
+
+// ── OpenAI backend ────────────────────────────────────────────────────────────
+const OPENAI_MODEL      = 'text-embedding-3-small';
+const OPENAI_DIMENSIONS = 512;
+const OPENAI_API_URL    = 'https://api.openai.com/v1/embeddings';
+
+// ── Ollama backend ────────────────────────────────────────────────────────────
+const OLLAMA_MODEL      = 'bge-m3';
+const OLLAMA_DIMENSIONS = 1024;
+const OLLAMA_API_URL    = process.env.OLLAMA_HOST
+  ? `${process.env.OLLAMA_HOST}/api/embed`
+  : 'http://localhost:11434/api/embed';
+const OLLAMA_BIN_PATHS  = [
+  '/usr/local/bin/ollama',
+  '/opt/homebrew/bin/ollama',
+  '/usr/bin/ollama',
+];
+
+// ── Shared constants ──────────────────────────────────────────────────────────
 const MAX_INPUT_CHARS = 8000;
-const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 2000;
-const BATCH_SIZE = 100;
-const API_URL = 'https://api.openai.com/v1/embeddings';
+const MAX_RETRIES     = 3;
+const BASE_DELAY_MS   = 2000;
+const BATCH_SIZE      = 100;
+
+// Keep legacy export name for callers that read it directly
+const MODEL      = OPENAI_MODEL;
+const DIMENSIONS = OPENAI_DIMENSIONS;
+
+// ── Backend detection ─────────────────────────────────────────────────────────
 
 function getApiKey() {
   return process.env.OPENAI_API_KEY || '';
 }
 
+function isOllamaInstalled() {
+  return OLLAMA_BIN_PATHS.some(p => existsSync(p));
+}
+
+function getBackend() {
+  if (getApiKey()) return 'openai';
+  if (isOllamaInstalled()) return 'ollama';
+  return null;
+}
+
 function isEmbeddingAvailable() {
-  return !!getApiKey();
+  return getBackend() !== null;
 }
 
 /**
@@ -46,56 +82,77 @@ function l2Normalize(vec) {
   return vec;
 }
 
-/**
- * Call OpenAI embeddings API with retry.
- * @param {string[]} inputs — already truncated
- * @returns {Float32Array[]}
- */
-async function callApi(inputs) {
-  const apiKey = getApiKey();
-  if (!apiKey) return inputs.map(() => null);
+// ── OpenAI API call ───────────────────────────────────────────────────────────
 
+async function callOpenAI(inputs) {
+  const apiKey = getApiKey();
   let lastError;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const resp = await fetch(API_URL, {
+      const resp = await fetch(OPENAI_API_URL, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: MODEL,
-          input: inputs,
-          dimensions: DIMENSIONS,
-        }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ model: OPENAI_MODEL, input: inputs, dimensions: OPENAI_DIMENSIONS }),
       });
-
       if (resp.status === 429) {
         const retryAfter = parseInt(resp.headers.get('retry-after') || '0', 10);
-        const delay = Math.max(retryAfter * 1000, BASE_DELAY_MS * Math.pow(2, attempt));
-        await new Promise(r => setTimeout(r, delay));
+        await new Promise(r => setTimeout(r, Math.max(retryAfter * 1000, BASE_DELAY_MS * Math.pow(2, attempt))));
         continue;
       }
-
       if (!resp.ok) {
         const body = await resp.text().catch(() => '');
         throw new Error(`OpenAI API ${resp.status}: ${body.slice(0, 200)}`);
       }
-
       const data = await resp.json();
-      return data.data.map(item => {
-        const vec = new Float32Array(item.embedding);
-        return l2Normalize(vec);
-      });
+      return data.data.map(item => l2Normalize(new Float32Array(item.embedding)));
     } catch (err) {
       lastError = err;
-      if (attempt < MAX_RETRIES - 1) {
-        await new Promise(r => setTimeout(r, BASE_DELAY_MS * Math.pow(2, attempt)));
-      }
+      if (attempt < MAX_RETRIES - 1) await new Promise(r => setTimeout(r, BASE_DELAY_MS * Math.pow(2, attempt)));
     }
   }
   throw lastError;
+}
+
+// ── Ollama API call (bge-m3, one text at a time — ollama /api/embed) ──────────
+
+async function callOllama(inputs) {
+  const results = [];
+  for (const text of inputs) {
+    let lastError;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        const resp = await fetch(OLLAMA_API_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: OLLAMA_MODEL, input: text }),
+        });
+        if (!resp.ok) {
+          const body = await resp.text().catch(() => '');
+          throw new Error(`Ollama API ${resp.status}: ${body.slice(0, 200)}`);
+        }
+        const data = await resp.json();
+        const vec = data.embeddings?.[0];
+        if (!vec || !Array.isArray(vec)) throw new Error('Ollama: unexpected response shape');
+        results.push(l2Normalize(new Float32Array(vec)));
+        lastError = null;
+        break;
+      } catch (err) {
+        lastError = err;
+        if (attempt < MAX_RETRIES - 1) await new Promise(r => setTimeout(r, BASE_DELAY_MS * Math.pow(2, attempt)));
+      }
+    }
+    if (lastError) results.push(null);
+  }
+  return results;
+}
+
+// ── Unified router ────────────────────────────────────────────────────────────
+
+async function callApi(inputs) {
+  const backend = getBackend();
+  if (backend === 'openai') return callOpenAI(inputs);
+  if (backend === 'ollama') return callOllama(inputs);
+  return inputs.map(() => null);
 }
 
 /**
@@ -143,12 +200,13 @@ function embeddingToBuffer(f32) {
 
 /**
  * Read Buffer from SQLite BLOB back to Float32Array.
- * Validates byte length matches expected dimensions.
+ * Dimension-agnostic: infers dim from blob length (supports both 512-dim OpenAI
+ * and 1024-dim bge-m3 embeddings stored in the same DB).
  * @param {Buffer|Uint8Array} blob
  * @returns {Float32Array|null}
  */
 function bufferToEmbedding(blob) {
-  if (!blob || blob.length !== DIMENSIONS * 4) return null;
+  if (!blob || blob.length === 0 || blob.length % 4 !== 0) return null;
   // Copy into aligned ArrayBuffer to avoid RangeError on unaligned byteOffset
   const aligned = new ArrayBuffer(blob.length);
   new Uint8Array(aligned).set(new Uint8Array(blob.buffer, blob.byteOffset, blob.length));

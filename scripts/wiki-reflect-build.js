@@ -18,6 +18,9 @@
 
 const crypto = require('node:crypto');
 const { buildWikiPrompt, validateWikilinks } = require('./core/wiki-prompt');
+const { extractText, extractSections } = require('./wiki-extract');
+const { extractPaperFacts, buildTier1Prompt } = require('./wiki-facts');
+const { buildComparisonMatrix, buildTimeline, detectContradictions, buildCoverageReport } = require('./wiki-synthesis');
 const { upsertWikiPage, resetPageStaleness, appendWikiTimeline } = require('./core/wiki-db');
 const { chunkText } = require('./core/chunker');
 const { membershipHash, findMatchingCluster } = require('./wiki-cluster');
@@ -223,40 +226,21 @@ function buildFallbackWikiContent(topic, queryResult) {
 }
 
 /**
- * Build a prompt for a Tier 1 document wiki page.
- */
-function buildDocWikiPrompt(title, text) {
-  const truncated = text.length > 8000 ? text.slice(0, 8000) + '\n\n[...truncated]' : text;
-  return `You are writing a wiki page for a knowledge base.
-
-Title: ${title}
-
-Source document content:
-${truncated}
-
-Write a well-structured wiki page that:
-- Starts with a brief summary paragraph
-- Organizes information under ## headings
-- Preserves key facts, numbers, and terminology from the source
-- Uses [[wikilink]] syntax for concepts that deserve their own pages
-- Is 200–600 words
-
-Respond with only the wiki page content, starting with the summary paragraph.`;
-}
-
-/**
- * Build a Tier 1 wiki page from a document source.
+ * Build a Tier 1 wiki page from pre-extracted facts.
+ * LLM call is outside any DB transaction.
+ *
  * @param {object} db
  * @param {object} docSource — row from doc_sources
- * @param {string} extractedText — full text from wiki-extract.js
+ * @param {object[]} facts — rows from paper_facts (already written to DB)
  * @param {{ allowedSlugs: string[], providers: object }} opts
  * @returns {Promise<{slug, content, strippedLinks}|null>}
  */
-async function buildDocWikiPage(db, docSource, extractedText, { allowedSlugs, providers }) {
+async function buildTier1Page(db, docSource, facts, { allowedSlugs, providers }) {
   const { slug, title, id: docSourceId } = docSource;
   const displayTitle = title || slug;
 
-  const prompt = buildDocWikiPrompt(displayTitle, extractedText);
+  // Build prompt from facts — no text truncation, evidence-grounded
+  const prompt = buildTier1Prompt(displayTitle, facts);
   const result = await generateWikiContent(prompt, providers, allowedSlugs);
   if (!result) return null;
 
@@ -269,31 +253,80 @@ async function buildDocWikiPage(db, docSource, extractedText, { allowedSlugs, pr
     source_type: 'doc',
     raw_source_ids: '[]',
     topic_tags: '[]',
-    raw_source_count: 0,
+    raw_source_count: facts.length,
   }, content, { docSourceIds: [docSourceId], role: 'primary' });
 
   return { slug, content, strippedLinks };
 }
 
+/**
+ * Build a Tier 1 wiki page from a document source.
+ *
+ * New flow (evidence-first):
+ *   1. extractSections(text)       — wiki-extract.js
+ *   2. extractPaperFacts(sections) — wiki-facts.js (writes paper_facts, all LLM calls here)
+ *   3. buildTier1Page(facts)       — generates wiki page from evidence
+ *
+ * Falls back to null if text is unavailable (scanned PDF).
+ *
+ * @param {object} db
+ * @param {object} docSource — row from doc_sources
+ * @param {string} extractedText — full text (may be empty for stale re-runs)
+ * @param {{ allowedSlugs: string[], providers: object }} opts
+ * @returns {Promise<{slug, content, strippedLinks}|null>}
+ */
+async function buildDocWikiPage(db, docSource, extractedText, { allowedSlugs, providers }) {
+  // FLAG-5 fix: re-extract if caller passed empty string (stale re-run path)
+  let text = extractedText;
+  if (!text || !text.trim()) {
+    const reExtracted = await extractText(docSource.file_path).catch(() => ({ text: '' }));
+    text = reExtracted.text || '';
+  }
+
+  if (!text || !text.trim()) return null; // scanned PDF or missing file — skip
+
+  // Step 1: structured section split
+  const sections = extractSections(text);
+
+  // Step 2: per-section fact extraction (all LLM calls, writes paper_facts)
+  const facts = await extractPaperFacts(db, docSource, sections, providers);
+
+  // Step 3: generate Tier 1 wiki page from facts
+  return buildTier1Page(db, docSource, facts, { allowedSlugs, providers });
+}
+
 async function buildTopicClusterPage(db, docSourceRows, { allowedSlugs, providers, existingClusters = [] }) {
   if (!docSourceRows || docSourceRows.length === 0) return null;
 
-  const memberIds = docSourceRows.map(r => r.id);
+  const memberIds   = docSourceRows.map(r => r.id);
   const memberSlugs = docSourceRows.map(r => r.slug);
-  const mHash = membershipHash(memberSlugs);
+  const mHash       = membershipHash(memberSlugs);
 
   // Find or create stable slug
-  const match = findMatchingCluster(existingClusters, memberIds);
+  const match       = findMatchingCluster(existingClusters, memberIds);
   const clusterSlug = match ? match.slug : 'cluster-' + crypto.randomBytes(4).toString('hex');
 
-  // Build synthesis content
-  const memberTitles = docSourceRows.map(r => r.title || r.slug);
-  const prompt = buildClusterPrompt(memberTitles, memberSlugs);
+  // ── Gather evidence (all sync DB reads, no LLM yet) ──────────────────────
+  const matrix         = buildComparisonMatrix(db, memberIds);
+  const timeline       = buildTimeline(db, memberIds);
+  const contradictions = detectContradictions(db, memberIds);
+  const coverage       = buildCoverageReport(db, memberIds);
+
+  // Total facts referenced in this cluster
+  const factsRow = db.prepare(
+    `SELECT COUNT(*) as n FROM paper_facts WHERE doc_source_id IN (${memberIds.map(() => '?').join(',')})`
+  ).get(...memberIds);
+  const totalFacts = factsRow ? factsRow.n : 0;
+
+  // ── LLM synthesis (outside any DB transaction) ───────────────────────────
+  const prompt = buildEvidenceClusterPrompt(docSourceRows, {
+    matrix, timeline, contradictions, coverage, allowedSlugs,
+  });
   const result = await generateWikiContent(prompt, providers, allowedSlugs);
   if (!result) return null;
   const { content, strippedLinks: clusterStrippedLinks } = result;
 
-  const clusterLabel = inferClusterLabel(memberTitles);
+  const clusterLabel = inferClusterLabel(docSourceRows.map(r => r.title || r.slug));
 
   writeWikiPageWithChunks(db, {
     slug: clusterSlug,
@@ -302,7 +335,7 @@ async function buildTopicClusterPage(db, docSourceRows, { allowedSlugs, provider
     source_type: 'topic_cluster',
     staleness: 0.0,
     raw_source_ids: '[]',
-    raw_source_count: 0,
+    raw_source_count: totalFacts,
     topic_tags: '[]',
     membership_hash: mHash,
     cluster_size: memberIds.length,
@@ -319,6 +352,73 @@ function inferClusterLabel(titles) {
   return top.length ? top.map(([w]) => w).join(' & ') + ' cluster' : 'Document Cluster';
 }
 
+/**
+ * Evidence-based cluster prompt — uses synthesis intermediates from wiki-synthesis.js.
+ * Produces a structured Tier 4 survey page (600–1500 words).
+ */
+function buildEvidenceClusterPrompt(docSourceRows, { matrix, timeline, contradictions, coverage, allowedSlugs }) {
+  const memberLinks = docSourceRows.map(r => {
+    const safeTitle = (r.title || r.slug || '').slice(0, 100).replace(/[\r\n]/g, ' ');
+    return `- [[${r.slug}]] — ${safeTitle}`;
+  }).join('\n');
+
+  // Render contradiction section (up to 5 pairs to stay within token budget)
+  const contradictionText = contradictions.length === 0
+    ? 'No contradictions detected in current evidence.'
+    : contradictions.slice(0, 5).map((c, i) => {
+        return `${i + 1}. **"${c.factA.subject} ${c.factA.predicate}"** differs:\n` +
+               `   - [[${c.slugA}]]: ${c.factA.object}\n` +
+               `   - [[${c.slugB}]]: ${c.factB.object}`;
+      }).join('\n');
+
+  // Keep prompt under ~3000 tokens: truncate all variable-length sections
+  const matrixTrunc        = matrix.length   > 2000 ? matrix.slice(0, 2000)   + '\n...[truncated]' : matrix;
+  const timelineTrunc      = timeline.length > 1000 ? timeline.slice(0, 1000) + '\n...[truncated]' : timeline;
+  const coverageTrunc      = coverage.length > 500  ? coverage.slice(0, 500)  + '\n...[truncated]' : coverage;
+  const linksTrunc         = memberLinks.length > 800  ? memberLinks.slice(0, 800)  + '\n...[truncated]' : memberLinks;
+  const contradictionsTrunc = contradictionText.length > 600 ? contradictionText.slice(0, 600) + '\n...[truncated]' : contradictionText;
+
+  return `You are writing a Tier 4 survey wiki page that synthesizes evidence from ${docSourceRows.length} related academic papers.
+
+Member papers:
+${linksTrunc}
+
+## Comparison Matrix (auto-generated)
+${matrixTrunc || '(no result/metric facts available)'}
+
+## Timeline (auto-generated)
+${timelineTrunc || '(no year data available)'}
+
+## Contradictions (auto-detected)
+${contradictionsTrunc}
+
+## Coverage Report (auto-generated)
+${coverageTrunc || '(no coverage data)'}
+
+Write a survey page with EXACTLY these eight sections in order:
+## Scope
+## Method Families
+## Comparison Matrix
+## Timeline
+## Agreements
+## Contradictions
+## Open Questions / Gaps
+## Source Papers
+
+Rules:
+- For "## Comparison Matrix": reproduce or improve on the auto-generated table above using exact evidence
+- For "## Timeline": reproduce or improve the auto-generated timeline
+- For "## Contradictions": explain the contradictions above in plain language; write "None detected." if empty
+- For "## Agreements": summarize what all papers agree on
+- For "## Open Questions / Gaps": derive from the coverage report above — what questions remain unanswered?
+- For "## Source Papers": list all members as [[wikilinks]]
+- Ground every claim in the evidence above — do not hallucinate
+- Use [[wikilink]] syntax when referencing member papers by slug
+- 600–1500 words total
+- Respond with only the wiki page content`;
+}
+
+// @deprecated — use buildEvidenceClusterPrompt for evidence-grounded Tier 4 pages
 function buildClusterPrompt(titles, slugs) {
   const links = slugs.map((s, i) => {
     const safeTitle = (titles[i] || '').slice(0, 120).replace(/[\r\n]/g, ' ');
@@ -338,4 +438,4 @@ Write a concise wiki overview page (150–300 words) that:
 Respond with only the wiki page content.`;
 }
 
-module.exports = { buildWikiPage, buildFallbackWikiContent, generateWikiContent, writeWikiPageWithChunks, buildDocWikiPage, buildTopicClusterPage };
+module.exports = { buildWikiPage, buildFallbackWikiContent, generateWikiContent, writeWikiPageWithChunks, buildDocWikiPage, buildTier1Page, buildTopicClusterPage };

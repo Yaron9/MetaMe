@@ -180,6 +180,76 @@ function applyWikiSchema(db) {
     try { db.exec(`ALTER TABLE wiki_pages ADD COLUMN ${col} ${def}`); } catch { /* already exists */ }
   }
   db.exec("UPDATE wiki_pages SET source_type = 'memory' WHERE source_type IS NULL");
+
+  // ── doc_sources additions (idempotent ALTER) ──────────────────────────────
+  for (const [col, def] of [
+    ['doi',            'TEXT'],
+    ['year',           'INTEGER'],
+    ['venue',          'TEXT'],
+    ['zotero_key',     'TEXT'],
+    ['citation_count', 'INTEGER'],
+  ]) {
+    try { db.exec(`ALTER TABLE doc_sources ADD COLUMN ${col} ${def}`); } catch { /* already exists */ }
+  }
+
+  // ── paper_facts ───────────────────────────────────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS paper_facts (
+      id                TEXT PRIMARY KEY,
+      doc_source_id     INTEGER NOT NULL,
+      fact_type         TEXT NOT NULL CHECK (fact_type IN (
+                          'problem','method','claim','assumption',
+                          'dataset','metric','result','baseline',
+                          'limitation','future_work','contradiction_note'
+                        )),
+      subject           TEXT,
+      predicate         TEXT,
+      object            TEXT,
+      value             TEXT,
+      unit              TEXT,
+      context           TEXT,
+      evidence_text     TEXT NOT NULL,
+      section           TEXT,
+      extraction_source TEXT DEFAULT 'pdf_llm_section'
+                        CHECK (extraction_source IN (
+                          'pdf_llm_section',
+                          'zotero_deep_read',
+                          'manual'
+                        )),
+      confidence        REAL DEFAULT 0.7,
+      created_at        TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (doc_source_id) REFERENCES doc_sources(id) ON DELETE CASCADE
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_paper_facts_doc     ON paper_facts(doc_source_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_paper_facts_type    ON paper_facts(fact_type)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_paper_facts_subject ON paper_facts(subject)');
+
+  // ── research_entities ─────────────────────────────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS research_entities (
+      id          TEXT PRIMARY KEY,
+      entity_type TEXT NOT NULL CHECK (entity_type IN (
+                    'problem','concept','method_family','dataset','metric','application'
+                  )),
+      name        TEXT NOT NULL UNIQUE,
+      aliases     TEXT DEFAULT '[]',
+      description TEXT,
+      created_at  TEXT DEFAULT (datetime('now'))
+    )
+  `);
+
+  // ── fact_entity_links ─────────────────────────────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS fact_entity_links (
+      fact_id   TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      role      TEXT,
+      PRIMARY KEY (fact_id, entity_id),
+      FOREIGN KEY (fact_id)   REFERENCES paper_facts(id)       ON DELETE CASCADE,
+      FOREIGN KEY (entity_id) REFERENCES research_entities(id) ON DELETE CASCADE
+    )
+  `);
 }
 
 module.exports = { applyWikiSchema };

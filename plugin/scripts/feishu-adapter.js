@@ -393,11 +393,14 @@ function createBot(config) {
       let stopped = false;
       let currentWs = null;
       let healthTimer = null;
+      let sleepWakeTimer = null;
       let reconnectTimer = null;
       let reconnectDelay = 5000; // start 5s, doubles up to 60s
       const MAX_RECONNECT_DELAY = 60000;
       const HEALTH_CHECK_INTERVAL = 90000; // check every 90s
       const SILENT_THRESHOLD = 300000; // 5 min no SDK activity → suspect dead
+      const SLEEP_DETECT_INTERVAL = 5000; // tick every 5s to detect clock jump
+      const SLEEP_JUMP_THRESHOLD = 30000; // clock jump >30s = system was sleeping
 
       // Track last SDK activity (any event received = alive)
       let _lastActivityAt = Date.now();
@@ -538,15 +541,37 @@ function createBot(config) {
         }, HEALTH_CHECK_INTERVAL);
       }
 
+      // Sleep/wake detector: if the JS clock jumps >30s, system was sleeping → force reconnect
+      function startSleepWakeDetector() {
+        let _lastTickAt = Date.now();
+        sleepWakeTimer = setInterval(() => {
+          if (stopped) return;
+          const now = Date.now();
+          const elapsed = now - _lastTickAt;
+          _lastTickAt = now;
+          if (elapsed > SLEEP_JUMP_THRESHOLD) {
+            _log('INFO', `System wake detected (${Math.round(elapsed / 1000)}s gap) — forcing reconnect`);
+            reconnectDelay = 5000;
+            clearTimeout(reconnectTimer);
+            try { currentWs?.stop?.(); } catch { /* ignore */ }
+            currentWs = null;
+            touchActivity(); // reset silence counter so health check doesn't double-fire
+            connect();
+          }
+        }, SLEEP_DETECT_INTERVAL);
+      }
+
       // Initial connect
       connect();
       startHealthCheck();
+      startSleepWakeDetector();
 
       return Promise.resolve({
         stop() {
           stopped = true;
           clearTimeout(reconnectTimer);
           clearInterval(healthTimer);
+          clearInterval(sleepWakeTimer);
           currentWs = null;
         },
         reconnect() {
