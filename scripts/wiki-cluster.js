@@ -23,8 +23,8 @@ function jaccardOverlap(setA, setB) {
   const b = new Set(setB);
   let intersection = 0;
   for (const x of a) if (b.has(x)) intersection++;
-  const minSize = Math.min(a.size, b.size);
-  return minSize === 0 ? 0 : intersection / minSize;
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
 }
 
 /**
@@ -48,11 +48,13 @@ function findMatchingCluster(existingClusters, newMemberIds) {
 
 /**
  * Build connected components from embeddings using cosine similarity threshold.
+ * @param {Array<{ slug: string, vector: Float32Array|number[] }>} embeddings
+ * @param {{ threshold?: number, minSize?: number }} options
  * Uses union-find.
  */
 function buildConnectedComponents(embeddings, { threshold = 0.75, minSize = 3 } = {}) {
-  const slugs = Object.keys(embeddings);
-  const n = slugs.length;
+  const n = embeddings.length;
+  const slugs = embeddings.map(e => e.slug);
   const parent = Object.fromEntries(slugs.map(s => [s, s]));
 
   function find(x) {
@@ -63,7 +65,7 @@ function buildConnectedComponents(embeddings, { threshold = 0.75, minSize = 3 } 
 
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
-      if (cosineSimilarity(embeddings[slugs[i]], embeddings[slugs[j]]) >= threshold) {
+      if (cosineSimilarity(embeddings[i].vector, embeddings[j].vector) >= threshold) {
         union(slugs[i], slugs[j]);
       }
     }
@@ -81,23 +83,34 @@ function buildConnectedComponents(embeddings, { threshold = 0.75, minSize = 3 } 
 
 /**
  * Fetch doc-level embeddings from content_chunks by averaging all chunk embeddings per page.
+ * @param {object} db - node:sqlite DatabaseSync instance
+ * @param {string[]} slugs
+ * @returns {Array<{ slug: string, vector: Float32Array }>} one entry per slug that has embeddings
  */
 function getDocEmbeddings(db, slugs) {
-  const result = {};
-  for (const slug of slugs) {
-    const chunks = db.prepare(
-      "SELECT embedding FROM content_chunks WHERE page_slug=? AND embedding IS NOT NULL"
-    ).all(slug);
-    if (chunks.length === 0) continue;
-    const vecs = chunks.map(c => {
-      const buf = Buffer.isBuffer(c.embedding) ? c.embedding : Buffer.from(c.embedding);
-      const arr = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
-      return Array.from(arr);
-    });
+  if (slugs.length === 0) return [];
+  const placeholders = ',?'.repeat(slugs.length).slice(1);
+  const rows = db.prepare(
+    `SELECT page_slug, embedding FROM content_chunks WHERE page_slug IN (${placeholders}) AND embedding IS NOT NULL`
+  ).all(...slugs);
+
+  // Group rows by slug
+  const bySlug = {};
+  for (const row of rows) {
+    if (!bySlug[row.page_slug]) bySlug[row.page_slug] = [];
+    const buf = Buffer.isBuffer(row.embedding) ? row.embedding : Buffer.from(row.embedding);
+    bySlug[row.page_slug].push(new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4));
+  }
+
+  // Average chunk vectors per slug
+  const result = [];
+  for (const [slug, vecs] of Object.entries(bySlug)) {
     const dim = vecs[0].length;
-    const avg = new Array(dim).fill(0);
-    for (const v of vecs) for (let i = 0; i < dim; i++) avg[i] += v[i] / vecs.length;
-    result[slug] = avg;
+    const avg = new Float32Array(dim);
+    for (const v of vecs) {
+      for (let i = 0; i < dim; i++) avg[i] += v[i] / vecs.length;
+    }
+    result.push({ slug, vector: avg });
   }
   return result;
 }
