@@ -318,12 +318,7 @@ function exportDocPages(db, outputDir = DEFAULT_WIKI_DIR) {
 
   for (const row of rows) {
     try {
-      const tags = (() => {
-        try {
-          const p = JSON.parse(row.topic_tags || '[]');
-          return Array.isArray(p) ? p : [];
-        } catch { return []; }
-      })();
+      const tags = _safeJsonArray(row.topic_tags);
       const frontmatter = {
         title: row.title || row.slug,
         slug: row.slug,
