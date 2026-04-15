@@ -16,9 +16,11 @@
  *     → void
  */
 
+const crypto = require('node:crypto');
 const { buildWikiPrompt, validateWikilinks } = require('./core/wiki-prompt');
 const { upsertWikiPage, resetPageStaleness, appendWikiTimeline } = require('./core/wiki-db');
 const { chunkText } = require('./core/chunker');
+const { membershipHash, findMatchingCluster } = require('./wiki-cluster');
 
 const LLM_TIMEOUT_MS = 60000; // Sonnet needs more time than Haiku
 
@@ -274,4 +276,63 @@ async function buildDocWikiPage(db, docSource, extractedText, { allowedSlugs, pr
   return { slug, content, strippedLinks };
 }
 
-module.exports = { buildWikiPage, buildFallbackWikiContent, generateWikiContent, writeWikiPageWithChunks, buildDocWikiPage };
+async function buildTopicClusterPage(db, docSourceRows, { allowedSlugs, providers, existingClusters = [] }) {
+  const memberIds = docSourceRows.map(r => r.id);
+  const memberSlugs = docSourceRows.map(r => r.slug);
+  const mHash = membershipHash(memberSlugs);
+
+  // Find or create stable slug
+  const match = findMatchingCluster(existingClusters, memberIds);
+  const clusterSlug = match ? match.slug : 'cluster-' + crypto.randomBytes(4).toString('hex');
+
+  // Build synthesis content
+  const memberTitles = docSourceRows.map(r => r.title || r.slug);
+  const prompt = buildClusterPrompt(memberTitles, memberSlugs);
+  const result = await generateWikiContent(prompt, providers, allowedSlugs);
+  if (!result) return null;
+  const { content } = result;
+
+  const clusterLabel = inferClusterLabel(memberTitles);
+
+  writeWikiPageWithChunks(db, {
+    slug: clusterSlug,
+    title: clusterLabel,
+    primary_topic: clusterSlug,
+    source_type: 'topic_cluster',
+    staleness: 0.0,
+    raw_source_ids: '[]',
+    raw_source_count: 0,
+    topic_tags: '[]',
+    word_count: content.split(/\s+/).length,
+    membership_hash: mHash,
+    cluster_size: memberIds.length,
+  }, content, { docSourceIds: memberIds, role: 'cluster_member' });
+
+  return clusterSlug;
+}
+
+function inferClusterLabel(titles) {
+  const words = titles.flatMap(t => t.toLowerCase().split(/\W+/).filter(w => w.length > 3));
+  const freq = {};
+  for (const w of words) freq[w] = (freq[w] || 0) + 1;
+  const top = Object.entries(freq).filter(([, c]) => c > 1).sort((a, b) => b[1] - a[1]).slice(0, 2);
+  return top.length ? top.map(([w]) => w).join(' & ') + ' cluster' : 'Document Cluster';
+}
+
+function buildClusterPrompt(titles, slugs) {
+  const links = slugs.map((s, i) => `- [[${s}]] — ${titles[i]}`).join('\n');
+  return `You are writing a wiki overview page that synthesizes multiple related documents.
+
+Member documents:
+${links}
+
+Write a concise wiki overview page (150–300 words) that:
+- Opens with a paragraph explaining what these documents share in common
+- Briefly notes what each document covers (1 sentence each)
+- Uses [[wikilink]] syntax when referencing the member documents by slug
+- Ends with a "## See Also" section listing all members as [[wikilinks]]
+
+Respond with only the wiki page content.`;
+}
+
+module.exports = { buildWikiPage, buildFallbackWikiContent, generateWikiContent, writeWikiPageWithChunks, buildDocWikiPage, buildTopicClusterPage };

@@ -214,6 +214,43 @@ describe('buildDocWikiPage', () => {
   });
 });
 
+describe('buildTopicClusterPage', () => {
+  it('builds a cluster page linking to member doc pages', async () => {
+    const db = openTestDb();
+    const { upsertDocSource } = require('./core/wiki-db');
+    const { buildDocWikiPage, buildTopicClusterPage } = require('./wiki-reflect-build');
+    const providers = {
+      callHaiku: async () => '## Cluster\n\nA synthesis of related documents.',
+      buildDistillEnv: () => ({}),
+    };
+
+    // Create 3 doc sources + their pages
+    const docs = ['alpha', 'beta', 'gamma'];
+    const docRows = [];
+    for (const name of docs) {
+      upsertDocSource(db, { filePath: `/tmp/${name}.md`, fileHash: name, mtimeMs: 1,
+        sizeBytes: 10, fileType: 'md', extractor: 'direct', extractStatus: 'ok',
+        extractedTextHash: name, title: name, slug: name });
+      docRows.push(db.prepare(`SELECT * FROM doc_sources WHERE slug=?`).get(name));
+      await buildDocWikiPage(db, docRows.at(-1), `Content of ${name}`, { allowedSlugs: docs, providers });
+    }
+
+    const clusterSlug = await buildTopicClusterPage(db, docRows, {
+      allowedSlugs: docs,
+      providers,
+      existingClusters: [],
+    });
+
+    assert.ok(clusterSlug, 'should return a slug');
+    assert.ok(clusterSlug.startsWith('cluster-'));
+    const page = db.prepare(`SELECT source_type, cluster_size FROM wiki_pages WHERE slug=?`).get(clusterSlug);
+    assert.equal(page.source_type, 'topic_cluster');
+    assert.equal(page.cluster_size, 3);
+    const members = db.prepare(`SELECT * FROM wiki_page_doc_sources WHERE page_slug=? AND role='cluster_member'`).all(clusterSlug);
+    assert.equal(members.length, 3);
+  });
+});
+
 describe('writeWikiPageWithChunks', () => {
   it('inserts wiki_page with source_type=doc and content_chunks', () => {
     const { writeWikiPageWithChunks } = require('./wiki-reflect-build');
