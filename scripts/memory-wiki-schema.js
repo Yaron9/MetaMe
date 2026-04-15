@@ -129,6 +129,57 @@ function applyWikiSchema(db) {
       created_at  TEXT DEFAULT (datetime('now'))
     )
   `);
+
+  // ── doc_sources ───────────────────────────────────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS doc_sources (
+      id                  INTEGER PRIMARY KEY,
+      file_path           TEXT UNIQUE NOT NULL,
+      file_hash           TEXT NOT NULL,
+      mtime_ms            INTEGER,
+      size_bytes          INTEGER,
+      extracted_text_hash TEXT,
+      file_type           TEXT NOT NULL CHECK (file_type IN ('md','txt','pdf')),
+      extractor           TEXT,
+      extract_status      TEXT DEFAULT 'pending'
+                          CHECK (extract_status IN ('ok','empty_or_scanned','error','pending')),
+      title               TEXT,
+      slug                TEXT UNIQUE NOT NULL,
+      status              TEXT DEFAULT 'active'
+                          CHECK (status IN ('active','orphaned','missing')),
+      error_message       TEXT,
+      indexed_at          TEXT NOT NULL,
+      last_seen_at        TEXT,
+      built_at            TEXT,
+      content_stale       INTEGER DEFAULT 1
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_doc_sources_status        ON doc_sources(status)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_doc_sources_file_hash     ON doc_sources(file_hash)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_doc_sources_slug          ON doc_sources(slug)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_doc_sources_content_stale ON doc_sources(content_stale)`);
+
+  // ── wiki_page_doc_sources ─────────────────────────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS wiki_page_doc_sources (
+      page_slug     TEXT NOT NULL,
+      doc_source_id INTEGER NOT NULL,
+      role          TEXT NOT NULL CHECK (role IN ('primary','cluster_member')),
+      PRIMARY KEY (page_slug, doc_source_id, role),
+      FOREIGN KEY (page_slug)     REFERENCES wiki_pages(slug)  ON DELETE CASCADE,
+      FOREIGN KEY (doc_source_id) REFERENCES doc_sources(id)   ON DELETE CASCADE
+    )
+  `);
+
+  // ── wiki_pages additions (idempotent ALTER) ───────────────────────────────
+  for (const [col, def] of [
+    ['source_type',    "TEXT DEFAULT 'memory'"],
+    ['membership_hash','TEXT'],
+    ['cluster_size',   'INTEGER'],
+  ]) {
+    try { db.exec(`ALTER TABLE wiki_pages ADD COLUMN ${col} ${def}`); } catch { /* already exists */ }
+  }
+  db.exec("UPDATE wiki_pages SET source_type = 'memory' WHERE source_type IS NULL");
 }
 
 module.exports = { applyWikiSchema };

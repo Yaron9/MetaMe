@@ -471,6 +471,36 @@ describe('wiki-db', () => {
     });
   });
 
+  // ── doc_sources schema ────────────────────────────────────────────────────────
+  describe('doc_sources schema', () => {
+    it('creates doc_sources table', () => {
+      const db = openTestDb();
+      const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='doc_sources'").get();
+      assert.ok(row, 'doc_sources table should exist');
+    });
+
+    it('creates wiki_page_doc_sources table', () => {
+      const db = openTestDb();
+      const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='wiki_page_doc_sources'").get();
+      assert.ok(row, 'wiki_page_doc_sources table should exist');
+    });
+
+    it('wiki_pages has source_type column defaulting to memory', () => {
+      const db = openTestDb();
+      const { upsertWikiPage } = require('./wiki-db');
+      upsertWikiPage(db, { slug: 'test-schema', primary_topic: 'test-schema', title: 'T', content: 'C' });
+      const row = db.prepare("SELECT source_type FROM wiki_pages WHERE slug='test-schema'").get();
+      assert.equal(row.source_type, 'memory');
+    });
+
+    it('wiki_pages has membership_hash and cluster_size columns', () => {
+      const db = openTestDb();
+      const cols = db.prepare("PRAGMA table_info(wiki_pages)").all().map(c => c.name);
+      assert.ok(cols.includes('membership_hash'));
+      assert.ok(cols.includes('cluster_size'));
+    });
+  });
+
   // ── upsertWikiTopic with force=true ─────────────────────────────────────────
   describe('upsertWikiTopic force=true', () => {
     it('force=true skips threshold check', () => {
@@ -491,5 +521,116 @@ describe('wiki-db', () => {
         upsertWikiTopic(db, '***^^^', { force: true });
       }, /empty/i);
     });
+  });
+});
+
+describe('upsertDocSource', () => {
+  it('inserts a new doc source', () => {
+    const { upsertDocSource, getDocSourceByPath } = require('./wiki-db');
+    const db = openTestDb();
+    upsertDocSource(db, {
+      filePath: '/tmp/test.md',
+      fileHash: 'abc123',
+      mtimeMs: 1000,
+      sizeBytes: 500,
+      fileType: 'md',
+      extractor: 'direct',
+      extractStatus: 'ok',
+      extractedTextHash: 'def456',
+      title: 'Test Doc',
+      slug: 'test-doc',
+    });
+    const row = getDocSourceByPath(db, '/tmp/test.md');
+    assert.equal(row.slug, 'test-doc');
+    assert.equal(row.content_stale, 1);
+    assert.equal(row.status, 'active');
+  });
+
+  it('updates file_hash and marks content_stale=1 on hash change', () => {
+    const { upsertDocSource, getDocSourceByPath } = require('./wiki-db');
+    const db = openTestDb();
+    upsertDocSource(db, { filePath: '/tmp/a.md', fileHash: 'old', mtimeMs: 1, sizeBytes: 1, fileType: 'md', extractor: 'direct', extractStatus: 'ok', extractedTextHash: 'h1', title: 'A', slug: 'a' });
+    db.prepare("UPDATE doc_sources SET content_stale=0 WHERE file_path='/tmp/a.md'").run();
+    upsertDocSource(db, { filePath: '/tmp/a.md', fileHash: 'new', mtimeMs: 2, sizeBytes: 2, fileType: 'md', extractor: 'direct', extractStatus: 'ok', extractedTextHash: 'h2', title: 'A', slug: 'a' });
+    const row = getDocSourceByPath(db, '/tmp/a.md');
+    assert.equal(row.content_stale, 1);
+  });
+
+  it('keeps content_stale=0 when hash unchanged', () => {
+    const { upsertDocSource, getDocSourceByPath } = require('./wiki-db');
+    const db = openTestDb();
+    upsertDocSource(db, { filePath: '/tmp/b.md', fileHash: 'same', mtimeMs: 1, sizeBytes: 1, fileType: 'md', extractor: 'direct', extractStatus: 'ok', extractedTextHash: 'th', title: 'B', slug: 'b' });
+    db.prepare("UPDATE doc_sources SET content_stale=0 WHERE file_path='/tmp/b.md'").run();
+    upsertDocSource(db, { filePath: '/tmp/b.md', fileHash: 'same', mtimeMs: 2, sizeBytes: 2, fileType: 'md', extractor: 'direct', extractStatus: 'ok', extractedTextHash: 'th', title: 'B', slug: 'b' });
+    const row = getDocSourceByPath(db, '/tmp/b.md');
+    assert.equal(row.content_stale, 0);
+  });
+});
+
+describe('markDocSourcesMissing', () => {
+  it('marks active docs not in seenPaths as missing', () => {
+    const { upsertDocSource, getDocSourceByPath, markDocSourcesMissing } = require('./wiki-db');
+    const db = openTestDb();
+    upsertDocSource(db, { filePath: '/tmp/gone.md', fileHash: 'x', mtimeMs: 1, sizeBytes: 1, fileType: 'md', extractor: 'direct', extractStatus: 'ok', extractedTextHash: 'h', title: 'G', slug: 'gone' });
+    markDocSourcesMissing(db, ['/tmp/other.md']);
+    const row = getDocSourceByPath(db, '/tmp/gone.md');
+    assert.equal(row.status, 'missing');
+  });
+});
+
+describe('upsertWikiPage source_type support', () => {
+  it('accepts source_type doc', () => {
+    const { upsertWikiPage } = require('./wiki-db');
+    const db = openTestDb();
+    upsertWikiPage(db, { slug: 'doc-1', primary_topic: 'doc-1', title: 'D', content: 'C', source_type: 'doc' });
+    const row = db.prepare("SELECT source_type FROM wiki_pages WHERE slug='doc-1'").get();
+    assert.equal(row.source_type, 'doc');
+  });
+
+  it('accepts membership_hash and cluster_size for topic_cluster', () => {
+    const { upsertWikiPage } = require('./wiki-db');
+    const db = openTestDb();
+    upsertWikiPage(db, { slug: 'cluster-abc', primary_topic: 'cluster-abc', title: 'C', content: 'C', source_type: 'topic_cluster', membership_hash: 'hash123', cluster_size: 3 });
+    const row = db.prepare("SELECT membership_hash, cluster_size FROM wiki_pages WHERE slug='cluster-abc'").get();
+    assert.equal(row.membership_hash, 'hash123');
+    assert.equal(row.cluster_size, 3);
+  });
+});
+
+describe('cluster CRUD', () => {
+  it('getClusterMemberIds returns member doc_source ids', () => {
+    const { upsertDocSource, upsertDocPageLink, getClusterMemberIds } = require('./wiki-db');
+    const { upsertWikiPage } = require('./wiki-db');
+    const db = openTestDb();
+    upsertDocSource(db, { filePath: '/tmp/x.md', fileHash: 'hx', mtimeMs: 1, sizeBytes: 1, fileType: 'md', extractor: 'direct', extractStatus: 'ok', extractedTextHash: 'tx', title: 'X', slug: 'x-doc' });
+    upsertWikiPage(db, { slug: 'cluster-test', primary_topic: 'cluster-test', title: 'CT', content: 'C', source_type: 'topic_cluster' });
+    const docRow = db.prepare("SELECT id FROM doc_sources WHERE slug='x-doc'").get();
+    upsertDocPageLink(db, 'cluster-test', docRow.id, 'cluster_member');
+    const ids = getClusterMemberIds(db, 'cluster-test');
+    assert.ok(ids.includes(docRow.id));
+  });
+
+  it('listStaleDocSources returns only active stale rows', () => {
+    const { upsertDocSource, listStaleDocSources } = require('./wiki-db');
+    const db = openTestDb();
+    upsertDocSource(db, { filePath: '/tmp/stale.md', fileHash: 'h1', mtimeMs: 1, sizeBytes: 1, fileType: 'md', extractor: 'direct', extractStatus: 'ok', extractedTextHash: 'th1', title: 'S', slug: 'stale-doc' });
+    const rows = listStaleDocSources(db);
+    assert.ok(rows.some(r => r.slug === 'stale-doc'));
+  });
+
+  it('replaceClusterMembers atomically replaces member set', () => {
+    const { upsertDocSource, upsertDocPageLink, replaceClusterMembers, getClusterMemberIds } = require('./wiki-db');
+    const { upsertWikiPage } = require('./wiki-db');
+    const db = openTestDb();
+    upsertDocSource(db, { filePath: '/tmp/m1.md', fileHash: 'h1', mtimeMs: 1, sizeBytes: 1, fileType: 'md', extractor: 'direct', extractStatus: 'ok', extractedTextHash: 'th1', title: 'M1', slug: 'm1' });
+    upsertDocSource(db, { filePath: '/tmp/m2.md', fileHash: 'h2', mtimeMs: 1, sizeBytes: 1, fileType: 'md', extractor: 'direct', extractStatus: 'ok', extractedTextHash: 'th2', title: 'M2', slug: 'm2' });
+    upsertWikiPage(db, { slug: 'cluster-rep', primary_topic: 'cluster-rep', title: 'CR', content: 'C', source_type: 'topic_cluster' });
+    const d1 = db.prepare("SELECT id FROM doc_sources WHERE slug='m1'").get();
+    const d2 = db.prepare("SELECT id FROM doc_sources WHERE slug='m2'").get();
+    upsertDocPageLink(db, 'cluster-rep', d1.id, 'cluster_member');
+    replaceClusterMembers(db, 'cluster-rep', [d2.id]);
+    const ids = getClusterMemberIds(db, 'cluster-rep');
+    assert.equal(ids.length, 1);
+    assert.equal(ids[0], d2.id);
   });
 });
