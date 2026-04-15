@@ -157,6 +157,63 @@ function openTestDb() {
   return db;
 }
 
+describe('buildDocWikiPage', () => {
+  it('builds a wiki page with source_type=doc and primary link', async () => {
+    const { buildDocWikiPage } = require('./wiki-reflect-build');
+    const { upsertDocSource } = require('./core/wiki-db');
+    const db = openTestDb();
+
+    upsertDocSource(db, {
+      filePath: '/tmp/build-test.md',
+      fileHash: 'h1', mtimeMs: 1, sizeBytes: 10,
+      fileType: 'md', extractor: 'direct', extractStatus: 'ok',
+      extractedTextHash: 'th1', title: 'My Doc', slug: 'my-doc',
+    });
+    const docSrc = db.prepare("SELECT * FROM doc_sources WHERE slug='my-doc'").get();
+
+    const providers = {
+      callHaiku: async () => '## My Doc\n\nThis is the doc content here.',
+      buildDistillEnv: () => ({}),
+    };
+
+    const result = await buildDocWikiPage(db, docSrc, 'Full document text here for the page', {
+      allowedSlugs: ['my-doc'],
+      providers,
+    });
+
+    assert.ok(result, 'should return a result');
+    assert.equal(result.slug, 'my-doc');
+
+    const page = db.prepare("SELECT source_type, primary_topic FROM wiki_pages WHERE slug='my-doc'").get();
+    assert.equal(page.source_type, 'doc');
+    assert.equal(page.primary_topic, 'my-doc');
+
+    const link = db.prepare("SELECT * FROM wiki_page_doc_sources WHERE page_slug='my-doc' AND role='primary'").get();
+    assert.ok(link, 'should have wiki_page_doc_sources primary link');
+  });
+
+  it('returns null when LLM returns empty content', async () => {
+    const { buildDocWikiPage } = require('./wiki-reflect-build');
+    const { upsertDocSource } = require('./core/wiki-db');
+    const db = openTestDb();
+
+    upsertDocSource(db, {
+      filePath: '/tmp/empty-test.md', fileHash: 'h2', mtimeMs: 1, sizeBytes: 5,
+      fileType: 'md', extractor: 'direct', extractStatus: 'ok',
+      extractedTextHash: 'th2', title: 'Empty', slug: 'empty-doc',
+    });
+    const docSrc = db.prepare("SELECT * FROM doc_sources WHERE slug='empty-doc'").get();
+
+    const providers = {
+      callHaiku: async () => '',  // empty response
+      buildDistillEnv: () => ({}),
+    };
+
+    const result = await buildDocWikiPage(db, docSrc, 'text', { allowedSlugs: [], providers });
+    assert.equal(result, null);
+  });
+});
+
 describe('writeWikiPageWithChunks', () => {
   it('inserts wiki_page with source_type=doc and content_chunks', () => {
     const { writeWikiPageWithChunks } = require('./wiki-reflect-build');

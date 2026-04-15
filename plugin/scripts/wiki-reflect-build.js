@@ -220,4 +220,58 @@ function buildFallbackWikiContent(topic, queryResult) {
   return lines.join('\n').trim();
 }
 
-module.exports = { buildWikiPage, buildFallbackWikiContent, generateWikiContent, writeWikiPageWithChunks };
+/**
+ * Build a prompt for a Tier 1 document wiki page.
+ */
+function buildDocWikiPrompt(title, text) {
+  const truncated = text.length > 8000 ? text.slice(0, 8000) + '\n\n[...truncated]' : text;
+  return `You are writing a wiki page for a knowledge base.
+
+Title: ${title}
+
+Source document content:
+${truncated}
+
+Write a well-structured wiki page that:
+- Starts with a brief summary paragraph
+- Organizes information under ## headings
+- Preserves key facts, numbers, and terminology from the source
+- Uses [[wikilink]] syntax for concepts that deserve their own pages
+- Is 200–600 words
+
+Respond with only the wiki page content, starting with the summary paragraph.`;
+}
+
+/**
+ * Build a Tier 1 wiki page from a document source.
+ * @param {object} db
+ * @param {object} docSource — row from doc_sources
+ * @param {string} extractedText — full text from wiki-extract.js
+ * @param {{ allowedSlugs: string[], providers: object }} opts
+ * @returns {Promise<{slug, content, strippedLinks}|null>}
+ */
+async function buildDocWikiPage(db, docSource, extractedText, { allowedSlugs, providers }) {
+  const { slug, title, id: docSourceId } = docSource;
+  const displayTitle = title || slug;
+
+  const prompt = buildDocWikiPrompt(displayTitle, extractedText);
+  const result = await generateWikiContent(prompt, providers, allowedSlugs);
+  if (!result) return null;
+
+  const { content, strippedLinks } = result;
+
+  writeWikiPageWithChunks(db, {
+    slug,
+    title: displayTitle,
+    primary_topic: slug,
+    source_type: 'doc',
+    raw_source_ids: '[]',
+    topic_tags: '[]',
+    raw_source_count: 0,
+    word_count: content.split(/\s+/).length,
+  }, content, { docSourceIds: [docSourceId], role: 'primary' });
+
+  return { slug, content, strippedLinks };
+}
+
+module.exports = { buildWikiPage, buildFallbackWikiContent, generateWikiContent, writeWikiPageWithChunks, buildDocWikiPage };
