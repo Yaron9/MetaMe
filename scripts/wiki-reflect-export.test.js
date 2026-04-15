@@ -12,6 +12,8 @@ const {
   rebuildSessionsIndex,
   exportCapsuleFile,
   rebuildCapsulesIndex,
+  exportReflectDir,        // add this
+  rebuildReflectDirIndex,  // add this
 } = require('./wiki-reflect-export');
 
 function makeTmpDir() {
@@ -265,4 +267,66 @@ test('rebuildCapsulesIndex creates capsules/_index.md', () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── exportReflectDir ────────────────────────────────────────────
+test('exportReflectDir copies .md files to outputDir/subdir', (_t) => {
+  const tmp = makeTmpDir();
+  const srcDir = path.join(tmp, 'decisions');
+  fs.mkdirSync(srcDir);
+  fs.writeFileSync(path.join(srcDir, '2026-04-11-nightly-reflect.md'), '# test\ncontent', 'utf8');
+
+  const outDir = path.join(tmp, 'vault');
+  exportReflectDir(srcDir, 'decisions', outDir);
+
+  const dest = path.join(outDir, 'decisions', '2026-04-11-nightly-reflect.md');
+  assert.ok(fs.existsSync(dest), 'file copied to vault/decisions/');
+  assert.ok(fs.readFileSync(dest, 'utf8').includes('content'));
+  fs.rmSync(tmp, { recursive: true });
+});
+
+test('exportReflectDir skips non-.md files', (_t) => {
+  const tmp = makeTmpDir();
+  const srcDir = path.join(tmp, 'lessons');
+  fs.mkdirSync(srcDir);
+  fs.writeFileSync(path.join(srcDir, 'data.json'), '{}', 'utf8');
+  fs.writeFileSync(path.join(srcDir, 'lesson.md'), '# ok', 'utf8');
+
+  const outDir = path.join(tmp, 'vault');
+  exportReflectDir(srcDir, 'lessons', outDir);
+
+  const destDir = path.join(outDir, 'lessons');
+  const files = fs.readdirSync(destDir);
+  assert.deepStrictEqual(files, ['lesson.md']);
+  fs.rmSync(tmp, { recursive: true });
+});
+
+test('exportReflectDir returns empty array when srcDir missing', (_t) => {
+  const tmp = makeTmpDir();
+  const result = exportReflectDir(path.join(tmp, 'nonexistent'), 'decisions', tmp);
+  assert.deepStrictEqual(result, []);
+  fs.rmSync(tmp, { recursive: true });
+});
+
+test('rebuildReflectDirIndex writes _index.md with entries', (_t) => {
+  const tmp = makeTmpDir();
+  const outDir = path.join(tmp, 'vault');
+  const files = ['2026-04-11-nightly-reflect.md', '2026-04-12-nightly-reflect.md'];
+
+  rebuildReflectDirIndex(files, 'decisions', outDir);
+
+  const idx = path.join(outDir, 'decisions', '_index.md');
+  assert.ok(fs.existsSync(idx));
+  const content = fs.readFileSync(idx, 'utf8');
+  assert.ok(content.includes('2026-04-11'));
+  assert.ok(content.includes('Architecture Decisions'));
+  fs.rmSync(tmp, { recursive: true });
+});
+
+test('rebuildReflectDirIndex uses "Operational Lessons" label for lessons subdir', (_t) => {
+  const tmp = makeTmpDir();
+  rebuildReflectDirIndex(['2026-04-11-nightly-reflect.md'], 'lessons', tmp);
+  const content = fs.readFileSync(path.join(tmp, 'lessons', '_index.md'), 'utf8');
+  assert.ok(content.includes('Operational Lessons'));
+  fs.rmSync(tmp, { recursive: true });
 });

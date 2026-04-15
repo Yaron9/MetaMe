@@ -226,6 +226,74 @@ function rebuildCapsulesIndex(capsuleFiles, outputDir = DEFAULT_WIKI_DIR) {
   fs.renameSync(tmpPath, filePath);
 }
 
+/**
+ * Mirror all .md files from srcDir into outputDir/subdir (atomic write).
+ * Pattern mirrors exportCapsuleFile.
+ *
+ * @param {string} srcDir   — e.g. ~/.metame/memory/decisions
+ * @param {string} subdir   — vault subdirectory name, e.g. 'decisions'
+ * @param {string} [outputDir]
+ * @returns {string[]}      — list of destination file paths written
+ */
+function exportReflectDir(srcDir, subdir, outputDir = DEFAULT_WIKI_DIR) {
+  if (!fs.existsSync(srcDir)) return [];
+  const destDir = path.join(outputDir, subdir);
+  _ensureDir(destDir);
+
+  const written = [];
+  for (const name of fs.readdirSync(srcDir)) {
+    if (!name.endsWith('.md')) continue;
+    const src = path.join(srcDir, name);
+    const dest = path.join(destDir, name);
+    const tmp = `${dest}.tmp`;
+    try {
+      const content = fs.readFileSync(src, 'utf8');
+      try { fs.unlinkSync(tmp); } catch { /* not present */ }
+      fs.writeFileSync(tmp, content.endsWith('\n') ? content : `${content}\n`, 'utf8');
+      fs.renameSync(tmp, dest);
+      written.push(dest);
+    } catch { /* skip unreadable file */ }
+  }
+  return written;
+}
+
+/**
+ * Write _index.md for a reflect subdirectory (decisions or lessons).
+ *
+ * @param {string[]} fileNames  — bare filenames (not full paths)
+ * @param {string}   subdir     — 'decisions' | 'lessons'
+ * @param {string}   [outputDir]
+ */
+function rebuildReflectDirIndex(fileNames, subdir, outputDir = DEFAULT_WIKI_DIR) {
+  const destDir = path.join(outputDir, subdir);
+  _ensureDir(destDir);
+
+  const label = subdir === 'decisions' ? 'Architecture Decisions' : 'Operational Lessons';
+  const lines = [
+    '---',
+    `title: ${label}`,
+    `updated: ${new Date().toISOString().slice(0, 10)}`,
+    'type: reflect-index',
+    '---',
+    '',
+    `# ${label}`,
+    '',
+    `> ${fileNames.length} entries · 自动生成，勿手动编辑`,
+    '',
+  ];
+
+  for (const name of [...fileNames].sort().reverse()) {
+    const base = path.basename(name, '.md');
+    lines.push(`- [[${subdir}/${base}|${base}]]`);
+  }
+
+  const filePath = path.join(destDir, '_index.md');
+  const tmpPath = `${filePath}.tmp`;
+  try { fs.unlinkSync(tmpPath); } catch { /* not present */ }
+  fs.writeFileSync(tmpPath, lines.join('\n') + '\n', 'utf8');
+  fs.renameSync(tmpPath, filePath);
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function _ensureDir(dir) {
@@ -330,4 +398,6 @@ module.exports = {
   rebuildSessionsIndex,
   exportCapsuleFile,
   rebuildCapsulesIndex,
+  exportReflectDir,        // new
+  rebuildReflectDirIndex,  // new
 };
