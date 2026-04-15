@@ -277,6 +277,8 @@ async function buildDocWikiPage(db, docSource, extractedText, { allowedSlugs, pr
 }
 
 async function buildTopicClusterPage(db, docSourceRows, { allowedSlugs, providers, existingClusters = [] }) {
+  if (!docSourceRows || docSourceRows.length === 0) return null;
+
   const memberIds = docSourceRows.map(r => r.id);
   const memberSlugs = docSourceRows.map(r => r.slug);
   const mHash = membershipHash(memberSlugs);
@@ -290,7 +292,7 @@ async function buildTopicClusterPage(db, docSourceRows, { allowedSlugs, provider
   const prompt = buildClusterPrompt(memberTitles, memberSlugs);
   const result = await generateWikiContent(prompt, providers, allowedSlugs);
   if (!result) return null;
-  const { content } = result;
+  const { content, strippedLinks: clusterStrippedLinks } = result;
 
   const clusterLabel = inferClusterLabel(memberTitles);
 
@@ -308,7 +310,7 @@ async function buildTopicClusterPage(db, docSourceRows, { allowedSlugs, provider
     cluster_size: memberIds.length,
   }, content, { docSourceIds: memberIds, role: 'cluster_member' });
 
-  return clusterSlug;
+  return { slug: clusterSlug, strippedLinks: clusterStrippedLinks || [] };
 }
 
 function inferClusterLabel(titles) {
@@ -320,7 +322,10 @@ function inferClusterLabel(titles) {
 }
 
 function buildClusterPrompt(titles, slugs) {
-  const links = slugs.map((s, i) => `- [[${s}]] — ${titles[i]}`).join('\n');
+  const links = slugs.map((s, i) => {
+    const safeTitle = (titles[i] || '').slice(0, 120).replace(/[\r\n]/g, ' ');
+    return `- [[${s}]] — ${safeTitle}`;
+  }).join('\n');
   return `You are writing a wiki overview page that synthesizes multiple related documents.
 
 Member documents:

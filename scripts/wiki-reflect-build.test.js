@@ -235,18 +235,19 @@ describe('buildTopicClusterPage', () => {
       await buildDocWikiPage(db, docRows.at(-1), `Content of ${name}`, { allowedSlugs: docs, providers });
     }
 
-    const clusterSlug = await buildTopicClusterPage(db, docRows, {
+    const clusterResult = await buildTopicClusterPage(db, docRows, {
       allowedSlugs: docs,
       providers,
       existingClusters: [],
     });
 
-    assert.ok(clusterSlug, 'should return a slug');
-    assert.ok(clusterSlug.startsWith('cluster-'));
-    const page = db.prepare(`SELECT source_type, cluster_size FROM wiki_pages WHERE slug=?`).get(clusterSlug);
+    assert.ok(clusterResult, 'should return a result object');
+    assert.ok(clusterResult.slug.startsWith('cluster-'));
+    assert.ok(Array.isArray(clusterResult.strippedLinks));
+    const page = db.prepare(`SELECT source_type, cluster_size FROM wiki_pages WHERE slug=?`).get(clusterResult.slug);
     assert.equal(page.source_type, 'topic_cluster');
     assert.equal(page.cluster_size, 3);
-    const members = db.prepare(`SELECT * FROM wiki_page_doc_sources WHERE page_slug=? AND role='cluster_member'`).all(clusterSlug);
+    const members = db.prepare(`SELECT * FROM wiki_page_doc_sources WHERE page_slug=? AND role='cluster_member'`).all(clusterResult.slug);
     assert.equal(members.length, 3);
   });
 });
