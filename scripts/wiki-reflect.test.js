@@ -268,6 +268,26 @@ test('runWikiReflect writes audit log', async () => {
   db.close();
 });
 
+function _setupSchema(db) {
+  db.exec('PRAGMA journal_mode = WAL');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS memory_items (
+      id        TEXT PRIMARY KEY,
+      kind      TEXT NOT NULL DEFAULT 'insight',
+      state     TEXT NOT NULL DEFAULT 'active',
+      title     TEXT,
+      content   TEXT NOT NULL DEFAULT '',
+      confidence REAL DEFAULT 0.5,
+      search_count INTEGER DEFAULT 0,
+      relation  TEXT,
+      tags      TEXT DEFAULT '[]',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  applyWikiSchema(db);
+}
+
 test('runWikiReflect skips permanent_error slugs', async () => {
   const db = buildTestDb();
   const dir = makeTmpDir();
@@ -298,4 +318,90 @@ test('runWikiReflect skips permanent_error slugs', async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
   db.close();
+});
+
+test('runWikiReflect exports doc pages from DB to vault', async (_t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wkr-'));
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(':memory:');
+
+  // Use the same minimal schema as the other tests in this file
+  _setupSchema(db);
+
+  // Insert a doc page (already built in DB, just needs file export)
+  db.prepare(`INSERT INTO wiki_pages
+    (slug, title, primary_topic, source_type, content, topic_tags,
+     created_at, last_built_at, raw_source_count, staleness)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`)
+    .run('doc-paper', 'Doc Paper', 'doc-paper', 'doc',
+         '## Analysis\nContent.', '[]', '2026-04-15', '2026-04-15', 3, 0.0);
+
+  const outDir = path.join(tmp, 'vault');
+  const capsulesDir = path.join(tmp, 'capsules');
+  const logPath = path.join(tmp, 'reflect.log');
+
+  const fakeProviders = {
+    callHaiku: async () => '## content\ntest',
+    buildDistillEnv: () => ({}),
+  };
+
+  const result = await runWikiReflect(db, {
+    outputDir: outDir,
+    capsulesDir,
+    logPath,
+    providers: fakeProviders,
+  });
+
+  assert.ok(
+    fs.existsSync(path.join(outDir, 'doc-paper.md')),
+    'doc page exported to vault'
+  );
+  assert.ok(typeof result.docsExported === 'number', 'result.docsExported is a number');
+  assert.strictEqual(result.docsExported, 1);
+
+  db.close();
+  fs.rmSync(tmp, { recursive: true });
+});
+
+test('runWikiReflect mirrors decisions dir to vault', async (_t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wkr-'));
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(':memory:');
+  _setupSchema(db);
+
+  // Write a decisions file in a temp location
+  const decisionsDir = path.join(tmp, 'decisions');
+  fs.mkdirSync(decisionsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(decisionsDir, '2026-04-15-nightly-reflect.md'),
+    '# Decision\nX over Y.',
+    'utf8'
+  );
+
+  const outDir = path.join(tmp, 'vault');
+  const logPath = path.join(tmp, 'reflect.log');
+
+  const fakeProviders = {
+    callHaiku: async () => '## content',
+    buildDistillEnv: () => ({}),
+  };
+
+  const result = await runWikiReflect(db, {
+    outputDir: outDir,
+    decisionsDir,
+    lessonsDir: path.join(tmp, 'lessons_empty'),   // doesn't exist — should not throw
+    capsulesDir: path.join(tmp, 'caps'),
+    logPath,
+    providers: fakeProviders,
+  });
+
+  assert.ok(
+    fs.existsSync(path.join(outDir, 'decisions', '2026-04-15-nightly-reflect.md')),
+    'decisions file mirrored to vault'
+  );
+  assert.ok(typeof result.reflectExported === 'number', 'result.reflectExported is a number');
+  assert.ok(result.reflectExported >= 1);
+
+  db.close();
+  fs.rmSync(tmp, { recursive: true });
 });

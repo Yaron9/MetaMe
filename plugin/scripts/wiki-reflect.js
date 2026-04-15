@@ -29,11 +29,16 @@ const {
   rebuildSessionsIndex,
   exportCapsuleFile,
   rebuildCapsulesIndex,
+  exportReflectDir,
+  rebuildReflectDirIndex,
+  exportDocPages,
 } = require('./wiki-reflect-export');
 
 const DEFAULT_WIKI_DIR = path.join(os.homedir(), '.metame', 'wiki');
 const DEFAULT_CAPSULES_DIR = path.join(os.homedir(), '.metame', 'memory', 'capsules');
 const DEFAULT_LOG_PATH = path.join(os.homedir(), '.metame', 'wiki_reflect_log.jsonl');
+const DEFAULT_DECISIONS_DIR = path.join(os.homedir(), '.metame', 'memory', 'decisions');
+const DEFAULT_LESSONS_DIR   = path.join(os.homedir(), '.metame', 'memory', 'lessons');
 const LOCK_FILE = path.join(os.homedir(), '.metame', 'wiki-reflect.lock');
 const LOCK_MAX_AGE_MS = 10 * 60 * 1000; // 10 minutes
 const STALENESS_THRESHOLD = 0.4;
@@ -55,6 +60,8 @@ const MAX_RETRIES = 3;
 async function runWikiReflect(db, {
   outputDir = DEFAULT_WIKI_DIR,
   capsulesDir = DEFAULT_CAPSULES_DIR,
+  decisionsDir = DEFAULT_DECISIONS_DIR,
+  lessonsDir   = DEFAULT_LESSONS_DIR,
   logPath = DEFAULT_LOG_PATH,
   providers,
   threshold = STALENESS_THRESHOLD,
@@ -70,6 +77,8 @@ async function runWikiReflect(db, {
   const failed = [];
   const exportFailed = [];
   const strippedLinksMap = {};
+  let docsExported = 0;
+  let reflectExported = 0;
 
   try {
     // 2. Load previous failed_slugs for retry logic
@@ -179,6 +188,28 @@ async function runWikiReflect(db, {
     }
     try { rebuildCapsulesIndex(capsuleFiles, outputDir); } catch { /* non-fatal */ }
 
+    // Step 6: Export doc/cluster pages from DB
+    try {
+      const { exported } = exportDocPages(db, outputDir);
+      docsExported = exported.length;
+    } catch { /* non-fatal */ }
+
+    // Step 7: Mirror decisions and lessons to vault
+    try {
+      const decWritten = exportReflectDir(decisionsDir, 'decisions', outputDir);
+      const lesWritten = exportReflectDir(lessonsDir, 'lessons', outputDir);
+      reflectExported = decWritten.length + lesWritten.length;
+
+      const decFiles = fs.existsSync(decisionsDir) && fs.statSync(decisionsDir).isDirectory()
+        ? fs.readdirSync(decisionsDir).filter(f => f.endsWith('.md'))
+        : [];
+      const lesFiles = fs.existsSync(lessonsDir) && fs.statSync(lessonsDir).isDirectory()
+        ? fs.readdirSync(lessonsDir).filter(f => f.endsWith('.md'))
+        : [];
+      if (decFiles.length > 0) rebuildReflectDirIndex(decFiles, 'decisions', outputDir);
+      if (lesFiles.length > 0) rebuildReflectDirIndex(lesFiles, 'lessons', outputDir);
+    } catch { /* non-fatal */ }
+
   } finally {
     // 6. Release lock
     _releaseLock(LOCK_FILE);
@@ -190,6 +221,8 @@ async function runWikiReflect(db, {
       export_failed_slugs: exportFailed,
       failed_slugs: failed,
       stripped_links: strippedLinksMap,
+      docs_exported: docsExported,
+      reflect_exported: reflectExported,
       duration_ms: Date.now() - startMs,
     };
     try {
@@ -197,7 +230,7 @@ async function runWikiReflect(db, {
     } catch { /* non-fatal */ }
   }
 
-  return { built, failed, exportFailed };
+  return { built, failed, exportFailed, docsExported, reflectExported };
 }
 
 // ── Lock helpers ──────────────────────────────────────────────────────────────
