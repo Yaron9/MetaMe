@@ -467,9 +467,16 @@ function listStaleDocSources(db) {
 }
 
 function markDocSourcesMissing(db, seenPaths) {
+  if (seenPaths.length === 0) return;
   const set = new Set(seenPaths);
+  // Infer the scan directory from the seen paths so we only mark files
+  // within that directory scope as missing (not docs imported from other paths).
+  const path = require('node:path');
+  const dirs = new Set(seenPaths.map(p => path.dirname(p)));
   const all = db.prepare("SELECT id, file_path FROM doc_sources WHERE status='active'").all();
-  const missingIds = all.filter(r => !set.has(r.file_path)).map(r => r.id);
+  const missingIds = all
+    .filter(r => dirs.has(path.dirname(r.file_path)) && !set.has(r.file_path))
+    .map(r => r.id);
   if (missingIds.length === 0) return;
   const ph = missingIds.map(() => '?').join(',');
   db.prepare(`UPDATE doc_sources SET status='missing' WHERE id IN (${ph})`).run(...missingIds);
