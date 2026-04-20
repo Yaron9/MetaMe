@@ -282,8 +282,6 @@ function ensureLaunchdPlist({ daemonScript, daemonLog }) {
   <string>${LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/caffeinate</string>
-    <string>-i</string>
     <string>${nodePath}</string>
     <string>${daemonScript}</string>
   </array>
@@ -2717,10 +2715,8 @@ try {
       } catch { /* PID file stale, daemon not running */ }
     }
     if (!daemonRunning) {
-      const _isMac = process.platform === 'darwin';
-      const dCmd = _isMac ? 'caffeinate' : process.execPath;
-      const dArgs = _isMac ? ['-i', process.execPath, _daemonScript] : [_daemonScript];
-      const bg = spawn(dCmd, dArgs, {
+      const dArgs = [_daemonScript];
+      const bg = spawn(process.execPath, dArgs, {
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
