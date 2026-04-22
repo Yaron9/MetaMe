@@ -736,21 +736,24 @@ function createBridgeStarter(deps) {
     const { createBot } = require('./feishu-adapter.js');
     const bot = createBot(config.feishu);
 
-    // Validate credentials before starting WebSocket — fail loud, not silent
+    // Credential pre-check is informational only. We always start the WS
+    // pipeline — it has its own network-ready-probe + backoff reconnect, so
+    // even if startup lands in a "just woke / network flaky" window, recovery
+    // is automatic instead of requiring a manual daemon restart.
     try {
       const validation = await bot.validateCredentials();
       if (!validation.ok) {
-        log('ERROR', `Feishu credential check FAILED: ${validation.error}`);
         if (validation.isAuthError) {
-          log('ERROR', 'Feishu bridge will NOT start — fix app_id/app_secret in ~/.metame/daemon.yaml and restart daemon');
-          return null;
+          log('ERROR', `Feishu credential check FAILED (likely bad app_id/app_secret): ${validation.error}`);
+          log('WARN', 'Starting bridge anyway — if this persists, fix ~/.metame/daemon.yaml and restart daemon');
+        } else {
+          log('WARN', `Feishu credential pre-check failed (transient): ${validation.error} — WS pipeline will retry`);
         }
-        log('WARN', 'Feishu credential check failed (possibly network issue) — attempting to start anyway');
       } else {
         log('INFO', 'Feishu credentials validated OK');
       }
     } catch (e) {
-      log('WARN', `Feishu credential pre-check error: ${e.message} — attempting to start anyway`);
+      log('WARN', `Feishu credential pre-check error: ${e.message} — WS pipeline will retry`);
     }
 
     try {

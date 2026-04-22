@@ -160,22 +160,52 @@ function saveProviders(config) {
 // ---------------------------------------------------------
 
 /**
+ * Read the env mapping defined in ~/.claude/settings.json.
+ * Returns a plain string→string object (only string values are kept).
+ * Returns {} on any error or if the file/env block is missing.
+ */
+function readClaudeSettingsEnv() {
+  const home = process.env.HOME || os.homedir();
+  const settingsPath = path.join(home, '.claude', 'settings.json');
+  try {
+    if (!fs.existsSync(settingsPath)) return {};
+    const data = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    if (!data || typeof data.env !== 'object' || data.env === null) return {};
+    const out = {};
+    for (const [k, v] of Object.entries(data.env)) {
+      if (typeof v === 'string') out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Build env var overrides for a named provider.
- * Returns {} for 'anthropic' (official) — use Claude Code defaults.
- * Returns { ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY } for relays.
+ *
+ * Always inherits the env mapping from ~/.claude/settings.json (slot mappings
+ * like ANTHROPIC_DEFAULT_*_MODEL stay in place across providers).
+ * For 'anthropic' (official): returns the inherited Claude settings env unchanged.
+ * For custom providers: overrides ANTHROPIC_BASE_URL plus both
+ * ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN with the provider's credentials.
  */
 function buildEnv(providerName) {
   const config = loadProviders();
   const name = providerName || config.active;
 
-  if (name === 'anthropic') return {};
+  const env = readClaudeSettingsEnv();
+
+  if (name === 'anthropic') return env;
 
   const provider = config.providers[name];
-  if (!provider) return {};
+  if (!provider) return env;
 
-  const env = {};
   if (provider.base_url) env.ANTHROPIC_BASE_URL = provider.base_url;
-  if (provider.api_key) env.ANTHROPIC_API_KEY = provider.api_key;
+  if (provider.api_key) {
+    env.ANTHROPIC_API_KEY = provider.api_key;
+    env.ANTHROPIC_AUTH_TOKEN = provider.api_key;
+  }
   return env;
 }
 
@@ -390,6 +420,7 @@ function getEngine() { return _currentEngine; }
 const api = {
   loadProviders,
   saveProviders,
+  readClaudeSettingsEnv,
   buildEnv,
   buildSpawnEnv,
   buildActiveEnv,

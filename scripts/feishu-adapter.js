@@ -8,6 +8,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const dns = require('dns');
 
 let Lark;
 function _tryRequireLark() {
@@ -58,6 +59,40 @@ function withTimeout(promise, ms = 10000) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+// Wait for DNS to resolve a target host with exponential backoff.
+// Used after system wake / before reconnect: the OS may report clock/events
+// restored before WiFi+DNS are actually usable. Retries 1/2/4/8s, total cap 30s.
+async function waitForNetworkReady(hostname, opts = {}) {
+  const log = opts.log || (() => {});
+  const totalBudget = Number.isFinite(opts.totalBudgetMs) ? opts.totalBudgetMs : 30000;
+  const lookup = opts.lookup || dns.promises.lookup;
+  const sleep = opts.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const startedAt = Date.now();
+  let attempt = 0;
+  let lastError = null;
+  // Backoff schedule: 0s, 1s, 2s, 4s, 8s between attempts (before the next attempt)
+  const backoff = [0, 1000, 2000, 4000, 8000];
+  // Always make at least one attempt; subsequent attempts are budget-gated.
+  do {
+    const wait = backoff[Math.min(attempt, backoff.length - 1)];
+    if (wait > 0) await sleep(wait);
+    attempt += 1;
+    try {
+      await lookup(hostname);
+      return { ok: true, attempts: attempt, elapsed: Date.now() - startedAt };
+    } catch (err) {
+      lastError = err;
+      log('DEBUG', `[net-ready] ${hostname} attempt ${attempt} failed: ${err.code || err.message}`);
+    }
+  } while (Date.now() - startedAt < totalBudget);
+  return {
+    ok: false,
+    attempts: attempt,
+    elapsed: Date.now() - startedAt,
+    error: lastError && (lastError.message || String(lastError)),
+  };
+}
+
 // Max chars per lark_md element (Feishu limit ~4000)
 const MAX_CHUNK = 3800;
 
@@ -101,12 +136,25 @@ function createBot(config) {
       return { ok: true };
     } catch (err) {
       const msg = err && err.message || String(err);
-      const isAuthError = /invalid|unauthorized|forbidden|token|credential|app_id|app_secret|permission|99991663|99991664|99991665/i.test(msg);
+      // Only flag as auth error when we have strong evidence: known Feishu
+      // auth error codes, HTTP 401/403, or explicit 'invalid app_id/secret'.
+      // Previously a loose /token/ regex false-positived on SDK-internal
+      // messages like "Cannot destructure 'tenant_access_token' of undefined"
+      // (which is really a network/empty-response failure) and caused the
+      // bridge to refuse to start across a lid-close/wake cycle.
+      const authPatterns = [
+        /\b(99991663|99991664|99991665)\b/,                                  // Feishu token invalid codes
+        /\b(401|403)\b/,                                                     // HTTP 401/403
+        /invalid\s+(app_?id|app_?secret|tenant_access_token|access_?token)/i,
+        /unauthorized/i,
+        /\bforbidden\b/i,
+      ];
+      const isAuthError = authPatterns.some((p) => p.test(msg));
       return {
         ok: false,
         error: isAuthError
           ? `Feishu credential validation failed (app_id/app_secret may be incorrect): ${msg}`
-          : `Feishu API probe failed (network or config issue): ${msg}`,
+          : `Feishu API probe failed (network or transient issue): ${msg}`,
         isAuthError,
       };
     }
@@ -395,15 +443,22 @@ function createBot(config) {
       let healthTimer = null;
       let sleepWakeTimer = null;
       let reconnectTimer = null;
-      let reconnectDelay = 5000; // start 5s, doubles up to 60s
+      let aliveTimer = null;
+      let reconnectScheduled = false; // dedup flag: true while a reconnect is pending
+      let wsEpoch = 0; // increments each connect(); underlying-ws hooks capture their own epoch
+      const INITIAL_RECONNECT_DELAY = 5000;
       const MAX_RECONNECT_DELAY = 60000;
-      const HEALTH_CHECK_INTERVAL = 90000; // check every 90s
-      const SILENT_THRESHOLD = 300000; // 5 min no SDK activity → suspect dead
-      const SLEEP_DETECT_INTERVAL = 5000; // tick every 5s to detect clock jump
-      const SLEEP_JUMP_THRESHOLD = 30000; // clock jump >30s = system was sleeping
+      let reconnectDelay = INITIAL_RECONNECT_DELAY;
+      const HEALTH_CHECK_INTERVAL = 30000; // tighter bottom-line probe (was 90s)
+      const SILENT_THRESHOLD = 90000; // 90s no SDK activity → probe (was 300s)
+      const SLEEP_DETECT_INTERVAL = 5000;
+      const SLEEP_JUMP_THRESHOLD = 30000; // clock jump >30s = was sleeping
+      const ALIVE_CHECK_WINDOW = 15000; // after connect, must see activity within 15s
+      const FEISHU_HOST = 'open.feishu.cn';
 
       // Track last SDK activity (any event received = alive)
       let _lastActivityAt = Date.now();
+      let _connectedAt = 0; // when the current WSClient was (re)started
       function touchActivity() { _lastActivityAt = Date.now(); }
 
       // Dedup: track recent message_ids (Feishu may redeliver on slow ack)
@@ -490,58 +545,162 @@ function createBot(config) {
         });
       }
 
-      function connect() {
-        if (stopped) return;
+      // Hook the underlying ws instance for first-class close/error notification.
+      // Lark SDK stores the live WebSocket via wsConfig.setWSInstance; we wrap it
+      // so we learn about 'close' immediately instead of waiting for silence.
+      // Defensive: SDK internals can change between versions — any failure just
+      // downgrades to the silent/health/sleep bottom-lines.
+      function hookUnderlyingWs(wsClient, epoch) {
         try {
-          currentWs = new Lark.WSClient({
-            appId: app_id,
-            appSecret: app_secret,
-            loggerLevel: Lark.LoggerLevel.info,
-          });
-          const eventDispatcher = buildDispatcher();
-          currentWs.start({ eventDispatcher });
-          touchActivity();
-          reconnectDelay = 5000; // reset backoff on successful start
-          _log('INFO', 'Feishu WebSocket connecting...');
+          const cfg = wsClient && wsClient.wsConfig;
+          if (!cfg || typeof cfg.setWSInstance !== 'function') return;
+          const orig = cfg.setWSInstance.bind(cfg);
+          cfg.setWSInstance = (inst) => {
+            orig(inst);
+            if (!inst || inst._metameHooked) return;
+            inst._metameHooked = true;
+            try {
+              inst.on('close', () => {
+                if (stopped) return;
+                if (epoch !== wsEpoch) return; // stale: a newer connect() has superseded this one
+                _log('INFO', 'Feishu underlying WS closed — scheduling reconnect');
+                scheduleReconnect({ immediate: true, reason: 'ws-close' });
+              });
+              inst.on('error', (e) => {
+                if (epoch !== wsEpoch) return;
+                _log('WARN', `Feishu underlying WS error: ${e && e.message || e}`);
+              });
+            } catch (hookErr) {
+              _log('WARN', `Feishu ws event hook failed: ${hookErr.message}`);
+            }
+          };
         } catch (err) {
-          _log('ERROR', `Feishu WSClient.start failed: ${err.message}`);
-          scheduleReconnect();
+          _log('WARN', `Feishu SDK hook unavailable (${err.message}) — falling back to silence/sleep detection`);
         }
       }
 
-      function scheduleReconnect() {
+      function connect() {
         if (stopped) return;
-        clearTimeout(reconnectTimer);
-        _log('INFO', `Feishu reconnecting in ${reconnectDelay / 1000}s...`);
-        reconnectTimer = setTimeout(() => {
-          _log('INFO', 'Feishu reconnecting now...');
-          connect();
-        }, reconnectDelay);
-        reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+        clearTimeout(aliveTimer);
+        wsEpoch += 1;
+        const myEpoch = wsEpoch;
+        let ws;
+        try {
+          ws = new Lark.WSClient({
+            appId: app_id,
+            appSecret: app_secret,
+            loggerLevel: Lark.LoggerLevel.info,
+            autoReconnect: false, // we own the reconnect lifecycle
+          });
+          currentWs = ws;
+          hookUnderlyingWs(ws, myEpoch);
+          const eventDispatcher = buildDispatcher();
+          const startResult = ws.start({ eventDispatcher });
+          _connectedAt = Date.now();
+          touchActivity();
+          _log('INFO', 'Feishu WebSocket connecting...');
+          startAliveCheck();
+          // start() may return a Promise. Surface async failures into the reconnect pipeline
+          // so we don't depend solely on the 15s alive-check to recover.
+          if (startResult && typeof startResult.then === 'function') {
+            startResult.catch((err) => {
+              if (stopped) return;
+              if (myEpoch !== wsEpoch) return; // superseded
+              _log('ERROR', `Feishu WSClient.start rejected: ${err && err.message || err}`);
+              scheduleReconnect({ immediate: true, reason: 'start-rejected', failed: true });
+            });
+          }
+        } catch (err) {
+          _log('ERROR', `Feishu WSClient.start failed: ${err.message}`);
+          scheduleReconnect({ immediate: true, reason: 'start-failed', failed: true });
+        }
       }
 
-      // Health check: detect silent WebSocket death via API probe
+      // Single entry point for all reconnect signals. Dedup'd via reconnectScheduled
+      // so concurrent ws-close + alive-probe-fail + sleep events collapse into one
+      // reconnect. Backoff only grows when the caller marks this as a failure recovery
+      // (failed:true) — known-cause resets (manual / system-wake) start from 0s.
+      function scheduleReconnect({ immediate = false, reason = '', failed = false } = {}) {
+        if (stopped) return;
+        if (reconnectScheduled) {
+          _log('DEBUG', `Feishu reconnect already scheduled — dropping duplicate (reason: ${reason})`);
+          return;
+        }
+        reconnectScheduled = true;
+        clearTimeout(reconnectTimer);
+        clearTimeout(aliveTimer);
+        try { currentWs?.stop?.(); } catch { /* ignore */ }
+        currentWs = null;
+        if (failed) {
+          // Only failure paths grow the backoff ceiling for the *next* attempt.
+          reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+        }
+        const delay = immediate ? 0 : reconnectDelay;
+        _log('INFO', `Feishu reconnect in ${Math.round(delay / 1000)}s (reason: ${reason || 'unspecified'})`);
+        reconnectTimer = setTimeout(async () => {
+          reconnectScheduled = false;
+          if (stopped) return;
+          const net = await waitForNetworkReady(FEISHU_HOST, { log: _log });
+          if (stopped) return;
+          if (!net.ok) {
+            _log('WARN', `Feishu network still down after ${Math.round(net.elapsed / 1000)}s (${net.error || 'unknown'}) — retrying`);
+            scheduleReconnect({ immediate: false, reason: 'network-wait-timeout', failed: true });
+            return;
+          }
+          if (net.attempts > 1) {
+            _log('INFO', `Feishu network ready after ${net.attempts} attempts (${Math.round(net.elapsed / 1000)}s)`);
+          }
+          connect();
+        }, delay);
+      }
+
+      // Alive-check: after each connect, require either SDK activity or a
+      // successful API probe within ALIVE_CHECK_WINDOW. Otherwise reconnect.
+      // This catches the "WSClient.start returned but underlying socket is
+      // dead" case that the 120s SDK loop would otherwise sit on.
+      function startAliveCheck() {
+        clearTimeout(aliveTimer);
+        const connectedAt = _connectedAt;
+        aliveTimer = setTimeout(async () => {
+          if (stopped) return;
+          if (_lastActivityAt > connectedAt) {
+            // SDK delivered at least one event strictly after connect → healthy.
+            // Using `>` (not `>=`) because connect() calls touchActivity(), so
+            // _lastActivityAt === _connectedAt at connect time — `>=` would
+            // false-positive immediately without any real post-connect activity.
+            reconnectDelay = INITIAL_RECONNECT_DELAY;
+            return;
+          }
+          try {
+            await withTimeout(client.im.chat.list({ params: { page_size: 1 } }), 8000);
+            touchActivity();
+            reconnectDelay = INITIAL_RECONNECT_DELAY;
+            _log('INFO', 'Feishu alive probe ok');
+          } catch (err) {
+            _log('WARN', `Feishu alive probe failed: ${err.message} — reconnecting`);
+            scheduleReconnect({ immediate: true, reason: 'alive-probe-failed', failed: true });
+          }
+        }, ALIVE_CHECK_WINDOW);
+      }
+
+      // Health check: bottom-line probe for silent dead-sockets the hooks missed.
       function startHealthCheck() {
         clearInterval(healthTimer);
         healthTimer = setInterval(async () => {
           if (stopped) return;
           const silentMs = Date.now() - _lastActivityAt;
-          if (silentMs < SILENT_THRESHOLD) return; // recently active, skip
-          // Probe: try a lightweight API call to verify token + connectivity
+          if (silentMs < SILENT_THRESHOLD) return;
           try {
-            await withTimeout(client.im.chat.list({ params: { page_size: 1 } }), 10000);
-            // API works — connection might still be alive, just quiet. Reset activity.
+            await withTimeout(client.im.chat.list({ params: { page_size: 1 } }), 8000);
             touchActivity();
           } catch (err) {
             _log('WARN', `Feishu health check failed after ${Math.round(silentMs / 1000)}s silence: ${err.message} — reconnecting`);
-            try { currentWs?.stop?.(); } catch { /* ignore */ }
-            currentWs = null;
-            connect();
+            scheduleReconnect({ immediate: true, reason: 'health-probe-failed', failed: true });
           }
         }, HEALTH_CHECK_INTERVAL);
       }
 
-      // Sleep/wake detector: if the JS clock jumps >30s, system was sleeping → force reconnect
+      // Sleep/wake detector: JS clock jump >30s ⇒ system was suspended.
       function startSleepWakeDetector() {
         let _lastTickAt = Date.now();
         sleepWakeTimer = setInterval(() => {
@@ -550,13 +709,9 @@ function createBot(config) {
           const elapsed = now - _lastTickAt;
           _lastTickAt = now;
           if (elapsed > SLEEP_JUMP_THRESHOLD) {
-            _log('INFO', `System wake detected (${Math.round(elapsed / 1000)}s gap) — forcing reconnect`);
-            reconnectDelay = 5000;
-            clearTimeout(reconnectTimer);
-            try { currentWs?.stop?.(); } catch { /* ignore */ }
-            currentWs = null;
-            touchActivity(); // reset silence counter so health check doesn't double-fire
-            connect();
+            _log('INFO', `Feishu system wake detected (${Math.round(elapsed / 1000)}s gap) — reconnecting`);
+            reconnectDelay = INITIAL_RECONNECT_DELAY; // wake is a known cause, not a failure
+            scheduleReconnect({ immediate: true, reason: 'system-wake' });
           }
         }, SLEEP_DETECT_INTERVAL);
       }
@@ -570,17 +725,16 @@ function createBot(config) {
         stop() {
           stopped = true;
           clearTimeout(reconnectTimer);
+          clearTimeout(aliveTimer);
           clearInterval(healthTimer);
           clearInterval(sleepWakeTimer);
+          try { currentWs?.stop?.(); } catch { /* ignore */ }
           currentWs = null;
         },
         reconnect() {
           _log('INFO', 'Feishu manual reconnect triggered');
-          reconnectDelay = 5000;
-          clearTimeout(reconnectTimer);
-          try { currentWs?.stop?.(); } catch { /* ignore */ }
-          currentWs = null;
-          connect();
+          reconnectDelay = INITIAL_RECONNECT_DELAY;
+          scheduleReconnect({ immediate: true, reason: 'manual' });
         },
         isAlive() {
           return !stopped && (Date.now() - _lastActivityAt) < SILENT_THRESHOLD;
@@ -592,4 +746,4 @@ function createBot(config) {
   };
 }
 
-module.exports = { createBot };
+module.exports = { createBot, _internal: { waitForNetworkReady } };
