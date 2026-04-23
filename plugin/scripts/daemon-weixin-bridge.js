@@ -182,6 +182,8 @@ function createWeixinBridge(deps = {}) {
     let currentAccount = null;
     let currentBot = null;
     let missingAccountLogged = false;
+    let pollErrorDelay = 1000;        // exponential backoff on poll errors
+    const MAX_POLL_ERROR_DELAY = 30000;
 
     function sameAccount(a, b) {
       if (!a || !b) return false;
@@ -238,6 +240,7 @@ function createWeixinBridge(deps = {}) {
           getUpdatesBuf,
           timeoutMs: liveBridgeCfg.pollTimeoutMs,
         });
+        pollErrorDelay = 1000; // reset as soon as HTTP poll succeeds — downstream processMessage errors should not cause poll backoff
         if (resp && typeof resp.get_updates_buf === 'string' && resp.get_updates_buf) {
           getUpdatesBuf = resp.get_updates_buf;
         }
@@ -263,8 +266,9 @@ function createWeixinBridge(deps = {}) {
           });
         }
       } catch (err) {
-        log('WARN', `[WEIXIN] poll error: ${err.message}`);
-        nextDelayMs = 1000;
+        log('WARN', `[WEIXIN] poll error: ${err.message} — retrying in ${Math.round(pollErrorDelay / 1000)}s`);
+        nextDelayMs = pollErrorDelay;
+        pollErrorDelay = Math.min(pollErrorDelay * 2, MAX_POLL_ERROR_DELAY);
       } finally {
         processing = false;
         scheduleNext(nextDelayMs);

@@ -61,10 +61,10 @@ function withTimeout(promise, ms = 10000) {
 
 // Wait for DNS to resolve a target host with exponential backoff.
 // Used after system wake / before reconnect: the OS may report clock/events
-// restored before WiFi+DNS are actually usable. Retries 1/2/4/8s, total cap 30s.
+// restored before WiFi+DNS are actually usable. Retries 1/2/4/8s, total cap 60s.
 async function waitForNetworkReady(hostname, opts = {}) {
   const log = opts.log || (() => {});
-  const totalBudget = Number.isFinite(opts.totalBudgetMs) ? opts.totalBudgetMs : 30000;
+  const totalBudget = Number.isFinite(opts.totalBudgetMs) ? opts.totalBudgetMs : 60000;
   const lookup = opts.lookup || dns.promises.lookup;
   const sleep = opts.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
   const startedAt = Date.now();
