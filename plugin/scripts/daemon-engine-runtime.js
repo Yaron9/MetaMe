@@ -15,6 +15,8 @@ const CODEX_TOOL_MAP = Object.freeze({
   web_fetch: 'WebFetch',
 });
 
+const CODEX_AUTO_MODEL = 'auto';
+
 const ENGINE_TIMEOUT_DEFAULTS = Object.freeze({
   codex: Object.freeze({
     idleMs: 10 * 60 * 1000,
@@ -80,16 +82,19 @@ const ENGINE_MODEL_CONFIG = Object.freeze({
     hint:     null,
   },
   codex: {
-    main:     'gpt-5.4',           // recommended for most tasks (official default)
+    main:     CODEX_AUTO_MODEL,     // follow official Codex CLI default model
     distill:  'gpt-5.1-codex-mini', // cost-effective mini
     options:  [                     // quick-pick buttons (official model names)
-      { value: 'gpt-5.4',            label: 'gpt-5.4 · 推荐' },
-      { value: 'gpt-5.3-codex',      label: 'gpt-5.3-codex · 最新 Codex 专用' },
+      { value: CODEX_AUTO_MODEL,     label: 'auto · 跟随 Codex 官方默认' },
+      { value: 'gpt-5-codex',        label: 'gpt-5-codex · 官方滚动别名' },
+      { value: 'gpt-5.5',            label: 'gpt-5.5 · 固定版本' },
+      { value: 'gpt-5.4',            label: 'gpt-5.4 · 固定版本' },
+      { value: 'gpt-5.3-codex',      label: 'gpt-5.3-codex · 固定 Codex' },
       { value: 'gpt-5.1-codex-max',  label: 'gpt-5.1-codex-max · 长任务' },
       { value: 'gpt-5.1-codex-mini', label: 'gpt-5.1-codex-mini · 轻量' },
     ],
     provider: 'openai',
-    hint:     '或直接发送任意 OpenAI 模型名切换',
+    hint:     '推荐 `auto` 或 `gpt-5-codex`，也可直接发送任意 OpenAI 模型名切换',
   },
 });
 
@@ -121,12 +126,17 @@ function looksLikeCodexModel(model) {
   const raw = String(model || '').trim().toLowerCase();
   if (!raw) return false;
   return (
-    raw.startsWith('gpt-')
+    raw === CODEX_AUTO_MODEL
+    || raw.startsWith('gpt-')
     || raw.startsWith('o1')
     || raw.startsWith('o3')
     || raw.startsWith('o4')
     || raw.includes('codex')
   );
+}
+
+function isCodexAutoModel(model) {
+  return String(model || '').trim().toLowerCase() === CODEX_AUTO_MODEL;
 }
 
 function resolveEngineModel(engineName, daemonCfg = {}, overrideModel = '') {
@@ -393,7 +403,7 @@ function buildCodexArgs(options = {}) {
     : ['exec'];
 
   args.push('--json', '--skip-git-repo-check');
-  if (model) args.push('-m', model);
+  if (model && !isCodexAutoModel(model)) args.push('-m', model);
   // -C (cwd) is only supported on fresh exec, not resume
   if (cwd && !isResume) args.push('-C', cwd);
 

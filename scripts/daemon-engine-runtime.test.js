@@ -19,6 +19,17 @@ describe('daemon-engine-runtime normalize', () => {
 });
 
 describe('daemon-engine-runtime args builder', () => {
+  it('skips explicit model flag when codex is set to auto', () => {
+    const args = _private.buildCodexArgs({
+      model: 'auto',
+      session: {},
+      cwd: '/tmp/proj',
+    });
+    assert.deepEqual(args.slice(0, 1), ['exec']);
+    assert.ok(!args.includes('-m'));
+    assert.ok(args.includes('-C'));
+  });
+
   it('builds codex native resume args with explicit permission flags', () => {
     const args = _private.buildCodexArgs({
       model: 'gpt-5-codex',
@@ -134,6 +145,11 @@ describe('daemon-engine-runtime args builder', () => {
 });
 
 describe('daemon-engine-runtime model resolution', () => {
+  it('defaults codex to auto when no explicit model is configured', () => {
+    const model = resolveEngineModel('codex', {});
+    assert.equal(model, 'auto');
+  });
+
   it('uses per-engine models before legacy daemon.model', () => {
     const model = resolveEngineModel('codex', {
       model: 'opus',
@@ -144,7 +160,7 @@ describe('daemon-engine-runtime model resolution', () => {
 
   it('does not leak legacy claude aliases into codex', () => {
     const model = resolveEngineModel('codex', { model: 'opus' });
-    assert.equal(model, 'gpt-5.4');
+    assert.equal(model, 'auto');
   });
 
   it('preserves legacy custom model ids for codex', () => {
@@ -154,7 +170,7 @@ describe('daemon-engine-runtime model resolution', () => {
 
   it('does not leak legacy non-codex custom model ids into codex', () => {
     const model = resolveEngineModel('codex', { model: 'MiniMax-M2.1' });
-    assert.equal(model, 'gpt-5.4');
+    assert.equal(model, 'auto');
   });
 
   it('normalizes legacy custom claude model ids back to canonical slots', () => {
@@ -232,7 +248,7 @@ describe('daemon-engine-runtime factory', () => {
     assert.equal(codex.name, 'codex');
     assert.equal(codex.binary, 'codex');
     assert.equal(codex.stdinBehavior, 'write-and-close');
-    assert.equal(codex.defaultModel, 'gpt-5.4');
+    assert.equal(codex.defaultModel, 'auto');
   });
 });
 
@@ -246,7 +262,7 @@ describe('daemon-engine-runtime timeout resolution', () => {
 
   it('keeps claude on idle/tool watchdogs only', () => {
     const timeouts = _private.resolveEngineTimeouts('claude');
-    assert.equal(timeouts.idleMs, 5 * 60 * 1000);
+    assert.equal(timeouts.idleMs, 20 * 60 * 1000);
     assert.equal(timeouts.toolMs, 25 * 60 * 1000);
     assert.equal(timeouts.ceilingMs, null);
   });
