@@ -177,6 +177,11 @@ function saveMemoryItem(item) {
   return { ok: true, id };
 }
 
+function saveSessionSource(source) {
+  const { upsertSessionSource } = require('./core/session-source-db');
+  return upsertSessionSource(getDb(), source);
+}
+
 function searchMemoryItems(query, { kind = null, scope = null, project = null, state = 'active', limit = 20 } = {}) {
   const db = getDb();
   const conditions = [];
@@ -335,7 +340,7 @@ function saveSession({ sessionId, project, scope = null, summary, keywords = '' 
   });
 }
 
-function saveFacts(sessionId, project, facts, { scope = null, source_type = null } = {}) {
+function saveFacts(sessionId, project, facts, { scope = null, source_type = null, source_id = null } = {}) {
   if (!Array.isArray(facts) || facts.length === 0) return { saved: 0, skipped: 0, superseded: 0, savedFacts: [] };
   const normalizedProject = project === '*' ? '*' : String(project || 'unknown');
   let saved = 0;
@@ -363,7 +368,7 @@ function saveFacts(sessionId, project, facts, { scope = null, source_type = null
         scope: scope || null,
         session_id: sessionId,
         source_type: f.source_type || source_type || 'session',
-        source_id: sessionId,
+        source_id: f.source_id || source_id || sessionId,
         relation: f.relation,
         tags,
       });
@@ -564,6 +569,7 @@ async function hybridSearchWiki(query, { ftsOnly = false, expand = false, trackS
 module.exports = {
   // core
   saveMemoryItem,
+  saveSessionSource,
   searchMemoryItems,
   promoteItem,
   archiveItem,

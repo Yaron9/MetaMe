@@ -130,6 +130,37 @@ function applyWikiSchema(db) {
     )
   `);
 
+  // ── session_sources (raw transcript provenance, L0) ───────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS session_sources (
+      id               TEXT PRIMARY KEY,
+      engine           TEXT NOT NULL DEFAULT 'unknown'
+                       CHECK (engine IN ('claude','codex','unknown')),
+      session_id       TEXT NOT NULL,
+      project          TEXT DEFAULT '*',
+      scope            TEXT,
+      agent_key        TEXT,
+      cwd              TEXT,
+      source_path      TEXT,
+      source_hash      TEXT NOT NULL,
+      source_size      INTEGER DEFAULT 0,
+      first_ts         TEXT,
+      last_ts          TEXT,
+      message_count    INTEGER DEFAULT 0,
+      tool_call_count  INTEGER DEFAULT 0,
+      tool_error_count INTEGER DEFAULT 0,
+      status           TEXT DEFAULT 'indexed'
+                       CHECK (status IN ('indexed','summarized','extracted','error','archived')),
+      error_message    TEXT,
+      created_at       TEXT DEFAULT (datetime('now')),
+      updated_at       TEXT DEFAULT (datetime('now')),
+      UNIQUE(engine, session_id, source_hash)
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_session_sources_session ON session_sources(session_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_session_sources_project ON session_sources(project, scope, last_ts)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_session_sources_agent   ON session_sources(agent_key, last_ts)');
+
   // ── doc_sources ───────────────────────────────────────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS doc_sources (

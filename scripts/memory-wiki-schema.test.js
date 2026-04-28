@@ -40,6 +40,17 @@ test('wiki_topics table exists after applyWikiSchema', () => {
   db.close();
 });
 
+test('session_sources table exists after applyWikiSchema', () => {
+  const db = openMemoryDb();
+  applyWikiSchema(db);
+
+  const row = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='session_sources'"
+  ).get();
+  assert.ok(row, 'session_sources table should exist');
+  db.close();
+});
+
 test('INSERT wiki_pages creates corresponding FTS row', () => {
   const db = openMemoryDb();
   applyWikiSchema(db);
