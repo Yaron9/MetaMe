@@ -11,16 +11,17 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function createHarness(initialConfig = {}) {
+function createHarness(initialConfig = {}, { home } = {}) {
   let config = clone(initialConfig);
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-agent-tools-'));
-  const expandPath = (input) => String(input || '').replace(/^~(?=\/|$)/, os.homedir());
+  const harnessHome = home || os.homedir();
+  const expandPath = (input) => String(input || '').replace(/^~(?=\/|$)/, harnessHome);
   const normalizeCwd = (input) => path.resolve(expandPath(input));
 
   const tools = createAgentTools({
     fs,
     path,
-    HOME: os.homedir(),
+    HOME: harnessHome,
     loadConfig: () => clone(config),
     writeConfigSafe: (next) => { config = clone(next); },
     backupConfig: () => {},
@@ -117,6 +118,60 @@ describe('daemon-agent-tools engine persistence', () => {
       assert.equal(cfg.projects.bind_codex.agent_id, 'bind_codex');
     } finally {
       h.cleanup();
+    }
+  });
+});
+
+describe('daemon-agent-tools default workspace derivation', () => {
+  it('createNewWorkspaceAgent (skipChatBinding) auto-derives ~/AGI/<name>/ when path omitted', async () => {
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-fakehome-'));
+    const h = createHarness({ projects: {} }, { home: fakeHome });
+    try {
+      const res = await h.tools.createNewWorkspaceAgent(
+        'auto agent unit',
+        '',                       // <-- no workspaceDir given
+        '',
+        'oc_chat_auto',
+        { skipChatBinding: true }
+      );
+      assert.equal(res.ok, true, `expected ok, got error: ${res.error}`);
+      const expectedDir = path.join(fakeHome, 'AGI', 'auto agent unit');
+      assert.equal(fs.existsSync(expectedDir), true);
+      assert.equal(fs.statSync(expectedDir).isDirectory(), true);
+      const cfg = h.getConfig();
+      assert.equal(cfg.projects.auto_agent_unit.cwd, expectedDir);
+    } finally {
+      h.cleanup();
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it('bindAgentToChat auto-derives default dir when workspace omitted', async () => {
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-fakehome-'));
+    const h = createHarness({ projects: {} }, { home: fakeHome });
+    try {
+      const res = await h.tools.bindAgentToChat('oc_chat_bind_auto', 'auto bind unit', '');
+      assert.equal(res.ok, true, `expected ok, got error: ${res.error}`);
+      const expectedDir = path.join(fakeHome, 'AGI', 'auto bind unit');
+      assert.equal(fs.existsSync(expectedDir), true);
+      assert.equal(res.data.cwd, expectedDir);
+    } finally {
+      h.cleanup();
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects user-supplied path that does not exist (no auto-mkdir for typos)', async () => {
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-fakehome-'));
+    const h = createHarness({ projects: {} }, { home: fakeHome });
+    try {
+      const typoPath = path.join(fakeHome, 'totally', 'not', 'there');
+      const res = await h.tools.bindAgentToChat('oc_chat_typo', 'typo', typoPath);
+      assert.equal(res.ok, false);
+      assert.match(res.error, /not found/);
+    } finally {
+      h.cleanup();
+      fs.rmSync(fakeHome, { recursive: true, force: true });
     }
   });
 });

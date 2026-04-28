@@ -33,6 +33,24 @@ function createAgentTools(deps) {
     return normalizeCwd ? normalizeCwd(expanded) : path.resolve(expanded);
   }
 
+  // Derive a default workspace path "~/AGI/<safeName>" when the user names the
+  // agent but skips the path. The directory is created on demand so the rest
+  // of the pipeline (CLAUDE.md write, daemon.yaml entry) can proceed without
+  // forcing the user to mkdir manually.
+  function deriveDefaultWorkspaceDir(safeName) {
+    const cleanName = String(safeName || '').replace(/[\\/:*?"<>|]/g, '').trim();
+    if (!cleanName) return null;
+    return path.join(HOME, 'AGI', cleanName);
+  }
+
+  function ensureWorkspaceDir(dir) {
+    if (!dir) return false;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      return fs.existsSync(dir) && fs.statSync(dir).isDirectory();
+    } catch { return false; }
+  }
+
   function getAdapterKey(chatId) {
     return typeof chatId === 'number' ? 'telegram' : 'feishu';
   }
@@ -87,11 +105,27 @@ function createAgentTools(deps) {
         const existing = cfg.projects[projectKey];
         if (existing && existing.cwd) resolvedDir = resolveWorkspaceDir(existing.cwd);
       }
+      // No path supplied and no prior project → derive ~/AGI/<safeName>/.
+      if (!resolvedDir) {
+        const defaultDir = deriveDefaultWorkspaceDir(safeName);
+        if (defaultDir && ensureWorkspaceDir(defaultDir)) {
+          resolvedDir = resolveWorkspaceDir(defaultDir);
+        }
+      }
       if (!resolvedDir) {
         return { ok: false, error: 'workspaceDir is required for a new agent' };
       }
+      // If the resolved path doesn't exist yet but is the derived default,
+      // mkdir on the spot. Stay strict for user-supplied paths so typos don't
+      // silently spawn directories in the wrong place.
       if (!fs.existsSync(resolvedDir)) {
-        return { ok: false, error: `workspaceDir not found: ${resolvedDir}` };
+        const defaultDir = deriveDefaultWorkspaceDir(safeName);
+        const isDefault = defaultDir && resolveWorkspaceDir(defaultDir) === resolvedDir;
+        if (isDefault && ensureWorkspaceDir(resolvedDir)) {
+          // ok — created it
+        } else {
+          return { ok: false, error: `workspaceDir not found: ${resolvedDir}` };
+        }
       }
       if (!fs.statSync(resolvedDir).isDirectory()) {
         return { ok: false, error: `workspaceDir is not a directory: ${resolvedDir}` };
@@ -236,9 +270,24 @@ ${safeDelta}
       // Create the project entry without touching chat_agent_map
       const safeName = sanitizeText(agentName, 120);
       if (!safeName) return { ok: false, error: 'agentName is required' };
-      const resolvedDir = resolveWorkspaceDir(workspaceDir);
+      let resolvedDir = resolveWorkspaceDir(workspaceDir);
+      // Same default-derivation rule as bindAgentToChat: when the user names
+      // the agent but doesn't pin a path, anchor it under ~/AGI/<safeName>/.
+      if (!resolvedDir) {
+        const defaultDir = deriveDefaultWorkspaceDir(safeName);
+        if (defaultDir && ensureWorkspaceDir(defaultDir)) {
+          resolvedDir = resolveWorkspaceDir(defaultDir);
+        }
+      }
       if (!resolvedDir) return { ok: false, error: 'workspaceDir is required' };
-      if (!fs.existsSync(resolvedDir) || !fs.statSync(resolvedDir).isDirectory()) {
+      if (!fs.existsSync(resolvedDir)) {
+        const defaultDir = deriveDefaultWorkspaceDir(safeName);
+        const isDefault = defaultDir && resolveWorkspaceDir(defaultDir) === resolvedDir;
+        if (!(isDefault && ensureWorkspaceDir(resolvedDir))) {
+          return { ok: false, error: `workspaceDir not found or not a directory: ${resolvedDir}` };
+        }
+      }
+      if (!fs.statSync(resolvedDir).isDirectory()) {
         return { ok: false, error: `workspaceDir not found or not a directory: ${resolvedDir}` };
       }
       const cfg = loadConfig();

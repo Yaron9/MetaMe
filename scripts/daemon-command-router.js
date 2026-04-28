@@ -593,7 +593,7 @@ function createCommandRouter(deps) {
         return;
       }
 
-      if (await tryHandleAgentIntent(bot, chatId, text, config)) {
+      if (await tryHandleAgentIntent(bot, chatId, text, config, senderId)) {
         return;
       }
     }

@@ -28,6 +28,24 @@ describe('daemon-agent-intent helpers', () => {
     const intent = _private.classifyAgentIntent('帮我重置当前 agent 的角色');
     assert.equal(intent.action, 'reset');
   });
+
+  it('creates agent without explicit path or directAction prefix', () => {
+    // Bare "新建 agent 叫 X" — no workspace path, no canonical verb prefix.
+    const intent = _private.classifyAgentIntent('新建 agent 叫 datalab');
+    assert.equal(intent.action, 'create');
+  });
+
+  it('routes create before list when both phrasings overlap', () => {
+    // "新建 agent 用于查看日志" — contains both 新建 and 查看, must be create.
+    const intent = _private.classifyAgentIntent('新建 agent 用于查看日志');
+    assert.equal(intent.action, 'create');
+  });
+
+  it('does NOT classify question-form prompts as create', () => {
+    assert.equal(_private.classifyAgentIntent('如何新建 agent'), null);
+    assert.equal(_private.classifyAgentIntent('怎么创建 agent'), null);
+    assert.equal(_private.classifyAgentIntent('能不能新建 agent?'), null);
+  });
 });
 
 describe('daemon-agent-intent handler', () => {
