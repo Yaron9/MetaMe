@@ -31,6 +31,8 @@ description: |
 4. **marker 独占行**。不要把 marker 写在 markdown 列表项里、不要包在反引号里。
 5. 用户**看不到**这一行 marker——daemon 解析后会从输出里剥掉再回显文本，所以
    你的正文该写什么写什么,marker 是给 daemon 看的「附录」。
+6. **路径含空格/中文是 OK 的**,不要做 shell 转义、不要加引号——daemon 直接当
+   字面字符串送给 `fs.statSync` 与上传 API。例:`[[FILE:/Users/王总/桌面/今日报表.xlsx]]`。
 
 ## 完整示例
 
