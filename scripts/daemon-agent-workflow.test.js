@@ -315,6 +315,9 @@ describe('daemon-agent-workflow auto-create-chat', () => {
 
     assert.equal(res.ok, true);
     assert.equal(res.data.autoChat.error, '飞书应用缺少 im:chat 权限');
+    // code must be forwarded so the intent handler can give a targeted upgrade
+    // hint (Fix 2 / cross-review follow-up) rather than a generic message.
+    assert.equal(res.data.autoChat.code, 99991663);
     assert.equal(tools.calls.bind.length, 0);
     assert.equal(pending.size, 1);
   });

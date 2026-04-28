@@ -230,13 +230,35 @@ function createAgentIntentHandler(deps) {
           `或在任意群发 \`/agent bind ${projName} ${data.cwd || ''}\` 直接指定绑定。`
         );
       } else {
-        const fallbackHint = data.autoChat && data.autoChat.error
-          ? `\n（自动建群失败:${data.autoChat.error}）`
-          : '';
-        await bot.sendMessage(chatId,
-          `✅ Agent「${projName}」已创建\n目录: ${data.cwd || '（未知）'}${engineTip}${fallbackHint}\n\n` +
-          `**下一步**: 在新群里发送 \`/activate\` 完成绑定（30分钟内有效）`
-        );
+        // Existing-user upgrade path: the most common failure here is missing
+        // im:chat / im:chat.member permissions on the user's Feishu app
+        // (older installs predate Fix 1's expanded permission list). Detect
+        // that case and tell the user exactly what to fix, instead of
+        // burying it in a generic "自动建群失败" line.
+        const autoErr = (data.autoChat && data.autoChat.error) || '';
+        const autoCode = data.autoChat && data.autoChat.code;
+        const isPermissionError = autoCode === 99991663
+          || /im:chat|权限|permission|forbidden|scope/i.test(autoErr);
+        if (isPermissionError) {
+          await bot.sendMessage(chatId,
+            `⚠️ Agent「${projName}」已创建\n目录: ${data.cwd || '（未知）'}${engineTip}\n\n` +
+            `自动建群失败:飞书应用缺少 \`im:chat\` 或 \`im:chat.member\` 权限。\n\n` +
+            `**修复方法**(2 分钟):\n` +
+            `1. 打开 https://open.feishu.cn/app 找到这个应用\n` +
+            `2. 左侧「权限管理」搜索并开通这两个权限:\n` +
+            `   • \`im:chat\`(创建群聊)\n` +
+            `   • \`im:chat.member\`(邀请用户进群)\n` +
+            `3. 左侧「版本管理与发布」→ 创建新版本 → 申请发布\n` +
+            `4. 回这里再说一次「新建 agent ${projName}」即可\n\n` +
+            `也可以**手动**:在飞书新建群,把 bot 拉进去,发送 \`/activate\`(30 分钟内有效)。`
+          );
+        } else {
+          const fallbackHint = autoErr ? `\n（自动建群失败:${autoErr}）` : '';
+          await bot.sendMessage(chatId,
+            `✅ Agent「${projName}」已创建\n目录: ${data.cwd || '（未知）'}${engineTip}${fallbackHint}\n\n` +
+            `**下一步**: 在新群里发送 \`/activate\` 完成绑定（30分钟内有效）`
+          );
+        }
       }
       return true;
     }

@@ -60,6 +60,16 @@
 - **新增 helper 必须配测试**。`scripts/core/*.test.js` 覆盖纯逻辑，`scripts/daemon-*.test.js` 覆盖集成。
 - **现有模块边界**：`core/handoff.js`=子进程生命周期，`core/audit.js`=审计状态。不混入路由/会话/记忆语义。
 
+## 运行语义红线（必须了解，避免误判）
+
+以下行为是当前线上 daemon 的真实约定,改动相关代码前先理解:
+
+- **群成员即 admin**:消息来自 `feishu.allowed_chat_ids` 命中的群,senderId 又不在 `users.yaml` 显式登记时,daemon 把它当 admin 处理(`scripts/daemon-user-acl.js:resolveUserCtx` 的 `fromAllowedChat` 分支)。后果:任何被拉进白名单群的人都能跑 `/sh`、`/agent` 等系统级命令。如果要把某人降权,在 `users.yaml` 显式写 `role: stranger`/`member` 即可覆盖。
+- **自然语言新建 agent 会自动建群**:用户在飞书说「新建 agent 叫 X」时,daemon 走 `scripts/daemon-agent-workflow.js:createWorkspaceAgent` 路径,先 `createNewWorkspaceAgent` 落 yaml,再尝试 `bot.createChat` + `bindAgentToChat`。需要飞书应用具备 `im:chat` 与 `im:chat.member` 权限——首装向导(`index.js daemon init`)已加入清单,但**升级用户**的旧应用可能缺。失败时落到 `pendingActivations` + `/activate` 兜底流。
+- **`pendingActivations` 持久化到 `~/.metame/pending_activations.json`**:进程重启(launchd / SIGUSR2 / Fix 5 自更新)不会丢失激活窗口。30 分钟 TTL 在 load 时强制。改动 `pendingActivations` 的语义前,记得 daemon.js 里 set/delete/clear 都被 wrap 过。
+- **`[[FILE:/abs/path]]` 是 send-to-user 的输出契约**:agent 在回复尾部独占行写 marker,daemon `parseFileMarkers` → `sendFileButtons` → `bot.sendFile` 自动上传。Skill 文档在 `skills/send-to-user/SKILL.md`,路由词在 `scripts/daemon.js:SKILL_ROUTES`(注意 `(?<!转)` 排除转发语义)。
+- **自动更新会请求 daemon 重启**:`metame X` 触发 npm install -g 成功后,`index.js` 立刻调 `requestDaemonRestart({reason:'auto-update'})`。`metame deploy`、`metame restart` 走同一原语。daemon 内任何依赖**进程级常驻状态**的逻辑必须能从持久化恢复。
+
 ## 代码质量红线（必须遵守）
 
 - **修改 `scripts/daemon*.js` 后，必须运行 `npx eslint scripts/daemon*.js`**，零错误才能部署

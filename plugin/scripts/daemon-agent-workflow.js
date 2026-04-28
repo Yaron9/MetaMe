@@ -275,6 +275,10 @@ async function createWorkspaceAgent({
       }
       // createChat failed — fall through to /activate path with diagnostic.
       const errSummary = createRes.error || 'unknown';
+      // Forward the underlying error code (e.g. 99991663 = permission denied)
+      // so the caller can give a targeted upgrade hint instead of a generic
+      // "auto-create failed" message.
+      const errCode = createRes.code || null;
       // Still register pendingActivations so user can /activate manually.
       if (data.projectKey && pendingActivations) {
         pendingActivations.set(data.projectKey, {
@@ -287,7 +291,7 @@ async function createWorkspaceAgent({
       }
       return {
         ok: true,
-        data: { ...data, autoChat: { error: errSummary } },
+        data: { ...data, autoChat: { error: errSummary, code: errCode } },
       };
     }
 
