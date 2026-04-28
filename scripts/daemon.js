@@ -262,8 +262,6 @@ function writeConfigSafe(nextConfig) {
     const dumped = yaml.dump(nextConfig, { lineWidth: -1 });
     // Validate: round-trip parse before committing to disk
     yaml.load(dumped);
-    // Backup current config before overwriting
-    try { if (fs.existsSync(CONFIG_FILE)) fs.copyFileSync(CONFIG_FILE, CONFIG_FILE + '.bak'); } catch { }
     fs.writeFileSync(tmpFile, dumped, 'utf8');
     fs.renameSync(tmpFile, CONFIG_FILE);
   } catch (e) {

@@ -165,8 +165,10 @@ function setupRuntimeWatchers(deps) {
   }
 
   let reloadDebounce = null;
+  let suppressNextWatch = false; // guard: skip watcher re-trigger after .bak restore
   fs.watchFile(CONFIG_FILE, { interval: 2000 }, (curr, prev) => {
     if (curr.mtimeMs === prev.mtimeMs) return;
+    if (suppressNextWatch) { suppressNextWatch = false; return; }
     if (reloadDebounce) clearTimeout(reloadDebounce);
     reloadDebounce = setTimeout(() => {
       log('INFO', 'daemon.yaml changed on disk — auto-reloading config');
@@ -179,17 +181,23 @@ function setupRuntimeWatchers(deps) {
         // Attempt auto-restore from backup
         const bakFile = CONFIG_FILE + '.bak';
         try {
-          if (fs.existsSync(bakFile)) {
+          if (!fs.existsSync(bakFile)) {
+            log('WARN', 'No .bak file available for auto-restore');
+          } else {
+            suppressNextWatch = true; // prevent watcher re-trigger from our own copyFileSync
             fs.copyFileSync(bakFile, CONFIG_FILE);
             log('INFO', 'Auto-restored daemon.yaml from .bak');
             const r2 = reloadConfig();
             if (r2.success) {
               log('INFO', `Restored config reload OK: ${r2.tasks} tasks`);
               adminNotifyFn(`⚠️ daemon.yaml 解析失败，已从备份恢复。错误: ${r.error}`).catch(() => { });
+            } else {
+              log('ERROR', `Backup config also invalid: ${r2.error}. Manual intervention required.`);
+              adminNotifyFn(`🚨 daemon.yaml 和备份均无法解析，请手动修复。`).catch(() => { });
             }
           }
         } catch (restoreErr) {
-          log('ERROR', `Auto-restore from .bak also failed: ${restoreErr.message}`);
+          log('ERROR', `Auto-restore from .bak failed: ${restoreErr.message}`);
         }
       }
     }, 1000);
