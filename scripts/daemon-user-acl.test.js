@@ -54,6 +54,49 @@ test('default stranger keeps query permission after ACL is configured', () => {
   });
 });
 
+test('fromAllowedChat upgrades unknown sender to admin (group-whitelist trust)', () => {
+  withTempHome(({ acl }) => {
+    // Seed an existing admin so bootstrap-as-admin path is bypassed for new senders.
+    acl.saveUsers({
+      default_role: 'stranger',
+      users: { ou_admin0001: { role: 'admin', name: 'seed' } },
+    });
+    const ctx = acl.resolveUserCtx('ou_groupie_001', {}, { fromAllowedChat: true });
+    assert.equal(ctx.role, 'admin');
+    assert.equal(ctx.readOnly, false);
+    assert.equal(ctx.can('system'), true);
+    // Crucially: must NOT have been written into users.yaml — implicit trust only.
+    assert.equal(acl.loadUsers().users.ou_groupie_001, undefined);
+  });
+});
+
+test('fromAllowedChat does NOT override explicit yaml entry (yaml wins)', () => {
+  withTempHome(({ acl }) => {
+    acl.saveUsers({
+      default_role: 'stranger',
+      users: {
+        ou_admin0001: { role: 'admin', name: 'seed' },
+        ou_demoted_99: { role: 'stranger', name: 'demoted' },
+      },
+    });
+    const ctx = acl.resolveUserCtx('ou_demoted_99', {}, { fromAllowedChat: true });
+    assert.equal(ctx.role, 'stranger');
+    assert.equal(ctx.can('system'), false);
+  });
+});
+
+test('fromAllowedChat=false preserves legacy default-stranger path', () => {
+  withTempHome(({ acl }) => {
+    acl.saveUsers({
+      default_role: 'stranger',
+      users: { ou_admin0001: { role: 'admin', name: 'seed' } },
+    });
+    const ctx = acl.resolveUserCtx('ou_groupie_002', {});
+    assert.equal(ctx.role, 'stranger');
+    assert.equal(ctx.can('system'), false);
+  });
+});
+
 test('/user add parsing stores uid/role/name correctly', () => {
   withTempHome(({ acl }) => {
     const adminCtx = acl.resolveUserCtx('ou_admin_12345', {});
