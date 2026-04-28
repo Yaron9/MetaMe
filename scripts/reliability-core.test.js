@@ -156,6 +156,68 @@ test('memory-extract does not mark session extracted when extraction fails', () 
   assert.ok(remain.includes(sessionId));
 });
 
+test('memory-extract records codex provenance when no claude sessions exist', () => {
+  const home = mkHome();
+  const response = JSON.stringify({
+    session_name: 'Codex provenance',
+    facts: [{
+      entity: 'MetaMe.memory.provenance',
+      relation: 'arch_convention',
+      value: 'MetaMe memory extraction records each Codex rollout as raw session provenance before saving extracted facts.',
+      confidence: 'high',
+      tags: ['memory', 'provenance'],
+    }],
+  });
+  const env = installFakeClaude(home, `cat >/dev/null\nprintf '%s\\n' '${response}'`);
+  const sessionId = 'codex-provenance-session';
+  const dayDir = path.join(home, '.codex', 'sessions', '2026', '04', '28');
+  fs.mkdirSync(dayDir, { recursive: true });
+  const rolloutPath = path.join(dayDir, `rollout-2026-04-28T01-02-03-${sessionId}.jsonl`);
+  const meta = {
+    type: 'session_meta',
+    payload: {
+      id: sessionId,
+      cwd: '/tmp/metame',
+      model_provider: 'openai',
+    },
+  };
+  fs.writeFileSync(rolloutPath, `${JSON.stringify(meta)}\n${'x'.repeat(1200)}\n`, 'utf8');
+  fs.writeFileSync(
+    path.join(home, '.codex', 'history.jsonl'),
+    JSON.stringify({
+      session_id: sessionId,
+      ts: 1777338123,
+      text: '请把 Codex rollout provenance 接入 memory extract，并保持最小闭环。',
+    }) + '\n',
+    'utf8'
+  );
+
+  const rows = JSON.parse(runNode(home, `
+    const me = require('./scripts/memory-extract');
+    (async () => {
+      await me.run();
+      const { DatabaseSync } = require('node:sqlite');
+      const path = require('path');
+      const db = new DatabaseSync(path.join(process.env.HOME, '.metame', 'memory.db'));
+      const sources = db.prepare('SELECT id, engine, session_id, status FROM session_sources').all();
+      const facts = db.prepare("SELECT source_type, source_id FROM memory_items WHERE kind IN ('convention','insight')").all();
+      db.close();
+      console.log(JSON.stringify({ sources, facts }));
+    })().then(() => process.exit(0)).catch((e) => {
+      console.error(e.stack || e.message);
+      process.exit(1);
+    });
+  `, env).trim().split('\n').pop());
+
+  assert.equal(rows.sources.length, 1);
+  assert.equal(rows.sources[0].engine, 'codex');
+  assert.equal(rows.sources[0].session_id, sessionId);
+  assert.equal(rows.sources[0].status, 'extracted');
+  assert.equal(rows.facts.length, 1);
+  assert.equal(rows.facts[0].source_type, 'codex');
+  assert.equal(rows.facts[0].source_id, rows.sources[0].id);
+});
+
 test('skill-evolution keeps signals when haiku output is malformed', () => {
   const home = mkHome();
   const env = installFakeClaude(home, 'echo "NOT_JSON_BLOCK"');

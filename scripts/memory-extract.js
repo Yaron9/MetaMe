@@ -15,6 +15,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { callHaiku, buildDistillEnv } = require('./providers');
 
 const HOME = os.homedir();
@@ -115,6 +116,63 @@ const VAGUE_PATTERNS = [
 ];
 const ALLOWED_FLAT = new Set(['王总', 'system', 'user']);
 
+function hashFile(filePath) {
+  if (!filePath) return null;
+  try {
+    const hash = crypto.createHash('sha256');
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(64 * 1024);
+      let bytesRead = 0;
+      do {
+        bytesRead = fs.readSync(fd, buf, 0, buf.length, null);
+        if (bytesRead > 0) hash.update(buf.subarray(0, bytesRead));
+      } while (bytesRead > 0);
+    } finally {
+      fs.closeSync(fd);
+    }
+    return hash.digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+function statSize(filePath) {
+  try {
+    return filePath ? fs.statSync(filePath).size : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveSessionSource(memory, engine, sourcePath, skeleton, status = 'indexed', errorMessage = null) {
+  if (!memory || typeof memory.saveSessionSource !== 'function' || !skeleton) return null;
+  const sourceHash = hashFile(sourcePath);
+  if (!sourceHash) return null;
+  try {
+    return memory.saveSessionSource({
+      engine,
+      sessionId: skeleton.session_id,
+      project: skeleton.project || 'unknown',
+      scope: skeleton.project_id || null,
+      cwd: skeleton.project_path || null,
+      sourcePath,
+      sourceHash,
+      sourceSize: statSize(sourcePath),
+      firstTs: skeleton.first_ts || null,
+      lastTs: skeleton.last_ts || null,
+      messageCount: skeleton.message_count || 0,
+      toolCallCount: skeleton.total_tool_calls || 0,
+      toolErrorCount: skeleton.tool_error_count || 0,
+      status,
+      errorMessage,
+    });
+  } catch (e) {
+    console.log(`[memory-extract] session source save failed: ${e.message}`);
+    return null;
+  }
+}
+
 /**
  * Extract atomic facts from session skeleton + evidence via Haiku.
  * Returns filtered fact array (may be empty).
@@ -212,8 +270,6 @@ async function run() {
     const sessions = sessionAnalytics.findAllUnextractedSessions(3);
     if (sessions.length === 0) {
       console.log('[memory-extract] No unanalyzed sessions found.');
-      memory.close();
-      return { sessionsProcessed: 0, factsSaved: 0, factsSkipped: 0 };
     }
 
     let totalSaved = 0;
@@ -223,9 +279,11 @@ async function run() {
     for (const session of sessions) {
       try {
         const skeleton = sessionAnalytics.extractSkeleton(session.path);
+        const sourceRow = saveSessionSource(memory, 'claude', session.path, skeleton);
 
         // Skip trivial sessions
         if (skeleton.message_count < 2 && skeleton.duration_min < 1) {
+          if (sourceRow) saveSessionSource(memory, 'claude', session.path, skeleton, 'archived');
           sessionAnalytics.markFactsExtracted(skeleton.session_id);
           continue;
         }
@@ -237,6 +295,7 @@ async function run() {
 
         const { ok, facts, session_name } = await extractFacts(skeleton, evidence, distillEnv);
         if (!ok) {
+          if (sourceRow) saveSessionSource(memory, 'claude', session.path, skeleton, 'error', 'fact extraction failed');
           console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)}: extraction failed, will retry later`);
           continue;
         }
@@ -249,7 +308,7 @@ async function run() {
             skeleton.session_id,
             skeleton.project || 'unknown',
             facts,
-            { scope: skeleton.project_id || fallbackScope }
+            { scope: skeleton.project_id || fallbackScope, source_id: sourceRow ? sourceRow.id : skeleton.session_id }
           );
           totalSaved += saved;
           totalSkipped += skipped;
@@ -276,6 +335,7 @@ async function run() {
 
         // P2-A: persist session name + tags to session_tags.json
         saveSessionTag(skeleton.session_id, session_name, facts);
+        if (sourceRow) saveSessionSource(memory, 'claude', session.path, skeleton, 'extracted');
 
         processed++;
       } catch (e) {
@@ -294,15 +354,18 @@ async function run() {
       for (const cs of codexSessions) {
         try {
           const { skeleton, evidence } = sessionAnalytics.buildCodexInput(cs.path, historyMap);
+          const sourceRow = saveSessionSource(memory, 'codex', cs.path, skeleton);
 
           // Skip trivial sessions with no user messages
           if (skeleton.message_count < 1) {
+            if (sourceRow) saveSessionSource(memory, 'codex', cs.path, skeleton, 'archived');
             sessionAnalytics.markCodexFactsExtracted(cs.session_id);
             continue;
           }
 
           const { ok, facts, session_name } = await extractFacts(skeleton, evidence, distillEnv);
           if (!ok) {
+            if (sourceRow) saveSessionSource(memory, 'codex', cs.path, skeleton, 'error', 'fact extraction failed');
             console.log(`[memory-extract] Codex ${cs.session_id.slice(0, 8)}: extraction failed, will retry later`);
             continue;
           }
@@ -313,7 +376,11 @@ async function run() {
               cs.session_id,
               skeleton.project || 'unknown',
               facts,
-              { scope: skeleton.project_id || fallbackScope, source_type: 'codex' }
+              {
+                scope: skeleton.project_id || fallbackScope,
+                source_type: 'codex',
+                source_id: sourceRow ? sourceRow.id : cs.session_id,
+              }
             );
             totalSaved += saved;
             totalSkipped += skipped;
@@ -339,6 +406,7 @@ async function run() {
           }
 
           sessionAnalytics.markCodexFactsExtracted(cs.session_id);
+          if (sourceRow) saveSessionSource(memory, 'codex', cs.path, skeleton, 'extracted');
           processed++;
         } catch (e) {
           console.log(`[memory-extract] Codex session error: ${e.message}`);
