@@ -176,6 +176,21 @@ function setupRuntimeWatchers(deps) {
         adminNotifyFn(`🔄 Config auto-reloaded. ${r.tasks} heartbeat tasks active.`).catch(() => { });
       } else {
         log('ERROR', `Auto-reload failed: ${r.error}`);
+        // Attempt auto-restore from backup
+        const bakFile = CONFIG_FILE + '.bak';
+        try {
+          if (fs.existsSync(bakFile)) {
+            fs.copyFileSync(bakFile, CONFIG_FILE);
+            log('INFO', 'Auto-restored daemon.yaml from .bak');
+            const r2 = reloadConfig();
+            if (r2.success) {
+              log('INFO', `Restored config reload OK: ${r2.tasks} tasks`);
+              adminNotifyFn(`⚠️ daemon.yaml 解析失败，已从备份恢复。错误: ${r.error}`).catch(() => { });
+            }
+          }
+        } catch (restoreErr) {
+          log('ERROR', `Auto-restore from .bak also failed: ${restoreErr.message}`);
+        }
       }
     }, 1000);
   });
