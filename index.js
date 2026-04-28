@@ -1538,7 +1538,7 @@ if (AUTO_UPDATE.enabled) {
           // daemon (metame daemon spawns a separate node process via DAEMON_SCRIPT).
           const restart = requestDaemonRestart({ reason: 'auto-update' });
           if (restart.ok) {
-            console.log(`${icon("ok")} Updated to ${latest}. Daemon restarted (${restart.status}).`);
+            console.log(`${icon("ok")} Updated to ${latest}. Daemon restart requested (${restart.status}).`);
           } else if (restart.status === 'not_running') {
             console.log(`${icon("ok")} Updated to ${latest}.`);
           } else {
