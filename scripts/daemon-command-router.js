@@ -2,6 +2,7 @@
 
 const { resolveEngineModel } = require('./daemon-engine-runtime');
 const { createAgentIntentHandler } = require('./daemon-agent-intent');
+const { classifyAgentIntent } = require('./agent-intent-shared');
 const { rawChatId: extractOriginalChatId, isThreadChatId } = require('./core/thread-chat-id');
 const { createWikiCommandHandler } = require('./daemon-wiki');
 
@@ -594,6 +595,14 @@ function createCommandRouter(deps) {
       }
 
       if (await tryHandleAgentIntent(bot, chatId, text, config, senderId)) {
+        return;
+      }
+    } else {
+      // Strict chats: still allow agent intents that don't affect current chat binding
+      // (create, list, wizard_clone, wizard_team, soul, agent_doc, edit_role, reset)
+      const _strictIntent = classifyAgentIntent(text);
+      const _safeInStrict = _strictIntent && !['bind', 'unbind', 'activate'].includes(_strictIntent.action);
+      if (_safeInStrict && await tryHandleAgentIntent(bot, chatId, text, config, senderId)) {
         return;
       }
     }
