@@ -200,6 +200,7 @@ function resolveUserCtx(senderId, config, opts = {}) {
   const hasConfiguredUsers = hasPlatformAdmin;
 
   let role, name, allowedActions;
+  let implicitAdmin = false;
 
   if (!senderId) {
     // 无 ID（Telegram 等）— 兼容旧逻辑，视为 admin
@@ -230,6 +231,7 @@ function resolveUserCtx(senderId, config, opts = {}) {
       role = 'admin';
       name = senderId.slice(-6);
       allowedActions = ROLE_DEFAULT_ACTIONS.admin;
+      implicitAdmin = true;
     } else {
       // 兼容旧 operator_ids：若 senderId 在 operator_ids 中，视为 admin
       const operatorIds = (config && config.feishu && config.feishu.operator_ids) || [];
@@ -269,6 +271,7 @@ function resolveUserCtx(senderId, config, opts = {}) {
     isAdmin: role === 'admin',
     isMember: role === 'member',
     isStranger: role === 'stranger',
+    implicitAdmin,
     can(action) { return allowedActions.includes(action); },
     readOnly: role !== 'admin',
   };

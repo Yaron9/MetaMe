@@ -62,6 +62,11 @@ function createBridgeStarter(deps) {
     } catch {
       return { blocked: false, readOnly: false, senderId: normalizedSenderId };
     }
+    // Audit trail for implicit-admin upgrades — these users are NOT in users.yaml
+    // and gain admin via group-whitelist trust, so make their action visible.
+    if (userCtx && userCtx.implicitAdmin) {
+      try { log('INFO', `[ACL] implicit admin via allowed_chat_ids: chat=${chatId} sender=${normalizedSenderId}`); } catch { /* non-fatal */ }
+    }
 
     const userCmd = userAcl.handleUserCommand(trimmed, userCtx);
     if (userCmd && userCmd.handled) {

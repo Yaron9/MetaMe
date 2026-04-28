@@ -97,6 +97,25 @@ test('fromAllowedChat=false preserves legacy default-stranger path', () => {
   });
 });
 
+test('fromAllowedChat with null senderId still hits the no-senderId admin shortcut', () => {
+  withTempHome(({ acl }) => {
+    const ctx = acl.resolveUserCtx(null, {}, { fromAllowedChat: true });
+    assert.equal(ctx.role, 'admin');
+    assert.equal(ctx.implicitAdmin, false); // null-senderId path, not the new branch
+  });
+});
+
+test('first-time bootstrap with empty users still wins over fromAllowedChat=false', () => {
+  withTempHome(({ acl }) => {
+    // Empty users — bootstrap path applies for fromAllowedChat=false
+    const ctx = acl.resolveUserCtx('ou_first_user', {});
+    assert.equal(ctx.role, 'admin');
+    assert.equal(ctx.implicitAdmin, false);
+    // bootstrap path persists to yaml
+    assert.equal(acl.loadUsers().users.ou_first_user.role, 'admin');
+  });
+});
+
 test('/user add parsing stores uid/role/name correctly', () => {
   withTempHome(({ acl }) => {
     const adminCtx = acl.resolveUserCtx('ou_admin_12345', {});
