@@ -20,8 +20,16 @@ MetaMe 是一个驻留在你电脑上的 AI——记住你的思维方式，7×2
 
 不上云。你的机器，你的数据。
 
+**macOS / Linux：**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
+```
+
+**Windows（PowerShell）：**
+
+```powershell
+irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 ```
 
 ---
@@ -209,9 +217,11 @@ MetaMe 是编排层，Claude Code 和 Codex 是引擎。一条命令装齐。
 | **两个都用** | `npm install -g @anthropic-ai/claude-code @openai/codex metame-cli` | `claude` + `codex login` |
 | **Claude 插件**（免 npm） | `claude plugin install github:Yaron9/MetaMe/plugin` | `claude` |
 
-> **没有 Node.js？** 运行 `curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash`，自动装 Node + MetaMe。
+> **没有 Node.js？** 一行命令搞定（Node + MetaMe 一起装）：
+> - macOS / Linux：`curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash`
+> - Windows（PowerShell）：`irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex` — 优先用 winget，没有则自动下 LTS MSI。
 >
-> **Windows？** 用原生 PowerShell/CMD 安装，不建议 WSL（代理和路径问题多）。
+> **Windows？** 用原生 PowerShell 或 CMD，不建议 WSL（代理和路径问题多）。
 
 ### 设置（3 分钟）
 

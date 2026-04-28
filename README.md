@@ -20,8 +20,16 @@ MetaMe is an AI that lives on your machine — remembers how you think, stays on
 
 No cloud. Your machine, your data.
 
+**macOS / Linux:**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 ```
 
 ---
@@ -256,9 +264,11 @@ MetaMe is the orchestration layer. Claude Code and Codex are the engines. You in
 | **Both** | `npm install -g @anthropic-ai/claude-code @openai/codex metame-cli` | `claude` + `codex login` |
 | **Claude plugin** (no npm) | `claude plugin install github:Yaron9/MetaMe/plugin` | `claude` |
 
-> **No Node.js?** Run `curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash` — it installs Node + MetaMe for you.
+> **No Node.js?** One-liner installers handle everything (Node + MetaMe):
+> - macOS / Linux: `curl -fsSL https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.sh | bash`
+> - Windows (PowerShell): `irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex` — uses winget when available, otherwise downloads the LTS MSI.
 >
-> **Windows?** Use PowerShell/CMD natively. WSL has proxy and path issues.
+> **Windows?** Use PowerShell or CMD natively. WSL has proxy and path issues.
 
 ### Setup (3 minutes)
 
