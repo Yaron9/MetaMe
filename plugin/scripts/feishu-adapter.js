@@ -430,6 +430,82 @@ function createBot(config) {
     },
 
     /**
+     * Create a new Feishu group chat. The bot is automatically a member of
+     * any chat it creates; pass `inviteOpenIds` to add humans at creation time.
+     * Requires the app to have `im:chat` (and `im:chat.member` for invitees)
+     * permission. Returns { ok, chatId, error }; never throws — callers can
+     * fall back to the manual /activate flow on failure.
+     *
+     * @param {object} opts
+     * @param {string} opts.name        Chat name shown in user's chat list.
+     * @param {string} [opts.description]  Optional description.
+     * @param {string[]} [opts.inviteOpenIds]  open_ids of humans to add now.
+     * @param {string} [opts.ownerOpenId]  open_id to mark as chat owner.
+     */
+    async createChat({ name, description = '', inviteOpenIds = [], ownerOpenId = null }) {
+      if (!name) return { ok: false, error: 'name is required' };
+      try {
+        const data = {
+          name: String(name).slice(0, 60),
+          description: String(description).slice(0, 256),
+          chat_mode: 'group',
+          chat_type: 'private',
+          // Owner is required by the API; default to the inviter if not given.
+          ...(ownerOpenId ? { owner_id: ownerOpenId } : {}),
+          ...(inviteOpenIds.length > 0 ? { user_id_list: inviteOpenIds.slice(0, 50) } : {}),
+        };
+        const res = await withTimeout(
+          client.im.chat.create({ params: { user_id_type: 'open_id' }, data }),
+          15000
+        );
+        const chatId = res?.data?.chat_id || null;
+        if (!chatId) {
+          return { ok: false, error: `chat.create returned no chat_id: ${JSON.stringify(res?.data || res)}` };
+        }
+        return { ok: true, chatId };
+      } catch (err) {
+        const errDetail = err?.response?.data || err;
+        const code = errDetail?.code;
+        const msg = errDetail?.msg || errDetail?.message || String(err);
+        // Permission denied is the common first-time failure — surface a hint.
+        if (code === 99991663 || /permission|forbidden|scope/i.test(msg)) {
+          return { ok: false, error: `飞书应用缺少 im:chat 权限（${msg}）`, code };
+        }
+        return { ok: false, error: msg, code };
+      }
+    },
+
+    /**
+     * Invite humans to an existing chat by open_id. Returns invalid_id_list
+     * so the caller can decide whether to surface the partial-failure case.
+     */
+    async inviteToChat(chatId, openIds = []) {
+      if (!chatId) return { ok: false, error: 'chatId is required' };
+      const list = (Array.isArray(openIds) ? openIds : [openIds]).filter(Boolean).slice(0, 50);
+      if (list.length === 0) return { ok: true, invalid: [] };
+      try {
+        const res = await withTimeout(
+          client.im.chat.members.create({
+            path: { chat_id: chatId },
+            params: { member_id_type: 'open_id' },
+            data: { id_list: list },
+          }),
+          15000
+        );
+        const invalid = res?.data?.invalid_id_list || [];
+        return { ok: true, invalid };
+      } catch (err) {
+        const errDetail = err?.response?.data || err;
+        const code = errDetail?.code;
+        const msg = errDetail?.msg || errDetail?.message || String(err);
+        if (code === 99991663 || /permission|forbidden|scope/i.test(msg)) {
+          return { ok: false, error: `飞书应用缺少 im:chat.member 权限（${msg}）`, code };
+        }
+        return { ok: false, error: msg, code };
+      }
+    },
+
+    /**
      * Start WebSocket long connection to receive messages (with auto-reconnect)
      * @param {function} onMessage - callback(chatId, text, event)
      * @param {object} [opts]

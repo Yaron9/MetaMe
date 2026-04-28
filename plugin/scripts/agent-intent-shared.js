@@ -68,13 +68,20 @@ function classifyAgentIntent(input) {
   if (hasThirdPartyName && hasAgentWord && !isAboutOurAgents) return null;
 
   const hasAgentContext = /(agent|智能体|工作区|人设|绑定|当前群|这个群|chat|workspace)/i.test(text);
+  // Question-form prefixes ("如何/怎么/能不能/可以吗") indicate the user is
+  // asking ABOUT creating an agent, not requesting one — exclude from create intent.
+  const isQuestion = /^(如何|怎么|怎样|能不能|可不可以|可以吗|是否)/i.test(text) || /(吗\?|吗？|\?$|？$)/.test(text);
   const wantsList = /(列出|查看|显示|有哪些|list|show)/i.test(text) && /(agent|智能体|工作区|绑定)/i.test(text);
   const wantsUnbind = /(解绑|取消绑定|断开绑定|unbind|unassign)/i.test(text) && hasAgentContext;
   const wantsEditRole =
     ((/(角色|职责|人设)/i.test(text) && /(改|修改|调整|更新|变成|改成|改为)/i.test(text)) ||
     /(把这个agent|把当前agent|当前群.*角色|当前群.*职责)/i.test(text));
+  // Relaxed: a bare "新建 agent" with no path is enough — daemon will derive
+  // a default workspace at ~/AGI/<name>/ if no path is given.
   const wantsCreate =
-    (/(创建|新建|新增|搞一个|加一个|create)/i.test(text) && /(agent|智能体|人设|工作区)/i.test(text) && (directAction || hasWorkspacePath));
+    /(创建|新建|新增|搞一个|加一个|create)/i.test(text)
+    && /(agent|智能体|人设|工作区)/i.test(text)
+    && !isQuestion;
   const wantsBind =
     !wantsCreate &&
     (/(绑定|bind)/i.test(text) && hasAgentContext && (directAction || hasWorkspacePath));
@@ -89,10 +96,12 @@ function classifyAgentIntent(input) {
     /(?:怎么|如何|手册|文档|说明).{0,12}(配置|管理|使用).{0,12}(agent|智能体|机器人|bot)/i.test(text) ||
     /(?:agent|智能体|机器人|bot).{0,12}(怎么|如何).{0,12}(配置|管理|使用)/i.test(text);
 
+  // wantsCreate is checked BEFORE wantsList so that "新建 agent 用于查看 X"
+  // (which contains both 新建 and 查看) is correctly routed to create.
+  if (wantsCreate) return { action: 'create', workspaceDir };
   if (wantsList) return { action: 'list', workspaceDir };
   if (wantsUnbind) return { action: 'unbind', workspaceDir };
   if (wantsEditRole) return { action: 'edit_role', workspaceDir };
-  if (wantsCreate) return { action: 'create', workspaceDir };
   if (wantsBind) return { action: 'bind', workspaceDir };
   if (wantsAgentDoc) return { action: 'agent_doc', workspaceDir };
   if (wantsActivate) return { action: 'activate', workspaceDir };

@@ -10,6 +10,7 @@ const {
   bindAgentToChat,
   handleActivateCommand,
   unbindAgent,
+  createWorkspaceAgent,
 } = require('./daemon-agent-workflow');
 
 describe('daemon-agent-workflow helpers', () => {
@@ -146,5 +147,133 @@ describe('daemon-agent-workflow bind/unbind semantics', () => {
     assert.equal(res.data.unbound, true);
     assert.deepEqual(writes, [null]);
     assert.equal(backups, 1);
+  });
+});
+
+describe('daemon-agent-workflow auto-create-chat', () => {
+  function fakeAgentTools() {
+    const calls = { create: [], bind: [] };
+    return {
+      calls,
+      createNewWorkspaceAgent: async (name, cwd, role, chatId, opts) => {
+        calls.create.push({ name, cwd, role, chatId, opts });
+        return {
+          ok: true,
+          data: {
+            projectKey: 'foo',
+            cwd: '/repo/foo',
+            project: { name: 'foo', engine: 'claude' },
+          },
+        };
+      },
+      bindAgentToChat: async (newChatId, name, cwd) => {
+        calls.bind.push({ newChatId, name, cwd });
+        return { ok: true, data: { chatId: String(newChatId), projectKey: 'foo' } };
+      },
+    };
+  }
+
+  it('auto-creates chat and binds when bot.createChat + senderOpenId provided', async () => {
+    const sent = [];
+    const bot = {
+      createChat: async ({ name }) => ({ ok: true, chatId: 'oc_new_chat_1', name }),
+      sendMessage: async (_cid, text) => sent.push(String(text)),
+    };
+    const tools = fakeAgentTools();
+    const pending = new Map();
+
+    const res = await createWorkspaceAgent({
+      agentTools: tools,
+      chatId: 'oc_creator',
+      agentName: 'foo',
+      workspaceDir: '',
+      pendingActivations: pending,
+      skipChatBinding: true,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (v) => v,
+      getDefaultEngine: () => 'claude',
+      bot,
+      senderOpenId: 'ou_human_001',
+    });
+
+    assert.equal(res.ok, true);
+    assert.equal(res.data.autoChat.chatId, 'oc_new_chat_1');
+    assert.equal(tools.calls.bind.length, 1);
+    assert.equal(tools.calls.bind[0].newChatId, 'oc_new_chat_1');
+    // pendingActivations not used when auto-create succeeds
+    assert.equal(pending.size, 0);
+    assert.match(sent[0], /已上线/);
+  });
+
+  it('falls back to /activate flow when bot.createChat is missing', async () => {
+    const tools = fakeAgentTools();
+    const pending = new Map();
+    const res = await createWorkspaceAgent({
+      agentTools: tools,
+      chatId: 'oc_creator',
+      agentName: 'foo',
+      workspaceDir: '',
+      pendingActivations: pending,
+      skipChatBinding: true,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (v) => v,
+      getDefaultEngine: () => 'claude',
+      bot: { sendMessage: async () => {} },  // no createChat
+      senderOpenId: 'ou_human_001',
+    });
+
+    assert.equal(res.ok, true);
+    assert.equal(tools.calls.bind.length, 0);
+    assert.equal(pending.size, 1);
+    assert.equal(pending.get('foo').agentName, 'foo');
+  });
+
+  it('falls back to /activate flow when senderOpenId is missing', async () => {
+    const tools = fakeAgentTools();
+    const pending = new Map();
+    const res = await createWorkspaceAgent({
+      agentTools: tools,
+      chatId: 'oc_creator',
+      agentName: 'foo',
+      workspaceDir: '',
+      pendingActivations: pending,
+      skipChatBinding: true,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (v) => v,
+      getDefaultEngine: () => 'claude',
+      bot: { createChat: async () => ({ ok: true, chatId: 'oc_x' }), sendMessage: async () => {} },
+      senderOpenId: null,
+    });
+
+    assert.equal(res.ok, true);
+    assert.equal(tools.calls.bind.length, 0);
+    assert.equal(pending.size, 1);
+  });
+
+  it('falls back to /activate when bot.createChat returns permission error', async () => {
+    const tools = fakeAgentTools();
+    const pending = new Map();
+    const bot = {
+      createChat: async () => ({ ok: false, error: '飞书应用缺少 im:chat 权限', code: 99991663 }),
+      sendMessage: async () => {},
+    };
+    const res = await createWorkspaceAgent({
+      agentTools: tools,
+      chatId: 'oc_creator',
+      agentName: 'foo',
+      workspaceDir: '',
+      pendingActivations: pending,
+      skipChatBinding: true,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (v) => v,
+      getDefaultEngine: () => 'claude',
+      bot,
+      senderOpenId: 'ou_human_001',
+    });
+
+    assert.equal(res.ok, true);
+    assert.equal(res.data.autoChat.error, '飞书应用缺少 im:chat 权限');
+    assert.equal(tools.calls.bind.length, 0);
+    assert.equal(pending.size, 1);
   });
 });

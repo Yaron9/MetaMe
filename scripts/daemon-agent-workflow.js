@@ -181,6 +181,11 @@ async function createWorkspaceAgent({
   normalizeCwd,
   getDefaultEngine,
   legacyCreate,
+  // Optional: enable auto-create-chat when set. Requires the bot to expose
+  // createChat (currently only feishu-adapter) and a senderOpenId so the
+  // human creator can be invited into the new chat.
+  bot = null,
+  senderOpenId = null,
 }) {
   let res;
   if (agentTools && typeof agentTools.createNewWorkspaceAgent === 'function') {
@@ -198,6 +203,73 @@ async function createWorkspaceAgent({
 
   const data = res.data || {};
   if (skipChatBinding) {
+    // Try the one-shot path: create a Feishu chat for this agent right now,
+    // invite the human creator, and bind chat→agent so /activate is unneeded.
+    // Pre-conditions: caller provided a bot with createChat, a senderOpenId
+    // that looks like Feishu open_id, and bindAgentToChat is wired up.
+    const canAutoCreate = bot
+      && typeof bot.createChat === 'function'
+      && typeof senderOpenId === 'string' && senderOpenId.startsWith('ou_')
+      && agentTools && typeof agentTools.bindAgentToChat === 'function';
+
+    if (canAutoCreate) {
+      const projName = (data.project && data.project.name) || agentName || data.projectKey;
+      const chatName = `MetaMe · ${projName}`;
+      const createRes = await bot.createChat({
+        name: chatName,
+        description: `Agent ${projName} — auto-created`,
+        ownerOpenId: senderOpenId,
+        inviteOpenIds: [senderOpenId],
+      });
+      if (createRes.ok && createRes.chatId) {
+        const newChatId = createRes.chatId;
+        const bindRes = await agentTools.bindAgentToChat(newChatId, projName, data.cwd, { engine });
+        if (bindRes.ok) {
+          // Skip /activate — directly attach the session in the new chat.
+          attachBoundSession({
+            attachOrCreateSession,
+            projectKey: data.projectKey,
+            chatId: newChatId,
+            cwd: data.cwd,
+            name: projName,
+            engine: data.project && data.project.engine,
+            normalizeCwd,
+            getDefaultEngine,
+          });
+          // Greeting in the freshly created chat so the user sees the bot is alive.
+          try {
+            await bot.sendMessage(newChatId, `🤖 ${projName} 已上线。直接说话即可，本群已绑定到 \`${data.projectKey}\`。`);
+          } catch { /* non-fatal */ }
+          return {
+            ok: true,
+            data: { ...data, autoChat: { chatId: newChatId, name: chatName } },
+          };
+        }
+        // Bind failed — record the failure but keep the project entry.
+        return {
+          ok: true,
+          data: { ...data, autoChat: { error: `bind failed: ${bindRes.error}` } },
+        };
+      }
+      // createChat failed — fall through to /activate path with diagnostic.
+      const errSummary = createRes.error || 'unknown';
+      // Still register pendingActivations so user can /activate manually.
+      if (data.projectKey && pendingActivations) {
+        pendingActivations.set(data.projectKey, {
+          agentKey: data.projectKey,
+          agentName: projName,
+          cwd: data.cwd,
+          createdByChatId: String(chatId),
+          createdAt: Date.now(),
+        });
+      }
+      return {
+        ok: true,
+        data: { ...data, autoChat: { error: errSummary } },
+      };
+    }
+
+    // No auto-create — original /activate flow.
     if (data.projectKey && pendingActivations) {
       pendingActivations.set(data.projectKey, {
         agentKey: data.projectKey,
