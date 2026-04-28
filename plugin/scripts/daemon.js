@@ -1962,9 +1962,49 @@ const pendingAgentFlows = new Map();
 const pendingTeamFlows = new Map();
 
 // Pending activation: after creating an agent with skipChatBinding=true,
-// store here so any new unbound group can activate it with /activate
-// { agentKey, agentName, cwd, createdAt }
-const pendingActivations = new Map(); // key: agentKey -> activation record
+// store here so any new unbound group can activate it with /activate.
+// { agentKey, agentName, cwd, createdAt, preCreatedChatId?, preCreatedChatName? }
+//
+// Persisted to disk so an auto-update / lid-close / SIGUSR2 restart in the
+// 30-minute activation window doesn't strand a freshly created Feishu chat
+// that hadn't bound yet (esp. the orphan path: createChat ok + bind fail).
+// Stale entries (>30min) are dropped on load.
+const pendingActivations = new Map();
+const PENDING_ACTIVATIONS_FILE = path.join(HOME, '.metame', 'pending_activations.json');
+const PENDING_ACTIVATIONS_TTL_MS = 30 * 60 * 1000;
+function _persistPendingActivations() {
+  try {
+    const obj = Object.fromEntries(pendingActivations);
+    const tmp = PENDING_ACTIVATIONS_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(obj), 'utf8');
+    fs.renameSync(tmp, PENDING_ACTIVATIONS_FILE);
+  } catch { /* best-effort, never throw from persistence */ }
+}
+function _restorePendingActivations() {
+  try {
+    if (!fs.existsSync(PENDING_ACTIVATIONS_FILE)) return;
+    const data = JSON.parse(fs.readFileSync(PENDING_ACTIVATIONS_FILE, 'utf8'));
+    const now = Date.now();
+    let restored = 0;
+    for (const [k, v] of Object.entries(data)) {
+      if (v && v.createdAt && now - v.createdAt < PENDING_ACTIVATIONS_TTL_MS) {
+        pendingActivations.set(k, v);
+        restored += 1;
+      }
+    }
+    if (restored > 0) log('INFO', `[pending] restored ${restored} pending activation(s) from disk`);
+  } catch { /* corrupt file → start fresh */ }
+}
+// Wrap Map.set/.delete so every mutation hits disk. Wrapping the prototype
+// methods (rather than reassigning) keeps the Map reference stable for callers
+// that stored it before the wrap (the daemon does not, but defensive).
+const _origPendingSet = pendingActivations.set.bind(pendingActivations);
+const _origPendingDelete = pendingActivations.delete.bind(pendingActivations);
+const _origPendingClear = pendingActivations.clear.bind(pendingActivations);
+pendingActivations.set = function (k, v) { const r = _origPendingSet(k, v); _persistPendingActivations(); return r; };
+pendingActivations.delete = function (k) { const r = _origPendingDelete(k); _persistPendingActivations(); return r; };
+pendingActivations.clear = function () { const r = _origPendingClear(); _persistPendingActivations(); return r; };
+_restorePendingActivations();
 
 const { handleAdminCommand } = createAdminCommandHandler({
   fs,
