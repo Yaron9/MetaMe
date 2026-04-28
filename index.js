@@ -1532,7 +1532,18 @@ if (AUTO_UPDATE.enabled) {
             timeout: 60000,
             ...(process.platform === 'win32' ? { shell: process.env.COMSPEC || true } : {}),
           });
-          console.log(`${icon("ok")} Updated to ${latest}. Restart metame to use the new version.`);
+          // Auto-restart the running daemon so the new code takes effect immediately.
+          // Safe by design: requestDaemonRestart short-circuits with status 'not_running'
+          // when no daemon.pid exists, and the current CLI process is never itself the
+          // daemon (metame daemon spawns a separate node process via DAEMON_SCRIPT).
+          const restart = requestDaemonRestart({ reason: 'auto-update' });
+          if (restart.ok) {
+            console.log(`${icon("ok")} Updated to ${latest}. Daemon restart requested (${restart.status}).`);
+          } else if (restart.status === 'not_running') {
+            console.log(`${icon("ok")} Updated to ${latest}.`);
+          } else {
+            console.log(`${icon("ok")} Updated to ${latest}. Daemon restart failed (${restart.status}); run \`metame restart\`.`);
+          }
         } catch (e) {
           const msg = e.stderr ? e.stderr.toString().trim().split('\n').pop() : '';
           console.log(`${icon("warn")} Auto-update failed${msg ? ': ' + msg : ''}. Run manually: npm install -g metame-cli`);
