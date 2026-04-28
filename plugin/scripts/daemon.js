@@ -106,6 +106,9 @@ const SKILL_ROUTES = [
   { name: 'heartbeat-task-manager', pattern: /提醒|remind|闹钟|定时|每[天周月]/i },
   { name: 'skill-manager', pattern: /找技能|管理技能|更新技能|安装技能|skill manager|skill scout|(?:find|look for)\s+skills?/i },
   { name: 'skill-evolution-manager', pattern: /\/evolve\b|复盘一下|记录一下(这个)?经验|保存到\s*skill|skill evolution/i },
+  // (?<!转) excludes "转发" forwarding semantics (e.g. "把这条消息转发给我")
+  // which is conversation relay, not file delivery.
+  { name: 'send-to-user', pattern: /(?<!转)发(?:到|给|出)?\s*(?:我|手机|飞书)|发(?:个|条|份)?\s*(?:文件|附件|图(?:片)?|日志|压缩包|截图|csv|pdf|zip|excel|表格)|(?<!转)发我|给我(?:下载|发个|发份)|send\s+(?:me|file|attachment|to\s+me)|push\s+(?:to\s+)?(?:me|phone|file)|attach\s+file/i },
 ];
 
 function routeSkill(prompt) {
