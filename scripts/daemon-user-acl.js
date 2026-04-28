@@ -178,9 +178,15 @@ const ADMIN_ONLY_ACTIONS = new Set(['system', 'agent', 'config', 'admin_acl']);
  * 根据 senderId 解析用户上下文
  * @param {string|null} senderId  飞书 open_id
  * @param {object} config         daemon 配置（兼容旧 operator_ids）
+ * @param {object} [opts]
+ * @param {boolean} [opts.fromAllowedChat]  消息来自 allowed_chat_ids 命中的群。
+ *   当为 true 且 senderId 未在 users.yaml 显式登记时，直接判为 admin
+ *   （群级白名单已经做过准入控制，再叠用户级 operator_ids 是冗余）。
+ *   users.yaml 里显式登记的角色仍然受尊重。
  * @returns {object} userCtx { senderId, role, name, allowedActions, can(action) }
  */
-function resolveUserCtx(senderId, config) {
+function resolveUserCtx(senderId, config, opts = {}) {
+  const fromAllowedChat = !!(opts && opts.fromAllowedChat);
   const userData = loadUsers();
   // Per-platform bootstrap: Feishu open_id starts with "ou_", Telegram IDs are numeric.
   const allUsers = userData && userData.users ? userData.users : {};
@@ -194,6 +200,7 @@ function resolveUserCtx(senderId, config) {
   const hasConfiguredUsers = hasPlatformAdmin;
 
   let role, name, allowedActions;
+  let implicitAdmin = false;
 
   if (!senderId) {
     // 无 ID（Telegram 等）— 兼容旧逻辑，视为 admin
@@ -215,6 +222,16 @@ function resolveUserCtx(senderId, config) {
       } else {
         allowedActions = [];
       }
+    } else if (fromAllowedChat) {
+      // Group-whitelist trust: messages reaching us through allowed_chat_ids
+      // already passed chat-level access control. Anyone who can speak in the
+      // group is treated as admin without needing operator_ids or yaml entry.
+      // (Explicit users.yaml entries above still win — admins can demote
+      // someone by writing them in.)
+      role = 'admin';
+      name = senderId.slice(-6);
+      allowedActions = ROLE_DEFAULT_ACTIONS.admin;
+      implicitAdmin = true;
     } else {
       // 兼容旧 operator_ids：若 senderId 在 operator_ids 中，视为 admin
       const operatorIds = (config && config.feishu && config.feishu.operator_ids) || [];
@@ -254,6 +271,7 @@ function resolveUserCtx(senderId, config) {
     isAdmin: role === 'admin',
     isMember: role === 'member',
     isStranger: role === 'stranger',
+    implicitAdmin,
     can(action) { return allowedActions.includes(action); },
     readOnly: role !== 'admin',
   };

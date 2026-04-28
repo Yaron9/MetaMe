@@ -49,7 +49,7 @@ function createBridgeStarter(deps) {
     return text || null;
   }
 
-  async function applyUserAcl({ bot, chatId, text, config, senderId, bypassAcl }) {
+  async function applyUserAcl({ bot, chatId, text, config, senderId, bypassAcl, fromAllowedChat }) {
     const trimmed = String(text || '').trim();
     const normalizedSenderId = normalizeSenderId(senderId);
     if (!trimmed || bypassAcl || !userAcl) {
@@ -58,9 +58,14 @@ function createBridgeStarter(deps) {
 
     let userCtx;
     try {
-      userCtx = userAcl.resolveUserCtx(normalizedSenderId, config || {});
+      userCtx = userAcl.resolveUserCtx(normalizedSenderId, config || {}, { fromAllowedChat: !!fromAllowedChat });
     } catch {
       return { blocked: false, readOnly: false, senderId: normalizedSenderId };
+    }
+    // Audit trail for implicit-admin upgrades — these users are NOT in users.yaml
+    // and gain admin via group-whitelist trust, so make their action visible.
+    if (userCtx && userCtx.implicitAdmin) {
+      try { log('INFO', `[ACL] implicit admin via allowed_chat_ids: chat=${chatId} sender=${normalizedSenderId}`); } catch { /* non-fatal */ }
     }
 
     const userCmd = userAcl.handleUserCommand(trimmed, userCtx);
@@ -803,6 +808,7 @@ function createBridgeStarter(deps) {
             config: liveCfg,
             senderId,
             bypassAcl: !isAllowedChat && !!isBindCmd,
+            fromAllowedChat: isAllowedChat,
           });
           if (acl.blocked) return;
           log('INFO', `Feishu file from ${chatId}: ${fileInfo.fileName} (key: ${fileInfo.fileKey}, msgId: ${fileInfo.messageId}, type: ${fileInfo.msgType})`);
@@ -850,6 +856,7 @@ function createBridgeStarter(deps) {
             config: liveCfg,
             senderId,
             bypassAcl: !isAllowedChat && !!isBindCmd,
+            fromAllowedChat: isAllowedChat,
           });
           if (acl.blocked) return;
           log('INFO', `Feishu message from ${chatId}: ${text.slice(0, 50)}`);
