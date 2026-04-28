@@ -2169,25 +2169,42 @@ if (isDaemon) {
           // Immediate credential validation — catches "wrong app_secret",
           // "app not published", "permission missing" etc. up front instead
           // of after the user has finished setup and tried to send a message.
+          //
+          // CAUTION: feishu-adapter.js triggers a synchronous SDK auto-install
+          // (and process.exit(1) on failure) at module-load time when the
+          // @larksuiteoapi/node-sdk is missing. We MUST avoid that path here:
+          // (a) it would block the wizard for tens of seconds, and (b) an
+          // install failure would kill `metame daemon init` outright,
+          // bypassing our try/catch. Pre-check via require.resolve and skip
+          // validation if the SDK isn't already available — the daemon will
+          // install it lazily on first start and validate then.
           console.log(`\n  ${icon("info")} Validating credentials with Feishu...`);
+          let sdkResolved = null;
           try {
-            const feishuAdapter = require(path.join(__dirname, 'scripts', 'feishu-adapter.js'));
-            const bot = feishuAdapter.createBot({
-              app_id: feishuAppId,
-              app_secret: feishuSecret,
-            });
-            const validation = await bot.validateCredentials();
-            if (validation && validation.ok) {
-              console.log(`  ${icon("ok")} Credentials valid. Feishu configured!`);
-            } else {
-              console.log(`  ${icon("warn")}  Credentials accepted but Feishu rejected the test call:`);
-              console.log(`     ${validation && validation.error ? validation.error : 'unknown error'}`);
-              console.log("     Common causes: app not published yet, wrong app_secret,");
-              console.log("     missing im:message permission. Daemon will still start; fix");
-              console.log("     in the console and re-run `metame restart`.");
+            sdkResolved = require.resolve('@larksuiteoapi/node-sdk');
+          } catch { /* not yet installed */ }
+          if (!sdkResolved) {
+            console.log(`  ${icon("info")} Skipped: Feishu SDK not installed yet (will validate on first daemon start).`);
+          } else {
+            try {
+              const feishuAdapter = require(path.join(__dirname, 'scripts', 'feishu-adapter.js'));
+              const bot = feishuAdapter.createBot({
+                app_id: feishuAppId,
+                app_secret: feishuSecret,
+              });
+              const validation = await bot.validateCredentials();
+              if (validation && validation.ok) {
+                console.log(`  ${icon("ok")} Credentials valid. Feishu configured!`);
+              } else {
+                console.log(`  ${icon("warn")}  Credentials accepted but Feishu rejected the test call:`);
+                console.log(`     ${validation && validation.error ? validation.error : 'unknown error'}`);
+                console.log("     Common causes: app not published yet, wrong app_secret,");
+                console.log("     missing im:message permission. Daemon will still start; fix");
+                console.log("     in the console and re-run `metame restart`.");
+              }
+            } catch (e) {
+              console.log(`  ${icon("warn")}  Validation skipped (${e.message}). Config saved anyway.`);
             }
-          } catch (e) {
-            console.log(`  ${icon("warn")}  Validation skipped (${e.message}). Config saved anyway.`);
           }
           console.log("  Note: allowed_chat_ids is empty = deny all users.");
           console.log("        Add chat IDs to daemon.yaml or use /agent bind from target chat.\n");
