@@ -245,10 +245,32 @@ async function createWorkspaceAgent({
             data: { ...data, autoChat: { chatId: newChatId, name: chatName } },
           };
         }
-        // Bind failed — record the failure but keep the project entry.
+        // Bind failed AFTER chat was created — keep enough info for recovery.
+        // Surface chatId/name so the user knows which chat exists, and write
+        // pendingActivations so /activate from inside that new chat works.
+        if (data.projectKey && pendingActivations) {
+          pendingActivations.set(data.projectKey, {
+            agentKey: data.projectKey,
+            agentName: projName,
+            cwd: data.cwd,
+            createdByChatId: String(chatId),
+            createdAt: Date.now(),
+            // Hint for downstream: the chat already exists, /activate from it.
+            preCreatedChatId: newChatId,
+            preCreatedChatName: chatName,
+          });
+        }
         return {
           ok: true,
-          data: { ...data, autoChat: { error: `bind failed: ${bindRes.error}` } },
+          data: {
+            ...data,
+            autoChat: {
+              chatId: newChatId,
+              name: chatName,
+              error: `bind failed: ${bindRes.error}`,
+              recoverable: true,
+            },
+          },
         };
       }
       // createChat failed — fall through to /activate path with diagnostic.

@@ -250,6 +250,48 @@ describe('daemon-agent-workflow auto-create-chat', () => {
     assert.equal(pending.size, 1);
   });
 
+  it('preserves chatId/name and writes pendingActivations when createChat ok but bind fails', async () => {
+    // Recovery scenario: the new chat exists in Feishu, but config-write
+    // failed (e.g. transient fs issue). User must be told which chat was
+    // created so they can /activate from it.
+    const failingTools = {
+      createNewWorkspaceAgent: async () => ({
+        ok: true,
+        data: { projectKey: 'foo', cwd: '/repo/foo', project: { name: 'foo' } },
+      }),
+      bindAgentToChat: async () => ({ ok: false, error: 'config write failed' }),
+    };
+    const pending = new Map();
+    const bot = {
+      createChat: async () => ({ ok: true, chatId: 'oc_orphan_chat' }),
+      sendMessage: async () => {},
+    };
+
+    const res = await createWorkspaceAgent({
+      agentTools: failingTools,
+      chatId: 'oc_creator',
+      agentName: 'foo',
+      workspaceDir: '',
+      pendingActivations: pending,
+      skipChatBinding: true,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (v) => v,
+      getDefaultEngine: () => 'claude',
+      bot,
+      senderOpenId: 'ou_human_001',
+    });
+
+    assert.equal(res.ok, true);
+    // chatId and name preserved so the user knows which chat was created.
+    assert.equal(res.data.autoChat.chatId, 'oc_orphan_chat');
+    assert.match(res.data.autoChat.name, /foo/);
+    assert.match(res.data.autoChat.error, /bind failed/);
+    assert.equal(res.data.autoChat.recoverable, true);
+    // pendingActivations written so /activate works from the new chat.
+    assert.equal(pending.size, 1);
+    assert.equal(pending.get('foo').preCreatedChatId, 'oc_orphan_chat');
+  });
+
   it('falls back to /activate when bot.createChat returns permission error', async () => {
     const tools = fakeAgentTools();
     const pending = new Map();

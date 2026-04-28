@@ -215,10 +215,19 @@ function createAgentIntentHandler(deps) {
       const engineTip = data.project && data.project.engine ? `\n引擎: ${data.project.engine}` : '';
       // If createWorkspaceAgent auto-created a Feishu chat and bound it, the
       // bot has already messaged the new chat — just confirm in the source chat.
-      if (data.autoChat && data.autoChat.chatId) {
+      if (data.autoChat && data.autoChat.chatId && !data.autoChat.error) {
         await bot.sendMessage(chatId,
           `✅ Agent「${projName}」已创建\n目录: ${data.cwd || '（未知）'}${engineTip}\n\n` +
           `已自动建好飞书群「${data.autoChat.name}」并把你拉进群里——直接打开新群和它对话即可。`
+        );
+      } else if (data.autoChat && data.autoChat.chatId && data.autoChat.error) {
+        // Chat was created but binding failed mid-way — give the user a clear
+        // recovery path so they don't end up with an orphan group.
+        await bot.sendMessage(chatId,
+          `⚠️ Agent「${projName}」已创建\n目录: ${data.cwd || '（未知）'}${engineTip}\n\n` +
+          `飞书群「${data.autoChat.name}」也已建好，但自动绑定失败:${data.autoChat.error}\n\n` +
+          `**手动恢复**: 在新群里发送 \`/activate\` 即可补绑（30分钟内有效）；\n` +
+          `或在任意群发 \`/agent bind ${projName} ${data.cwd || ''}\` 直接指定绑定。`
         );
       } else {
         const fallbackHint = data.autoChat && data.autoChat.error
