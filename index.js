@@ -2091,17 +2091,44 @@ if (isDaemon) {
         console.log("  Skipped.\n");
       }
 
+      // Tiny cross-platform "open URL in default browser" helper. Fire-and-
+      // forget — if the GUI isn't available (SSH/Docker/CI), we silently fall
+      // back and the user copy-pastes the URL from the terminal output.
+      const tryOpenInBrowser = (url) => {
+        try {
+          const { spawn: _spawn } = require('child_process');
+          const platform = process.platform;
+          const cmd = platform === 'darwin'
+            ? 'open'
+            : platform === 'win32'
+              ? 'cmd'
+              : 'xdg-open';
+          const args = platform === 'win32' ? ['/c', 'start', '""', url] : [url];
+          const child = _spawn(cmd, args, {
+            stdio: 'ignore',
+            detached: true,
+            ...(platform === 'win32' ? { shell: false, windowsHide: true } : {}),
+          });
+          child.on('error', () => { /* GUI unavailable, ignore */ });
+          child.unref();
+          return true;
+        } catch { return false; }
+      };
+
       // --- Feishu Setup ---
       console.log(`━━━ ${icon("feishu")} Feishu (Lark) Setup ━━━`);
       console.log("");
+      const FEISHU_CONSOLE_URL = 'https://open.feishu.cn/app';
       console.log("Step 1: Create an App");
-      console.log("  • Go to: https://open.feishu.cn/app");
+      console.log(`  • Opening browser to ${FEISHU_CONSOLE_URL} ...`);
+      const opened = tryOpenInBrowser(FEISHU_CONSOLE_URL);
+      if (!opened) console.log(`  • Open this URL manually: ${FEISHU_CONSOLE_URL}`);
       console.log("  • Click '创建企业自建应用' (Create Enterprise App)");
       console.log("  • Fill in app name and description");
       console.log("");
       console.log("Step 2: Get Credentials");
       console.log("  • In left sidebar → '凭证与基础信息' (Credentials)");
-      console.log("  • Copy App ID and App Secret");
+      console.log("  • Copy App ID and App Secret — you'll paste them below.");
       console.log("");
       console.log("Step 3: Enable Bot");
       console.log("  • In left sidebar → '应用能力' → '机器人' (Bot)");
@@ -2114,12 +2141,14 @@ if (isDaemon) {
       console.log("");
       console.log("Step 5: Add Permissions");
       console.log("  • In left sidebar → '权限管理' (Permissions)");
-      console.log("  • Search and enable these 5 permissions:");
+      console.log("  • Search and enable these 7 permissions:");
       console.log("    → im:message                       (获取与发送单聊、群组消息)");
       console.log("    → im:message.p2p_msg:readonly      (读取用户发给机器人的单聊消息)");
       console.log("    → im:message.group_at_msg:readonly (接收群聊中@机器人消息事件)");
       console.log("    → im:message:send_as_bot           (以应用的身份发消息)");
-      console.log("    → im:resource                      (文件上传下载 - for file transfer)");
+      console.log("    → im:resource                      (文件上传下载 - send-to-user skill)");
+      console.log("    → im:chat                          (创建群聊 - 自动建 agent 群)");
+      console.log("    → im:chat.member                   (邀请用户进群 - 自动建 agent 群)");
       console.log("");
       console.log("Step 6: Publish");
       console.log("  • In left sidebar → '版本管理与发布' (Version Management)");
@@ -2136,7 +2165,47 @@ if (isDaemon) {
           cfg.feishu.app_id = feishuAppId;
           cfg.feishu.app_secret = feishuSecret;
           if (!cfg.feishu.allowed_chat_ids) cfg.feishu.allowed_chat_ids = [];
-          console.log(`  ${icon("ok")} Feishu configured!`);
+
+          // Immediate credential validation — catches "wrong app_secret",
+          // "app not published", "permission missing" etc. up front instead
+          // of after the user has finished setup and tried to send a message.
+          //
+          // CAUTION: feishu-adapter.js triggers a synchronous SDK auto-install
+          // (and process.exit(1) on failure) at module-load time when the
+          // @larksuiteoapi/node-sdk is missing. We MUST avoid that path here:
+          // (a) it would block the wizard for tens of seconds, and (b) an
+          // install failure would kill `metame daemon init` outright,
+          // bypassing our try/catch. Pre-check via require.resolve and skip
+          // validation if the SDK isn't already available — the daemon will
+          // install it lazily on first start and validate then.
+          console.log(`\n  ${icon("info")} Validating credentials with Feishu...`);
+          let sdkResolved = null;
+          try {
+            sdkResolved = require.resolve('@larksuiteoapi/node-sdk');
+          } catch { /* not yet installed */ }
+          if (!sdkResolved) {
+            console.log(`  ${icon("info")} Skipped: Feishu SDK not installed yet (will validate on first daemon start).`);
+          } else {
+            try {
+              const feishuAdapter = require(path.join(__dirname, 'scripts', 'feishu-adapter.js'));
+              const bot = feishuAdapter.createBot({
+                app_id: feishuAppId,
+                app_secret: feishuSecret,
+              });
+              const validation = await bot.validateCredentials();
+              if (validation && validation.ok) {
+                console.log(`  ${icon("ok")} Credentials valid. Feishu configured!`);
+              } else {
+                console.log(`  ${icon("warn")}  Credentials accepted but Feishu rejected the test call:`);
+                console.log(`     ${validation && validation.error ? validation.error : 'unknown error'}`);
+                console.log("     Common causes: app not published yet, wrong app_secret,");
+                console.log("     missing im:message permission. Daemon will still start; fix");
+                console.log("     in the console and re-run `metame restart`.");
+              }
+            } catch (e) {
+              console.log(`  ${icon("warn")}  Validation skipped (${e.message}). Config saved anyway.`);
+            }
+          }
           console.log("  Note: allowed_chat_ids is empty = deny all users.");
           console.log("        Add chat IDs to daemon.yaml or use /agent bind from target chat.\n");
         }
