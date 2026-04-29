@@ -281,6 +281,53 @@ function applyWikiSchema(db) {
       FOREIGN KEY (entity_id) REFERENCES research_entities(id) ON DELETE CASCADE
     )
   `);
+
+  // ── recall_audit (v4.1 §P1.17): observe + inject phase telemetry ──────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS recall_audit (
+      id              TEXT PRIMARY KEY,
+      ts              TEXT DEFAULT (datetime('now')),
+      phase           TEXT NOT NULL DEFAULT 'observe',
+      chat_id         TEXT,
+      project         TEXT,
+      scope           TEXT,
+      agent_key       TEXT,
+      engine          TEXT,
+      session_started INTEGER DEFAULT 0,
+      should_recall   INTEGER DEFAULT 0,
+      router_reason   TEXT,
+      query_hashes    TEXT DEFAULT '[]',
+      anchor_labels   TEXT DEFAULT '[]',
+      modes           TEXT DEFAULT '[]',
+      source_refs     TEXT DEFAULT '[]',
+      injected_chars  INTEGER DEFAULT 0,
+      truncated       INTEGER DEFAULT 0,
+      wiki_dropped    INTEGER DEFAULT 0,
+      outcome         TEXT DEFAULT 'unknown'
+                      CHECK (outcome IN ('unknown','planned','injected','used','ignored','corrected','harmful')),
+      error_message  TEXT
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_recall_audit_ts      ON recall_audit(ts)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_recall_audit_phase   ON recall_audit(phase, ts)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_recall_audit_project ON recall_audit(project, scope, ts)');
+
+  // ── memory_review_decisions (v4.1 §P1.7): Phase-3 candidate review idempotency ──
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS memory_review_decisions (
+      content_hash TEXT PRIMARY KEY,
+      item_id      TEXT NOT NULL,
+      decision     TEXT NOT NULL CHECK (decision IN ('promoted','merged','rejected','aged_out')),
+      reason       TEXT,
+      reviewed_at  TEXT DEFAULT (datetime('now')),
+      reviewer     TEXT DEFAULT 'nightly'
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_review_decisions_item ON memory_review_decisions(item_id)');
+
+  // ── memory_items.archive_reason (v4.1 §P1.9): tracks why item was archived ─
+  // NULL = legacy archive (reason unknown); positive-match queries only.
+  try { db.exec('ALTER TABLE memory_items ADD COLUMN archive_reason TEXT'); } catch { /* already exists */ }
 }
 
 module.exports = { applyWikiSchema };

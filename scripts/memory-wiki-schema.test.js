@@ -122,3 +122,105 @@ test('DELETE wiki_pages removes rowid from FTS', () => {
   assert.equal(ftsRow, undefined, 'wiki_pages_fts rowid should be gone after DELETE');
   db.close();
 });
+
+test('recall_audit table exists after applyWikiSchema', () => {
+  const db = openMemoryDb();
+  applyWikiSchema(db);
+  const row = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='recall_audit'"
+  ).get();
+  assert.ok(row, 'recall_audit table should exist');
+  db.close();
+});
+
+test('recall_audit accepts observe-only insert with hashed/redacted columns', () => {
+  const db = openMemoryDb();
+  applyWikiSchema(db);
+  db.prepare(`
+    INSERT INTO recall_audit (id, phase, project, should_recall, router_reason, query_hashes, anchor_labels)
+    VALUES ('ra_001', 'observe', 'metame', 1, 'explicit-history', '["abc123"]', '["fn:saveFacts"]')
+  `).run();
+  const row = db.prepare("SELECT phase, should_recall, router_reason, anchor_labels FROM recall_audit WHERE id='ra_001'").get();
+  assert.equal(row.phase, 'observe');
+  assert.equal(row.should_recall, 1);
+  assert.equal(row.router_reason, 'explicit-history');
+  assert.equal(row.anchor_labels, '["fn:saveFacts"]');
+  db.close();
+});
+
+test('recall_audit rejects invalid outcome value via CHECK constraint', () => {
+  const db = openMemoryDb();
+  applyWikiSchema(db);
+  assert.throws(() => {
+    db.prepare(`INSERT INTO recall_audit (id, outcome) VALUES ('ra_bad', 'totally-invalid')`).run();
+  }, /CHECK constraint/);
+  db.close();
+});
+
+test('memory_review_decisions table exists after applyWikiSchema', () => {
+  const db = openMemoryDb();
+  applyWikiSchema(db);
+  const row = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_review_decisions'"
+  ).get();
+  assert.ok(row, 'memory_review_decisions table should exist');
+  db.close();
+});
+
+test('memory_review_decisions enforces decision CHECK and primary key', () => {
+  const db = openMemoryDb();
+  applyWikiSchema(db);
+  db.prepare(`
+    INSERT INTO memory_review_decisions (content_hash, item_id, decision)
+    VALUES ('h1', 'item_a', 'promoted')
+  `).run();
+  // duplicate content_hash blocked
+  assert.throws(() => {
+    db.prepare(`INSERT INTO memory_review_decisions (content_hash, item_id, decision)
+                VALUES ('h1', 'item_b', 'promoted')`).run();
+  }, /UNIQUE|PRIMARY/);
+  // invalid decision blocked
+  assert.throws(() => {
+    db.prepare(`INSERT INTO memory_review_decisions (content_hash, item_id, decision)
+                VALUES ('h2', 'item_c', 'maybe')`).run();
+  }, /CHECK constraint/);
+  // INSERT OR IGNORE on duplicate is no-op (idempotency contract)
+  db.prepare(`INSERT OR IGNORE INTO memory_review_decisions (content_hash, item_id, decision)
+              VALUES ('h1', 'item_a', 'promoted')`).run();
+  const count = db.prepare(`SELECT COUNT(*) AS n FROM memory_review_decisions WHERE content_hash='h1'`).get();
+  assert.equal(count.n, 1);
+  db.close();
+});
+
+test('memory_items.archive_reason ALTER is idempotent and adds nullable column', () => {
+  const db = openMemoryDb();
+  // Simulate memory.js creating memory_items first.
+  db.exec(`
+    CREATE TABLE memory_items (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'candidate',
+      content TEXT NOT NULL,
+      supersedes_id TEXT
+    )
+  `);
+  applyWikiSchema(db);
+  applyWikiSchema(db); // second call must not throw
+
+  // Verify column exists by inserting a row with archive_reason set.
+  db.prepare(`INSERT INTO memory_items (id, kind, content, archive_reason) VALUES ('mi_1', 'fact', 'x', 'aged_out')`).run();
+  const row = db.prepare(`SELECT archive_reason FROM memory_items WHERE id='mi_1'`).get();
+  assert.equal(row.archive_reason, 'aged_out');
+
+  // NULL semantics: legacy archive without reason.
+  db.prepare(`INSERT INTO memory_items (id, kind, content) VALUES ('mi_legacy', 'fact', 'x')`).run();
+  const legacy = db.prepare(`SELECT archive_reason FROM memory_items WHERE id='mi_legacy'`).get();
+  assert.equal(legacy.archive_reason, null);
+  db.close();
+});
+
+test('archive_reason ALTER does not throw when memory_items does not exist (table-absent path)', () => {
+  const db = openMemoryDb();
+  applyWikiSchema(db); // memory_items absent — ALTER should be swallowed silently
+  db.close();
+});
