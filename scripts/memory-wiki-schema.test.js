@@ -148,6 +148,18 @@ test('recall_audit accepts observe-only insert with hashed/redacted columns', ()
   db.close();
 });
 
+test('recall_audit accepts every documented outcome enum value', () => {
+  const db = openMemoryDb();
+  applyWikiSchema(db);
+  const valid = ['unknown', 'planned', 'injected', 'used', 'ignored', 'corrected', 'harmful'];
+  valid.forEach((outcome, i) => {
+    db.prepare(`INSERT INTO recall_audit (id, outcome) VALUES (?, ?)`).run(`ra_o_${i}`, outcome);
+  });
+  const count = db.prepare(`SELECT COUNT(*) AS n FROM recall_audit`).get();
+  assert.equal(count.n, valid.length);
+  db.close();
+});
+
 test('recall_audit rejects invalid outcome value via CHECK constraint', () => {
   const db = openMemoryDb();
   applyWikiSchema(db);
