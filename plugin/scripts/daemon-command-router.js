@@ -1,7 +1,6 @@
 'use strict';
 
 const { resolveEngineModel } = require('./daemon-engine-runtime');
-const { createAgentIntentHandler } = require('./daemon-agent-intent');
 const { rawChatId: extractOriginalChatId, isThreadChatId } = require('./core/thread-chat-id');
 const { createWikiCommandHandler } = require('./daemon-wiki');
 
@@ -26,9 +25,9 @@ function createCommandRouter(deps) {
     activeProcesses,
     pipeline,      // message pipeline — used for interrupt/clearQueue
     log,
-    agentTools,
+    agentTools: _agentTools,
     pendingAgentFlows,
-    pendingActivations,
+    pendingActivations: _pendingActivations,
     agentFlowTtlMs,
     getDefaultEngine,
     getDb,              // optional — () → DatabaseSync (for wiki commands)
@@ -42,7 +41,7 @@ function createCommandRouter(deps) {
     return Number.isFinite(num) && num > 0 ? num : (10 * 60 * 1000);
   }
 
-  function hasFreshPendingFlow(flowKey) {
+  function _hasFreshPendingFlow(flowKey) {
     if (!pendingAgentFlows) return false;
     const flow = pendingAgentFlows.get(flowKey);
     if (!flow) return false;
@@ -217,7 +216,7 @@ function createCommandRouter(deps) {
     return null;
   }
 
-  function getBoundProjectForChat(chatId, cfg) {
+  function _getBoundProjectForChat(chatId, cfg) {
     const map = {
       ...(cfg.telegram ? cfg.telegram.chat_agent_map : {}),
       ...(cfg.feishu ? cfg.feishu.chat_agent_map : {}),
@@ -356,18 +355,9 @@ function createCommandRouter(deps) {
     });
   }
 
-  const tryHandleAgentIntent = createAgentIntentHandler({
-    agentTools,
-    handleAgentCommand,
-    attachOrCreateSession,
-    normalizeCwd,
-    getDefaultEngine,
-    loadConfig,
-    getBoundProjectForChat,
-    log,
-    pendingActivations,
-    hasFreshPendingFlow,
-  });
+  // Agent intent classification removed — now handled by agent-management skill.
+  // tryHandleAgentIntent was previously created here via createAgentIntentHandler().
+  // Explicit /agent commands still work through handleAgentCommand above.
 
   async function handleCommand(bot, chatId, text, config, executeTaskByName, senderId = null, readOnly = false, _meta = {}) {
     if (text && !text.startsWith('/chatid') && !text.startsWith('/myid')) log('INFO', `CMD [${String(chatId).slice(-8)}]: ${text.slice(0, 80)}`);
@@ -593,9 +583,8 @@ function createCommandRouter(deps) {
         return;
       }
 
-      if (await tryHandleAgentIntent(bot, chatId, text, config, senderId)) {
-        return;
-      }
+      // Agent intent classification removed — now handled by agent-management skill
+      // via Claude's semantic understanding instead of daemon-level regex matching.
     }
 
     const daemonCfg = (config && config.daemon) || {};
