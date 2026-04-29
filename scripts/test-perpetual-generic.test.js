@@ -170,7 +170,7 @@ describe('Phase C: Generic perpetual project (no research, no team)', () => {
     assert.equal(afterState.reactive.code_audit.depth, 0);
 
     // Verify notification sent
-    assert.ok(deps._notifications.some(n => n.includes('mission completed')));
+    assert.ok(deps._notifications.some(n => n.includes('Code Auditor') && n.includes('完成')));
   });
 
   it('handleReactiveOutput ignores non-reactive projects', () => {

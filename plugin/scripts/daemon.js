@@ -259,7 +259,10 @@ function loadConfig() {
 function writeConfigSafe(nextConfig) {
   const tmpFile = `${CONFIG_FILE}.tmp.${process.pid}.${Date.now()}`;
   try {
-    fs.writeFileSync(tmpFile, yaml.dump(nextConfig, { lineWidth: -1 }), 'utf8');
+    const dumped = yaml.dump(nextConfig, { lineWidth: -1 });
+    // Validate: round-trip parse before committing to disk
+    yaml.load(dumped);
+    fs.writeFileSync(tmpFile, dumped, 'utf8');
     fs.renameSync(tmpFile, CONFIG_FILE);
   } catch (e) {
     try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch { }

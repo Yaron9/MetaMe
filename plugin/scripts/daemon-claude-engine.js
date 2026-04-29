@@ -1931,6 +1931,9 @@ function createClaudeEngine(deps) {
           log('WARN', `Codex thread migrated for ${chatId}: ${prevSessionId.slice(0, 8)} -> ${safeNextId.slice(0, 8)}`);
         }
         // Keep card header in sync with the real session ID reported by the engine
+        if (!_ackCardHeader && bot.sendCard) {
+          _ackCardHeader = { title: `📎 ${safeNextId.slice(0, 8)}`, color: 'grey' };
+        }
         if (_ackCardHeader && _ackCardHeader._baseTitle) {
           _ackCardHeader = { ..._ackCardHeader, title: `${_ackCardHeader._baseTitle}（${safeNextId.slice(0, 8)}）` };
         }
@@ -1941,7 +1944,11 @@ function createClaudeEngine(deps) {
       if (_ackCardHeader) {
         _ackCardHeader._baseTitle = _ackCardHeader.title; // preserve original title for onSession updates
       }
-      if (session && session.id && _ackCardHeader) {
+      // For non-bound-project chats: create a minimal header to display session ID (Feishu cards)
+      if (!_ackCardHeader && bot.sendCard && session && session.id) {
+        _ackCardHeader = { title: `📎 ${session.id.slice(0, 8)}`, color: 'grey' };
+      }
+      if (session && session.id && _ackCardHeader && _ackCardHeader._baseTitle) {
         _ackCardHeader = { ..._ackCardHeader, title: `${_ackCardHeader._baseTitle}（${session.id.slice(0, 8)}）` };
       }
 
@@ -2336,13 +2343,15 @@ function createClaudeEngine(deps) {
               log('DEBUG', `[REPLY:${chatId}] sendCard done msgId=${replyMsg && replyMsg.message_id}`);
             } else {
               log('DEBUG', `[REPLY:${chatId}] sending sendMarkdown`);
-              replyMsg = await bot.sendMarkdown(chatId, cleanOutput);
+              const _textSessionSuffix = session && session.id ? `\n\n📎 ${session.id.slice(0, 8)}` : '';
+              replyMsg = await bot.sendMarkdown(chatId, cleanOutput + _textSessionSuffix);
               log('DEBUG', `[REPLY:${chatId}] sendMarkdown done msgId=${replyMsg && replyMsg.message_id}`);
             }
           }
         } catch (sendErr) {
           log('WARN', `sendCard/sendMarkdown failed (${sendErr.message}), falling back to sendMessage`);
-          try { replyMsg = await bot.sendMessage(chatId, cleanOutput); } catch (e2) {
+          const _textSessionSuffix = session && session.id ? `\n\n📎 ${session.id.slice(0, 8)}` : '';
+          try { replyMsg = await bot.sendMessage(chatId, cleanOutput + _textSessionSuffix); } catch (e2) {
             log('ERROR', `sendMessage fallback also failed: ${e2.message}`);
           }
         }

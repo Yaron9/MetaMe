@@ -46,17 +46,17 @@ test('queryRawFacts returns totalCount=0 when no facts exist', () => {
   db.close();
 });
 
-test('queryRawFacts counts active raw facts only (not derived)', () => {
+test('queryRawFacts counts active and candidate raw facts only (not derived)', () => {
   const db = buildTestDb();
 
   insertFact(db, { id: 'f1', tag: 'session' });
   insertFact(db, { id: 'f2', tag: 'session' });
   insertFact(db, { id: 'f3', tag: 'session', relation: 'synthesized_insight' }); // derived, excluded
-  insertFact(db, { id: 'f4', tag: 'session', state: 'candidate' });               // candidate, excluded
+  insertFact(db, { id: 'f4', tag: 'session', state: 'candidate' });               // candidate, included for first build
 
   const { totalCount, facts } = queryRawFacts(db, 'session');
-  assert.equal(totalCount, 2, 'should count only active non-derived facts');
-  assert.equal(facts.length, 2);
+  assert.equal(totalCount, 3, 'should count active/candidate non-derived facts');
+  assert.equal(facts.length, 3);
   db.close();
 });
 
