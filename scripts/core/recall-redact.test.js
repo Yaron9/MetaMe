@@ -84,4 +84,90 @@ test('recall-redact', async (t) => {
     assert.equal(redactSecretsAndPii('上次的决策'), '上次的决策');
     assert.equal(redactSecretsAndPii('记得吗那个 bug'), '记得吗那个 bug');
   });
+
+  await t.test('redacts standalone bot_secret_*', () => {
+    const out = redactSecretsAndPii('config bot_secret_xyzABC123def env');
+    assert.match(out, /<metame>/);
+    assert.doesNotMatch(out, /xyzABC123def/);
+  });
+
+  await t.test('redacts standalone chat_ou_* and chat_oc_*', () => {
+    const out1 = redactSecretsAndPii('chat chat_ou_abcDEF12345 reference');
+    assert.match(out1, /<metame>/);
+    assert.doesNotMatch(out1, /abcDEF12345/);
+
+    const out2 = redactSecretsAndPii('group chat_oc_xyz98765 hello');
+    assert.match(out2, /<metame>/);
+  });
+
+  await t.test('redacts standalone Feishu open ID (ou_*/oc_*)', () => {
+    const out = redactSecretsAndPii('user ou_f873edab380d4836f93cc9e9b9104f5a today');
+    assert.match(out, /<feishu>|<hex>|<b64>/);
+    assert.doesNotMatch(out, /f873edab380d4836/);
+  });
+
+  await t.test('redacts UUID', () => {
+    const out = redactSecretsAndPii('id 550e8400-e29b-41d4-a716-446655440000 ref');
+    assert.match(out, /<uuid>/);
+    assert.doesNotMatch(out, /550e8400/);
+  });
+
+  await t.test('redacts JWT starting with hyphen-friendly base64url chars', () => {
+    const jwt = 'AbCdEfGhIj-_.KlMnOpQrSt-_.UvWxYzAbCd-_';
+    const out = redactSecretsAndPii(jwt);
+    assert.match(out, /<jwt>/);
+    assert.doesNotMatch(out, /AbCd/);
+  });
+
+  await t.test('mixed input: redacts every category in one pass', () => {
+    const mixed = 'user yaron@live.com phone +86 13511112222 jwt eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3OCJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c uuid 550e8400-e29b-41d4-a716-446655440000';
+    const out = redactSecretsAndPii(mixed);
+    assert.ok(out.length <= 64);
+    // None of the original sensitive substrings survive.
+    for (const leak of ['yaron@live.com', '13511112222', 'eyJhbGc', '550e8400']) {
+      assert.doesNotMatch(out, new RegExp(leak.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    }
+  });
+
+  await t.test('property: sensitive tokens never leak; output ≤64 chars; paths may keep head/tail', () => {
+    const sensitive = [
+      ['email',        'yaron@live.com',                                                                                          'yaron@live'],
+      ['phone',        '+86 135-1234-5678',                                                                                        '13512345678'],
+      ['jwt',          'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3OCJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c', 'eyJhbGc'],
+      ['secret-kv',    'bot_token=xyzABC123def456',                                                                                'xyzABC123'],
+      ['metame-token', 'bot_secret_xyzABC123def',                                                                                  'xyzABC123def'],
+      ['feishu-id',    'ou_f873edab380d4836f93cc9e9b9104f5a',                                                                       'f873edab'],
+      ['uuid',         '550e8400-e29b-41d4-a716-446655440000',                                                                      '550e8400'],
+      ['sha256',       'deadbeefcafe1234567890abcdef1234567890abcdef1234567890abcdef1234',                                          'deadbeef'],
+      ['base64',       'YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU=',                                                              'YWJjZGVm'],
+    ];
+    for (const [name, raw, fingerprint] of sensitive) {
+      const out = redactSecretsAndPii(raw);
+      assert.ok(out.length <= 64, `${name}: output ${out.length}>64: ${out}`);
+      const escaped = fingerprint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      assert.doesNotMatch(out, new RegExp(escaped), `${name}: leaked "${fingerprint}" in output: ${out}`);
+    }
+
+    // Paths are allowed to keep head/tail intentionally — only assert length cap.
+    const longPath = '/Users/yaron/AGI/MetaMe/scripts/very/deep/nested/path/with/many/components/file.js';
+    assert.ok(redactSecretsAndPii(longPath).length <= 64);
+    // URL-with-query: path part is preserved by design, query part must be fully dropped.
+    const url = '/api/users?token=secretSauce&id=42';
+    const urlOut = redactSecretsAndPii(url);
+    assert.ok(urlOut.length <= 64);
+    assert.doesNotMatch(urlOut, /secretSauce/);
+    assert.doesNotMatch(urlOut, /\?/);
+  });
+
+  await t.test('order stability: JWT must be detected before hex/base64 swallows its segments', () => {
+    const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3OCJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
+    const out = redactSecretsAndPii(jwt);
+    assert.equal(out, '<jwt>');
+  });
+
+  await t.test('order stability: pure sha256 hex resolves to <hex> not <b64>', () => {
+    const out = redactSecretsAndPii('deadbeefcafe1234567890abcdef1234567890abcdef1234567890abcdef1234');
+    assert.match(out, /<hex>/);
+    assert.doesNotMatch(out, /<b64>/);
+  });
 });
