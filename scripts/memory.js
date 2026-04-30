@@ -182,7 +182,7 @@ function saveSessionSource(source) {
   return upsertSessionSource(getDb(), source);
 }
 
-function searchMemoryItems(query, { kind = null, scope = null, project = null, state = 'active', limit = 20 } = {}) {
+function searchMemoryItems(query, { kind = null, scope = null, project = null, state = 'active', limit = 20, trackSearch = true } = {}) {
   const db = getDb();
   const conditions = [];
   const params = [];
@@ -215,7 +215,7 @@ function searchMemoryItems(query, { kind = null, scope = null, project = null, s
     try {
       const rows = db.prepare(sql).all(sanitized, ...params, limit);
       if (rows.length > 0) {
-        _trackSearch(rows.map(r => r.id));
+        if (trackSearch) _trackSearch(rows.map(r => r.id));
         return rows;
       }
     } catch { /* FTS error, fall through to LIKE */ }
@@ -228,7 +228,7 @@ function searchMemoryItems(query, { kind = null, scope = null, project = null, s
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
   const fallbackSql = `SELECT mi.* FROM memory_items mi ${where} ORDER BY mi.created_at DESC LIMIT ?`;
   const rows = db.prepare(fallbackSql).all(...params, limit);
-  if (rows.length > 0) _trackSearch(rows.map(r => r.id));
+  if (rows.length > 0 && trackSearch) _trackSearch(rows.map(r => r.id));
   return rows;
 }
 
@@ -416,13 +416,14 @@ function saveFactLabels() {
   return { saved: 0, skipped: 0 };
 }
 
-function searchFacts(query, { limit = 5, project = null, scope = null } = {}) {
+function searchFacts(query, { limit = 5, project = null, scope = null, trackSearch = true } = {}) {
   if (!query || !query.trim()) return [];
   const rows = searchMemoryItems(query, {
     state: 'active',
     project: project || null,
     scope: scope || null,
     limit,
+    trackSearch,
   }).filter(r => r.kind === 'insight' || r.kind === 'convention');
 
   return rows.map(r => ({
@@ -442,7 +443,7 @@ async function searchFactsAsync(query, opts) {
   return searchFacts(query, opts);
 }
 
-function searchSessions(query, { limit = 5, project = null, scope = null } = {}) {
+function searchSessions(query, { limit = 5, project = null, scope = null, trackSearch = true } = {}) {
   if (!query || !query.trim()) return [];
   return searchMemoryItems(query, {
     kind: 'episode',
@@ -450,6 +451,7 @@ function searchSessions(query, { limit = 5, project = null, scope = null } = {})
     project: project || null,
     scope: scope || null,
     limit,
+    trackSearch,
   }).map(r => ({
     id: r.session_id || r.id,
     project: r.project,
