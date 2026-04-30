@@ -565,6 +565,28 @@ async function hybridSearchWiki(query, { ftsOnly = false, expand = false, trackS
   }
 }
 
+/**
+ * Look up topic_tags for a list of wiki page slugs.
+ * Returns Map<slug, string[]>. Missing or unparseable rows yield [].
+ * Used by scripts/memory-recall.js to enforce v4.1 §P1.10 wiki tag-overlap
+ * filtering without exposing the raw db handle to consumers.
+ */
+function getWikiTopicTags(slugs) {
+  const out = new Map();
+  if (!Array.isArray(slugs) || slugs.length === 0) return out;
+  try {
+    const db = getDb();
+    const placeholders = slugs.map(() => '?').join(',');
+    const rows = db.prepare(`SELECT slug, topic_tags FROM wiki_pages WHERE slug IN (${placeholders})`).all(...slugs);
+    for (const r of rows) {
+      let tags = [];
+      try { const parsed = JSON.parse(r.topic_tags || '[]'); if (Array.isArray(parsed)) tags = parsed; } catch { /* keep [] */ }
+      out.set(r.slug, tags);
+    }
+  } catch { /* non-fatal */ }
+  return out;
+}
+
 module.exports = {
   // core
   saveMemoryItem,
@@ -578,6 +600,7 @@ module.exports = {
   // wiki
   searchWikiAndFacts,
   hybridSearchWiki,
+  getWikiTopicTags,
   // compatibility
   saveSession,
   saveFacts,
