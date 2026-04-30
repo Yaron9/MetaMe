@@ -155,11 +155,9 @@ async function assembleRecallContext({ plan, scope = {}, budget = {}, search = {
   };
   const totalChars = Number.isFinite(budget.totalChars) ? budget.totalChars : DEFAULT_TOTAL_CHARS;
   const perItem = budget.perItem || undefined;
-  const searchOpts = {
-    ftsOnly: !!search.ftsOnly,
-    trackSearch: false,                  // forced for prompt-bound recall
-    preferState: search.preferState || 'active',
-  };
+  // searchFacts/searchSessions internally hard-pin state='active' so we don't
+  // expose preferState here. trackSearch is forced false for prompt-bound recall.
+  const searchOpts = { ftsOnly: !!search.ftsOnly };
 
   const query = _anchorsToQuery(plan.anchors);
   const modes = Array.isArray(plan.modes) ? plan.modes : [];
