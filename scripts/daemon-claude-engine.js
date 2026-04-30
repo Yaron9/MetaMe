@@ -1775,6 +1775,26 @@ function createClaudeEngine(deps) {
         projectKey,
         log,
       });
+
+      // PR1 Step 12: observe-only recall audit. Computes a plan and writes a
+      // phase='observe' row to recall_audit. Does NOT change composePrompt
+      // arguments or the resulting prompt bytes (that's PR2's recallHint slot).
+      // Failure is fully swallowed inside observeRecall.
+      try {
+        const { observeRecall } = require('./core/recall-observe');
+        observeRecall({
+          prompt,
+          runtime: { engine: runtime.name, sessionStarted: !!session.started },
+          scope: {
+            project: boundProjectKey || projectKey || null,
+            workspaceScope: null,
+            agentKey: boundProjectKey || null,
+          },
+          chatId,
+          log,
+        });
+      } catch { /* defensive — observeRecall already wraps internally */ }
+
       // For warm process reuse: static context (daemonHint, memoryHint, etc.) is already
       // in the persistent process — skip those to save tokens. intentHint is dynamic
       // (varies per prompt), so include it even on warm reuse.
