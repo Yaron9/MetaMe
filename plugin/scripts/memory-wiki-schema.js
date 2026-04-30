@@ -283,34 +283,11 @@ function applyWikiSchema(db) {
   `);
 
   // ── recall_audit (v4.1 §P1.17): observe + inject phase telemetry ──────────
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS recall_audit (
-      id              TEXT PRIMARY KEY,
-      ts              TEXT DEFAULT (datetime('now')),
-      phase           TEXT NOT NULL DEFAULT 'observe',
-      chat_id         TEXT,
-      project         TEXT,
-      scope           TEXT,
-      agent_key       TEXT,
-      engine          TEXT,
-      session_started INTEGER DEFAULT 0,
-      should_recall   INTEGER DEFAULT 0,
-      router_reason   TEXT,
-      query_hashes    TEXT DEFAULT '[]',
-      anchor_labels   TEXT DEFAULT '[]',
-      modes           TEXT DEFAULT '[]',
-      source_refs     TEXT DEFAULT '[]',
-      injected_chars  INTEGER DEFAULT 0,
-      truncated       INTEGER DEFAULT 0,
-      wiki_dropped    INTEGER DEFAULT 0,
-      outcome         TEXT DEFAULT 'unknown'
-                      CHECK (outcome IN ('unknown','planned','injected','used','ignored','corrected','harmful')),
-      error_message  TEXT
-    )
-  `);
-  db.exec('CREATE INDEX IF NOT EXISTS idx_recall_audit_ts      ON recall_audit(ts)');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_recall_audit_phase   ON recall_audit(phase, ts)');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_recall_audit_project ON recall_audit(project, scope, ts)');
+  // DDL is shared with core/recall-audit-db.js via core/recall-audit-ddl.js
+  // (single source of truth, §0.5 no-redundancy).
+  const { RECALL_AUDIT_DDL, RECALL_AUDIT_INDEXES } = require('./core/recall-audit-ddl');
+  db.exec(RECALL_AUDIT_DDL);
+  for (const idx of RECALL_AUDIT_INDEXES) db.exec(idx);
 
   // ── memory_review_decisions (v4.1 §P1.7): Phase-3 candidate review idempotency ──
   db.exec(`
