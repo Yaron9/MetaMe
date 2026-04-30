@@ -108,6 +108,12 @@ function run() {
     db.exec('PRAGMA journal_mode = WAL');
     db.exec('PRAGMA busy_timeout = 5000');
 
+    // Ensure schema migrations (including memory_items.archive_reason) are applied
+    // before any mutate API call. Stand-alone GC may run before memory.js:getDb()
+    // touches this DB, so we cannot rely on getDb() to apply schema for us.
+    const { applyWikiSchema } = require('./memory-wiki-schema');
+    applyWikiSchema(db);
+
     const dbSizeBefore = getDbSizeBytes();
 
     const memoryModel = require('./core/memory-model');

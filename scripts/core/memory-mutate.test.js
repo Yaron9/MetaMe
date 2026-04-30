@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { DatabaseSync } = require('node:sqlite');
 const { archiveMemoryItem, setItemState } = require('./memory-mutate');
+const { applyWikiSchema } = require('../memory-wiki-schema');
 
 function makeDb() {
   const db = new DatabaseSync(':memory:');
@@ -156,5 +157,49 @@ test('memory-mutate.setItemState', async (t) => {
   await t.test('non-existent id is a no-op', () => {
     const db = makeDb();
     setItemState(db, 'does-not-exist', 'active');
+  });
+});
+
+test('regression: legacy DB schema (no archive_reason) requires applyWikiSchema', async (t) => {
+  await t.test('archiveMemoryItem fails on raw legacy schema without archive_reason', () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE memory_items (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'candidate',
+        content TEXT NOT NULL,
+        supersedes_id TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    db.prepare(`INSERT INTO memory_items (id, kind, content) VALUES ('a1', 'fact', 'x')`).run();
+    assert.throws(
+      () => archiveMemoryItem(db, 'a1', { reason: 'gc' }),
+      /no such column.*archive_reason/i,
+      'pre-migration schema must reject archiveMemoryItem'
+    );
+  });
+
+  await t.test('after applyWikiSchema migrates archive_reason, archiveMemoryItem succeeds', () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE memory_items (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'candidate',
+        content TEXT NOT NULL,
+        supersedes_id TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    db.prepare(`INSERT INTO memory_items (id, kind, content) VALUES ('a1', 'fact', 'x')`).run();
+    applyWikiSchema(db); // migrates archive_reason
+    archiveMemoryItem(db, 'a1', { reason: 'gc' });
+    const row = db.prepare(`SELECT state, archive_reason FROM memory_items WHERE id='a1'`).get();
+    assert.equal(row.state, 'archived');
+    assert.equal(row.archive_reason, 'gc');
   });
 });

@@ -278,6 +278,11 @@ async function run() {
     db.exec('PRAGMA journal_mode = WAL');
     db.exec('PRAGMA busy_timeout = 5000');
 
+    // Ensure schema migrations (including memory_items.archive_reason used by
+    // archiveMemoryItem in conflict resolution) are applied before any mutate call.
+    const { applyWikiSchema } = require('./memory-wiki-schema');
+    applyWikiSchema(db);
+
     const hotFacts = queryHotFacts(db);
     // Recent facts (last 1 day) used exclusively for incremental capsule appends,
     // preventing the 7-day rolling window from re-distilling the same facts repeatedly.
