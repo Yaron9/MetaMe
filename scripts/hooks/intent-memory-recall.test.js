@@ -52,11 +52,13 @@ test('intent-memory-recall: hint string carries CLI usage info', () => {
 test('intent-memory-recall: shim is string-only — does NOT require core/recall-plan (v4.1 §P1.14)', () => {
   const src = fs.readFileSync(path.join(__dirname, 'intent-memory-recall.js'), 'utf8');
   const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  // Each banned target is matched both with and without the .js suffix so
+  // require('../core/recall-plan.js') cannot slip past the invariant.
   for (const banned of ['../core/recall-plan', './core/recall-plan']) {
-    const re = new RegExp(`require\\s*\\(\\s*['"]${banned.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"]\\s*\\)`);
+    const re = new RegExp(`require\\s*\\(\\s*['"]${banned.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\.js)?['"]\\s*\\)`);
     assert.doesNotMatch(code, re, `shim must not require ${banned}`);
   }
   // Also assert it doesn't pull memory.js or daemon — it must be pure regex.
-  assert.doesNotMatch(code, /require\s*\(\s*['"][.\/]+memory['"]\s*\)/, 'shim must not require ./memory');
-  assert.doesNotMatch(code, /require\s*\(\s*['"][.\/]+daemon[\w-]*['"]\s*\)/, 'shim must not require any daemon module');
+  assert.doesNotMatch(code, /require\s*\(\s*['"][.\/]+memory(?:\.js)?['"]\s*\)/, 'shim must not require ./memory');
+  assert.doesNotMatch(code, /require\s*\(\s*['"][.\/]+daemon[\w-]*(?:\.js)?['"]\s*\)/, 'shim must not require any daemon module');
 });
