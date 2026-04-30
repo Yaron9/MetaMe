@@ -18,24 +18,27 @@ const { redactSecretsAndPii } = require('./recall-redact');
 // Trigger phrases. Each entry has a reason tag for audit attribution.
 const TRIGGER_PATTERNS = [
   { reason: 'explicit-history', re: /(?:上次|前几天|上周|前阵子).{0,6}(?:说|讨论|聊|提到|做|改|写|搞|弄|处理|商量|决定)/ },
-  { reason: 'explicit-history', re: /之前.{0,4}(?:说过|讨论过|聊过|提到过|商量过|做过|做的|的决定|的方案)/ },
-  { reason: 'explicit-history', re: /(?:还记得|记不记得|记得吗)/ },
-  { reason: 'explicit-history', re: /\b(?:last time|previously|remember when|do you remember|earlier we)\b/i },
-  { reason: 'decision-recall',  re: /(?:为什么这么(?:定|做|选)|当时怎么(?:决定|定的|想的)|以前怎么处理)/ },
+  { reason: 'explicit-history', re: /之前.{0,4}(?:说过|讨论过|聊过|提到过|商量过|做过|做的|的决定|的方案|修过|改过|实现过|做的时候)/ },
+  { reason: 'explicit-history', re: /(?:还记得|记不记得|记得吗|记得当时)/ },
+  { reason: 'explicit-history', re: /\b(?:last time|previously|remember when|do you remember|earlier we|as discussed earlier|what did we do before|how did we handle this before)\b/i },
+  { reason: 'decision-recall',  re: /(?:为什么这么(?:定|做|选)|当时怎么(?:决定|定的|想的)|(?:以前|之前)怎么处理)/ },
   { reason: 'recurrence',       re: /(?:又(?:出|遇)|再次出|同样的\s*(?:问题|bug|错误)|之前的\s*bug|之前那个\s*bug)/i },
   { reason: 'procedural',       re: /(?:怎么做|流程是|步骤是|以后遇到|复用一下|按之前的)/ },
 ];
 
-const NON_TRIGGER_PREFIXES = ['/status', '/tasks', '/agent', '/wiki', '/engine', '/help', '/clear'];
+// Slash-command prefixes require word boundary (space or end-of-text) to avoid
+// false-excluding e.g. "/statusx 上次" or any text that starts with these letters.
+const NON_TRIGGER_RE = /^\/(?:status|tasks|agent|wiki|engine|help|clear)(?:\s|$)/;
 const MIN_LENGTH = 4;
 const MAX_TEXT_FOR_SCAN = 4000;
 const MAX_ANCHORS = 8;
 
 const ANCHOR_PATTERNS = [
-  { kind: 'file',    re: /(?:^|[\s,'"`(])([./]?[\w-]+\/[\w./-]+\.(?:js|ts|tsx|jsx|py|md|json|yaml|yml|toml|sql|sh|css|html))(?=$|[\s,'"`)\]:.;])/g },
+  { kind: 'file',    re: /(?:^|[\s,'"`(])([./]?[\w-]+\/[\w./-]+\.(?:js|ts|tsx|jsx|py|md|json|yaml|yml|toml|sql|sh|css|html|env))(?=$|[\s,'"`)\]:.;])/g },
   { kind: 'fn',      re: /\b((?:[a-z][a-zA-Z0-9]*(?:Item|Memory|Search|Audit|Hint|Recall|Session|Schema|Embed|Wiki))|(?:[a-z][a-zA-Z0-9_]*[A-Z][a-zA-Z0-9]+))\s*\(/g },
-  { kind: 'errcode', re: /\b(E[A-Z][A-Z0-9_]{3,}|HTTP\s*\d{3}|SQLITE_[A-Z]+)\b/g },
+  { kind: 'errcode', re: /\b(E[A-Z0-9][A-Z0-9_]{2,}|HTTP\s*\d{3}|SQLITE_[A-Z]+)\b/g },
   { kind: 'config',  re: /\b([a-z][a-zA-Z0-9_]*\.(?:yaml|yml|json|toml|env))\b/g },
+  { kind: 'env-var', re: /\b([A-Z][A-Z0-9_]{4,}_(?:KEY|TOKEN|SECRET|URL|HOST|PORT|PATH|DIR|FILE|ID))\b/g },
 ];
 
 function _detectTriggers(text) {
@@ -73,7 +76,7 @@ function planRecall({ text, runtime, scope } = {}) {
   if (typeof text !== 'string') return _emptyPlan();
   const trimmed = text.trim();
   if (trimmed.length < MIN_LENGTH) return _emptyPlan();
-  if (NON_TRIGGER_PREFIXES.some(p => trimmed.startsWith(p))) return _emptyPlan();
+  if (NON_TRIGGER_RE.test(trimmed)) return _emptyPlan();
 
   const scanText = trimmed.length > MAX_TEXT_FOR_SCAN ? trimmed.slice(0, MAX_TEXT_FOR_SCAN) : trimmed;
 
@@ -95,7 +98,9 @@ function planRecall({ text, runtime, scope } = {}) {
   if (reasons.includes('explicit-history') || reasons.includes('decision-recall')) modes.push('working');
 
   // Soft hint to facade — actual budget enforced by recall-budget.js.
-  const hintBudget = Math.min(4000, 800 + 200 * anchors.length);
+  // Cap matches the calculable max (800 base + 8 anchors × 200 = 2400) instead
+  // of an unreachable 4000; the budget allocator will still apply totalBudget=4000.
+  const hintBudget = Math.min(2400, 800 + 200 * anchors.length);
 
   return {
     shouldRecall: true,

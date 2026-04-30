@@ -170,6 +170,59 @@ test('recall-plan: anchor extraction caps at MAX_ANCHORS', () => {
   assert.ok(p.anchors.length <= 8, `anchors capped at 8, got ${p.anchors.length}`);
 });
 
+test('recall-plan: extended trigger phrases (Codex Step 7 P2)', async (t) => {
+  await t.test('记得当时 (explicit-history extension)', () => {
+    assert.equal(planRecall({ text: '记得当时怎么改的吗', runtime: RUNTIME, scope: SCOPE }).reason, 'explicit-history');
+  });
+  await t.test('之前修过 / 改过 / 实现过 (explicit-history extension)', () => {
+    assert.equal(planRecall({ text: '之前修过这个 bug', runtime: RUNTIME, scope: SCOPE }).reason, 'explicit-history');
+    assert.equal(planRecall({ text: '之前实现过这个功能', runtime: RUNTIME, scope: SCOPE }).reason, 'explicit-history');
+    assert.equal(planRecall({ text: '之前改过的那个文件', runtime: RUNTIME, scope: SCOPE }).reason, 'explicit-history');
+  });
+  await t.test('之前怎么处理 (decision-recall extension)', () => {
+    assert.equal(planRecall({ text: '之前怎么处理这种情况', runtime: RUNTIME, scope: SCOPE }).reason, 'decision-recall');
+  });
+  await t.test('extended EN phrases', () => {
+    assert.equal(planRecall({ text: 'as discussed earlier we settled on this', runtime: RUNTIME, scope: SCOPE }).reason, 'explicit-history');
+    assert.equal(planRecall({ text: 'how did we handle this before', runtime: RUNTIME, scope: SCOPE }).reason, 'explicit-history');
+  });
+});
+
+test('recall-plan: env-var anchor extraction (Codex Step 7 P2)', () => {
+  const text = '上次设置 OPENAI_API_KEY 和 DATABASE_URL 之后 daemon 没起来';
+  const p = planRecall({ text, runtime: RUNTIME, scope: SCOPE });
+  assert.equal(p.shouldRecall, true);
+  const all = p.anchors.join(' ');
+  assert.match(all, /env-var:OPENAI_API_KEY/);
+  assert.match(all, /env-var:DATABASE_URL/);
+});
+
+test('recall-plan: .env file anchor extraction', () => {
+  const text = '还记得吗 scripts/foo/.env 那个设置';
+  const p = planRecall({ text, runtime: RUNTIME, scope: SCOPE });
+  assert.equal(p.shouldRecall, true);
+  assert.ok(p.anchors.some(a => a.includes('.env')), `expected .env anchor, got: ${p.anchors.join(',')}`);
+});
+
+test('recall-plan: slash-prefix non-trigger requires word boundary', async (t) => {
+  await t.test('exact /status with space remains non-trigger', () => {
+    assert.equal(planRecall({ text: '/status 上次的事', runtime: RUNTIME, scope: SCOPE }).shouldRecall, false);
+  });
+  await t.test('/statusx is NOT excluded — fall-through to phrase scan', () => {
+    const p = planRecall({ text: '/statusx 还记得吗', runtime: RUNTIME, scope: SCOPE });
+    assert.equal(p.shouldRecall, true, 'non-command prefix must allow recall');
+  });
+});
+
+test('recall-plan: hintBudget cap is reachable (Codex Step 7 P2)', () => {
+  // 8 anchors × 200 + 800 base = 2400; cap is 2400 so this matches exactly.
+  const files = Array.from({ length: 8 }, (_, i) => `scripts/f${i}.js`).join(' ');
+  const p = planRecall({ text: '上次改了 ' + files, runtime: RUNTIME, scope: SCOPE });
+  assert.equal(p.shouldRecall, true);
+  assert.equal(p.anchors.length, 8);
+  assert.equal(p.hintBudget, 2400);
+});
+
 test('recall-plan: deduplicates identical anchors', () => {
   const text = '上次改 scripts/memory.js scripts/memory.js scripts/memory.js';
   const p = planRecall({ text, runtime: RUNTIME, scope: SCOPE });
