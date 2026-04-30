@@ -72,20 +72,35 @@ function consumeTier(items, allowance, perItemSpec) {
   const taken = [];
   let used = 0;
   let dropped = 0;
+  let truncatedTexts = 0;
   if (!Array.isArray(items) || items.length === 0 || allowance <= 0) {
-    return { taken, used, dropped };
+    return { taken, used, dropped, truncatedTexts };
   }
   const { maxChars, maxItems } = perItemSpec;
   for (const raw of items) {
     if (taken.length >= maxItems) break;
     const text = typeof raw === 'string' ? raw : (raw && typeof raw.text === 'string' ? raw.text : '');
     if (!text) continue;
-    const capped = _truncate(text, maxChars);
+    const wasTruncated = text.length > maxChars;
+    const capped = wasTruncated ? _truncate(text, maxChars) : text;
     if (used + capped.length > allowance) { dropped++; continue; }
     taken.push({ text: capped, source: raw && raw.source != null ? raw.source : null });
     used += capped.length;
+    if (wasTruncated) truncatedTexts++;
   }
-  return { taken, used, dropped };
+  return { taken, used, dropped, truncatedTexts };
+}
+
+// Deep-merge a partial perItem override on top of PER_ITEM_DEFAULTS so caller
+// can supply e.g. { fact: { maxChars: 30 } } without losing the default
+// maxItems. Tier keys not mentioned by override fall through to defaults.
+function _mergePerItem(override) {
+  if (!override || typeof override !== 'object') return PER_ITEM_DEFAULTS;
+  const merged = {};
+  for (const tier of Object.keys(PER_ITEM_DEFAULTS)) {
+    merged[tier] = { ...PER_ITEM_DEFAULTS[tier], ...(override[tier] || {}) };
+  }
+  return merged;
 }
 
 /**
@@ -104,7 +119,7 @@ function consumeTier(items, allowance, perItemSpec) {
  */
 function consumeTiers({ items = {}, totalChars = 4000, perItem } = {}) {
   const budget = allocateBudget(totalChars);
-  const cap = perItem ? { ...PER_ITEM_DEFAULTS, ...perItem } : PER_ITEM_DEFAULTS;
+  const cap = _mergePerItem(perItem);
 
   const order = ['facts', 'wiki', 'working', 'sessions'];
   let spillover = 0;
@@ -123,8 +138,8 @@ function consumeTiers({ items = {}, totalChars = 4000, perItem } = {}) {
     used[tier] = result.used;
     totalUsed += result.used;
     dropped += result.dropped;
-    if (result.dropped > 0) truncated = true;
-    if (result.taken.some(t => t.text.endsWith(TRUNC_SUFFIX))) truncated = true;
+    if (result.dropped > 0 || result.truncatedTexts > 0) truncated = true;
+    // Items beyond maxItems cap also count as truncation signal.
     if (tierItems.length > result.taken.length + result.dropped) truncated = true;
     spillover = allowance - result.used;
   }

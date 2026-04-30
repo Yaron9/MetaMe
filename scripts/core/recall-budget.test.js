@@ -34,10 +34,10 @@ test('allocateBudget: invalid input falls back to default 4000', () => {
 });
 
 test('consumeTier: empty inputs return zero result', () => {
-  const out = consumeTier([], 1000, PER_ITEM_DEFAULTS.fact);
-  assert.deepEqual(out, { taken: [], used: 0, dropped: 0 });
-  assert.deepEqual(consumeTier(null, 100, PER_ITEM_DEFAULTS.fact), { taken: [], used: 0, dropped: 0 });
-  assert.deepEqual(consumeTier(['x'], 0, PER_ITEM_DEFAULTS.fact), { taken: [], used: 0, dropped: 0 });
+  const expected = { taken: [], used: 0, dropped: 0, truncatedTexts: 0 };
+  assert.deepEqual(consumeTier([], 1000, PER_ITEM_DEFAULTS.fact), expected);
+  assert.deepEqual(consumeTier(null, 100, PER_ITEM_DEFAULTS.fact), expected);
+  assert.deepEqual(consumeTier(['x'], 0, PER_ITEM_DEFAULTS.fact), expected);
 });
 
 test('consumeTier: respects per-item maxChars (truncation)', () => {
@@ -200,6 +200,39 @@ test('consumeTiers: pure module — no daemon/memory imports', () => {
     const re = new RegExp(`require\\s*\\(\\s*['"]${banned.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"]\\s*\\)`);
     assert.doesNotMatch(code, re, `recall-budget must not require ${banned}`);
   }
+});
+
+test('consumeTiers: text truncation alone sets truncated=true (Codex Step 8 P2)', () => {
+  // No drops, no maxItems hit — just one over-cap fact.
+  const longFact = 'f'.repeat(500); // exceeds fact.maxChars=300
+  const out = consumeTiers({ items: { facts: [longFact] }, totalChars: 4000 });
+  assert.equal(out.taken.facts.length, 1);
+  assert.ok(out.taken.facts[0].text.endsWith('…[truncated]'));
+  assert.equal(out.truncated, true, 'pure text-truncation must set truncated flag');
+  assert.equal(out.dropped, 0);
+});
+
+test('consumeTiers: text naturally ending in suffix is NOT mis-flagged (Codex Step 8 P2)', () => {
+  // Text shorter than maxChars but happens to end with the suffix.
+  const harmless = 'short text …[truncated]';
+  const out = consumeTiers({ items: { facts: [harmless] }, totalChars: 4000 });
+  assert.equal(out.taken.facts.length, 1);
+  assert.equal(out.taken.facts[0].text, harmless);
+  // Only one item, fits within cap, nothing dropped, nothing truncated.
+  assert.equal(out.truncated, false, 'naturally-ending suffix must not trigger truncated flag');
+});
+
+test('consumeTiers: partial perItem override deep-merges defaults (Codex Step 8 P2)', () => {
+  // Caller overrides only fact.maxChars; fact.maxItems should stay at default 8.
+  const items = Array.from({ length: 12 }, () => 'f'.repeat(20));
+  const out = consumeTiers({
+    items: { facts: items },
+    totalChars: 4000,
+    perItem: { fact: { maxChars: 30 } },
+  });
+  // Should respect default maxItems=8 (not undefined → 0).
+  assert.equal(out.taken.facts.length, 8, 'default maxItems=8 preserved by deep merge');
+  for (const it of out.taken.facts) assert.ok(it.text.length <= 30);
 });
 
 test('exported constants reflect documented design', () => {
