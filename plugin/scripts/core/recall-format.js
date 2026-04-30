@@ -22,10 +22,19 @@ const TIER_LABELS = {
 };
 const TIER_ORDER = ['facts', 'wiki', 'working', 'sessions'];
 
+// Inline newlines in bullet text break the single-line bullet visual.
+// Replace with `\n` literal (4 chars) so the bullet stays one line in
+// the prompt block. Closing brackets are escaped to keep the outer
+// `[Recall context: ... ]` structure parseable by readers.
+function _sanitizeText(text) {
+  return text.replace(/\r?\n+/g, ' \\n ').replace(/]/g, '\\]');
+}
+
 function _renderItem(item) {
   // item: { text, source: { kind?, id?, slug?, sessionId? } | null }
   const text = (typeof item === 'object' && item && typeof item.text === 'string') ? item.text : '';
   if (!text) return '';
+  const safe = _sanitizeText(text);
   const src = item.source;
   let label = '';
   if (src && typeof src === 'object') {
@@ -34,7 +43,7 @@ function _renderItem(item) {
     else if (src.sessionId) label = `[session:${src.sessionId}]`;
     else if (src.kind) label = `[${src.kind}]`;
   }
-  const bullet = `- ${text}`;
+  const bullet = `- ${safe}`;
   return label ? `${bullet} ${label}` : bullet;
 }
 
@@ -66,13 +75,15 @@ function formatRecallBlock(taken = {}) {
     }
   }
   if (sections.length === 0) {
-    return { text: '', sources: [], isEmpty: true };
+    return { text: '', sources: [], isEmpty: true, chars: 0 };
   }
   const body = sections.join('\n\n');
+  const text = `\n\n[Recall context:\n${body}\n]`;
   return {
-    text: `\n\n[Recall context:\n${body}\n]`,
+    text,
     sources,
     isEmpty: false,
+    chars: text.length,
   };
 }
 

@@ -6,10 +6,11 @@ const fs = require('fs');
 const path = require('path');
 const { formatRecallBlock, TIER_LABELS, TIER_ORDER } = require('./recall-format');
 
-test('formatRecallBlock: empty input → empty string', () => {
-  assert.deepEqual(formatRecallBlock({}), { text: '', sources: [], isEmpty: true });
-  assert.deepEqual(formatRecallBlock(undefined), { text: '', sources: [], isEmpty: true });
-  assert.deepEqual(formatRecallBlock({ facts: [], wiki: [] }), { text: '', sources: [], isEmpty: true });
+test('formatRecallBlock: empty input → empty string with chars=0', () => {
+  const expected = { text: '', sources: [], isEmpty: true, chars: 0 };
+  assert.deepEqual(formatRecallBlock({}), expected);
+  assert.deepEqual(formatRecallBlock(undefined), expected);
+  assert.deepEqual(formatRecallBlock({ facts: [], wiki: [] }), expected);
 });
 
 test('formatRecallBlock: non-empty starts with \\n\\n (intentHint convention)', () => {
@@ -123,6 +124,25 @@ test('TIER_ORDER and TIER_LABELS are aligned', () => {
     assert.ok(typeof TIER_LABELS[tier] === 'string' && TIER_LABELS[tier].length > 0,
       `missing label for ${tier}`);
   }
+});
+
+test('formatRecallBlock: chars matches text.length on non-empty (Codex Step 9 P2)', () => {
+  const out = formatRecallBlock({ facts: [{ text: 'hello', source: null }] });
+  assert.equal(out.chars, out.text.length);
+  assert.ok(out.chars > 0);
+});
+
+test('formatRecallBlock: sanitizes embedded newlines and ] in text (Codex Step 9 P2)', () => {
+  const out = formatRecallBlock({
+    facts: [
+      { text: 'line one\nline two', source: null },
+      { text: 'has ] bracket inside', source: null },
+    ],
+  });
+  // Newlines collapsed to literal \n marker — bullet stays one line.
+  assert.match(out.text, /- line one \\n line two/);
+  // Closing bracket escaped so outer [Recall context: ... ] is unambiguous.
+  assert.match(out.text, /- has \\] bracket inside/);
 });
 
 test('formatRecallBlock: pure module — no daemon/memory imports', () => {
