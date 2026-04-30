@@ -16,6 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const mutate = require('./core/memory-mutate');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
@@ -579,16 +580,12 @@ ${JSON.stringify(conflictInput, null, 2)}
                 if (loserIds.length === 0) continue;
 
                 // Mark losers as archived (superseded by winner)
-                const placeholders = loserIds.map(() => '?').join(',');
-                db.prepare(
-                  `UPDATE memory_items SET supersedes_id = ?, state = 'archived', updated_at = datetime('now')
-                   WHERE id IN (${placeholders})`
-                ).run(v.winner_id, ...loserIds);
+                for (const loserId of loserIds) {
+                  mutate.archiveMemoryItem(db, loserId, { supersededBy: v.winner_id, reason: 'conflict_resolution' });
+                }
 
                 // Restore winner to active
-                db.prepare(
-                  `UPDATE memory_items SET state = 'active', updated_at = datetime('now') WHERE id = ?`
-                ).run(v.winner_id);
+                mutate.setItemState(db, v.winner_id, 'active');
 
                 conflictsResolved += loserIds.length;
               }

@@ -111,6 +111,7 @@ function run() {
     const dbSizeBefore = getDbSizeBytes();
 
     const memoryModel = require('./core/memory-model');
+    const mutate = require('./core/memory-mutate');
 
     let promoted = 0;
     let archivedCount = 0;
@@ -123,9 +124,7 @@ function run() {
       ).all();
       for (const item of candidates) {
         if (memoryModel.shouldPromote(item)) {
-          db.prepare(
-            `UPDATE memory_items SET state = 'active', updated_at = datetime('now') WHERE id = ?`
-          ).run(item.id);
+          mutate.setItemState(db, item.id, 'active');
           promoted++;
         }
       }
@@ -137,9 +136,7 @@ function run() {
       ).all();
       for (const item of allItems) {
         if (memoryModel.shouldArchive(item)) {
-          db.prepare(
-            `UPDATE memory_items SET state = 'archived', updated_at = datetime('now') WHERE id = ?`
-          ).run(item.id);
+          mutate.archiveMemoryItem(db, item.id, { reason: 'gc' });
           archivedCount++;
         }
       }

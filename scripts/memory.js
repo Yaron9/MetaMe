@@ -244,19 +244,16 @@ function _trackSearch(ids) {
   } catch { /* non-fatal */ }
 }
 
+// Bounded compat wrappers — delegate to scripts/core/memory-mutate.js.
+// Slated for deletion in the same milestone as PR1's stable release (v4.1 §P1.8).
+const _mutate = require('./core/memory-mutate');
+
 function promoteItem(id) {
-  const db = getDb();
-  db.prepare(`UPDATE memory_items SET state = 'active', updated_at = datetime('now') WHERE id = ?`).run(id);
+  _mutate.setItemState(getDb(), id, 'active');
 }
 
 function archiveItem(id, supersededById) {
-  const db = getDb();
-  if (supersededById) {
-    db.prepare(`UPDATE memory_items SET state = 'archived', supersedes_id = ?, updated_at = datetime('now') WHERE id = ?`)
-      .run(supersededById, id);
-  } else {
-    db.prepare(`UPDATE memory_items SET state = 'archived', updated_at = datetime('now') WHERE id = ?`).run(id);
-  }
+  _mutate.archiveMemoryItem(getDb(), id, { supersededBy: supersededById || null });
 }
 
 function bumpSearchCount(id) {

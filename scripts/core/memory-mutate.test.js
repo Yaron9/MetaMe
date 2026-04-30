@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { DatabaseSync } = require('node:sqlite');
-const { archiveMemoryItem } = require('./memory-mutate');
+const { archiveMemoryItem, setItemState } = require('./memory-mutate');
 
 function makeDb() {
   const db = new DatabaseSync(':memory:');
@@ -110,5 +110,51 @@ test('memory-mutate.archiveMemoryItem', async (t) => {
     const db = makeDb();
     archiveMemoryItem(db, 'does-not-exist', { reason: 'x' });
     // No assertion needed; absence of throw is the contract.
+  });
+});
+
+test('memory-mutate.setItemState', async (t) => {
+  await t.test('promotes candidate → active', () => {
+    const db = makeDb();
+    insertItem(db, 'm1', 'candidate');
+    setItemState(db, 'm1', 'active');
+    const row = getItem(db, 'm1');
+    assert.equal(row.state, 'active');
+  });
+
+  await t.test('demotes active → candidate', () => {
+    const db = makeDb();
+    insertItem(db, 'm1', 'active');
+    setItemState(db, 'm1', 'candidate');
+    const row = getItem(db, 'm1');
+    assert.equal(row.state, 'candidate');
+  });
+
+  await t.test('rejects invalid state', () => {
+    const db = makeDb();
+    insertItem(db, 'm1');
+    assert.throws(() => setItemState(db, 'm1', 'pending'), /newState must be one of/);
+    assert.throws(() => setItemState(db, 'm1', 'archived-x'), /newState must be one of/);
+  });
+
+  await t.test('refreshes updated_at', () => {
+    const db = makeDb();
+    insertItem(db, 'm1');
+    const sentinelStamp = '2020-01-01 00:00:00';
+    db.prepare(`UPDATE memory_items SET updated_at = ? WHERE id='m1'`).run(sentinelStamp);
+    setItemState(db, 'm1', 'active');
+    const after = db.prepare(`SELECT updated_at FROM memory_items WHERE id='m1'`).get().updated_at;
+    assert.notEqual(after, sentinelStamp);
+  });
+
+  await t.test('throws TypeError on bad db / id', () => {
+    const db = makeDb();
+    assert.throws(() => setItemState(null, 'm1', 'active'), TypeError);
+    assert.throws(() => setItemState(db, '', 'active'), TypeError);
+  });
+
+  await t.test('non-existent id is a no-op', () => {
+    const db = makeDb();
+    setItemState(db, 'does-not-exist', 'active');
   });
 });
