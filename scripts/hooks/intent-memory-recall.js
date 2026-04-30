@@ -1,10 +1,21 @@
 'use strict';
 
 /**
- * Memory Recall Intent Module
+ * Memory Recall Intent Module — string-only shim (v4.1 §P1.14).
  *
- * Detects cross-session memory recall intent (user references past conversations).
- * Injects memory-search command hint on demand.
+ * Surfaces a CLI hint string for the legacy memory-search.js workflow when
+ * the user references past conversations. This is INDEPENDENT of the
+ * recall channel:
+ *
+ *   - This shim:           returns a CLI guidance string (or null) for the
+ *                          intent-registry pipeline. Prompt-only.
+ *   - core/recall-plan.js: produces a structured plan for the daemon to
+ *                          assemble actual recall context. Async, audited.
+ *
+ * The shim MUST NOT require core/recall-plan.js. Phrase patterns may
+ * overlap with planRecall by design — they serve different surfaces and
+ * evolve independently. PR2 wiring will suppress this shim's output when
+ * recall injection actually fires (v4.1 §P1.6 suppressKeys).
  *
  * @param {string} prompt
  * @returns {string|null}
