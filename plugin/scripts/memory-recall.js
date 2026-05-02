@@ -48,17 +48,35 @@ function _emptyResult() {
 
 // Anchor labels are tier-prefixed (e.g. "file:scripts/memory.js" / "fn:saveFacts").
 // For search we want only the meaningful tail, joined with spaces.
+//
+// Path-anchor expansion: file paths often arrive with a "scripts/" prefix
+// (because the user types it) but indexed memories frequently store only
+// the basename ("memory.js"). FTS5 phrase match is strict — `"scripts/x.js"`
+// will NOT match `"x.js"`. So when we see a file anchor with a slash, we
+// emit BOTH the full path AND the basename. searchMemoryItems' OR-tier
+// then catches rows that only carry one or the other.
 function _anchorsToQuery(anchors) {
   if (!Array.isArray(anchors)) return '';
-  const tails = [];
+  const tokens = [];
+  const seen = new Set();
+  const push = (t) => {
+    if (!t || seen.has(t)) return;
+    seen.add(t);
+    tokens.push(t);
+  };
   for (const a of anchors) {
     if (typeof a !== 'string' || !a) continue;
+    if (tokens.length >= MAX_QUERY_ANCHORS) break;
     const idx = a.indexOf(':');
     const tail = idx >= 0 ? a.slice(idx + 1) : a;
-    if (tail) tails.push(tail);
-    if (tails.length >= MAX_QUERY_ANCHORS) break;
+    if (!tail) continue;
+    push(tail);
+    if (a.startsWith('file:') && tail.includes('/')) {
+      const base = tail.slice(tail.lastIndexOf('/') + 1);
+      if (base && base !== tail) push(base);
+    }
   }
-  return tails.join(' ').trim();
+  return tokens.slice(0, MAX_QUERY_ANCHORS).join(' ').trim();
 }
 
 function _searchFacts(query, scope) {

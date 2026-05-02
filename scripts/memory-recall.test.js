@@ -194,6 +194,41 @@ test('assembleRecallContext: recallMeta carries plan + breakdown but no raw tran
   });
 });
 
+test('assembleRecallContext: file anchor expands basename so prefixed paths still hit', async () => {
+  await withFreshMemoryHome(async (memory, assembleRecallContext) => {
+    // Indexed memory uses ONLY the basename (no scripts/ prefix) — common
+    // shape because the extractor LLM often normalises paths.
+    memory.saveMemoryItem({
+      id: 'mi_basename_only',
+      kind: 'convention',
+      state: 'active',
+      title: 'memory.js · saveFacts',
+      content: 'memory.js exposes saveFacts() helper used by extract pipeline',
+      project: 'metame',
+      scope: 'main',
+    });
+    // Anchors carry the user-typed full path. Without basename expansion the
+    // FTS phrase "scripts/memory.js" would never match the indexed row.
+    const plan = {
+      shouldRecall: true,
+      reason: 'explicit-history',
+      anchors: ['file:scripts/memory.js', 'fn:saveFacts'],
+      modes: ['facts'],
+      hintBudget: 1600,
+    };
+    const result = await assembleRecallContext({
+      plan,
+      scope: { project: 'metame', workspaceScope: 'main', agentKey: 'jarvis' },
+      budget: { totalChars: 4000 },
+      search: { ftsOnly: true },
+    });
+    assert.ok(result.text, 'recall block should be non-empty');
+    assert.ok(result.recallMeta && result.recallMeta.sources.length > 0);
+    const ids = result.recallMeta.sources.map(s => s.id);
+    assert.ok(ids.includes('mi_basename_only'));
+  });
+});
+
 test('assembleRecallContext: search/budget/format module isolation (no daemon imports)', () => {
   const src = fs.readFileSync(path.join(__dirname, 'memory-recall.js'), 'utf8');
   const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');

@@ -201,8 +201,20 @@ function searchMemoryItems(query, { kind = null, scope = null, project = null, s
   }
 
   if (query && query.trim()) {
-    const sanitized = query.trim().split(/\s+/)
-      .map(t => '"' + t.replace(/"/g, '') + '"').join(' ');
+    // Three-tier progressive degradation:
+    //   Tier 1 — AND phrase match (precision-first; e.g. "scripts/x.js" "fn")
+    //   Tier 2 — OR  phrase match (recall when AND would exclude rows that
+    //                              only contain a subset of tokens — common
+    //                              when an anchor adds a path prefix the
+    //                              indexed memory doesn't carry verbatim)
+    //   Tier 3 — LIKE per-token OR (final safety net, also kicks in if FTS
+    //                              errors entirely on the AND path)
+    // Single-token queries skip Tier 2 because phrases.join(' OR ') would
+    // be identical to Tier 1 — no point retrying the same expression.
+    const tokens = query.trim().split(/\s+/)
+      .map(t => t.replace(/"/g, ''))
+      .filter(Boolean);
+    const phrases = tokens.map(t => `"${t}"`);
     const where = conditions.length > 0 ? `AND ${conditions.join(' AND ')}` : '';
     const sql = `
       SELECT mi.*, (-fts.rank / (1.0 + ABS(fts.rank))) AS fts_rank
@@ -213,16 +225,26 @@ function searchMemoryItems(query, { kind = null, scope = null, project = null, s
       LIMIT ?
     `;
     try {
-      const rows = db.prepare(sql).all(sanitized, ...params, limit);
+      let rows = db.prepare(sql).all(phrases.join(' '), ...params, limit);
+      if (rows.length === 0 && phrases.length > 1) {
+        rows = db.prepare(sql).all(phrases.join(' OR '), ...params, limit);
+      }
       if (rows.length > 0) {
         if (trackSearch) _trackSearch(rows.map(r => r.id));
         return rows;
       }
     } catch { /* FTS error, fall through to LIKE */ }
 
-    const like = '%' + query.trim() + '%';
-    conditions.push('(mi.title LIKE ? OR mi.content LIKE ? OR mi.tags LIKE ?)');
-    params.push(like, like, like);
+    if (tokens.length > 0) {
+      const perTokenClause = tokens
+        .map(() => '(mi.title LIKE ? OR mi.content LIKE ? OR mi.tags LIKE ?)')
+        .join(' OR ');
+      conditions.push(`(${perTokenClause})`);
+      for (const tok of tokens) {
+        const like = `%${tok}%`;
+        params.push(like, like, like);
+      }
+    }
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
