@@ -120,4 +120,25 @@ describe('daemon-prompt-context', () => {
       'hello\n\n[daemon]\n\n[intent]\n\n[agent]\n\n[mentor]\n\n[recall]\n\n[lang]'
     );
   });
+
+  it('PR2: cold-path full ordering with all hints + recallHint (Codex Step 1 P2)', () => {
+    // Locks the relative order of every slot so future reorders can't slip
+    // recallHint into the wrong position.
+    assert.equal(
+      composePrompt({
+        routedPrompt: 'hello',
+        warmEntry: false,
+        intentHint: '\n\n[intent]',
+        daemonHint: '\n\n[daemon]',
+        agentHint: '\n\n[agent]',
+        macAutomationHint: '\n\n[mac]',
+        summaryHint: '\n\n[summary]',
+        memoryHint: '\n\n[memory]',
+        mentorHint: '\n\n[mentor]',
+        recallHint: '\n\n[recall]',
+        langGuard: '\n\n[lang]',
+      }),
+      'hello\n\n[daemon]\n\n[intent]\n\n[agent]\n\n[mac]\n\n[summary]\n\n[memory]\n\n[mentor]\n\n[recall]\n\n[lang]'
+    );
+  });
 });
