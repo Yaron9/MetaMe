@@ -29,6 +29,7 @@ function createExecCommandHandler(deps) {
     findSessionFile,
     findCodexSessionFile = null,
     loadConfig,
+    writeConfigSafe,
     getDistillModel,
     getDefaultEngine = () => 'claude',
   } = deps;
@@ -271,6 +272,58 @@ function createExecCommandHandler(deps) {
       const name = session ? getSessionName(session.id) : null;
       const label = name || (session ? session.id.slice(0, 8) : 'none');
       await bot.sendMessage(chatId, `🔄 Session restarted. MCP/config reloaded.\n📁 ${session ? path.basename(session.cwd) : '~'} [${label}]`);
+      return true;
+    }
+
+    // /recall on|off|status — toggle memory recall channel injection (PR2 §P1.16).
+    // Persists to ~/.metame/daemon.yaml via writeConfigSafe so the change
+    // survives daemon restart. Default off; flip to on once observe-only audit
+    // data confirms healthy trigger metrics.
+    if (text === '/recall' || text.startsWith('/recall ')) {
+      const arg = text.slice('/recall'.length).trim().toLowerCase();
+      const cfg = loadConfig() || {};
+      cfg.daemon = cfg.daemon || {};
+
+      if (arg === 'on' || arg === 'enable' || arg === 'true' || arg === '1') {
+        cfg.daemon.memory_recall_enabled = true;
+        try { writeConfigSafe(cfg); } catch (e) {
+          await bot.sendMessage(chatId, `❌ Failed to write config: ${e.message}`);
+          return true;
+        }
+        await bot.sendMessage(chatId,
+          '✅ Memory recall **enabled**.\n' +
+          'Daemon will inject recall context for prompts that match the planRecall trigger heuristics.\n' +
+          'Use `/recall off` to disable, `/recall status` to view current state.');
+        return true;
+      }
+
+      if (arg === 'off' || arg === 'disable' || arg === 'false' || arg === '0') {
+        cfg.daemon.memory_recall_enabled = false;
+        try { writeConfigSafe(cfg); } catch (e) {
+          await bot.sendMessage(chatId, `❌ Failed to write config: ${e.message}`);
+          return true;
+        }
+        await bot.sendMessage(chatId,
+          '⏹ Memory recall **disabled**.\n' +
+          'Daemon stays in observe-only mode (still writes phase=observe rows for analysis).');
+        return true;
+      }
+
+      // status / empty / help
+      const enabled = !!cfg.daemon.memory_recall_enabled;
+      const showMarker = cfg.daemon.memory_recall_show_marker !== false;
+      const channel = cfg.daemon.memory_recall_marker_channel || 'card';
+      const budget = Number.isFinite(cfg.daemon.memory_recall_max_chars)
+        ? cfg.daemon.memory_recall_max_chars : 4000;
+      await bot.sendMessage(chatId,
+        `🧠 Memory recall status\n` +
+        `   Enabled: ${enabled ? '✅ on (injecting)' : '⏹ off (observe-only)'}\n` +
+        `   Marker card: ${showMarker ? `on (channel=${channel})` : 'off'}\n` +
+        `   Budget: ${budget} chars\n\n` +
+        `Usage:\n` +
+        `   /recall on       — enable injection\n` +
+        `   /recall off      — disable injection (back to observe-only)\n` +
+        `   /recall status   — show this`);
       return true;
     }
 

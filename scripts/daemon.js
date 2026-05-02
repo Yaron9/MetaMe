@@ -2222,6 +2222,7 @@ const { handleExecCommand } = createExecCommandHandler({
   findSessionFile,
   findCodexSessionFile,
   loadConfig,
+  writeConfigSafe,
   getDistillModel,
   getDefaultEngine,
 });
