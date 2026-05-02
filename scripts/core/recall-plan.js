@@ -91,11 +91,21 @@ function planRecall({ text, runtime, scope } = {}) {
   const reason = reasons[0] || 'anchor-match';
 
   // Modes: facts always; sessions for explicit history; wiki for procedural;
-  // working for any explicit-history or decision-recall.
+  // working ONLY when the query likely intersects with current task state
+  // (per Codex final audit P1 — pure historical questions like "还记得吗"
+  // without anchors must NOT pull current task state into the prompt).
+  //
+  // Working is added when:
+  //   - reason is `recurrence` ("又遇到这个 bug" — current work IS the topic)
+  //   - explicit-history or decision-recall reason AND at least one anchor
+  //     (anchors signal the user is referring to specific files/functions/
+  //      env-vars that the agent may also be touching right now)
   const modes = ['facts'];
   if (reasons.includes('explicit-history') || reasons.includes('recurrence')) modes.push('sessions');
   if (reasons.includes('procedural') || reasons.includes('decision-recall')) modes.push('wiki');
-  if (reasons.includes('explicit-history') || reasons.includes('decision-recall')) modes.push('working');
+  const wantsWorking = reasons.includes('recurrence')
+    || ((reasons.includes('explicit-history') || reasons.includes('decision-recall')) && anchors.length > 0);
+  if (wantsWorking) modes.push('working');
 
   // Soft hint to facade — actual budget enforced by recall-budget.js.
   // Cap matches the calculable max (800 base + 8 anchors × 200 = 2400) instead

@@ -64,7 +64,9 @@ test('recall-plan: explicit history triggers (EN)', async (t) => {
   }
 });
 
-test('recall-plan: decision-recall triggers', async (t) => {
+test('recall-plan: decision-recall triggers (no anchors → no working tier)', async (t) => {
+  // Quality Step 4: pure historical decision questions without anchors must
+  // NOT pull current task state. They get facts + wiki, NOT working.
   const cases = ['为什么这么定的', '当时怎么决定的', '以前怎么处理这种'];
   for (const text of cases) {
     await t.test(`triggers on: ${text}`, () => {
@@ -72,9 +74,73 @@ test('recall-plan: decision-recall triggers', async (t) => {
       assert.equal(p.shouldRecall, true);
       assert.equal(p.reason, 'decision-recall');
       assert.ok(p.modes.includes('wiki'));
-      assert.ok(p.modes.includes('working'));
+      assert.ok(!p.modes.includes('working'),
+        `pure decision-recall must not pull current task state, got modes: ${p.modes}`);
     });
   }
+});
+
+test('recall-plan: decision-recall WITH anchors → working tier added', () => {
+  // Anchors signal the user is referring to specific files/fns the agent
+  // may also be touching now — current task state becomes relevant context.
+  const p = planRecall({
+    text: '为什么这么定的 scripts/memory.js 的 saveFacts() 这个返回值',
+    runtime: RUNTIME, scope: SCOPE,
+  });
+  assert.equal(p.shouldRecall, true);
+  assert.equal(p.reason, 'decision-recall');
+  assert.ok(p.anchors.length > 0);
+  assert.ok(p.modes.includes('wiki'));
+  assert.ok(p.modes.includes('working'),
+    'decision-recall + anchors should add working tier');
+});
+
+test('Quality Step 4 — explicit-history without anchors: NO working tier', () => {
+  // "还记得吗" alone is pure historical recall; current task state would
+  // pollute the prompt with unrelated current-work context.
+  const p = planRecall({ text: '还记得吗 那个事儿', runtime: RUNTIME, scope: SCOPE });
+  assert.equal(p.shouldRecall, true);
+  assert.equal(p.reason, 'explicit-history');
+  assert.equal(p.anchors.length, 0, 'sanity: no anchors');
+  assert.ok(!p.modes.includes('working'),
+    `explicit-history without anchors must skip working tier, got modes: ${p.modes}`);
+});
+
+test('Quality Step 4 — explicit-history WITH anchors: working tier added', () => {
+  // Anchors mean the user is referring to specific code; current task state
+  // is likely intersecting with that work and useful as context.
+  const p = planRecall({
+    text: '还记得上次改的 scripts/memory.js 里的 saveFacts() 吗',
+    runtime: RUNTIME, scope: SCOPE,
+  });
+  assert.equal(p.shouldRecall, true);
+  assert.equal(p.reason, 'explicit-history');
+  assert.ok(p.anchors.length >= 1);
+  assert.ok(p.modes.includes('working'),
+    'explicit-history + anchors should add working tier');
+});
+
+test('Quality Step 4 — recurrence ALWAYS adds working (current behaviour by definition)', () => {
+  // "又出现这个 bug" is inherently a current-state question — the agent's
+  // working memory is the most relevant single source.
+  const p = planRecall({ text: '这个 bug 又出现了', runtime: RUNTIME, scope: SCOPE });
+  assert.equal(p.shouldRecall, true);
+  assert.equal(p.reason, 'recurrence');
+  assert.ok(p.modes.includes('working'),
+    'recurrence must always include working — it IS about current state');
+});
+
+test('Quality Step 4 — anchor-only mode: working not auto-added', () => {
+  // anchor-match without a recurrence/explicit-history phrase doesn't
+  // imply we want current task state.
+  const p = planRecall({
+    text: 'check scripts/foo.js scripts/bar.js for askClaude() behaviour',
+    runtime: RUNTIME, scope: SCOPE,
+  });
+  assert.equal(p.shouldRecall, true);
+  assert.equal(p.reason, 'anchor-match');
+  assert.ok(!p.modes.includes('working'),
+    'anchor-only must not pull working tier');
 });
 
 test('recall-plan: recurrence triggers', async (t) => {
