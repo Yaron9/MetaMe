@@ -1768,21 +1768,23 @@ function createClaudeEngine(deps) {
       // linearly growing token cost on every turn in long conversations.
       // Claude Code preserves session context, so the guard persists after initial injection.
       const langGuard = buildLanguageGuard(session.started);
-      const intentHint = buildIntentHint({
-        prompt,
-        config,
-        boundProjectKey,
-        projectKey,
-        log,
-      });
 
-      // PR1 Step 12: observe-only recall audit. Computes a plan and writes a
-      // phase='observe' row to recall_audit. Does NOT change composePrompt
-      // arguments or the resulting prompt bytes (that's PR2's recallHint slot).
-      // Failure is fully swallowed inside observeRecall.
+      // PR2 Step 5: recall channel — observe always, inject when enabled +
+      // shouldRecall. prepareRecall replaces PR1's observeRecall. When the
+      // recall channel actively injects content, suppress the legacy CLI
+      // memory_recall intent hint to avoid double-emit (v4.1 §P1.6).
+      // recallMeta is captured in a turn-local variable for Step 6's
+      // marker pipeline; never leaks into prompt body or session diary.
+      const _recallEnabled = !!(config && config.daemon && config.daemon.memory_recall_enabled);
+      const _recallTotalChars = (config && config.daemon
+        && Number.isFinite(config.daemon.memory_recall_max_chars))
+        ? config.daemon.memory_recall_max_chars : 4000;
+      let _recallActive = false;
+      let _recallHint = '';
+      let _recallMeta = null;
       try {
-        const { observeRecall } = require('./core/recall-observe');
-        observeRecall({
+        const { prepareRecall } = require('./core/recall-prepare');
+        const _recall = await prepareRecall({
           prompt,
           runtime: { engine: runtime.name, sessionStarted: !!session.started },
           scope: {
@@ -1791,13 +1793,28 @@ function createClaudeEngine(deps) {
             agentKey: boundProjectKey || null,
           },
           chatId,
+          enabled: _recallEnabled,
+          budget: { totalChars: _recallTotalChars },
           log,
         });
-      } catch { /* defensive — observeRecall already wraps internally */ }
+        _recallActive = !!_recall.recallActive;
+        _recallHint = _recall.recallHint || '';
+        _recallMeta = _recall.recallMeta || null;
+      } catch { /* defensive — prepareRecall already wraps internally */ }
+
+      const intentHint = buildIntentHint({
+        prompt,
+        config,
+        boundProjectKey,
+        projectKey,
+        log,
+        suppressKeys: _recallActive ? ['memory_recall'] : undefined,
+      });
 
       // For warm process reuse: static context (daemonHint, memoryHint, etc.) is already
       // in the persistent process — skip those to save tokens. intentHint is dynamic
-      // (varies per prompt), so include it even on warm reuse.
+      // (varies per prompt), so include it even on warm reuse. recallHint is also
+      // dynamic and survives warm reuse alongside intentHint (v4.1 §P1.12).
       const fullPrompt = composePrompt({
         routedPrompt,
         warmEntry: _warmEntry,
@@ -1808,6 +1825,7 @@ function createClaudeEngine(deps) {
         summaryHint,
         memoryHint,
         mentorHint,
+        recallHint: _recallHint,
         langGuard,
       });
       if (runtime.name === 'codex' && session.started && session.id && requestedCodexPermissionProfile) {
