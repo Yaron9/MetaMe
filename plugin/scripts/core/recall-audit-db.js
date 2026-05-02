@@ -11,9 +11,15 @@
  *     CREATE TABLE IF NOT EXISTS recall_audit ensures the row target exists
  *     even if we hit a fresh DB before memory.js had a chance to init.
  *
- * Public API (single function): recordAudit(row).
- * Test hook: _resetForTesting() closes and forgets the cached handle so a fresh
- * DB_PATH (e.g. via METAME_RECALL_AUDIT_DB env) can be picked up next call.
+ * Public API: recordAudit(row), getDroppedCount().
+ * Test hooks: _resetForTesting() closes and forgets the cached handle so a fresh
+ * DB_PATH (e.g. via METAME_RECALL_AUDIT_DB env) can be picked up next call;
+ * _getDbForTesting() returns the cached handle for failure-injection tests.
+ *
+ * Drop accounting: any prepare().run() exception (lock contention, CHECK
+ * violation, etc.) is swallowed but counted in _droppedCount. Every 100 drops
+ * we write a single marker row (phase='observe', outcome='harmful',
+ * error_message='audit_dropped:N') so dashboards can see data gaps.
  */
 
 const path = require('path');
@@ -22,6 +28,8 @@ const fs = require('fs');
 const { RECALL_AUDIT_DDL } = require('./recall-audit-ddl');
 
 let _db = null;
+let _droppedCount = 0;
+const DROP_MARKER_INTERVAL = 100;
 
 function _resolveDbPath() {
   return process.env.METAME_RECALL_AUDIT_DB || path.join(os.homedir(), '.metame', 'memory.db');
@@ -45,10 +53,24 @@ function _openDb() {
   }
 }
 
+function _writeDroppedMarker(db, total) {
+  try {
+    const id = `audit_dropped_${Date.now()}_${total}`;
+    db.prepare(
+      `INSERT INTO recall_audit (id, phase, outcome, error_message, should_recall)
+       VALUES (?, 'observe', 'harmful', ?, 0)`
+    ).run(id, `audit_dropped:${total}`);
+  } catch {
+    // Sustained contention can drop the marker too. Swallow — the next
+    // 100-drop boundary will retry. The counter still records every drop.
+  }
+}
+
 function recordAudit(row) {
+  let db = null;
   try {
     if (!row || typeof row !== 'object' || typeof row.id !== 'string' || row.id.length === 0) return;
-    const db = _openDb();
+    db = _openDb();
     if (!db) return;
     const phase = row.phase === 'inject' ? 'inject' : 'observe';
     db.prepare(
@@ -80,14 +102,30 @@ function recordAudit(row) {
     );
   } catch {
     // Best-effort: audit must never surface failure into user reply path.
+    // Count the drop and emit a marker every DROP_MARKER_INTERVAL so ops can
+    // see data gaps. db is null only if _openDb() failed — in that case the
+    // marker write would also fail, so skip it.
+    _droppedCount += 1;
+    if (db && _droppedCount % DROP_MARKER_INTERVAL === 0) {
+      _writeDroppedMarker(db, _droppedCount);
+    }
   }
 }
 
+function getDroppedCount() {
+  return _droppedCount;
+}
+
 function _resetForTesting() {
+  _droppedCount = 0;
   if (_db) {
     try { _db.close(); } catch { /* ignore */ }
     _db = null;
   }
 }
 
-module.exports = { recordAudit, _resetForTesting };
+function _getDbForTesting() {
+  return _db;
+}
+
+module.exports = { recordAudit, getDroppedCount, _resetForTesting, _getDbForTesting };

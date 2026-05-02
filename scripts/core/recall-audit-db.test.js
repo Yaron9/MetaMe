@@ -140,6 +140,130 @@ test('recall-audit-db', async (t) => {
     });
   });
 
+  await t.test('counts dropped writes when prepare().run() throws', () => {
+    withTempDb((audit, dbPath) => {
+      // Warm up: one valid write opens the DB so we can monkey-patch its prepare.
+      audit.recordAudit({ id: 'r_warmup', should_recall: 1 });
+      assert.equal(audit.getDroppedCount(), 0, 'baseline drop count is 0');
+
+      const realDb = audit._getDbForTesting();
+      assert.ok(realDb, 'cached DB handle exists after warmup');
+      const realPrepare = realDb.prepare.bind(realDb);
+
+      // Inject failure: regular 19-? insert throws SQLITE_BUSY-like error;
+      // marker insert (different SQL shape) still passes through.
+      const REGULAR_INSERT_RE = /INSERT INTO recall_audit\s+\(id, phase, chat_id/;
+      realDb.prepare = (sql) => {
+        if (REGULAR_INSERT_RE.test(sql)) {
+          return {
+            run() {
+              const e = new Error('SQLITE_BUSY: database is locked');
+              e.code = 'SQLITE_BUSY';
+              throw e;
+            },
+          };
+        }
+        return realPrepare(sql);
+      };
+
+      // Drive 99 failures — counter should climb but no marker yet.
+      for (let i = 0; i < 99; i++) {
+        audit.recordAudit({ id: `r_busy_${i}`, should_recall: 1 });
+      }
+      assert.equal(audit.getDroppedCount(), 99, 'counter tracks every drop');
+
+      // Verify no marker row written before the 100th drop.
+      const probe = new DatabaseSync(dbPath);
+      let marker = probe.prepare(
+        `SELECT * FROM recall_audit WHERE error_message LIKE 'audit_dropped:%'`
+      ).get();
+      assert.equal(marker, undefined, 'no marker row before 100th drop');
+      probe.close();
+
+      // 100th drop triggers the marker.
+      audit.recordAudit({ id: 'r_busy_99', should_recall: 1 });
+      assert.equal(audit.getDroppedCount(), 100, 'counter at exactly 100');
+
+      const probe2 = new DatabaseSync(dbPath);
+      marker = probe2.prepare(
+        `SELECT * FROM recall_audit WHERE error_message LIKE 'audit_dropped:%'`
+      ).get();
+      assert.ok(marker, 'marker row exists after 100th drop');
+      assert.equal(marker.error_message, 'audit_dropped:100');
+      assert.equal(marker.outcome, 'harmful');
+      assert.equal(marker.phase, 'observe');
+      probe2.close();
+    });
+  });
+
+  await t.test('marker writes again at the 200th drop', () => {
+    withTempDb((audit, dbPath) => {
+      audit.recordAudit({ id: 'r_warmup', should_recall: 1 });
+      const realDb = audit._getDbForTesting();
+      const realPrepare = realDb.prepare.bind(realDb);
+      const REGULAR_INSERT_RE = /INSERT INTO recall_audit\s+\(id, phase, chat_id/;
+      realDb.prepare = (sql) => {
+        if (REGULAR_INSERT_RE.test(sql)) {
+          return { run() { throw new Error('busy'); } };
+        }
+        return realPrepare(sql);
+      };
+
+      for (let i = 0; i < 200; i++) {
+        audit.recordAudit({ id: `r_${i}`, should_recall: 1 });
+      }
+      assert.equal(audit.getDroppedCount(), 200);
+
+      const probe = new DatabaseSync(dbPath);
+      const markers = probe.prepare(
+        `SELECT error_message FROM recall_audit
+         WHERE error_message LIKE 'audit_dropped:%'
+         ORDER BY error_message`
+      ).all();
+      probe.close();
+      assert.equal(markers.length, 2, 'one marker per 100-drop boundary');
+      assert.deepEqual(
+        markers.map(r => r.error_message).sort(),
+        ['audit_dropped:100', 'audit_dropped:200'],
+      );
+    });
+  });
+
+  await t.test('marker write itself failing does not raise or recurse', () => {
+    withTempDb((audit) => {
+      audit.recordAudit({ id: 'r_warmup', should_recall: 1 });
+      const realDb = audit._getDbForTesting();
+
+      // ALL prepare() calls throw — even the marker insert. Verifies
+      // _writeDroppedMarker swallows its own failure cleanly.
+      realDb.prepare = () => ({
+        run() { throw new Error('total contention'); },
+      });
+
+      // 100 drops should not throw.
+      for (let i = 0; i < 100; i++) {
+        audit.recordAudit({ id: `r_${i}`, should_recall: 1 });
+      }
+      assert.equal(audit.getDroppedCount(), 100);
+      // Drive past 100 to make sure the marker-failure path didn't break the loop.
+      audit.recordAudit({ id: 'r_extra', should_recall: 1 });
+      assert.equal(audit.getDroppedCount(), 101);
+    });
+  });
+
+  await t.test('_resetForTesting clears drop counter', () => {
+    withTempDb((audit) => {
+      audit.recordAudit({ id: 'r_warmup', should_recall: 1 });
+      const realDb = audit._getDbForTesting();
+      realDb.prepare = () => ({ run() { throw new Error('x'); } });
+      audit.recordAudit({ id: 'r1', should_recall: 1 });
+      audit.recordAudit({ id: 'r2', should_recall: 1 });
+      assert.equal(audit.getDroppedCount(), 2);
+      audit._resetForTesting();
+      assert.equal(audit.getDroppedCount(), 0);
+    });
+  });
+
   await t.test('does not require ../memory (no heavy init)', () => {
     const src = fs.readFileSync(path.join(__dirname, 'recall-audit-db.js'), 'utf8');
     // Strip block + line comments so legitimate documentation references don't match.
