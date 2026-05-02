@@ -109,11 +109,19 @@ function composePrompt({
   summaryHint = '',
   memoryHint = '',
   mentorHint = '',
+  recallHint = '',
   langGuard = '',
 }) {
+  // PR2 §P0.1: recallHint is a dynamic prompt channel sibling to intentHint.
+  // - Default '' so flag-off behaviour is byte-identical to PR1 baseline.
+  // - Warm path: routedPrompt + intentHint + recallHint (both survive warm reuse).
+  // - Cold path: inserted between mentorHint and langGuard so cache-stable
+  //   prefix (routedPrompt + intentHint + agentHint + ... + mentorHint)
+  //   precedes the recall block; langGuard remains last.
   return warmEntry
-    ? routedPrompt + intentHint
-    : routedPrompt + daemonHint + intentHint + agentHint + macAutomationHint + summaryHint + memoryHint + mentorHint + langGuard;
+    ? routedPrompt + intentHint + recallHint
+    : routedPrompt + daemonHint + intentHint + agentHint + macAutomationHint
+      + summaryHint + memoryHint + mentorHint + recallHint + langGuard;
 }
 
 module.exports = {

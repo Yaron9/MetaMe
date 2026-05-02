@@ -68,4 +68,56 @@ describe('daemon-prompt-context', () => {
       'hello\n\n[daemon]\n\n[intent]'
     );
   });
+
+  it('PR2: recallHint default empty preserves baseline (warm + cold)', () => {
+    assert.equal(
+      composePrompt({
+        routedPrompt: 'hello',
+        warmEntry: true,
+        intentHint: '\n\n[intent]',
+        daemonHint: '\n\n[daemon]',
+        recallHint: '',
+      }),
+      'hello\n\n[intent]'
+    );
+    assert.equal(
+      composePrompt({
+        routedPrompt: 'hello',
+        warmEntry: false,
+        intentHint: '\n\n[intent]',
+        daemonHint: '\n\n[daemon]',
+        recallHint: '',
+      }),
+      'hello\n\n[daemon]\n\n[intent]'
+    );
+  });
+
+  it('PR2: warm-path recallHint appends after intentHint', () => {
+    assert.equal(
+      composePrompt({
+        routedPrompt: 'hello',
+        warmEntry: true,
+        intentHint: '\n\n[intent]',
+        daemonHint: '\n\n[daemon]',
+        recallHint: '\n\n[recall]',
+      }),
+      'hello\n\n[intent]\n\n[recall]'
+    );
+  });
+
+  it('PR2: cold-path recallHint inserts between mentorHint and langGuard', () => {
+    assert.equal(
+      composePrompt({
+        routedPrompt: 'hello',
+        warmEntry: false,
+        intentHint: '\n\n[intent]',
+        daemonHint: '\n\n[daemon]',
+        agentHint: '\n\n[agent]',
+        mentorHint: '\n\n[mentor]',
+        recallHint: '\n\n[recall]',
+        langGuard: '\n\n[lang]',
+      }),
+      'hello\n\n[daemon]\n\n[intent]\n\n[agent]\n\n[mentor]\n\n[recall]\n\n[lang]'
+    );
+  });
 });
