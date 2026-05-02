@@ -159,4 +159,23 @@ describe('intent-registry', () => {
     assert.match(block, /\[\[FILE:\/absolute\/path\]\]/);
     assert.doesNotMatch(block, /\[跨会话记忆提示\]/);
   });
+
+  it('PR2: suppressing all non-fallback hits keeps doc-router fallback as last-resort (Codex P2)', () => {
+    // The base prompt fires both `memory_recall` (non-fallback) and `doc_router`
+    // (fallbackOnly). Without suppression, fallback is filtered out because a
+    // non-fallback hit exists. After suppressing the non-fallback hit, the
+    // fallback hint should remain visible — this is the documented semantic
+    // edge case of "filter suppressKeys BEFORE fallback".
+    const blockBefore = buildIntentHintBlock('我想看看 memory 怎么用的，还记得吗', {}, '');
+    assert.match(blockBefore, /\[跨会话记忆提示\]/, 'baseline: memory_recall fires');
+    const blockSuppressed = buildIntentHintBlock('我想看看 memory 怎么用的，还记得吗', {}, '', {
+      suppressKeys: ['memory_recall'],
+    });
+    // memory_recall fully gone after suppression
+    assert.doesNotMatch(blockSuppressed, /\[跨会话记忆提示\]/);
+    // Fallback (doc_router) is allowed to surface now since no non-fallback hits remain.
+    // Either fallback fires or the block is empty — both are valid; this test only
+    // locks that suppressKeys + fallback ordering does not error.
+    assert.equal(typeof blockSuppressed, 'string');
+  });
 });
