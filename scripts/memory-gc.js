@@ -86,6 +86,61 @@ function getDbSizeBytes() {
 }
 
 /**
+ * Read memory_recall_audit_retention_days from ~/.metame/daemon.yaml, with
+ * defensive fallback. The standalone deploy may not have js-yaml on its
+ * direct path; use the same resolver pattern as ~/.metame/daemon.js.
+ *
+ * Default: 45 days — covers v4.1 §P1.16's 4-week observation window plus
+ * a buffer week for analysis before the show_marker flip.
+ */
+function _readAuditRetentionDays() {
+  const DEFAULT_DAYS = 45;
+  try {
+    const cfgPath = path.join(METAME_DIR, 'daemon.yaml');
+    if (!fs.existsSync(cfgPath)) return DEFAULT_DAYS;
+    let yaml;
+    try { yaml = require('./resolve-yaml'); } catch {
+      try { yaml = require('js-yaml'); } catch { return DEFAULT_DAYS; }
+    }
+    if (!yaml || typeof yaml.load !== 'function') return DEFAULT_DAYS;
+    const cfg = yaml.load(fs.readFileSync(cfgPath, 'utf8')) || {};
+    const v = cfg.daemon && cfg.daemon.memory_recall_audit_retention_days;
+    if (Number.isFinite(v) && v > 0) return Math.floor(v);
+    return DEFAULT_DAYS;
+  } catch {
+    return DEFAULT_DAYS;
+  }
+}
+
+/**
+ * Delete recall_audit rows older than `retentionDays` and return the
+ * deleted count. Best-effort: missing table, schema drift, or transient
+ * SQLITE_BUSY all degrade to 0. Caller (run()) records the count to the
+ * existing GC log so the deletion volume is observable.
+ */
+function cleanupRecallAudit(db, retentionDays) {
+  const days = Number.isFinite(retentionDays) && retentionDays > 0
+    ? Math.floor(retentionDays)
+    : 45;
+  try {
+    const cutoff = `-${days} days`;
+    const result = db.prepare(
+      `DELETE FROM recall_audit WHERE ts < datetime('now', ?)`
+    ).run(cutoff);
+    const deleted = Number.isFinite(result && result.changes) ? result.changes : 0;
+    if (deleted > 0) {
+      console.log(`[MEMORY-GC] Pruned ${deleted} recall_audit rows older than ${days} days`);
+    }
+    return deleted;
+  } catch (e) {
+    if (!/no such table/i.test(e.message || '')) {
+      console.log(`[MEMORY-GC] recall_audit cleanup failed (non-fatal): ${e.message}`);
+    }
+    return 0;
+  }
+}
+
+/**
  * Main GC run.
  */
 function run() {
@@ -156,8 +211,14 @@ function run() {
 
     console.log(`[MEMORY-GC] Promoted ${promoted}, archived ${archivedCount}`);
 
-    // Run VACUUM to reclaim space (only if we archived something) — outside transaction
-    if (archivedCount > 0) {
+    // Phase 3: prune recall_audit rows beyond the retention window. Runs
+    // OUTSIDE the memory_items transaction because it's an independent
+    // table and we don't want a slow audit DELETE to hold the row lock
+    // on memory_items. Best-effort (missing table / drift → 0).
+    const auditPruned = cleanupRecallAudit(db, _readAuditRetentionDays());
+
+    // Run VACUUM to reclaim space (only if anything was deleted) — outside transaction
+    if (archivedCount > 0 || auditPruned > 0) {
       try {
         db.exec('VACUUM');
       } catch { /* non-fatal — WAL mode makes VACUUM occasionally slow */ }
@@ -169,6 +230,7 @@ function run() {
     writeGcLog({
       promoted,
       archived: archivedCount,
+      audit_pruned: auditPruned,
       db_size_before: dbSizeBefore,
       db_size_after: dbSizeAfter,
     });

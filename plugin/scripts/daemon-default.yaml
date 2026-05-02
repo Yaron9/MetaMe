@@ -223,3 +223,8 @@ daemon:
                                          # false after 4 weeks per v4.1 §P1.16
                                          # (PR2 ship engineer owns the flip)
   memory_recall_marker_channel: 'card'   # 'card' (Feishu footer card) | 'off'
+  memory_recall_audit_retention_days: 45 # nightly memory-gc prunes recall_audit
+                                         # rows older than N days. 45 covers
+                                         # the 4-week observation window plus
+                                         # a buffer for analysis before the
+                                         # show_marker flip (v4.1 §P1.16).
