@@ -207,3 +207,15 @@ daemon:
     mode: gentle
     exclude_agents: [personal, xianyu]
     emotion_keywords_extra: []
+  # Cross-session memory recall channel (v4.1 §4 PR2)
+  # Default off — opt in per workspace once observe-only audit data
+  # confirms healthy trigger / wiki_dropped / router_reason metrics.
+  memory_recall_enabled: false           # opt-in flag — when true, daemon
+                                         # injects assembled recall context
+                                         # into prompt and writes phase=inject
+                                         # rows to recall_audit table.
+  memory_recall_max_chars: 4000          # recallHint budget cap (chars)
+  memory_recall_show_marker: true        # internal-testing default; flip to
+                                         # false after 4 weeks per v4.1 §P1.16
+                                         # (PR2 ship engineer owns the flip)
+  memory_recall_marker_channel: 'card'   # 'card' (Feishu footer card) | 'off'
