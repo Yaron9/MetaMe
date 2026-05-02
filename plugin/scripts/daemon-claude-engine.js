@@ -1783,9 +1783,24 @@ function createClaudeEngine(deps) {
         && Number.isFinite(config.daemon.memory_recall_assemble_timeout_ms)
         && config.daemon.memory_recall_assemble_timeout_ms > 0)
         ? config.daemon.memory_recall_assemble_timeout_ms : 80;
-      let _recallActive = false;
-      let _recallHint = '';
-      let _recallMeta = null;
+      // PR2 turn-local container for recall state. Single source of truth
+      // for the recall channel within this askClaude invocation, replacing
+      // three scattered `let` variables (Quality Sweep Step 5). Future
+      // cross-stage extensions (dashboard, feedback loop, retry hints) get
+      // a clear extension point here. Lifetime: this function call only —
+      // garbage-collected when askClaude returns.
+      // Read access:
+      //   - intentHint suppressKeys (next 4 lines)
+      //   - composePrompt recallHint slot (further down)
+      //   - reply-time marker render (~ line 2410)
+      // Write access:
+      //   - prepareRecall result (right below)
+      //   - DO NOT write from any other site to keep lifecycle reasoning local
+      const _askState = {
+        recallActive: false,
+        recallHint: '',
+        recallMeta: null,
+      };
       try {
         const { prepareRecall } = require('./core/recall-prepare');
         const _recall = await prepareRecall({
@@ -1802,9 +1817,9 @@ function createClaudeEngine(deps) {
           assembleTimeoutMs: _recallAssembleTimeoutMs,
           log,
         });
-        _recallActive = !!_recall.recallActive;
-        _recallHint = _recall.recallHint || '';
-        _recallMeta = _recall.recallMeta || null;
+        _askState.recallActive = !!_recall.recallActive;
+        _askState.recallHint = _recall.recallHint || '';
+        _askState.recallMeta = _recall.recallMeta || null;
       } catch { /* defensive — prepareRecall already wraps internally */ }
 
       const intentHint = buildIntentHint({
@@ -1813,7 +1828,7 @@ function createClaudeEngine(deps) {
         boundProjectKey,
         projectKey,
         log,
-        suppressKeys: _recallActive ? ['memory_recall'] : undefined,
+        suppressKeys: _askState.recallActive ? ['memory_recall'] : undefined,
       });
 
       // For warm process reuse: static context (daemonHint, memoryHint, etc.) is already
@@ -1830,7 +1845,7 @@ function createClaudeEngine(deps) {
         summaryHint,
         memoryHint,
         mentorHint,
-        recallHint: _recallHint,
+        recallHint: _askState.recallHint,
         langGuard,
       });
       if (runtime.name === 'codex' && session.started && session.id && requestedCodexPermissionProfile) {
@@ -2405,16 +2420,17 @@ function createClaudeEngine(deps) {
         // user knows recall fired and which tiers contributed. The marker
         // is NEVER concatenated into replyText, so it cannot leak into
         // session diary, memory extraction, or downstream forwarding.
-        // _recallMeta lifecycle: declared `let` at the prompt-build site;
-        // garbage-collected when askClaude returns (turn-local by construction).
+        // Reads from _askState.recallMeta (Quality Sweep Step 5: explicit
+        // turn-local container declared at the prompt-build site above).
+        // _askState is garbage-collected when askClaude returns.
         try {
           const _markerEnabled = !(config && config.daemon
             && config.daemon.memory_recall_show_marker === false);
           const _markerChannel = (config && config.daemon
             && typeof config.daemon.memory_recall_marker_channel === 'string')
             ? config.daemon.memory_recall_marker_channel : 'card';
-          if (_recallMeta && _markerEnabled && _markerChannel === 'card' && bot.sendCard) {
-            const sources = Array.isArray(_recallMeta.sources) ? _recallMeta.sources : [];
+          if (_askState.recallMeta && _markerEnabled && _markerChannel === 'card' && bot.sendCard) {
+            const sources = Array.isArray(_askState.recallMeta.sources) ? _askState.recallMeta.sources : [];
             const counts = sources.reduce((acc, s) => {
               const tier = s && s.tier;
               if (tier) acc[tier] = (acc[tier] || 0) + 1;
