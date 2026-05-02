@@ -316,8 +316,26 @@ test('daemon e2e: source-invariant — daemon-claude-engine.js wires the recall 
     [/recallHint:\s*_askState\.recallHint/,            'must pass recallHint to composePrompt from _askState'],
     [/_askState\.recallMeta/,                           'must use _askState container for recallMeta'],
     [/bot\.sendCard\(chatId,\s*\{\s*title:\s*['"]🧠 Recall['"]/, 'must emit marker card with title 🧠 Recall'],
+
+    // Codex Step 6 P2: parameter-completeness checks (text-only, but stronger
+    // than mere presence — proves the config flag, timeout, and scope shape
+    // are still plumbed to prepareRecall).
+    [/enabled:\s*_recallEnabled/,                                                    'must plumb memory_recall_enabled flag'],
+    [/assembleTimeoutMs:\s*_recallAssembleTimeoutMs/,                                'must plumb assemble timeout'],
+    [/budget:\s*\{\s*totalChars:\s*_recallTotalChars\s*\}/,                          'must plumb budget.totalChars'],
+    [/project:\s*boundProjectKey\s*\|\|\s*projectKey\s*\|\|\s*null/,                 'must compute scope.project from chat-agent map'],
   ];
   for (const [re, msg] of checks) {
     assert.match(src, re, msg);
   }
+
+  // Order invariant: prepareRecall must come BEFORE composePrompt in the
+  // function body. If a refactor reorders them, intentHint/recallHint would
+  // be empty when composePrompt fires.
+  const prepareIdx = src.search(/await\s+prepareRecall\(/);
+  const composeIdx = src.search(/const\s+fullPrompt\s*=\s*composePrompt\(/);
+  assert.ok(prepareIdx > 0, 'prepareRecall call must be findable');
+  assert.ok(composeIdx > 0, 'composePrompt call must be findable');
+  assert.ok(prepareIdx < composeIdx,
+    `prepareRecall (${prepareIdx}) must come before composePrompt (${composeIdx}) in askClaude`);
 });
