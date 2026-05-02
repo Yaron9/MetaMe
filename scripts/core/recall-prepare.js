@@ -35,6 +35,14 @@ function _emptyResult(plan) {
   return { plan: plan || _emptyPlan(), recallActive: false, recallHint: '', recallMeta: null };
 }
 
+function _errMessage(e) {
+  // Defensive: throws can be null/undefined/string in addition to Error.
+  if (e == null) return 'unknown';
+  if (typeof e === 'string') return e;
+  if (typeof e.message === 'string') return e.message;
+  try { return String(e); } catch { return 'unknown'; }
+}
+
 function _safeLog(log, level, msg) {
   if (typeof log !== 'function') return;
   try { log(level, msg); } catch { /* never raise */ }
@@ -71,19 +79,23 @@ function _toSourceRef(s) {
 
 async function prepareRecall({
   prompt,
-  runtime = {},
-  scope = {},
+  runtime,
+  scope,
   chatId = null,
   enabled = false,
-  budget = {},
+  budget,
   log,
 } = {}) {
+  // Normalize possibly-null inputs so downstream property access never throws.
+  runtime = runtime && typeof runtime === 'object' ? runtime : {};
+  scope = scope && typeof scope === 'object' ? scope : {};
+  budget = budget && typeof budget === 'object' ? budget : {};
   // Phase 0: plan (sync, pure). Never throws normally; defensive try/catch.
   let plan;
   try {
     plan = planRecall({ text: prompt, runtime, scope });
   } catch (e) {
-    _safeLog(log, 'WARN', `planRecall failed: ${e.message}`);
+    _safeLog(log, 'WARN', `planRecall failed: ${_errMessage(e)}`);
     return _emptyResult();
   }
 
@@ -110,7 +122,7 @@ async function prepareRecall({
       search: { ftsOnly: !!budget.ftsOnly },
     });
   } catch (e) {
-    _safeLog(log, 'WARN', `assembleRecallContext failed: ${e.message}`);
+    _safeLog(log, 'WARN', `assembleRecallContext failed: ${_errMessage(e)}`);
     return _emptyResult(plan);
   }
 
