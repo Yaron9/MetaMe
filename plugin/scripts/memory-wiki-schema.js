@@ -285,9 +285,10 @@ function applyWikiSchema(db) {
   // ── recall_audit (v4.1 §P1.17): observe + inject phase telemetry ──────────
   // DDL is shared with core/recall-audit-db.js via core/recall-audit-ddl.js
   // (single source of truth, §0.5 no-redundancy).
-  const { RECALL_AUDIT_DDL, RECALL_AUDIT_INDEXES } = require('./core/recall-audit-ddl');
+  const { RECALL_AUDIT_DDL, RECALL_AUDIT_INDEXES, RECALL_AUDIT_STATE_DDL } = require('./core/recall-audit-ddl');
   db.exec(RECALL_AUDIT_DDL);
   for (const idx of RECALL_AUDIT_INDEXES) db.exec(idx);
+  db.exec(RECALL_AUDIT_STATE_DDL);
 
   // ── memory_review_decisions (v4.1 §P1.7): Phase-3 candidate review idempotency ──
   db.exec(`

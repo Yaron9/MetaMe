@@ -17,15 +17,17 @@
  * _getDbForTesting() returns the cached handle for failure-injection tests.
  *
  * Drop accounting: any prepare().run() exception (lock contention, CHECK
- * violation, etc.) is swallowed but counted in _droppedCount. Every 100 drops
- * we write a single marker row (phase='observe', outcome='harmful',
- * error_message='audit_dropped:N') so dashboards can see data gaps.
+ * violation, etc.) is swallowed but counted in _droppedCount, and the count
+ * is persisted to recall_audit_state on every drop so daemon restart resumes
+ * cleanly. Every 100 drops we additionally write a marker row (phase='observe',
+ * outcome='harmful', error_message='audit_dropped:N') in recall_audit so
+ * dashboards see data gaps without scanning the state table.
  */
 
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { RECALL_AUDIT_DDL } = require('./recall-audit-ddl');
+const { RECALL_AUDIT_DDL, RECALL_AUDIT_STATE_DDL } = require('./recall-audit-ddl');
 
 let _db = null;
 let _droppedCount = 0;
@@ -46,6 +48,10 @@ function _openDb() {
     db.exec('PRAGMA journal_mode = WAL');
     db.exec('PRAGMA busy_timeout = 3000');
     db.exec(RECALL_AUDIT_DDL);
+    db.exec(RECALL_AUDIT_STATE_DDL);
+    db.prepare(
+      `INSERT OR IGNORE INTO recall_audit_state (key, value) VALUES ('dropped_count', 0)`
+    ).run();
     _db = db;
     _seedDroppedCountFromDb(db);
     return _db;
@@ -54,25 +60,30 @@ function _openDb() {
   }
 }
 
-// Seed _droppedCount from the highest persisted marker so the counter
-// survives daemon restart. Marker rows are the persistence layer (no
-// separate state file); this means we lose at most DROP_MARKER_INTERVAL-1
-// drops across a restart, which is the granularity we already accept by
-// emitting a marker every 100 drops.
+// Seed _droppedCount from recall_audit_state — the single source of truth,
+// updated on every drop (not just at 100-drop boundaries). Marker rows in
+// recall_audit remain dashboard signals only.
 function _seedDroppedCountFromDb(db) {
   try {
     const row = db.prepare(
-      `SELECT error_message FROM recall_audit
-       WHERE error_message LIKE 'audit_dropped:%'
-       ORDER BY ts DESC LIMIT 1`
+      `SELECT value FROM recall_audit_state WHERE key = 'dropped_count'`
     ).get();
-    if (!row || typeof row.error_message !== 'string') return;
-    const m = row.error_message.match(/^audit_dropped:(\d+)$/);
-    if (!m) return;
-    const n = parseInt(m[1], 10);
-    if (Number.isFinite(n) && n > _droppedCount) _droppedCount = n;
+    if (row && Number.isFinite(row.value) && row.value > _droppedCount) {
+      _droppedCount = row.value;
+    }
   } catch {
     // Best-effort: missing schema, locked DB, etc. Counter just stays at 0.
+  }
+}
+
+function _persistDroppedCount(db, total) {
+  try {
+    db.prepare(
+      `UPDATE recall_audit_state SET value = ? WHERE key = 'dropped_count'`
+    ).run(total);
+  } catch {
+    // Sustained contention can drop the UPDATE too. Swallow — next drop
+    // retries with the latest value, so persistence catches up automatically.
   }
 }
 
@@ -125,12 +136,16 @@ function recordAudit(row) {
     );
   } catch {
     // Best-effort: audit must never surface failure into user reply path.
-    // Count the drop and emit a marker every DROP_MARKER_INTERVAL so ops can
-    // see data gaps. db is null only if _openDb() failed — in that case the
-    // marker write would also fail, so skip it.
+    // Count the drop, persist to state row (so daemon restart preserves the
+    // count), and emit a marker every DROP_MARKER_INTERVAL so dashboards see
+    // data gaps. db is null only if _openDb() failed — in that case both
+    // writes would also fail, so skip them.
     _droppedCount += 1;
-    if (db && _droppedCount % DROP_MARKER_INTERVAL === 0) {
-      _writeDroppedMarker(db, _droppedCount);
+    if (db) {
+      _persistDroppedCount(db, _droppedCount);
+      if (_droppedCount % DROP_MARKER_INTERVAL === 0) {
+        _writeDroppedMarker(db, _droppedCount);
+      }
     }
   }
 }

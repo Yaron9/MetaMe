@@ -42,4 +42,14 @@ const RECALL_AUDIT_INDEXES = [
   'CREATE INDEX IF NOT EXISTS idx_recall_audit_project ON recall_audit(project, scope, ts)',
 ];
 
-module.exports = { RECALL_AUDIT_DDL, RECALL_AUDIT_INDEXES };
+// Single-row state table for monotonic counters that must survive daemon
+// restart at sub-marker granularity (e.g. dropped audit-row count). Co-located
+// with recall_audit so a single DB handle maintains both.
+const RECALL_AUDIT_STATE_DDL = `
+  CREATE TABLE IF NOT EXISTS recall_audit_state (
+    key   TEXT PRIMARY KEY,
+    value INTEGER NOT NULL DEFAULT 0
+  )
+`;
+
+module.exports = { RECALL_AUDIT_DDL, RECALL_AUDIT_INDEXES, RECALL_AUDIT_STATE_DDL };
