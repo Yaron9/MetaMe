@@ -84,6 +84,10 @@ function _persistDroppedCount(db, total) {
   } catch {
     // Sustained contention can drop the UPDATE too. Swallow — next drop
     // retries with the latest value, so persistence catches up automatically.
+    // BOUNDED LOSS: drops between the last successful UPDATE and a daemon
+    // restart are lost forever (state row lags in-memory counter). Acceptable
+    // for best-effort audit telemetry; see test "bounded loss: drops between
+    // last successful UPDATE and restart are lost" for the regression pin.
   }
 }
 

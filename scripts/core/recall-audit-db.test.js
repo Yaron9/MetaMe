@@ -335,39 +335,72 @@ test('recall-audit-db', async (t) => {
     try { fs.rmSync(path.dirname(dbPath), { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
-  await t.test('seed never decreases the in-memory counter', () => {
-    // If the in-memory counter is already higher than the persisted value
-    // (e.g. concurrent process wrote the same DB), seed must not regress.
-    withTempDb((audit) => {
-      audit.recordAudit({ id: 'r_warm', should_recall: 1 });
-      // Force counter to 999 in-memory.
-      const realDb = audit._getDbForTesting();
-      realDb.prepare(`UPDATE recall_audit_state SET value = 50 WHERE key = 'dropped_count'`).run();
-      // Drive failures to push in-memory above 50, but state stays low because
-      // we'll mock UPDATE to throw.
-      const realPrepare = realDb.prepare.bind(realDb);
-      realDb.prepare = (sql) => {
-        if (/UPDATE recall_audit_state/.test(sql)) {
-          return { run() { throw new Error('busy'); } };
-        }
-        if (/INSERT INTO recall_audit\s+\(id, phase, chat_id/.test(sql)) {
-          return { run() { throw new Error('busy'); } };
-        }
-        return realPrepare(sql);
-      };
-      for (let i = 0; i < 80; i++) {
-        audit.recordAudit({ id: `r_${i}`, should_recall: 1 });
-      }
-      assert.equal(audit.getDroppedCount(), 80, 'in-memory advanced despite UPDATE failing');
+  await t.test('bounded loss: drops between last successful UPDATE and restart are lost', () => {
+    // Codex Step 7 round-3 P2: when state UPDATE itself fails (sustained
+    // contention), in-memory counter advances but state row lags. On restart,
+    // seed reads the lagging state value and the difference is gone forever.
+    // This test pins the bounded-loss behaviour so future refactors that
+    // claim "no loss" must update the test (and prove it).
+    const dbPath = freshTempDbPath();
+    const prev = process.env.METAME_RECALL_AUDIT_DB;
+    process.env.METAME_RECALL_AUDIT_DB = dbPath;
 
-      // Restore prepare and re-seed manually — value=50 in state, but in-mem=80.
-      realDb.prepare = realPrepare;
-      // Force a re-seed by calling _openDb path indirectly: easiest is to
-      // simulate via a private accessor — we already have _getDbForTesting,
-      // so just hand the row back to the seed path. Simpler: just verify
-      // seed logic via the public condition: count never regresses.
-      assert.ok(audit.getDroppedCount() >= 50, 'counter never decreases below in-memory value');
-    });
+    delete require.cache[require.resolve('./recall-audit-db')];
+    let audit = require('./recall-audit-db');
+    audit._resetForTesting();
+    audit.recordAudit({ id: 'r_warm', should_recall: 1 });
+    const realDb = audit._getDbForTesting();
+    const realPrepare = realDb.prepare.bind(realDb);
+
+    // Phase A: regular insert fails, state UPDATE works → state climbs.
+    realDb.prepare = (sql) => {
+      if (/INSERT INTO recall_audit\s+\(id, phase, chat_id/.test(sql)) {
+        return { run() { throw new Error('busy'); } };
+      }
+      return realPrepare(sql);
+    };
+    for (let i = 0; i < 30; i++) {
+      audit.recordAudit({ id: `a_${i}`, should_recall: 1 });
+    }
+    assert.equal(audit.getDroppedCount(), 30);
+
+    // Phase B: now BOTH the insert AND the state UPDATE fail. In-memory
+    // advances, state row stays at 30.
+    realDb.prepare = (sql) => {
+      if (/INSERT INTO recall_audit\s+\(id, phase, chat_id/.test(sql)) {
+        return { run() { throw new Error('busy'); } };
+      }
+      if (/UPDATE recall_audit_state/.test(sql)) {
+        return { run() { throw new Error('busy'); } };
+      }
+      return realPrepare(sql);
+    };
+    for (let i = 0; i < 20; i++) {
+      audit.recordAudit({ id: `b_${i}`, should_recall: 1 });
+    }
+    assert.equal(audit.getDroppedCount(), 50, 'in-memory advanced through Phase B');
+    // Read state directly via a fresh probe (not through audit module).
+    const probe = new DatabaseSync(dbPath);
+    const stateBefore = probe.prepare(
+      `SELECT value FROM recall_audit_state WHERE key = 'dropped_count'`
+    ).get();
+    probe.close();
+    assert.equal(stateBefore.value, 30, 'state row stuck at 30 — Phase B drops were lost from durable record');
+
+    // Phase C: simulate restart. Reset module → _droppedCount = 0 → first
+    // _openDb seeds from state row = 30. The 20 Phase-B drops are gone.
+    audit._resetForTesting();
+    delete require.cache[require.resolve('./recall-audit-db')];
+    audit = require('./recall-audit-db');
+    audit._resetForTesting();
+    audit.recordAudit({ id: 'c_warm', should_recall: 1 });
+    assert.equal(audit.getDroppedCount(), 30,
+      'post-restart counter is bounded-loss = state value, NOT in-memory pre-restart value');
+
+    audit._resetForTesting();
+    if (prev === undefined) delete process.env.METAME_RECALL_AUDIT_DB;
+    else process.env.METAME_RECALL_AUDIT_DB = prev;
+    try { fs.rmSync(path.dirname(dbPath), { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
   await t.test('_resetForTesting clears drop counter', () => {
