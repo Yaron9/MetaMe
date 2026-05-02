@@ -194,26 +194,39 @@ test('project/scope filter applied across all tiers', () => {
   });
 });
 
-test('Tier 3 (LIKE) kicks in when query is identifier-like and FTS may struggle', () => {
-  withFreshMemoryHome((memory) => {
-    memory.saveMemoryItem({
-      id: 'mi_like_only',
-      kind: 'convention',
-      state: 'active',
-      title: 'odd one',
-      // The trigram FTS does index this, but for ASCII we still rely on FTS.
-      // This case ensures the LIKE branch returns rows when invoked.
-      content: 'a unique substring zzgrep1234 buried in the middle',
-      project: 'metame',
-      scope: 'main',
+test('Tier 3 (LIKE) actually kicks in when FTS errors entirely', () => {
+  withFreshMemoryHome((memory, tmpDir) => {
+    seed(memory);
+    // Force the FTS path to throw by dropping the virtual FTS table. The
+    // FTS MATCH on the SQL inside searchMemoryItems will raise, the
+    // try/catch falls through to Tier 3 LIKE per-token OR.
+    const dbPath = path.join(tmpDir, '.metame', 'memory.db');
+    const aux = new DatabaseSync(dbPath);
+    // Drop external-content FTS triggers first to avoid cascade errors,
+    // then drop the FTS virtual table itself.
+    aux.exec('DROP TRIGGER IF EXISTS mi_ai');
+    aux.exec('DROP TRIGGER IF EXISTS mi_ad');
+    aux.exec('DROP TRIGGER IF EXISTS mi_au');
+    aux.exec('DROP TABLE IF EXISTS memory_items_fts');
+    aux.close();
+
+    // Force memory module to reopen so the new (FTS-less) DB is used.
+    try { memory.forceClose(); } catch { /* ignore */ }
+
+    // Multi-token query — would normally hit Tier 1 / Tier 2 via FTS.
+    // With FTS dropped, Tier 1 throws → catch → Tier 3 LIKE per-token OR.
+    const rows = memory.searchMemoryItems('daemon-claude-engine askClaude', {
+      project: 'metame', scope: 'main', limit: 10, trackSearch: false,
     });
-    // FTS phrase "zzgrep1234" should still match; ensure result is found
-    // via FTS path (this proves Tier 1 still works for single-token).
-    const rows = memory.searchMemoryItems('zzgrep1234', {
-      project: 'metame', scope: 'main', limit: 5, trackSearch: false,
-    });
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0].id, 'mi_like_only');
+    const ids = new Set(rows.map(r => r.id));
+    // Per-token OR LIKE matches every active row that contains at least
+    // one of the two tokens — i.e. mi_A (both), mi_B (askClaude),
+    // mi_C (daemon-claude-engine).
+    assert.ok(ids.has('mi_A'), 'mi_A surfaced via LIKE');
+    assert.ok(ids.has('mi_B'), 'mi_B surfaced via LIKE');
+    assert.ok(ids.has('mi_C'), 'mi_C surfaced via LIKE');
+    // Archived row stays excluded by the state filter that LIKE inherits.
+    assert.ok(!ids.has('mi_D'), 'archived row still excluded under LIKE path');
   });
 });
 

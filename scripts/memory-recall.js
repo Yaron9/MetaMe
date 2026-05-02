@@ -64,19 +64,28 @@ function _anchorsToQuery(anchors) {
     seen.add(t);
     tokens.push(t);
   };
+  // Pass 1 — every anchor's tail. This guarantees fairness: a fn/errcode/
+  // env-var anchor never gets squeezed out by an earlier file anchor's
+  // basename expansion, regardless of how many file anchors precede it.
   for (const a of anchors) {
     if (typeof a !== 'string' || !a) continue;
     if (tokens.length >= MAX_QUERY_ANCHORS) break;
     const idx = a.indexOf(':');
     const tail = idx >= 0 ? a.slice(idx + 1) : a;
-    if (!tail) continue;
-    push(tail);
-    if (a.startsWith('file:') && tail.includes('/')) {
-      const base = tail.slice(tail.lastIndexOf('/') + 1);
-      if (base && base !== tail) push(base);
-    }
+    if (tail) push(tail);
   }
-  return tokens.slice(0, MAX_QUERY_ANCHORS).join(' ').trim();
+  // Pass 2 — basename expansion for `file:` anchors, only into slots
+  // remaining after Pass 1. So `file:scripts/memory.js` adds `memory.js`
+  // ONLY if budget allows, never at the cost of dropping later anchors.
+  for (const a of anchors) {
+    if (typeof a !== 'string' || !a.startsWith('file:')) continue;
+    if (tokens.length >= MAX_QUERY_ANCHORS) break;
+    const tail = a.slice('file:'.length);
+    if (!tail.includes('/')) continue;
+    const base = tail.slice(tail.lastIndexOf('/') + 1);
+    if (base && base !== tail) push(base);
+  }
+  return tokens.join(' ').trim();
 }
 
 function _searchFacts(query, scope) {

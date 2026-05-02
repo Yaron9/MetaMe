@@ -194,6 +194,50 @@ test('assembleRecallContext: recallMeta carries plan + breakdown but no raw tran
   });
 });
 
+test('assembleRecallContext: basename expansion does not squeeze out fn/errcode anchors', async () => {
+  await withFreshMemoryHome(async (memory, assembleRecallContext) => {
+    // Indexed memory whose content matches BOTH a fn anchor and a file
+    // basename — the recall facade should land on it.
+    memory.saveMemoryItem({
+      id: 'mi_fairness',
+      kind: 'convention',
+      state: 'active',
+      title: 'engine.js · spawnHelper',
+      content: 'engine.js wraps spawnHelper() for the runtime layer',
+      project: 'metame',
+      scope: 'main',
+    });
+    // Plan with TWO file anchors AND one fn anchor. Old (pass-1+pass-2
+    // interleaved) implementation could expand both file basenames first
+    // and exhaust MAX_QUERY_ANCHORS=4 before reaching `fn:spawnHelper`.
+    // The new two-pass design guarantees every anchor's tail is pushed
+    // first; basename expansion only fills any remaining slots.
+    const plan = {
+      shouldRecall: true,
+      reason: 'explicit-history',
+      anchors: [
+        'file:scripts/runtime/engine.js',
+        'file:scripts/runtime/helpers.js',
+        'fn:spawnHelper',
+      ],
+      modes: ['facts'],
+      hintBudget: 1600,
+    };
+    const result = await assembleRecallContext({
+      plan,
+      scope: { project: 'metame', workspaceScope: 'main', agentKey: 'jarvis' },
+      budget: { totalChars: 4000 },
+      search: { ftsOnly: true },
+    });
+    // The fn anchor MUST contribute a token even with multiple file
+    // anchors competing for the budget. mi_fairness has both `engine.js`
+    // and `spawnHelper` in content, so Tier 1 AND should catch it.
+    assert.ok(result.text, 'recall block should not be empty');
+    const ids = result.recallMeta.sources.map(s => s.id);
+    assert.ok(ids.includes('mi_fairness'), 'fairness fix surfaces fn-matching row');
+  });
+});
+
 test('assembleRecallContext: file anchor expands basename so prefixed paths still hit', async () => {
   await withFreshMemoryHome(async (memory, assembleRecallContext) => {
     // Indexed memory uses ONLY the basename (no scripts/ prefix) — common
