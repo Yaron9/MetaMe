@@ -124,4 +124,39 @@ describe('intent-registry', () => {
     assert.match(block, /\[Agent 能力提示\]/);
     assert.match(block, /agent-guide\.md/);
   });
+
+  it('PR2: suppressKeys filters specified intent modules out of the result', () => {
+    // memory_recall hits this prompt by default — confirmed in baseline.
+    const baseline = buildIntentHintBlock('你还记得上次我们怎么改的吗', {}, '');
+    assert.match(baseline, /memory-search\.js/);
+
+    // With suppressKeys, the recall hint disappears.
+    const suppressed = buildIntentHintBlock('你还记得上次我们怎么改的吗', {}, '', {
+      suppressKeys: ['memory_recall'],
+    });
+    assert.doesNotMatch(suppressed, /\[跨会话记忆提示\]/);
+    assert.doesNotMatch(suppressed, /memory-search\.js/);
+  });
+
+  it('PR2: omitting opts argument keeps all intents (backward compatible)', () => {
+    // 4-param overload must behave identically to legacy 3-param when opts unset.
+    const a = buildIntentHintBlock('你还记得上次我们怎么改的吗', {}, '');
+    const b = buildIntentHintBlock('你还记得上次我们怎么改的吗', {}, '', {});
+    assert.equal(a, b);
+  });
+
+  it('PR2: empty suppressKeys array is a no-op', () => {
+    const a = buildIntentHintBlock('你还记得上次我们怎么改的吗', {}, '');
+    const b = buildIntentHintBlock('你还记得上次我们怎么改的吗', {}, '', { suppressKeys: [] });
+    assert.equal(a, b);
+  });
+
+  it('PR2: suppressKeys does not affect non-matching intents (other hints still fire)', () => {
+    // file_transfer fires on this prompt; suppressing memory_recall should not affect it.
+    const block = buildIntentHintBlock('把报告发给我，还记得上次的格式吗', {}, '', {
+      suppressKeys: ['memory_recall'],
+    });
+    assert.match(block, /\[\[FILE:\/absolute\/path\]\]/);
+    assert.doesNotMatch(block, /\[跨会话记忆提示\]/);
+  });
 });

@@ -89,9 +89,11 @@ function buildIntentHint({
   boundProjectKey,
   projectKey,
   log,
+  suppressKeys,
 }) {
   try {
-    const block = buildIntentHintBlock(prompt, config, boundProjectKey || projectKey || '');
+    const opts = Array.isArray(suppressKeys) && suppressKeys.length > 0 ? { suppressKeys } : undefined;
+    const block = buildIntentHintBlock(prompt, config, boundProjectKey || projectKey || '', opts);
     return block ? `\n\n${block}` : '';
   } catch (e) {
     if (typeof log === 'function') log('WARN', `Intent registry injection failed: ${e.message}`);

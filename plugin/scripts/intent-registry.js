@@ -90,7 +90,7 @@ function collectIntentHints(prompt, config = {}, projectKey = '') {
   return hints;
 }
 
-function buildIntentHintBlock(prompt, config = {}, projectKey = '') {
+function buildIntentHintBlock(prompt, config = {}, projectKey = '', opts = {}) {
   const maxHints = Number.isInteger(config && config.intent_max_hints) && config.intent_max_hints > 0
     ? config.intent_max_hints
     : DEFAULT_MAX_HINTS;
@@ -98,8 +98,18 @@ function buildIntentHintBlock(prompt, config = {}, projectKey = '') {
     ? config.intent_max_hint_chars
     : DEFAULT_MAX_HINT_CHARS;
 
+  // PR2 §P1.6: caller may suppress specific intent modules so their hints
+  // never reach the prompt. Used by daemon when the recall channel actively
+  // injects a recallHint — the legacy `memory_recall` CLI string would
+  // otherwise double-emit alongside the actual recall block.
+  const suppress = new Set(Array.isArray(opts.suppressKeys) ? opts.suppressKeys : []);
+
   let hits = collectIntentHints(prompt, config, projectKey)
     .map((item) => ({ ...item, ...normalizeIntentModule(INTENT_MODULES[item.key]) }));
+
+  if (suppress.size > 0) {
+    hits = hits.filter(item => !suppress.has(item.key));
+  }
 
   if (hits.some(item => !item.fallbackOnly) && !(typeof detectDocRouter.hasExplicitDocIntent === 'function' && detectDocRouter.hasExplicitDocIntent(prompt))) {
     hits = hits.filter(item => !item.fallbackOnly);
