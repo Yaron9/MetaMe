@@ -2393,6 +2393,45 @@ function createClaudeEngine(deps) {
             log('ERROR', `sendMessage fallback also failed: ${e2.message}`);
           }
         }
+
+        // PR2 Step 6: Feishu footer-card recall marker (v4.1 §P1.16). When
+        // the recall channel injected this turn AND show_marker is enabled
+        // AND marker_channel === 'card', emit a small separate card so the
+        // user knows recall fired and which tiers contributed. The marker
+        // is NEVER concatenated into replyText, so it cannot leak into
+        // session diary, memory extraction, or downstream forwarding.
+        // _recallMeta lifecycle: declared `let` at the prompt-build site;
+        // garbage-collected when askClaude returns (turn-local by construction).
+        try {
+          const _markerEnabled = !(config && config.daemon
+            && config.daemon.memory_recall_show_marker === false);
+          const _markerChannel = (config && config.daemon
+            && typeof config.daemon.memory_recall_marker_channel === 'string')
+            ? config.daemon.memory_recall_marker_channel : 'card';
+          if (_recallMeta && _markerEnabled && _markerChannel === 'card' && bot.sendCard) {
+            const sources = Array.isArray(_recallMeta.sources) ? _recallMeta.sources : [];
+            const counts = sources.reduce((acc, s) => {
+              const tier = s && s.tier;
+              if (tier) acc[tier] = (acc[tier] || 0) + 1;
+              return acc;
+            }, {});
+            const parts = [];
+            if (counts.facts)    parts.push(`facts:${counts.facts}`);
+            if (counts.wiki)     parts.push(`wiki:${counts.wiki}`);
+            if (counts.working)  parts.push(`working:${counts.working}`);
+            if (counts.sessions) parts.push(`sessions:${counts.sessions}`);
+            const breakdown = parts.length > 0 ? ` — ${parts.join(' ')}` : '';
+            const markerBody = `[Jarvis: 已结合 ${sources.length} 条历史${breakdown}]`;
+            await bot.sendCard(chatId, {
+              title: '🧠 Recall',
+              body: markerBody,
+              color: 'gray',
+            }).catch(() => { /* swallow — marker must never block reply */ });
+          }
+        } catch (e) {
+          log('WARN', `Recall marker render failed: ${e && e.message ? e.message : 'unknown'}`);
+        }
+
         const trackedAgentKey = projectKeyFromVirtualChatId(chatId);
         if (replyMsg && replyMsg.message_id && session) {
           if (runtime.name === 'codex' && session.runtimeSessionObserved === false) {
