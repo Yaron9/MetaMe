@@ -200,6 +200,122 @@ test('prepareRecall: planRecall throws → returns empty, no rows', async () => 
   });
 });
 
+test('prepareRecall: assembleRecallContext slower than timeout → outcome=harmful inject row, no recall', async () => {
+  await withFreshHomeAndAudit(async (prepareRecall, _memory, dbPath) => {
+    // Monkey-patch memory-recall to simulate a 200ms-slow facade.
+    const memoryRecallPath = require.resolve('../memory-recall');
+    require.cache[memoryRecallPath] = {
+      id: memoryRecallPath, filename: memoryRecallPath, loaded: true, children: [], paths: [],
+      exports: {
+        assembleRecallContext: () => new Promise((resolve) => {
+          setTimeout(() => resolve({ text: '\n\n[recall would have been here]', sources: [], truncated: false, breakdown: { facts: 100, wiki: 0, working: 0, sessions: 0 }, recallMeta: { sources: [], chars: 30 }, wikiDropped: false }), 200);
+        }),
+      },
+    };
+    delete require.cache[require.resolve('./recall-prepare')];
+    const { prepareRecall: prep } = require('./recall-prepare');
+
+    const t0 = Date.now();
+    const result = await prep({
+      prompt: '上次我们讨论过 daemon 的崩溃 scripts/memory.js',
+      runtime: { engine: 'claude', sessionStarted: true },
+      scope: { project: 'metame', workspaceScope: 'main', agentKey: 'jarvis' },
+      chatId: 'oc_t', enabled: true,
+      assembleTimeoutMs: 50, // tight bound — synthetic 200ms must exceed.
+    });
+    const elapsed = Date.now() - t0;
+
+    // Caller is unblocked well before the synthetic delay completes.
+    assert.ok(elapsed < 150, `prepareRecall must return before assemble would finish, got ${elapsed}ms`);
+    // Returned result is the empty-result shape — no recall injection.
+    assert.equal(result.recallActive, false);
+    assert.equal(result.recallHint, '');
+    assert.equal(result.recallMeta, null);
+    // recall_audit captured BOTH observe (always) AND a timeout-tagged inject row.
+    const db = new (require('node:sqlite').DatabaseSync)(dbPath);
+    const rows = db.prepare(`SELECT phase, outcome, error_message, injected_chars FROM recall_audit ORDER BY ts, id`).all();
+    db.close();
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].phase, 'observe');
+    assert.equal(rows[1].phase, 'inject');
+    assert.equal(rows[1].outcome, 'harmful');
+    assert.match(rows[1].error_message, /assemble timeout:50ms/);
+    assert.equal(rows[1].injected_chars, 0);
+  });
+});
+
+test('prepareRecall: assembleRecallContext within timeout → normal inject row', async () => {
+  await withFreshHomeAndAudit(async (prepareRecall, _memory, dbPath) => {
+    // Monkey-patch memory-recall with a fast (10ms) facade.
+    const memoryRecallPath = require.resolve('../memory-recall');
+    require.cache[memoryRecallPath] = {
+      id: memoryRecallPath, filename: memoryRecallPath, loaded: true, children: [], paths: [],
+      exports: {
+        assembleRecallContext: () => new Promise((resolve) => {
+          setTimeout(() => resolve({
+            text: '\n\n[Recall context:\nFacts:\n- mock fact\n]',
+            sources: [{ tier: 'facts', kind: 'fact', id: 'mi_x' }],
+            truncated: false,
+            breakdown: { facts: 30, wiki: 0, working: 0, sessions: 0 },
+            recallMeta: { sources: [{ tier: 'facts', id: 'mi_x' }], chars: 30 },
+            wikiDropped: false,
+          }), 10);
+        }),
+      },
+    };
+    delete require.cache[require.resolve('./recall-prepare')];
+    const { prepareRecall: prep } = require('./recall-prepare');
+
+    const result = await prep({
+      prompt: '上次我们讨论过 daemon 的崩溃 scripts/memory.js',
+      runtime: { engine: 'claude', sessionStarted: true },
+      scope: { project: 'metame', workspaceScope: 'main', agentKey: 'jarvis' },
+      chatId: 'oc_ok', enabled: true,
+      assembleTimeoutMs: 100,
+    });
+    assert.equal(result.recallActive, true);
+    assert.match(result.recallHint, /\[Recall context:/);
+    const db = new (require('node:sqlite').DatabaseSync)(dbPath);
+    const rows = db.prepare(`SELECT phase, outcome FROM recall_audit ORDER BY ts, id`).all();
+    db.close();
+    assert.equal(rows[1].phase, 'inject');
+    assert.notEqual(rows[1].outcome, 'harmful');
+  });
+});
+
+test('prepareRecall: invalid assembleTimeoutMs falls back to default 80ms', async () => {
+  await withFreshHomeAndAudit(async (prepareRecall, _memory, dbPath) => {
+    // Synthetic 200ms facade.
+    const memoryRecallPath = require.resolve('../memory-recall');
+    require.cache[memoryRecallPath] = {
+      id: memoryRecallPath, filename: memoryRecallPath, loaded: true, children: [], paths: [],
+      exports: {
+        assembleRecallContext: () => new Promise((resolve) => {
+          setTimeout(() => resolve({ text: 'x', sources: [], truncated: false, breakdown: { facts: 1, wiki: 0, working: 0, sessions: 0 }, recallMeta: {}, wikiDropped: false }), 200);
+        }),
+      },
+    };
+    delete require.cache[require.resolve('./recall-prepare')];
+    const { prepareRecall: prep } = require('./recall-prepare');
+
+    const t0 = Date.now();
+    // Pass invalid timeouts — should all fall back to 80ms default and timeout.
+    for (const bad of [undefined, 0, -1, NaN, 'abc']) {
+      const r = await prep({
+        prompt: '还记得吗',
+        runtime: { engine: 'claude', sessionStarted: true },
+        scope: { project: 'metame' },
+        chatId: 'oc_d', enabled: true,
+        assembleTimeoutMs: bad,
+      });
+      assert.equal(r.recallActive, false, `bad timeout ${bad} should fall back, then time out`);
+    }
+    const elapsed = Date.now() - t0;
+    // 5 calls × ~80ms = ~400ms total; well under 5×200ms (1000ms).
+    assert.ok(elapsed < 700, `5×default 80ms timeouts should finish under 700ms, got ${elapsed}ms`);
+  });
+});
+
 test('prepareRecall: pure-ish module — no daemon imports', () => {
   const src = fs.readFileSync(path.join(__dirname, 'recall-prepare.js'), 'utf8');
   const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');

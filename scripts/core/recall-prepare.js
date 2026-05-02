@@ -77,6 +77,23 @@ function _toSourceRef(s) {
   return null;
 }
 
+// Sentinel resolved by the timeout side of Promise.race so the caller can
+// distinguish a genuine empty-context result from a budget-exceeded fall-through.
+const ASSEMBLE_TIMEOUT_SENTINEL = Symbol('recall-assemble-timeout');
+const DEFAULT_ASSEMBLE_TIMEOUT_MS = 80;
+
+function _withTimeout(promise, ms) {
+  let cancel;
+  const timer = new Promise((resolve) => {
+    const t = setTimeout(() => resolve(ASSEMBLE_TIMEOUT_SENTINEL), ms);
+    cancel = () => clearTimeout(t);
+  });
+  return Promise.race([
+    promise.then((v) => { cancel(); return v; }, (e) => { cancel(); throw e; }),
+    timer,
+  ]);
+}
+
 async function prepareRecall({
   prompt,
   runtime,
@@ -85,11 +102,15 @@ async function prepareRecall({
   enabled = false,
   budget,
   log,
+  assembleTimeoutMs,
 } = {}) {
   // Normalize possibly-null inputs so downstream property access never throws.
   runtime = runtime && typeof runtime === 'object' ? runtime : {};
   scope = scope && typeof scope === 'object' ? scope : {};
   budget = budget && typeof budget === 'object' ? budget : {};
+  const timeoutMs = Number.isFinite(assembleTimeoutMs) && assembleTimeoutMs > 0
+    ? assembleTimeoutMs
+    : DEFAULT_ASSEMBLE_TIMEOUT_MS;
   // Phase 0: plan (sync, pure). Never throws normally; defensive try/catch.
   let plan;
   try {
@@ -109,18 +130,39 @@ async function prepareRecall({
   if (!enabled || !plan.shouldRecall) return _emptyResult(plan);
 
   // Phase 3: assemble context. Heavyweight (DB queries via memory.js).
+  // Wrapped in Promise.race so it never blocks the user reply for more than
+  // `timeoutMs`. On timeout we write an inject-side audit row tagged with
+  // outcome='harmful' + error_message='assemble timeout:Nms' so the
+  // observation pipeline records the cost. recallActive stays false; the
+  // daemon proceeds with the existing prompt.
   let ctx;
   try {
     const { assembleRecallContext } = require('../memory-recall');
-    ctx = await assembleRecallContext({
-      plan,
-      scope,
-      budget: {
-        totalChars: Number.isFinite(budget.totalChars) ? budget.totalChars : 4000,
-        perItem: budget.perItem || undefined,
-      },
-      search: { ftsOnly: !!budget.ftsOnly },
-    });
+    const result = await _withTimeout(
+      assembleRecallContext({
+        plan,
+        scope,
+        budget: {
+          totalChars: Number.isFinite(budget.totalChars) ? budget.totalChars : 4000,
+          perItem: budget.perItem || undefined,
+        },
+        search: { ftsOnly: !!budget.ftsOnly },
+      }),
+      timeoutMs,
+    );
+    if (result === ASSEMBLE_TIMEOUT_SENTINEL) {
+      _safeLog(log, 'WARN', `assembleRecallContext timed out after ${timeoutMs}ms`);
+      _writeAudit({
+        id: _newAuditId('ri'),
+        phase: 'inject',
+        ...common,
+        injected_chars: 0,
+        outcome: 'harmful',
+        error_message: `assemble timeout:${timeoutMs}ms`,
+      });
+      return _emptyResult(plan);
+    }
+    ctx = result;
   } catch (e) {
     _safeLog(log, 'WARN', `assembleRecallContext failed: ${_errMessage(e)}`);
     return _emptyResult(plan);

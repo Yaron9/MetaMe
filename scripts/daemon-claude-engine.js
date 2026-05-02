@@ -1779,6 +1779,10 @@ function createClaudeEngine(deps) {
       const _recallTotalChars = (config && config.daemon
         && Number.isFinite(config.daemon.memory_recall_max_chars))
         ? config.daemon.memory_recall_max_chars : 4000;
+      const _recallAssembleTimeoutMs = (config && config.daemon
+        && Number.isFinite(config.daemon.memory_recall_assemble_timeout_ms)
+        && config.daemon.memory_recall_assemble_timeout_ms > 0)
+        ? config.daemon.memory_recall_assemble_timeout_ms : 80;
       let _recallActive = false;
       let _recallHint = '';
       let _recallMeta = null;
@@ -1795,6 +1799,7 @@ function createClaudeEngine(deps) {
           chatId,
           enabled: _recallEnabled,
           budget: { totalChars: _recallTotalChars },
+          assembleTimeoutMs: _recallAssembleTimeoutMs,
           log,
         });
         _recallActive = !!_recall.recallActive;

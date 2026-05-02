@@ -215,6 +215,10 @@ daemon:
                                          # into prompt and writes phase=inject
                                          # rows to recall_audit table.
   memory_recall_max_chars: 4000          # recallHint budget cap (chars)
+  memory_recall_assemble_timeout_ms: 80  # max wait for assembleRecallContext;
+                                         # on timeout daemon proceeds with no
+                                         # recallHint and writes outcome=harmful
+                                         # to recall_audit (observation-only).
   memory_recall_show_marker: true        # internal-testing default; flip to
                                          # false after 4 weeks per v4.1 §P1.16
                                          # (PR2 ship engineer owns the flip)
