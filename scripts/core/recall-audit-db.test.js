@@ -251,6 +251,106 @@ test('recall-audit-db', async (t) => {
     });
   });
 
+  await t.test('drop counter survives daemon restart via marker seed', () => {
+    // Simulates Codex Step 7 review finding: in-memory counter restart loses
+    // visibility. We persist via the marker rows themselves — on _openDb the
+    // module re-reads the highest audit_dropped:N and resumes from there.
+    const dbPath = freshTempDbPath();
+    const prev = process.env.METAME_RECALL_AUDIT_DB;
+    process.env.METAME_RECALL_AUDIT_DB = dbPath;
+
+    // Phase 1: write a marker manually (as if a previous daemon session had
+    // already passed the 100-drop boundary), then close everything.
+    delete require.cache[require.resolve('./recall-audit-db')];
+    let audit = require('./recall-audit-db');
+    audit._resetForTesting();
+    audit.recordAudit({ id: 'r_warmup', should_recall: 1 });
+    const realDb = audit._getDbForTesting();
+    realDb.prepare(
+      `INSERT INTO recall_audit (id, phase, outcome, error_message, should_recall)
+       VALUES (?, 'observe', 'harmful', ?, 0)`
+    ).run('audit_dropped_pretest_300', 'audit_dropped:300');
+    audit._resetForTesting();
+
+    // Phase 2: simulate restart — fresh module, _droppedCount starts at 0
+    // but should immediately seed to 300 from the persisted marker.
+    delete require.cache[require.resolve('./recall-audit-db')];
+    audit = require('./recall-audit-db');
+    audit._resetForTesting();
+    assert.equal(audit.getDroppedCount(), 0, 'before any DB open, count is 0');
+    // First write opens the DB → seed runs.
+    audit.recordAudit({ id: 'r_postrestart', should_recall: 1 });
+    assert.equal(
+      audit.getDroppedCount(), 300,
+      'counter seeded from latest marker on first open after restart',
+    );
+
+    // Phase 3: drive 100 more drops — should emit marker at 400, not 100.
+    const realDb2 = audit._getDbForTesting();
+    const realPrepare2 = realDb2.prepare.bind(realDb2);
+    const REGULAR_INSERT_RE = /INSERT INTO recall_audit\s+\(id, phase, chat_id/;
+    realDb2.prepare = (sql) => {
+      if (REGULAR_INSERT_RE.test(sql)) {
+        return { run() { throw new Error('busy'); } };
+      }
+      return realPrepare2(sql);
+    };
+    for (let i = 0; i < 100; i++) {
+      audit.recordAudit({ id: `r_p2_${i}`, should_recall: 1 });
+    }
+    assert.equal(audit.getDroppedCount(), 400);
+    const probe = new DatabaseSync(dbPath);
+    const markers = probe.prepare(
+      `SELECT error_message FROM recall_audit
+       WHERE error_message LIKE 'audit_dropped:%'
+       ORDER BY ts ASC`
+    ).all().map(r => r.error_message);
+    probe.close();
+    assert.deepEqual(markers, ['audit_dropped:300', 'audit_dropped:400']);
+
+    audit._resetForTesting();
+    if (prev === undefined) delete process.env.METAME_RECALL_AUDIT_DB;
+    else process.env.METAME_RECALL_AUDIT_DB = prev;
+    try { fs.rmSync(path.dirname(dbPath), { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  await t.test('seed picks the LATEST marker by ts, not numeric max', () => {
+    // Edge case: if old marker says 500 but most recent says 100 (e.g. table
+    // wrapped or DB was restored from backup), seed should follow the actual
+    // sequence — i.e. the latest row by ts. We assert the SELECT uses ORDER BY
+    // ts DESC (which the implementation does).
+    const dbPath = freshTempDbPath();
+    const prev = process.env.METAME_RECALL_AUDIT_DB;
+    process.env.METAME_RECALL_AUDIT_DB = dbPath;
+
+    delete require.cache[require.resolve('./recall-audit-db')];
+    let audit = require('./recall-audit-db');
+    audit._resetForTesting();
+    audit.recordAudit({ id: 'r_warm', should_recall: 1 });
+    const realDb = audit._getDbForTesting();
+    // Insert two markers, both flushed; second has later ts (sleep tick).
+    realDb.prepare(
+      `INSERT INTO recall_audit (id, ts, phase, outcome, error_message, should_recall)
+       VALUES (?, datetime('now', '-1 hour'), 'observe', 'harmful', ?, 0)`
+    ).run('m_old', 'audit_dropped:500');
+    realDb.prepare(
+      `INSERT INTO recall_audit (id, ts, phase, outcome, error_message, should_recall)
+       VALUES (?, datetime('now'), 'observe', 'harmful', ?, 0)`
+    ).run('m_new', 'audit_dropped:700');
+    audit._resetForTesting();
+
+    delete require.cache[require.resolve('./recall-audit-db')];
+    audit = require('./recall-audit-db');
+    audit._resetForTesting();
+    audit.recordAudit({ id: 'r_again', should_recall: 1 });
+    assert.equal(audit.getDroppedCount(), 700, 'seeded from newest marker');
+
+    audit._resetForTesting();
+    if (prev === undefined) delete process.env.METAME_RECALL_AUDIT_DB;
+    else process.env.METAME_RECALL_AUDIT_DB = prev;
+    try { fs.rmSync(path.dirname(dbPath), { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
   await t.test('_resetForTesting clears drop counter', () => {
     withTempDb((audit) => {
       audit.recordAudit({ id: 'r_warmup', should_recall: 1 });

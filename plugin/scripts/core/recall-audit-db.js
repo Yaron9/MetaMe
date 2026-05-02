@@ -47,9 +47,32 @@ function _openDb() {
     db.exec('PRAGMA busy_timeout = 3000');
     db.exec(RECALL_AUDIT_DDL);
     _db = db;
+    _seedDroppedCountFromDb(db);
     return _db;
   } catch {
     return null;
+  }
+}
+
+// Seed _droppedCount from the highest persisted marker so the counter
+// survives daemon restart. Marker rows are the persistence layer (no
+// separate state file); this means we lose at most DROP_MARKER_INTERVAL-1
+// drops across a restart, which is the granularity we already accept by
+// emitting a marker every 100 drops.
+function _seedDroppedCountFromDb(db) {
+  try {
+    const row = db.prepare(
+      `SELECT error_message FROM recall_audit
+       WHERE error_message LIKE 'audit_dropped:%'
+       ORDER BY ts DESC LIMIT 1`
+    ).get();
+    if (!row || typeof row.error_message !== 'string') return;
+    const m = row.error_message.match(/^audit_dropped:(\d+)$/);
+    if (!m) return;
+    const n = parseInt(m[1], 10);
+    if (Number.isFinite(n) && n > _droppedCount) _droppedCount = n;
+  } catch {
+    // Best-effort: missing schema, locked DB, etc. Counter just stays at 0.
   }
 }
 
