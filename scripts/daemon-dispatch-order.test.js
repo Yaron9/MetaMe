@@ -156,6 +156,96 @@ describe('dispatch receiver task cards', () => {
     assert.deepEqual(calls[0].card, originalCard);
   });
 
+  it('adds the dispatch identity heading to forwarded cards without a title', async () => {
+    const calls = [];
+    const realBot = {
+      sendMessage: async (_chatId, text) => {
+        calls.push({ type: 'text', text });
+        return { message_id: `m_${calls.length}` };
+      },
+      sendMarkdown: async (_chatId, text) => {
+        calls.push({ type: 'md', text });
+        return { message_id: `m_${calls.length}` };
+      },
+      sendCard: async (_chatId, card) => {
+        calls.push({ type: 'card', card });
+        return { message_id: `m_${calls.length}` };
+      },
+      sendRawCard: async () => ({ message_id: 'raw_1' }),
+      sendButtons: async () => ({ message_id: 'btn_1' }),
+      sendTyping: async () => null,
+      editMessage: async () => true,
+      deleteMessage: async () => null,
+      sendFile: async () => null,
+      downloadFile: async () => null,
+    };
+
+    const streamBot = __test.createStreamForwardBot(realBot, 'chat_1', null, {
+      responseCard: { title: '🔧 工匠 · MVP拼装', color: 'yellow' },
+    });
+    const originalCard = { body: '计划：先排查，再落地验证。' };
+    await streamBot.sendCard('ignored', originalCard);
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].type, 'card');
+    assert.deepEqual(calls[0].card, {
+      body: originalCard.body,
+      title: '🔧 工匠 · MVP拼装',
+      color: 'yellow',
+    });
+  });
+
+  it('builds a receipt for unknown targets without crashing on null response card', () => {
+    const { buildDispatchReceipt } = require('./daemon-dispatch-cards');
+    const receipt = buildDispatchReceipt(
+      { id: 'd_unknown_1', target: 'ghost_agent', from: 'user', prompt: '试试不存在的 agent' },
+      { projects: { real: { name: 'Real', icon: '🤖' } } },
+      { success: false, error: 'unknown_target' }
+    );
+
+    assert.equal(receipt.status, 'failed');
+    assert.equal(receipt.targetKey, 'ghost_agent');
+    assert.ok(receipt.card, 'receipt must include card payload');
+    assert.equal(receipt.card.title, '❓ 未知目标: ghost_agent');
+    assert.equal(receipt.card.color, 'red');
+    assert.match(receipt.card.body, /unknown_target/);
+    assert.match(receipt.card.body, /目标: ❓ 未知目标: ghost_agent/);
+  });
+
+  it('builds an accepted receipt card with the resolved target identity', () => {
+    const { buildDispatchReceipt } = require('./daemon-dispatch-cards');
+    const receipt = buildDispatchReceipt(
+      { id: 'd_ok_1', target: 'coder', from: 'planner', prompt: '修一下登录超时' },
+      { projects: {
+        planner: { name: 'Planner', icon: '🧭' },
+        coder: { name: 'Coder', icon: '🛠', color: 'green' },
+      } },
+      { success: true, id: 'queued_42' }
+    );
+
+    assert.equal(receipt.status, 'accepted');
+    assert.equal(receipt.dispatchId, 'queued_42');
+    assert.equal(receipt.card.title, '🛠 Coder');
+    assert.equal(receipt.card.color, 'green');
+    assert.match(receipt.card.body, /目标: 🛠 Coder/);
+    assert.match(receipt.card.body, /编号: queued_42/);
+  });
+
+  it('builds a receipt with safe defaults when target is missing entirely', () => {
+    const { buildDispatchReceipt } = require('./daemon-dispatch-cards');
+    const receipt = buildDispatchReceipt(
+      { id: 'd_null_1', target: null, from: 'user', prompt: '' },
+      { projects: {} },
+      { success: false, error: 'target_guard_user_only' }
+    );
+
+    assert.equal(receipt.status, 'failed');
+    assert.equal(receipt.targetKey, 'unknown');
+    assert.equal(receipt.card.title, '❓ 未知目标: unknown');
+    assert.equal(receipt.card.color, 'red');
+    assert.match(receipt.card.body, /target_guard_user_only/);
+  });
+
   it('builds a detailed task card with TeamTask metadata when available', () => {
     const card = __test.buildDispatchTaskCard({
       id: 'd_demo_001',

@@ -235,8 +235,8 @@ describe('daemon-admin-commands /TeamTask', () => {
         taskBoard: {
           listScopeParticipants: () => ['planner'],
         },
-        dispatchTask: (target, packet) => {
-          dispatchCalls.push({ target, packet });
+        dispatchTask: (target, packet, _config, _replyFn, streamOptions) => {
+          dispatchCalls.push({ target, packet, streamOptions });
           return { success: true };
         },
       }
@@ -251,8 +251,13 @@ describe('daemon-admin-commands /TeamTask', () => {
       chatId: 'mobile-user-2',
       text: '/TeamTask create coder 重构登录流程 --scope epic_auth',
       config: {
+        feishu: {
+          chat_agent_map: {
+            'target-coder-chat': 'coder',
+          },
+        },
         projects: {
-          coder: { name: 'Coder' },
+          coder: { name: 'Coder', icon: '🛠', color: 'green' },
         },
       },
       state: { tasks: {} },
@@ -267,6 +272,60 @@ describe('daemon-admin-commands /TeamTask', () => {
     assert.match(sent[0], /已创建 TeamTask 并提交派发/);
     assert.match(sent[0], /回执会在目标端真正接收后返回/);
     assert.match(sent[0], /查看: \/TeamTask t_/);
+  });
+
+  it('passes the target identity card into local TeamTask dispatch streams', async () => {
+    const sent = [];
+    const cards = [];
+    const dispatchCalls = [];
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        taskEnvelope,
+        taskBoard: {
+          listScopeParticipants: () => ['planner'],
+        },
+        dispatchTask: (target, packet, _config, replyFn, streamOptions) => {
+          dispatchCalls.push({ target, packet, replyFn, streamOptions });
+          return { success: true };
+        },
+      }
+    );
+
+    const bot = {
+      sendMessage: async (_chatId, text) => { sent.push(String(text)); },
+      sendCard: async (_chatId, card) => {
+        cards.push(card);
+        return { message_id: 'card_1' };
+      },
+    };
+
+    const res = await handleAdminCommand({
+      bot,
+      chatId: 'mobile-user-2',
+      text: '/TeamTask create coder 重构登录流程 --scope epic_auth',
+      config: {
+        feishu: {
+          chat_agent_map: {
+            'target-coder-chat': 'coder',
+          },
+        },
+        projects: {
+          coder: { name: 'Coder', icon: '🛠', color: 'green' },
+        },
+      },
+      state: { tasks: {} },
+    });
+
+    assert.equal(res.handled, true);
+    assert.equal(dispatchCalls.length, 1);
+    assert.equal(dispatchCalls[0].target, 'coder');
+    assert.equal(dispatchCalls[0].replyFn, null);
+    assert.equal(dispatchCalls[0].streamOptions.chatId, 'target-coder-chat');
+    assert.equal(dispatchCalls[0].streamOptions.responseCard.title, '🛠 Coder');
+    assert.equal(dispatchCalls[0].streamOptions.responseCard.color, 'green');
+    assert.equal(cards[0].title, '🛠 Coder');
+    assert.match(cards[0].body, /📮 Dispatch 回执/);
   });
 
   it('shows usage when /TeamTask create is missing payload', async () => {
@@ -395,8 +454,8 @@ describe('daemon-admin-commands /TeamTask', () => {
           listScopeParticipants: () => ['planner', 'coder'],
           appendTaskEvent: () => {},
         },
-        dispatchTask: (target, packet) => {
-          dispatchCalls.push({ target, packet });
+        dispatchTask: (target, packet, _config, _replyFn, streamOptions) => {
+          dispatchCalls.push({ target, packet, streamOptions });
           return { success: true };
         },
       }
@@ -410,8 +469,13 @@ describe('daemon-admin-commands /TeamTask', () => {
       chatId: 'mobile-user-3c',
       text: '/TeamTask resume t_20260225_resume1',
       config: {
+        feishu: {
+          chat_agent_map: {
+            'target-coder-chat': 'coder',
+          },
+        },
         projects: {
-          coder: { name: 'Coder' },
+          coder: { name: 'Coder', icon: '🛠', color: 'green' },
         },
       },
       state: { tasks: {} },
@@ -422,6 +486,8 @@ describe('daemon-admin-commands /TeamTask', () => {
     assert.equal(dispatchCalls[0].target, 'coder');
     assert.equal(dispatchCalls[0].packet.source_chat_id, 'mobile-user-3c');
     assert.equal(dispatchCalls[0].packet.source_sender_key, 'planner');
+    assert.equal(dispatchCalls[0].streamOptions.chatId, 'target-coder-chat');
+    assert.equal(dispatchCalls[0].streamOptions.responseCard.title, '🛠 Coder');
     assert.match(sent[0], /已续跑 TeamTask: t_20260225_resume1/);
     assert.match(sent[0], /回执会在目标端真正接收后返回/);
   });

@@ -20,6 +20,7 @@ const {
   buildIntentHint,
   composePrompt,
 } = require('./daemon-prompt-context');
+const { buildDispatchResponseCard } = require('./daemon-dispatch-cards');
 const { createPlatformSpawn, terminateChildProcess, stopStreamingLifecycle, abortStreamingChildLifecycle, setActiveChildProcess, clearActiveChildProcess, acquireStreamingChild, buildStreamingResult, resolveStreamingClosePayload, accumulateStreamingStderr, splitStreamingStdoutChunk, buildStreamFlushPayload, buildToolOverlayPayload, buildMilestoneOverlayPayload, finalizePersistentStreamingTurn, writeStreamingChildInput, parseStreamingEvents, applyStreamingMetadata, applyStreamingToolState, applyStreamingContentState, createStreamingWatchdog, runAsyncCommand } = require('./core/handoff');
 
 /**
@@ -584,6 +585,23 @@ function createClaudeEngine(deps) {
       if (idx > 7 && idx + 2 < v.length) return v.slice(idx + 2);
     }
     return null;
+  }
+
+  function buildAgentCardHeaderForChat(chatId, cfg = {}) {
+    const chatIdStr = String(chatId || '');
+    const agentMap = {
+      ...(cfg.telegram ? cfg.telegram.chat_agent_map || {} : {}),
+      ...(cfg.feishu ? cfg.feishu.chat_agent_map || {} : {}),
+      ...(cfg.imessage ? cfg.imessage.chat_agent_map || {} : {}),
+    };
+    const boundKey = agentMap[chatIdStr] || agentMap[rawChatId(chatIdStr)] || projectKeyFromVirtualChatId(chatIdStr);
+    if (!boundKey) return null;
+    const card = buildDispatchResponseCard(boundKey, cfg);
+    if (!card || !card.title) return null;
+    return {
+      title: card.title,
+      color: card.color || 'blue',
+    };
   }
 
   function resolveMentorMode(cfg = {}) {
@@ -1210,9 +1228,7 @@ function createClaudeEngine(deps) {
     const _ackBoundKey = _ackAgentMap[_ackChatIdStr] || _ackAgentMap[rawChatId(_ackChatIdStr)] || projectKeyFromVirtualChatId(_ackChatIdStr);
     const _ackBoundProj = _ackBoundKey && config.projects ? config.projects[_ackBoundKey] : null;
     // _ackCardHeader: non-null for bound projects with a name; passed to editMessage to preserve header on streaming edits
-    let _ackCardHeader = (_ackBoundProj && _ackBoundProj.name)
-      ? { title: `${_ackBoundProj.icon || '🤖'} ${_ackBoundProj.name}`, color: _ackBoundProj.color || 'blue' }
-      : null;
+    let _ackCardHeader = buildAgentCardHeaderForChat(_ackChatIdStr, config);
     // Reuse card from a paused merge (same card, no new push)
     const _pausedCard = _pausedCards.get(chatId);
     if (_pausedCard) {
@@ -2678,6 +2694,7 @@ function createClaudeEngine(deps) {
       codexNeedsFallbackForRequestedPermissions,
       buildCodexFallbackBridgePrompt,
       projectKeyFromVirtualChatId,
+      buildAgentCardHeaderForChat,
     },
   };
 }

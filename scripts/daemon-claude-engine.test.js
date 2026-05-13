@@ -1126,6 +1126,25 @@ describe('daemon-claude-engine private helpers', () => {
     );
   });
 
+  it('builds branded ack headers for scoped team member chats', () => {
+    const state = { sessions: {} };
+    const engine = createEngineWithState(state);
+
+    assert.deepEqual(
+      engine._private.buildAgentCardHeaderForChat('_scope_epic_auth__coder', {
+        projects: {
+          team: {
+            name: 'Team',
+            team: [
+              { key: 'coder', name: 'Coder', icon: '🛠', color: 'green' },
+            ],
+          },
+        },
+      }),
+      { title: '🛠 Coder', color: 'green' }
+    );
+  });
+
   it('keeps claude resume enabled for custom-provider session models', () => {
     const state = { sessions: {} };
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-engine-'));

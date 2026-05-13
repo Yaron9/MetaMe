@@ -129,9 +129,10 @@ function buildDispatchTaskCard(fullMsg, targetProject, config) {
 /** Receipt card sent back to the dispatcher after the target agent accepts or rejects. */
 function buildDispatchReceipt(item, config, result, opts = {}) {
   const targetKey = String(opts.targetKey || item.target || '').trim() || 'unknown';
-  const target = resolveDispatchTarget(targetKey, config) || {
-    icon: '🤖',
-    name: targetKey,
+  const resolved = resolveDispatchTarget(targetKey, config);
+  const target = resolved || {
+    icon: '❓',
+    name: `未知目标: ${targetKey}`,
   };
   const actor = resolveDispatchActor(
     String(item && (item.source_sender_key || item.from) || 'user').trim() || 'user',
@@ -154,11 +155,20 @@ function buildDispatchReceipt(item, config, result, opts = {}) {
   if (result && result.id) lines.push(`编号: ${result.id}`);
   lines.push(`摘要: ${preview}`);
   if (result && result.task_id) lines.push(buildTeamTaskResumeHint(result.task_id, result.scope_id));
+  const responseCard = buildDispatchResponseCard(targetKey, config) || {
+    title: `${target.icon} ${target.name}`,
+    color: isFailed ? 'red' : 'blue',
+  };
   return {
     status: isFailed ? 'failed' : 'accepted',
     dispatchId: result && result.id ? result.id : '',
     targetKey,
     text: lines.join('\n'),
+    card: {
+      title: responseCard.title,
+      body: lines.join('\n'),
+      color: responseCard.color || (isFailed ? 'red' : 'blue'),
+    },
   };
 }
 

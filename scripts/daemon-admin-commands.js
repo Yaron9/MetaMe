@@ -8,6 +8,7 @@ const {
 const { IS_WIN } = require('./platform');
 const { ENGINE_MODEL_CONFIG, resolveEngineModel, normalizeClaudeModel } = require('./daemon-engine-runtime');
 const { resolveProjectKey: _resolveProjectKey } = require('./daemon-team-dispatch');
+const { buildDispatchResponseCard } = require('./daemon-dispatch-cards');
 const {
   parseRemoteTargetRef,
   getRemoteDispatchStatus,
@@ -80,6 +81,22 @@ function createAdminCommandHandler(deps) {
       ...(config && config.telegram ? config.telegram.chat_agent_map : {}),
     };
     return map[String(chatId)] || 'user';
+  }
+
+  function resolveTargetFeishuChatId(targetKey, config) {
+    const feishuChatAgentMap = (config && config.feishu && config.feishu.chat_agent_map) || {};
+    return Object.entries(feishuChatAgentMap).find(([, v]) => v === targetKey)?.[0] || null;
+  }
+
+  function buildLocalDispatchStreamOptions(bot, targetKey, config) {
+    const targetChatId = resolveTargetFeishuChatId(targetKey, config);
+    if (!targetChatId) return null;
+    return {
+      bot,
+      chatId: targetChatId,
+      stripPlan: true,
+      responseCard: buildDispatchResponseCard(targetKey, config),
+    };
   }
 
   function resolveBoundProjectKey(chatId, config) {
@@ -175,7 +192,7 @@ function createAdminCommandHandler(deps) {
       };
   }
 
-  function dispatchTeamTaskResume(task, chatId, config, senderId = null) {
+  function dispatchTeamTaskResume(task, chatId, config, senderId = null, bot = null) {
     const targetKey = task.to_agent;
     if (!config.projects || !config.projects[targetKey]) {
       return { success: false, error: `target_missing:${targetKey}` };
@@ -195,7 +212,7 @@ function createAdminCommandHandler(deps) {
       source_chat_id: String(chatId),
       source_sender_key: envelope.from_agent || resolveSenderKey(chatId, config),
       source_sender_id: String(senderId || '').trim() || '',
-    }, config);
+    }, config, null, buildLocalDispatchStreamOptions(bot, targetKey, config));
     return { success: !!(result && result.success), result, envelope, targetKey };
   }
 
@@ -327,6 +344,14 @@ function createAdminCommandHandler(deps) {
         lines.push(`Scope: ${result.scope_id}`);
       }
       lines.push(`如需复工，请使用: /TeamTask resume ${result.task_id}`);
+    }
+    if (bot.sendCard) {
+      await bot.sendCard(chatId, {
+        title: `${icon} ${name}`,
+        body: lines.join('\n'),
+        color: (projInfo && projInfo.color) || 'blue',
+      });
+      return;
     }
     await bot.sendMessage(chatId, lines.join('\n'));
   }
@@ -673,7 +698,7 @@ function createAdminCommandHandler(deps) {
       const candidates = listAutoResumeCandidates(chatId, senderKey, config);
       if (candidates.length === 1) {
         const task = candidates[0];
-        const resumed = dispatchTeamTaskResume(task, chatId, config, senderId);
+        const resumed = dispatchTeamTaskResume(task, chatId, config, senderId, bot);
         if (resumed.success) {
           if (taskBoard && typeof taskBoard.appendTaskEvent === 'function') {
             taskBoard.appendTaskEvent(task.task_id, 'task_resume_requested', String(chatId), { by: String(chatId), source: 'nl_auto_resume' });
@@ -768,7 +793,7 @@ function createAdminCommandHandler(deps) {
           source_chat_id: String(chatId),
           source_sender_key: senderKey,
           source_sender_id: String(senderId || '').trim() || '',
-        }, config);
+        }, config, null, buildLocalDispatchStreamOptions(bot, targetKey, config));
         if (result.success) {
           await bot.sendMessage(chatId, [
             `✅ 已创建 TeamTask 并提交派发: ${envelope.task_id}`,
@@ -816,7 +841,7 @@ function createAdminCommandHandler(deps) {
           await bot.sendMessage(chatId, `❌ 目标 agent 不存在: ${targetKey}`);
           return { handled: true, config };
         }
-        const resumed = dispatchTeamTaskResume(task, chatId, config, senderId);
+        const resumed = dispatchTeamTaskResume(task, chatId, config, senderId, bot);
         const { result, envelope } = resumed;
 
         if (result.success) {
@@ -1043,11 +1068,9 @@ function createAdminCommandHandler(deps) {
           return { handled: true, config };
         }
 
-        // Find the target project's own Feishu chat (reverse lookup of chat_agent_map)
-        const feishuChatAgentMap = (config.feishu && config.feishu.chat_agent_map) || {};
-        const targetChatId = Object.entries(feishuChatAgentMap).find(([, v]) => v === targetKey)?.[0] || null;
         // Stream work directly to target's channel if available; otherwise fallback replyFn
-        const dispatchStreamOptions = targetChatId ? { bot, chatId: targetChatId } : null;
+        const dispatchStreamOptions = buildLocalDispatchStreamOptions(bot, targetKey, config);
+        const targetChatId = dispatchStreamOptions && dispatchStreamOptions.chatId;
         const replyFn = targetChatId ? null : (output) => {
           const text2 = `${projInfo.icon || '📬'} **${projInfo.name || targetKey}**\n\n${output.slice(0, 2000)}`;
           bot.sendMarkdown(chatId, text2)
@@ -1122,7 +1145,7 @@ function createAdminCommandHandler(deps) {
         source_chat_id: String(chatId),
         source_sender_key: senderKey,
         source_sender_id: String(senderId || '').trim() || '',
-      }, config, null, null);
+      }, config, null, buildLocalDispatchStreamOptions(bot, targetKey, config));
 
       if (result.success) {
         await bot.sendMessage(chatId, `📬 已发送消息给 ${toProj.icon || '🤖'} ${toProj.name || targetKey}`);
