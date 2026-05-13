@@ -34,7 +34,7 @@ const MIN_SEARCH_COUNT = 3;
 const WINDOW_DAYS = 7;
 const MAX_FACTS = 20;
 const LOCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
-const EXCLUDED_KINDS = ['project_milestone', 'synthesized_insight', 'knowledge_capsule', 'bug_lesson'];
+const EXCLUDED_RELATIONS = ['synthesized_insight', 'knowledge_capsule'];
 
 // Ensure output directories exist at startup
 [MEMORY_DIR, DECISIONS_DIR, LESSONS_DIR, CAPSULES_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
@@ -110,18 +110,54 @@ function writeReflectLog(record) {
  * Returns array of plain objects.
  */
 function queryHotFacts(db, windowDays = WINDOW_DAYS) {
-  const kindPlaceholders = EXCLUDED_KINDS.map(() => '?').join(', ');
+  const relationPlaceholders = EXCLUDED_RELATIONS.map(() => '?').join(', ');
   const stmt = db.prepare(`
-    SELECT id, title, kind, content, confidence, search_count, created_at
+    SELECT id, title, kind, relation, content, confidence, search_count, created_at, state
     FROM memory_items
-    WHERE search_count >= ${MIN_SEARCH_COUNT}
+    WHERE (
+        search_count >= ${MIN_SEARCH_COUNT}
+        OR confidence >= 0.85
+      )
       AND created_at >= datetime('now', '-${windowDays} days')
-      AND state = 'active'
-      AND kind NOT IN (${kindPlaceholders})
+      AND state IN ('active', 'candidate')
+      AND kind IN ('insight', 'convention', 'episode')
+      AND COALESCE(relation, '') NOT IN (${relationPlaceholders})
     ORDER BY search_count DESC, created_at DESC
     LIMIT ${MAX_FACTS}
   `);
-  return stmt.all(...EXCLUDED_KINDS);
+  return stmt.all(...EXCLUDED_RELATIONS);
+}
+
+// Old databases stored durable fact relations (arch_convention/bug_lesson/...) directly
+// in `kind`. The new query layout reads them from `relation` while restricting `kind` to
+// the abstract bucket ('insight'|'convention'|'episode'). One-shot backfill so old facts
+// stay reachable after the schema split.
+const RELATION_KIND_BUCKET = {
+  arch_convention: 'convention',
+  bug_lesson: 'convention',
+  workflow_rule: 'convention',
+  config_fact: 'convention',
+  config_change: 'convention',
+  tech_decision: 'insight',
+  project_milestone: 'insight',
+};
+
+function ensureMemoryItemsCompatibility(db) {
+  try { db.exec('ALTER TABLE memory_items ADD COLUMN relation TEXT'); } catch { /* column already exists */ }
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_mi_relation ON memory_items(relation)'); } catch { /* non-fatal */ }
+
+  // Idempotent backfill: only touch rows whose `kind` is one of the old durable relations
+  // and whose `relation` is still null/empty. Safe to run on every nightly invocation.
+  try {
+    for (const [oldKind, bucket] of Object.entries(RELATION_KIND_BUCKET)) {
+      db.prepare(`
+        UPDATE memory_items
+           SET relation = ?, kind = ?
+         WHERE kind = ?
+           AND (relation IS NULL OR relation = '')
+      `).run(oldKind, bucket, oldKind);
+    }
+  } catch { /* non-fatal: leave old rows alone if migration fails */ }
 }
 
 /**
@@ -278,10 +314,10 @@ async function run() {
     db.exec('PRAGMA journal_mode = WAL');
     db.exec('PRAGMA busy_timeout = 5000');
 
-    // Ensure schema migrations (including memory_items.archive_reason used by
-    // archiveMemoryItem in conflict resolution) are applied before any mutate call.
+    // Ensure schema migrations are applied before query/mutate paths.
     const { applyWikiSchema } = require('./memory-wiki-schema');
     applyWikiSchema(db);
+    ensureMemoryItemsCompatibility(db);
 
     const hotFacts = queryHotFacts(db);
     // Recent facts (last 1 day) used exclusively for incremental capsule appends,
@@ -653,6 +689,7 @@ module.exports = {
     collectCapsuleGroups,
     entityPrefix,
     parseJsonFromLlm,
-    EXCLUDED_KINDS,
+    ensureMemoryItemsCompatibility,
+    EXCLUDED_RELATIONS,
   },
 };

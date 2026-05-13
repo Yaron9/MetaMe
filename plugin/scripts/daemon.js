@@ -534,6 +534,20 @@ function stripLeadingPlanSection(text) {
   return remaining || first.replace(/^计划[:：]\s*/, '').trim();
 }
 
+function withFallbackResponseCardHeader(card, responseCard) {
+  if (!responseCard || !card || typeof card !== 'object' || Array.isArray(card)) return card;
+
+  const currentTitle = String(card.title || '').trim();
+  const fallbackTitle = String(responseCard.title || '').trim();
+  if (currentTitle || !fallbackTitle) return card;
+
+  return {
+    ...card,
+    title: fallbackTitle,
+    color: card.color || responseCard.color || 'blue',
+  };
+}
+
 /**
  * Forward bot: routes all calls to a real bot with a fixed chatId.
  * Used for dispatch tasks so Claude's streaming output appears in the target's Feishu channel.
@@ -589,10 +603,11 @@ function createStreamForwardBot(realBot, chatId, onOutput = null, opts = {}) {
     },
     sendCard: async (_, card) => {
       await waitUntilReady();
-      const title = typeof card === 'object' ? (card.title || card.body || '').slice(0, 60) : String(card).slice(0, 60);
+      const displayCard = withFallbackResponseCardHeader(card, opts.responseCard);
+      const title = typeof displayCard === 'object' ? (displayCard.title || displayCard.body || '').slice(0, 60) : String(displayCard).slice(0, 60);
       log('INFO', `[StreamBot→${chatId.slice(-8)}] card: ${title}`);
       if (onOutput) onOutput(typeof card === 'object' ? (card.body || card.title || JSON.stringify(card)) : card);
-      return realBot.sendCard(chatId, card);
+      return realBot.sendCard(chatId, displayCard);
     },
     sendRawCard: async (_, header, elements) => {
       await waitUntilReady();
@@ -1143,7 +1158,9 @@ function sendDispatchReceipt(item, config, receipt) {
   if (!text) return;
 
   if (liveBot && senderChatId) {
-    const send = liveBot.sendMarkdown
+    const send = (receipt.card && liveBot.sendCard)
+      ? liveBot.sendCard(senderChatId, receipt.card)
+      : liveBot.sendMarkdown
       ? liveBot.sendMarkdown(senderChatId, text)
       : liveBot.sendMessage(senderChatId, text);
     send.catch((e) => {
@@ -2391,7 +2408,7 @@ function acquireDaemonLock() {
             try { fs.unlinkSync(LOCK_FILE); } catch { /* ignore */ }
             continue;
           }
-          log('WARN', `Another daemon instance owns lock (PID: ${meta.pid})`);
+          log('INFO', `Daemon already running (PID: ${meta.pid}) — duplicate starter exiting`);
           return false;
         }
       } catch {
@@ -2451,6 +2468,12 @@ async function main() {
     'enable_nl_mac_fallback',
     'wiki_output_dir',       // wiki export path (used by daemon-command-router)
     'skill_evolution_notify', // whether to notify on skill evolution (used by daemon-task-scheduler)
+    'memory_recall_enabled',
+    'memory_recall_max_chars',
+    'memory_recall_assemble_timeout_ms',
+    'memory_recall_show_marker',
+    'memory_recall_marker_channel',
+    'memory_recall_audit_retention_days',
   ];
   for (const key of Object.keys(config)) {
     if (!KNOWN_SECTIONS.includes(key)) log('WARN', `Config: unknown section "${key}" (typo?)`);

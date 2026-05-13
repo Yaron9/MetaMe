@@ -1188,8 +1188,8 @@ function createSessionStore(deps) {
       clearSessionFileCache(sessionId);
       const sessionFile = findSessionFile(sessionId);
       if (!sessionFile) {
-        log('WARN', `writeSessionName: session file not found for ${sessionId.slice(0, 8)}`);
-        return;
+        log('INFO', `writeSessionName: session file not found yet for ${sessionId.slice(0, 8)}; skipping title write`);
+        return false;
       }
       const entry = JSON.stringify({ type: 'custom-title', customTitle: name, sessionId }) + '\n';
       fs.appendFileSync(sessionFile, entry, 'utf8');

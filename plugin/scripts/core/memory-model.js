@@ -5,6 +5,19 @@ const DEFAULT_BUDGET = { convention: 8, insight: 8, profile: 6, episode: 3 };
 const RECENCY_HALF_LIFE_DAYS = 30;
 const LN2 = Math.LN2;
 const MS_PER_DAY = 86400000;
+const AUTO_PROMOTE_RELATIONS = new Set([
+  'tech_decision',
+  'bug_lesson',
+  'arch_convention',
+  'config_fact',
+  'config_change',
+  'workflow_rule',
+  'project_milestone',
+]);
+const DERIVED_RELATIONS = new Set([
+  'synthesized_insight',
+  'knowledge_capsule',
+]);
 
 /** @param {{ project, scope, task, session, agent }} itemScope */
 /** @param {{ project, scope, task, session, agent }} queryScope */
@@ -140,12 +153,24 @@ function assemblePromptBlocks(allocated) {
 /** @param {object} item */
 /** @returns {boolean} */
 function shouldPromote(item) {
-  if (typeof item.search_count !== 'number' || item.search_count < 3) return false;
-  if (!item.last_searched_at) return false;
-  const searched = new Date(item.last_searched_at).getTime();
-  if (Number.isNaN(searched)) return false;
-  const sevenDaysAgo = Date.now() - 7 * MS_PER_DAY;
-  return searched >= sevenDaysAgo;
+  if (!item || item.state !== 'candidate') return false;
+  // Derived relations are nightly-reflect outputs; they must never self-promote
+  // without an explicit consumption signal, regardless of search/recency feedback.
+  const relation = String(item.relation || '');
+  if (DERIVED_RELATIONS.has(relation)) return false;
+
+  if (typeof item.search_count === 'number' && item.search_count >= 3 && item.last_searched_at) {
+    const searched = new Date(item.last_searched_at).getTime();
+    if (!Number.isNaN(searched)) {
+      const sevenDaysAgo = Date.now() - 7 * MS_PER_DAY;
+      if (searched >= sevenDaysAgo) return true;
+    }
+  }
+
+  if (!AUTO_PROMOTE_RELATIONS.has(relation)) return false;
+  if (typeof item.confidence !== 'number' || item.confidence < 0.85) return false;
+  if (!item.content || String(item.content).trim().length < 20) return false;
+  return true;
 }
 
 /** @param {object} item */

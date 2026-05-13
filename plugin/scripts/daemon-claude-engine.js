@@ -20,6 +20,7 @@ const {
   buildIntentHint,
   composePrompt,
 } = require('./daemon-prompt-context');
+const { buildDispatchResponseCard } = require('./daemon-dispatch-cards');
 const { createPlatformSpawn, terminateChildProcess, stopStreamingLifecycle, abortStreamingChildLifecycle, setActiveChildProcess, clearActiveChildProcess, acquireStreamingChild, buildStreamingResult, resolveStreamingClosePayload, accumulateStreamingStderr, splitStreamingStdoutChunk, buildStreamFlushPayload, buildToolOverlayPayload, buildMilestoneOverlayPayload, finalizePersistentStreamingTurn, writeStreamingChildInput, parseStreamingEvents, applyStreamingMetadata, applyStreamingToolState, applyStreamingContentState, createStreamingWatchdog, runAsyncCommand } = require('./core/handoff');
 
 /**
@@ -584,6 +585,23 @@ function createClaudeEngine(deps) {
       if (idx > 7 && idx + 2 < v.length) return v.slice(idx + 2);
     }
     return null;
+  }
+
+  function buildAgentCardHeaderForChat(chatId, cfg = {}) {
+    const chatIdStr = String(chatId || '');
+    const agentMap = {
+      ...(cfg.telegram ? cfg.telegram.chat_agent_map || {} : {}),
+      ...(cfg.feishu ? cfg.feishu.chat_agent_map || {} : {}),
+      ...(cfg.imessage ? cfg.imessage.chat_agent_map || {} : {}),
+    };
+    const boundKey = agentMap[chatIdStr] || agentMap[rawChatId(chatIdStr)] || projectKeyFromVirtualChatId(chatIdStr);
+    if (!boundKey) return null;
+    const card = buildDispatchResponseCard(boundKey, cfg);
+    if (!card || !card.title) return null;
+    return {
+      title: card.title,
+      color: card.color || 'blue',
+    };
   }
 
   function resolveMentorMode(cfg = {}) {
@@ -1210,9 +1228,7 @@ function createClaudeEngine(deps) {
     const _ackBoundKey = _ackAgentMap[_ackChatIdStr] || _ackAgentMap[rawChatId(_ackChatIdStr)] || projectKeyFromVirtualChatId(_ackChatIdStr);
     const _ackBoundProj = _ackBoundKey && config.projects ? config.projects[_ackBoundKey] : null;
     // _ackCardHeader: non-null for bound projects with a name; passed to editMessage to preserve header on streaming edits
-    let _ackCardHeader = (_ackBoundProj && _ackBoundProj.name)
-      ? { title: `${_ackBoundProj.icon || '🤖'} ${_ackBoundProj.name}`, color: _ackBoundProj.color || 'blue' }
-      : null;
+    let _ackCardHeader = buildAgentCardHeaderForChat(_ackChatIdStr, config);
     // Reuse card from a paused merge (same card, no new push)
     const _pausedCard = _pausedCards.get(chatId);
     if (_pausedCard) {
@@ -1874,17 +1890,38 @@ function createClaudeEngine(deps) {
       // the final session object and fresh exec args rather than stale resume args.
       if (engineName === 'codex' && session.cwd && !session.started) {
         try {
-          const parts = [];
-          const claudeMd = path.join(session.cwd, 'CLAUDE.md');
-          const soulMd = path.join(session.cwd, 'SOUL.md');
-          if (fs.existsSync(claudeMd)) parts.push(fs.readFileSync(claudeMd, 'utf8').trim());
-          if (fs.existsSync(soulMd)) {
-            const soulContent = fs.readFileSync(soulMd, 'utf8').trim();
-            if (soulContent) parts.push(soulContent);
+          const agentsMd = path.join(session.cwd, 'AGENTS.md');
+          // Refresh AGENTS.md only when we KNOW it is a regular file (or absent).
+          // If lstat says symlink, skip — writeFileSync would follow it and
+          // recursively append SOUL into the link target (the original CLAUDE.md
+          // pollution bug). For any other lstat failure (EACCES, EPERM, races),
+          // skip too — better to miss a refresh than to risk the recursion.
+          let canRefresh = false;
+          try {
+            const st = fs.lstatSync(agentsMd);
+            canRefresh = !st.isSymbolicLink();
+          } catch (statErr) {
+            if (statErr && statErr.code === 'ENOENT') {
+              canRefresh = true;
+            } else {
+              log('WARN', `AGENTS.md lstat failed in ${session.cwd}; skip refresh: ${statErr.message}`);
+            }
           }
-          if (parts.length > 0) {
-            fs.writeFileSync(path.join(session.cwd, 'AGENTS.md'), parts.join('\n\n'), 'utf8');
-            log('INFO', `Refreshed AGENTS.md (${parts.length} section(s)) in ${session.cwd}`);
+          if (!canRefresh) {
+            log('INFO', `AGENTS.md is not a regular file in ${session.cwd}; relying on link target (skip refresh)`);
+          } else {
+            const parts = [];
+            const claudeMd = path.join(session.cwd, 'CLAUDE.md');
+            const soulMd = path.join(session.cwd, 'SOUL.md');
+            if (fs.existsSync(claudeMd)) parts.push(fs.readFileSync(claudeMd, 'utf8').trim());
+            if (fs.existsSync(soulMd)) {
+              const soulContent = fs.readFileSync(soulMd, 'utf8').trim();
+              if (soulContent) parts.push(soulContent);
+            }
+            if (parts.length > 0) {
+              fs.writeFileSync(agentsMd, parts.join('\n\n'), 'utf8');
+              log('INFO', `Refreshed AGENTS.md (${parts.length} section(s)) in ${session.cwd}`);
+            }
           }
         } catch (e) {
           log('WARN', `AGENTS.md refresh failed: ${e.message}`);
@@ -2657,6 +2694,7 @@ function createClaudeEngine(deps) {
       codexNeedsFallbackForRequestedPermissions,
       buildCodexFallbackBridgePrompt,
       projectKeyFromVirtualChatId,
+      buildAgentCardHeaderForChat,
     },
   };
 }
