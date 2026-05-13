@@ -387,6 +387,73 @@ describe('shouldPromote', () => {
     const item = makeItem({ search_count: 0, state: 'candidate' });
     assert.strictEqual(shouldPromote(item), false);
   });
+
+  it('high-confidence durable candidate → true even before search feedback', () => {
+    const item = makeItem({
+      state: 'candidate',
+      kind: 'convention',
+      relation: 'arch_convention',
+      confidence: 0.9,
+      search_count: 0,
+      last_searched_at: null,
+      content: 'MetaMe daemon source files live under scripts and runtime copies are deployed under ~/.metame.',
+    });
+    assert.strictEqual(shouldPromote(item), true);
+  });
+
+  it('high-confidence bug lesson and project milestone candidates → true', () => {
+    for (const relation of ['bug_lesson', 'project_milestone']) {
+      const item = makeItem({
+        state: 'candidate',
+        kind: relation === 'bug_lesson' ? 'convention' : 'insight',
+        relation,
+        confidence: 0.9,
+        search_count: 0,
+        last_searched_at: null,
+        content: 'High confidence extracted facts should not remain stuck before search feedback.',
+      });
+      assert.strictEqual(shouldPromote(item), true, relation);
+    }
+  });
+
+  it('high-confidence derived candidate → false', () => {
+    const item = makeItem({
+      state: 'candidate',
+      kind: 'insight',
+      relation: 'synthesized_insight',
+      confidence: 0.9,
+      search_count: 0,
+      last_searched_at: null,
+      content: 'Derived nightly reflections should not self-promote without an explicit consumption signal.',
+    });
+    assert.strictEqual(shouldPromote(item), false);
+  });
+
+  it('medium-confidence durable candidate → false without search feedback', () => {
+    const item = makeItem({
+      state: 'candidate',
+      kind: 'convention',
+      relation: 'workflow_rule',
+      confidence: 0.7,
+      search_count: 0,
+      last_searched_at: null,
+      content: 'Medium confidence items still need explicit search feedback before promotion.',
+    });
+    assert.strictEqual(shouldPromote(item), false);
+  });
+
+  it('derived candidate with search feedback → still false (search path must not bypass derived guard)', () => {
+    const item = makeItem({
+      state: 'candidate',
+      kind: 'insight',
+      relation: 'knowledge_capsule',
+      confidence: 0.9,
+      search_count: 5,
+      last_searched_at: new Date().toISOString(),
+      content: 'Even when consumed via search, derived reflections must wait for explicit promotion.',
+    });
+    assert.strictEqual(shouldPromote(item), false);
+  });
 });
 
 // ---------------------------------------------------------------------------
