@@ -23,6 +23,9 @@ SOUL.md
 .env*
 *.log
 
+# Per-machine Claude Code state (permissions snapshots, settings, etc.)
+.claude/
+
 # Playwright browser profile (runtime data, never commit)
 ~/.metame/browser-profile/
 

@@ -22,7 +22,7 @@ const LOG_FILE = path.join(HOME, '.metame', 'daemon.log');
 const REPORT_FILE = path.join(HOME, '.metame', 'health-report-latest.json');
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 const MAX_UNIQUE_ERRORS = 8;
-const MAX_LINE_LEN = 280;
+const MAX_LINE_LEN = 800;
 
 // Match log lines that contain an ERROR or WARN level tag
 const LEVEL_PATTERN = /\[(ERROR|WARN)\]/;
@@ -44,10 +44,9 @@ function readRecentErrors(logFile, windowMs) {
   for (const line of lines) {
     if (!LEVEL_PATTERN.test(line)) continue;
     const tsMatch = line.match(TS_PATTERN);
-    if (tsMatch) {
-      const ts = new Date(tsMatch[1]).getTime();
-      if (ts < cutoff) continue;
-    }
+    if (!tsMatch) continue;
+    const ts = new Date(tsMatch[1]).getTime();
+    if (ts < cutoff) continue;
     result.push(line.slice(0, MAX_LINE_LEN));
   }
 
@@ -179,7 +178,15 @@ async function run() {
   console.log(formatReport(analysis, errorLines.length, grouped.length));
 }
 
-run().catch(e => {
-  process.stderr.write(`[daemon-health-scan] fatal: ${e.message}\n`);
-  process.exit(1);
-});
+if (require.main === module) {
+  run().catch(e => {
+    process.stderr.write(`[daemon-health-scan] fatal: ${e.message}\n`);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  readRecentErrors,
+  groupErrors,
+  formatReport,
+};
