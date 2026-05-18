@@ -31,6 +31,8 @@ describe('feishu-adapter sendFile', () => {
 });
 
 describe('feishu-adapter validateCredentials classification', () => {
+  const { classifyFeishuApiError, getRestProbeFailureAction } = _internal;
+
   // Regression for the wake-kills-bridge bug: SDK internal errors like
   // "Cannot destructure 'tenant_access_token' of undefined" (network empty
   // response) must NOT be classified as isAuthError, or the bridge refuses
@@ -61,6 +63,36 @@ describe('feishu-adapter validateCredentials classification', () => {
   it('treats HTTP 401 as auth', async () => {
     const r = await classify('request failed with status 401 unauthorized');
     assert.equal(r.isAuthError, true);
+  });
+
+  it('classifies SDK token-destructure errors as retryable transient probe failures', () => {
+    const r = classifyFeishuApiError("Cannot destructure property 'tenant_access_token' of '(intermediate value)' as it is undefined.");
+    assert.equal(r.kind, 'transient');
+    assert.equal(r.retryable, true);
+  });
+
+  it('classifies Feishu REST 404 errors as non-retryable probe configuration failures', () => {
+    const r = classifyFeishuApiError('AxiosError: Request failed with status code 404 ERR_BAD_REQUEST');
+    assert.equal(r.kind, 'config');
+    assert.equal(r.retryable, false);
+  });
+
+  it('uses delayed backoff reconnects for transient REST probe failures', () => {
+    const r = getRestProbeFailureAction(new Error('fetch failed'));
+    assert.equal(r.reconnect, true);
+    assert.equal(r.immediate, false);
+    assert.equal(r.failed, true);
+    assert.equal(r.disableRestProbe, false);
+  });
+
+  it('disables REST probes instead of reconnecting for non-retryable probe failures', () => {
+    const r = getRestProbeFailureAction(new Error('Request failed with status code 404 ERR_BAD_REQUEST'));
+    assert.equal(r.reconnect, false);
+    assert.equal(r.disableRestProbe, true);
+  });
+
+  it('limits non-retryable REST probe suppression to a bounded TTL', () => {
+    assert.equal(_internal.REST_PROBE_DISABLE_MS, 5 * 60 * 1000);
   });
 });
 

@@ -25,6 +25,7 @@ const HOME = os.homedir();
 const FACTS_DOCS_DIR = path.join(HOME, '.metame', 'facts-docs');
 const QMD_URL = 'http://localhost:8181';
 const COLLECTION = 'metame-facts';
+const { AbortSignal } = globalThis;
 
 // ── Availability ───────────────────────────────────────────────────────────
 

@@ -32,6 +32,33 @@ function sanitizeStringArray(values, maxItems = 40, maxItemLen = 500) {
   return out;
 }
 
+function isSqliteBusyError(err) {
+  const msg = err && (err.code || err.message || String(err));
+  return /SQLITE_(BUSY|LOCKED)|database is locked/i.test(String(msg || ''));
+}
+
+function sleepSync(ms) {
+  if (ms <= 0) return;
+  const view = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(view, 0, 0, ms);
+}
+
+function runSqliteWithRetry(operation, opts = {}) {
+  const maxRetries = Number.isInteger(opts.maxRetries) ? opts.maxRetries : 3;
+  const baseDelayMs = Number.isFinite(opts.baseDelayMs) ? opts.baseDelayMs : 100;
+  let lastErr = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return operation();
+    } catch (err) {
+      lastErr = err;
+      if (!isSqliteBusyError(err) || attempt >= maxRetries) throw err;
+      sleepSync(baseDelayMs * (2 ** attempt));
+    }
+  }
+  throw lastErr;
+}
+
 function createTaskBoard(opts = {}) {
   const dbPath = opts.dbPath || DEFAULT_DB_PATH;
   const logger = typeof opts.logger === 'function' ? opts.logger : null;
@@ -49,7 +76,7 @@ function createTaskBoard(opts = {}) {
     const { DatabaseSync } = require('node:sqlite');
     db = new DatabaseSync(dbPath);
     db.exec('PRAGMA journal_mode = WAL');
-    db.exec('PRAGMA busy_timeout = 3000');
+    db.exec('PRAGMA busy_timeout = 5000');
 
     db.exec(`
       CREATE TABLE IF NOT EXISTS tasks (
@@ -167,7 +194,7 @@ function createTaskBoard(opts = {}) {
         updated_at = excluded.updated_at
     `;
     try {
-      getDb().prepare(sql).run(
+      runSqliteWithRetry(() => getDb().prepare(sql).run(
         safe.task_id,
         safe.scope_id,
         safe.parent_task_id,
@@ -186,7 +213,7 @@ function createTaskBoard(opts = {}) {
         safe.last_error,
         safe.created_at,
         safe.updated_at
-      );
+      ));
       return { ok: true, task_id: safe.task_id };
     } catch (e) {
       logWarn(`TaskBoard upsertTask failed: ${e.message}`);
@@ -201,10 +228,10 @@ function createTaskBoard(opts = {}) {
     const safeActor = sanitizeText(actor, 80) || 'system';
     const nowIso = new Date().toISOString();
     try {
-      getDb().prepare(`
+      runSqliteWithRetry(() => getDb().prepare(`
         INSERT INTO task_events (task_id, event_type, actor, body, created_at)
         VALUES (?, ?, ?, ?, ?)
-      `).run(safeTaskId, safeEvent, safeActor, toJson(body, {}), nowIso);
+      `).run(safeTaskId, safeEvent, safeActor, toJson(body, {}), nowIso));
       return { ok: true };
     } catch (e) {
       logWarn(`TaskBoard appendTaskEvent failed: ${e.message}`);
@@ -226,7 +253,7 @@ function createTaskBoard(opts = {}) {
     };
     if (!safe.handoff_id || !safe.task_id || !safe.to_agent) return { ok: false, error: 'handoff_fields_missing' };
     try {
-      getDb().prepare(`
+      runSqliteWithRetry(() => getDb().prepare(`
         INSERT INTO handoffs (handoff_id, task_id, from_agent, to_agent, payload, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(handoff_id) DO UPDATE SET
@@ -242,7 +269,7 @@ function createTaskBoard(opts = {}) {
         safe.status,
         safe.created_at,
         safe.updated_at
-      );
+      ));
       return { ok: true };
     } catch (e) {
       logWarn(`TaskBoard recordHandoff failed: ${e.message}`);
@@ -401,4 +428,5 @@ function createTaskBoard(opts = {}) {
 module.exports = {
   createTaskBoard,
   DEFAULT_DB_PATH,
+  _internal: { isSqliteBusyError, runSqliteWithRetry },
 };

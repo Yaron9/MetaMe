@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { createTaskBoard } = require('./task-board');
+const { createTaskBoard, _internal } = require('./task-board');
 
 function newTmpDbPath() {
   const rand = Math.random().toString(36).slice(2, 8);
@@ -80,4 +80,20 @@ test('task board upsert/get/list/status flow', () => {
 
   board.close();
   try { fs.unlinkSync(dbPath); } catch {}
+});
+
+test('task board retries transient sqlite busy write failures', () => {
+  let attempts = 0;
+  const result = _internal.runSqliteWithRetry(() => {
+    attempts += 1;
+    if (attempts < 3) {
+      const err = new Error('database is locked');
+      err.code = 'SQLITE_BUSY';
+      throw err;
+    }
+    return 'ok';
+  }, { maxRetries: 3, baseDelayMs: 0 });
+
+  assert.equal(result, 'ok');
+  assert.equal(attempts, 3);
 });

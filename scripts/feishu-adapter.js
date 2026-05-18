@@ -59,6 +59,43 @@ function withTimeout(promise, ms = 10000) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+function classifyFeishuApiError(err) {
+  const message = err && err.message || String(err);
+  const authPatterns = [
+    /\b(99991663|99991664|99991665)\b/,                                  // Feishu token invalid codes
+    /\b(401|403)\b/,                                                     // HTTP 401/403
+    /invalid\s+(app_?id|app_?secret|tenant_access_token|access_?token)/i,
+    /unauthorized/i,
+    /\bforbidden\b/i,
+  ];
+  const configPatterns = [
+    /\b404\b/,
+    /\bERR_BAD_REQUEST\b/,
+    /\b(permission|scope)\b/i,
+    /persistent connection|event\/callback subscription|事件|回调|订阅方式/,
+  ];
+  const transientPatterns = [
+    /Cannot destructure.*tenant_access_token.*undefined/i,
+    /tenant_access_token.*undefined/i,
+    /fetch failed|network|socket disconnected|timeout|ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT/i,
+  ];
+
+  if (authPatterns.some((p) => p.test(message))) return { kind: 'auth', retryable: false, message };
+  if (configPatterns.some((p) => p.test(message))) return { kind: 'config', retryable: false, message };
+  if (transientPatterns.some((p) => p.test(message))) return { kind: 'transient', retryable: true, message };
+  return { kind: 'unknown', retryable: true, message };
+}
+
+function getRestProbeFailureAction(err) {
+  const classified = classifyFeishuApiError(err);
+  if (!classified.retryable) {
+    return { classified, reconnect: false, disableRestProbe: true, immediate: false, failed: false };
+  }
+  return { classified, reconnect: true, disableRestProbe: false, immediate: false, failed: true };
+}
+
+const REST_PROBE_DISABLE_MS = 5 * 60 * 1000;
+
 // Wait for DNS to resolve a target host with exponential backoff.
 // Used after system wake / before reconnect: the OS may report clock/events
 // restored before WiFi+DNS are actually usable. Retries 1/2/4/8s, total cap 60s.
@@ -135,26 +172,19 @@ function createBot(config) {
       await withTimeout(client.im.chat.list({ params: { page_size: 1 } }), 15000);
       return { ok: true };
     } catch (err) {
-      const msg = err && err.message || String(err);
       // Only flag as auth error when we have strong evidence: known Feishu
       // auth error codes, HTTP 401/403, or explicit 'invalid app_id/secret'.
       // Previously a loose /token/ regex false-positived on SDK-internal
       // messages like "Cannot destructure 'tenant_access_token' of undefined"
       // (which is really a network/empty-response failure) and caused the
       // bridge to refuse to start across a lid-close/wake cycle.
-      const authPatterns = [
-        /\b(99991663|99991664|99991665)\b/,                                  // Feishu token invalid codes
-        /\b(401|403)\b/,                                                     // HTTP 401/403
-        /invalid\s+(app_?id|app_?secret|tenant_access_token|access_?token)/i,
-        /unauthorized/i,
-        /\bforbidden\b/i,
-      ];
-      const isAuthError = authPatterns.some((p) => p.test(msg));
+      const classified = classifyFeishuApiError(err);
+      const isAuthError = classified.kind === 'auth';
       return {
         ok: false,
         error: isAuthError
-          ? `Feishu credential validation failed (app_id/app_secret may be incorrect): ${msg}`
-          : `Feishu API probe failed (network or transient issue): ${msg}`,
+          ? `Feishu credential validation failed (app_id/app_secret may be incorrect): ${classified.message}`
+          : `Feishu API probe failed (network or transient issue): ${classified.message}`,
         isAuthError,
       };
     }
@@ -531,6 +561,7 @@ function createBot(config) {
       const SLEEP_JUMP_THRESHOLD = 30000; // clock jump >30s = was sleeping
       const ALIVE_CHECK_WINDOW = 15000; // after connect, must see activity within 15s
       const FEISHU_HOST = 'open.feishu.cn';
+      let restProbeDisabledUntil = 0;
 
       // Track last SDK activity (any event received = alive)
       let _lastActivityAt = Date.now();
@@ -658,6 +689,7 @@ function createBot(config) {
       function connect() {
         if (stopped) return;
         clearTimeout(aliveTimer);
+        restProbeDisabledUntil = 0;
         wsEpoch += 1;
         const myEpoch = wsEpoch;
         let ws;
@@ -707,11 +739,11 @@ function createBot(config) {
         clearTimeout(aliveTimer);
         try { currentWs?.stop?.(); } catch { /* ignore */ }
         currentWs = null;
+        const delay = immediate ? 0 : reconnectDelay;
         if (failed) {
           // Only failure paths grow the backoff ceiling for the *next* attempt.
           reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
         }
-        const delay = immediate ? 0 : reconnectDelay;
         _log('INFO', `Feishu reconnect in ${Math.round(delay / 1000)}s (reason: ${reason || 'unspecified'})`);
         reconnectTimer = setTimeout(async () => {
           reconnectScheduled = false;
@@ -728,6 +760,20 @@ function createBot(config) {
           }
           connect();
         }, delay);
+      }
+
+      function handleRestProbeFailure(probeName, err, context = '') {
+        const action = getRestProbeFailureAction(err);
+        const { classified } = action;
+        if (action.disableRestProbe) {
+          restProbeDisabledUntil = Date.now() + REST_PROBE_DISABLE_MS;
+          _log('WARN', `Feishu ${probeName} probe suppressed for ${Math.round(REST_PROBE_DISABLE_MS / 60000)}m (${classified.kind}: ${classified.message}) — relying on WebSocket close/error events temporarily${context}`);
+          return;
+        }
+        _log('WARN', `Feishu ${probeName} probe failed${context}: ${classified.message} — reconnecting with backoff`);
+        if (action.reconnect) {
+          scheduleReconnect({ immediate: action.immediate, reason: `${probeName}-probe-failed`, failed: action.failed });
+        }
       }
 
       // Alive-check: after each connect, require either SDK activity or a
@@ -747,14 +793,14 @@ function createBot(config) {
             reconnectDelay = INITIAL_RECONNECT_DELAY;
             return;
           }
+          if (Date.now() < restProbeDisabledUntil) return;
           try {
             await withTimeout(client.im.chat.list({ params: { page_size: 1 } }), 8000);
             touchActivity();
             reconnectDelay = INITIAL_RECONNECT_DELAY;
             _log('INFO', 'Feishu alive probe ok');
           } catch (err) {
-            _log('WARN', `Feishu alive probe failed: ${err.message} — reconnecting`);
-            scheduleReconnect({ immediate: true, reason: 'alive-probe-failed', failed: true });
+            handleRestProbeFailure('alive', err);
           }
         }, ALIVE_CHECK_WINDOW);
       }
@@ -766,12 +812,12 @@ function createBot(config) {
           if (stopped) return;
           const silentMs = Date.now() - _lastActivityAt;
           if (silentMs < SILENT_THRESHOLD) return;
+          if (Date.now() < restProbeDisabledUntil) return;
           try {
             await withTimeout(client.im.chat.list({ params: { page_size: 1 } }), 8000);
             touchActivity();
           } catch (err) {
-            _log('WARN', `Feishu health check failed after ${Math.round(silentMs / 1000)}s silence: ${err.message} — reconnecting`);
-            scheduleReconnect({ immediate: true, reason: 'health-probe-failed', failed: true });
+            handleRestProbeFailure('health', err, ` after ${Math.round(silentMs / 1000)}s silence`);
           }
         }, HEALTH_CHECK_INTERVAL);
       }
@@ -822,4 +868,4 @@ function createBot(config) {
   };
 }
 
-module.exports = { createBot, _internal: { waitForNetworkReady } };
+module.exports = { createBot, _internal: { waitForNetworkReady, classifyFeishuApiError, getRestProbeFailureAction, REST_PROBE_DISABLE_MS } };

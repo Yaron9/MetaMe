@@ -25,7 +25,7 @@
         "sync:plugin": "node scripts/sync-plugin.js",
         "sync:readme": "node scripts/sync-readme.js",
         "restart:daemon": "node index.js stop 2>/dev/null; sleep 1; node index.js start 2>/dev/null || echo '鈿狅笍  Daemon not running or restart failed'",
-        "prepublishOnly": "node -e \"const fs=require('fs');['scripts/daemon.yaml','plugin/scripts/daemon.yaml'].forEach(f=>{if(fs.existsSync(f)){const c=fs.readFileSync(f,'utf8');if(/bot_token:\\s*[^n]|app_secret:\\s*[^n]|enabled:\\s*true/.test(c)){console.error('ABORT: Real credentials found in '+f);process.exit(1)}}})\"",
+        "prepublishOnly": "node scripts/prepublish-check.js",
         "precommit": "npm run sync:plugin && npm run restart:daemon"
     },
     "keywords": [
