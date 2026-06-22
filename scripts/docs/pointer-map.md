@@ -10,6 +10,7 @@
 - 多引擎 runtime 适配层：`scripts/daemon-engine-runtime.js`
 - 会话执行引擎（Claude/Codex 共用入口）：`scripts/daemon-claude-engine.js`
 - **核心纯逻辑模块**：`scripts/core/handoff.js`（子进程生命周期）、`scripts/core/audit.js`（审计状态）
+- Codex 宿主兼容：`scripts/core/codex-host.js`（插件 hooks 审计、配置隔离、原生 hooks 合并）
 - 管理命令：`scripts/daemon-admin-commands.js`
 - 命令路由：`scripts/daemon-command-router.js`
 - 执行命令（`/stop`、`/compact` 等）：`scripts/daemon-exec-commands.js`
@@ -22,6 +23,11 @@
 - 维护手册：`scripts/docs/maintenance-manual.md`
 
 ## 多引擎（Claude/Codex）定位
+
+- 宿主定制边界：
+  - `index.js:ensureHookInstalled()`：Claude 原生 hooks
+  - `index.js:ensureCodexHooksInstalled()`：Codex 原生 hooks
+  - `scripts/core/codex-host.js`：纯逻辑检测 Claude-only 插件并生成最小配置变更
 
 - Runtime 工厂与事件归一化：
   - `scripts/daemon-engine-runtime.js`

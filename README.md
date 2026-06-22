@@ -18,6 +18,8 @@
 
 MetaMe is an AI that lives on your machine — remembers how you think, stays online 24/7, and takes commands from your phone via Telegram or Feishu. Not in the cloud. In your computer. Runs natively on macOS and Windows.
 
+Claude Code and Codex are first-class hosts. MetaMe shares skills and runtime logic between them while keeping host-specific hooks and plugin configuration isolated.
+
 No cloud. Your machine, your data.
 
 **macOS / Linux:**

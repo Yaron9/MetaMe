@@ -9,6 +9,12 @@ const os = require('os');
 const { spawn, execSync } = require('child_process');
 const { sleepSync, findProcessesByPattern, killProcessTree, icon } = require('./scripts/platform');
 const { collectDeployGroups, collectSyntaxCheckFiles } = require('./scripts/deploy-manifest');
+const {
+  findClaudeOnlyPluginHooks,
+  disablePluginSections,
+  buildMetaMeCodexHooks,
+  mergeMetaMeCodexHooks,
+} = require('./scripts/core/codex-host');
 
 // On Windows, resolve .cmd wrapper → actual Node.js entry and spawn node directly.
 // Completely bypasses cmd.exe, eliminating terminal flash.
@@ -804,6 +810,33 @@ function ensureHookInstalled() {
 
 ensureHookInstalled();
 
+// Codex has its own hook schema and must not consume Claude plugin hook files.
+// Install MetaMe-owned hooks natively while preserving unrelated user hooks.
+function ensureCodexHooksInstalled() {
+  try {
+    const codexDir = path.join(HOME_DIR, '.codex');
+    const hooksFile = path.join(codexDir, 'hooks.json');
+    fs.mkdirSync(codexDir, { recursive: true });
+    let existing = {};
+    if (fs.existsSync(hooksFile)) existing = JSON.parse(fs.readFileSync(hooksFile, 'utf8'));
+    const managed = buildMetaMeCodexHooks({
+      signalCaptureScript: SIGNAL_CAPTURE_SCRIPT.replace(/\\/g, '/'),
+      stopCaptureScript: path.join(METAME_DIR, 'hooks', 'stop-session-capture.js').replace(/\\/g, '/'),
+    });
+    const merged = mergeMetaMeCodexHooks(existing, managed);
+    const next = JSON.stringify(merged, null, 2) + '\n';
+    const previous = fs.existsSync(hooksFile) ? fs.readFileSync(hooksFile, 'utf8') : '';
+    if (next !== previous) {
+      fs.writeFileSync(hooksFile, next, 'utf8');
+      console.log(`${icon("hook")} MetaMe: Codex-native hooks installed.`);
+    }
+  } catch (e) {
+    console.error(`${icon("warn")}  Codex hook install skipped: ${e.message}`);
+  }
+}
+
+ensureCodexHooksInstalled();
+
 // ---------------------------------------------------------
 // 1.6a AUTO-ENABLE BUNDLED PLUGINS
 // ---------------------------------------------------------
@@ -819,7 +852,6 @@ function ensurePluginsEnabled() {
 
     const bundledPlugins = {
       'example-skills@anthropic-agent-skills': true,
-      'ralph-loop@claude-plugins-official': true,
       'planning-with-files@planning-with-files': true,
     };
 
@@ -2633,6 +2665,30 @@ const isCodex = process.argv[2] === 'codex';
 if (isCodex) {
   const codexUserArgs = process.argv.slice(3);
   const codexProviderEnv = (() => { try { return require(path.join(__dirname, 'scripts', 'providers.js')).buildActiveEnv(); } catch { return {}; } })();
+
+  // Imported Claude plugins may contain hook metadata or variables that Codex
+  // cannot parse. Quarantine only definitively Claude-only plugins and keep a
+  // one-time backup; never patch third-party cache files.
+  if (!['0', 'false', 'off'].includes(String(process.env.METAME_CODEX_COMPAT || '').toLowerCase())) {
+    try {
+      const codexHome = process.env.CODEX_HOME || path.join(HOME_DIR, '.codex');
+      const configFile = path.join(codexHome, 'config.toml');
+      if (fs.existsSync(configFile)) {
+        const configText = fs.readFileSync(configFile, 'utf8');
+        const issues = findClaudeOnlyPluginHooks({ fs, path, codexHome, configText });
+        if (issues.length > 0) {
+          const next = disablePluginSections(configText, issues.map((issue) => issue.pluginId));
+          const backupFile = `${configFile}.pre-metame-codex-compat.bak`;
+          if (!fs.existsSync(backupFile)) fs.copyFileSync(configFile, backupFile);
+          fs.writeFileSync(configFile, next, 'utf8');
+          console.log(`${icon("warn")} MetaMe: Codex quarantined Claude-only plugins: ${issues.map((x) => x.pluginId).join(', ')}`);
+          console.log(`   Backup: ${backupFile}`);
+        }
+      }
+    } catch (e) {
+      console.error(`${icon("warn")}  Codex compatibility audit skipped: ${e.message}`);
+    }
+  }
 
   // Genesis: new user + interactive mode — trigger profile interview within the same Codex session.
   // CLAUDE.md (already written to disk above) contains the full genesis protocol; Codex reads it.

@@ -1,7 +1,7 @@
 {
     "name": "metame-cli",
     "version": "1.6.4",
-    "description": "The Cognitive Profile Layer for Claude Code. Knows how you think, not just what you said.",
+    "description": "The cognitive profile and agent runtime layer for Claude Code and Codex.",
     "main": "index.js",
     "bin": {
         "metame": "./index.js"
@@ -30,6 +30,7 @@
     },
     "keywords": [
         "claude",
+        "codex",
         "ai",
         "meta-cognition",
         "productivity",

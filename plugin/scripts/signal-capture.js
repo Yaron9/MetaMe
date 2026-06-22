@@ -3,7 +3,7 @@
 /**
  * MetaMe Signal Capture Hook
  *
- * Runs as a Claude Code UserPromptSubmit hook.
+ * Runs as a Claude Code or Codex UserPromptSubmit hook.
  * Receives user prompt via stdin JSON, filters for potential
  * persistent preferences/identity signals, appends to buffer.
  */

@@ -18,6 +18,8 @@
 
 MetaMe 是一个驻留在你电脑上的 AI——记住你的思维方式，7×24 待命，通过 Telegram 或飞书随时接受手机指令。它不在云端，它住在你的机器里。原生支持 macOS 和 Windows。
 
+Claude Code 与 Codex 都是一等宿主：共享 skills 与 runtime，hooks 和插件配置按宿主隔离，避免 Claude harness 污染 Codex 启动环境。
+
 不上云。你的机器，你的数据。
 
 **macOS / Linux：**

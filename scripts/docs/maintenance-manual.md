@@ -30,6 +30,15 @@ feishu:
 - Codex 入口：`metame codex [args]`
 - 也可直接用原生命令：`claude` / `codex`
 
+### 宿主定制隔离
+
+- 共享能力：`skills/` 与 `scripts/`，由 MetaMe 部署后供两个引擎使用。
+- Claude hooks：写入 `~/.claude/settings.json`。
+- Codex hooks：按 Codex 原生 schema 合并写入 `~/.codex/hooks.json`，不复用 Claude 插件 hooks。
+- `metame codex` 启动前检查已启用插件。仅当插件 hooks 同时满足“Codex 非法顶层字段”和“引用 `CLAUDE_PLUGIN_ROOT`”时，才在 Codex 配置中将其隔离。
+- 隔离前备份 `~/.codex/config.toml` 到 `config.toml.pre-metame-codex-compat.bak`；不修改 `~/.codex/plugins/cache/`。
+- 可用 `METAME_CODEX_COMPAT=off metame codex` 关闭自动兼容审计。
+
 ## 2. Agent 创建与引擎写入
 
 - 默认创建 Agent：不写 `engine` 字段（保持兼容）
@@ -115,6 +124,12 @@ feishu:
 1. 执行 `codex login`
 2. 或配置 `OPENAI_API_KEY`
 3. 重新发送同一条消息
+
+### Codex 启动报告 Claude 插件 hooks schema 错误
+
+症状：`unknown field description, expected hooks`，或 hook 命令引用 `CLAUDE_PLUGIN_ROOT`。
+
+处理：优先通过 `metame codex` 启动。兼容审计会隔离明确属于 Claude 的插件，同时保留配置备份。不要直接修改插件 cache；插件升级会覆盖 cache，且会混淆资产所有权。
 
 ### Codex 频率限制
 

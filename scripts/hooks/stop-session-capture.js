@@ -3,7 +3,7 @@
 /**
  * MetaMe Stop Hook — Session Event Logger + Tool Failure Capture
  *
- * Runs as a Claude Code "Stop" hook.
+ * Runs as a Claude Code or Codex "Stop" hook.
  * On each turn end:
  *   1. Appends a lightweight session event to session_events.jsonl
  *   2. Reads the tail of the transcript file to extract tool failures (is_error: true)
