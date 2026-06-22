@@ -130,6 +130,26 @@ async function waitForNetworkReady(hostname, opts = {}) {
   };
 }
 
+// Serializes reconnect attempts. A slot is held from the moment a reconnect is
+// scheduled until the attempt has fully completed (delay + network-wait +
+// connect/reschedule). While held, additional reconnect signals (ws-close,
+// periodic health probe, sleep/wake) collapse into the in-flight attempt
+// instead of spawning concurrent waitForNetworkReady loops — the bug that
+// turned a single recoverable outage into overlapping 63s DNS-probe storms.
+function createReconnectSlot() {
+  let held = false;
+  return {
+    // Returns true if the caller now owns the slot; false if one is in flight.
+    acquire() {
+      if (held) return false;
+      held = true;
+      return true;
+    },
+    release() { held = false; },
+    get held() { return held; },
+  };
+}
+
 // Max chars per lark_md element (Feishu limit ~4000)
 const MAX_CHUNK = 3800;
 
@@ -550,7 +570,7 @@ function createBot(config) {
       let sleepWakeTimer = null;
       let reconnectTimer = null;
       let aliveTimer = null;
-      let reconnectScheduled = false; // dedup flag: true while a reconnect is pending
+      const reconnectSlot = createReconnectSlot(); // held while a reconnect is pending or in flight
       let wsEpoch = 0; // increments each connect(); underlying-ws hooks capture their own epoch
       const INITIAL_RECONNECT_DELAY = 5000;
       const MAX_RECONNECT_DELAY = 60000;
@@ -724,17 +744,18 @@ function createBot(config) {
         }
       }
 
-      // Single entry point for all reconnect signals. Dedup'd via reconnectScheduled
-      // so concurrent ws-close + alive-probe-fail + sleep events collapse into one
-      // reconnect. Backoff only grows when the caller marks this as a failure recovery
-      // (failed:true) — known-cause resets (manual / system-wake) start from 0s.
+      // Single entry point for all reconnect signals. Serialized via reconnectSlot
+      // so concurrent ws-close + alive-probe-fail + sleep events collapse into the
+      // single in-flight reconnect attempt instead of spawning parallel
+      // waitForNetworkReady loops. Backoff only grows when the caller marks this as
+      // a failure recovery (failed:true) — known-cause resets (manual / system-wake)
+      // start from 0s.
       function scheduleReconnect({ immediate = false, reason = '', failed = false } = {}) {
         if (stopped) return;
-        if (reconnectScheduled) {
-          _log('DEBUG', `Feishu reconnect already scheduled — dropping duplicate (reason: ${reason})`);
+        if (!reconnectSlot.acquire()) {
+          _log('DEBUG', `Feishu reconnect already in flight — dropping duplicate (reason: ${reason})`);
           return;
         }
-        reconnectScheduled = true;
         clearTimeout(reconnectTimer);
         clearTimeout(aliveTimer);
         try { currentWs?.stop?.(); } catch { /* ignore */ }
@@ -746,18 +767,31 @@ function createBot(config) {
         }
         _log('INFO', `Feishu reconnect in ${Math.round(delay / 1000)}s (reason: ${reason || 'unspecified'})`);
         reconnectTimer = setTimeout(async () => {
-          reconnectScheduled = false;
-          if (stopped) return;
-          const net = await waitForNetworkReady(FEISHU_HOST, { log: _log });
-          if (stopped) return;
+          // Keep the slot held across the ENTIRE attempt (network-wait + connect),
+          // releasing only at a terminal point. Releasing before the await let
+          // periodic health/ws-close/wake signals spawn concurrent
+          // waitForNetworkReady loops during outages (overlapping 63s DNS storms).
+          if (stopped) { reconnectSlot.release(); return; }
+          let net;
+          try {
+            net = await waitForNetworkReady(FEISHU_HOST, { log: _log });
+          } catch (err) {
+            _log('WARN', `Feishu network wait errored: ${err && err.message || err} — retrying`);
+            reconnectSlot.release();
+            scheduleReconnect({ immediate: false, reason: 'network-wait-error', failed: true });
+            return;
+          }
+          if (stopped) { reconnectSlot.release(); return; }
           if (!net.ok) {
             _log('WARN', `Feishu network still down after ${Math.round(net.elapsed / 1000)}s (${net.error || 'unknown'}) — retrying`);
+            reconnectSlot.release();
             scheduleReconnect({ immediate: false, reason: 'network-wait-timeout', failed: true });
             return;
           }
           if (net.attempts > 1) {
             _log('INFO', `Feishu network ready after ${net.attempts} attempts (${Math.round(net.elapsed / 1000)}s)`);
           }
+          reconnectSlot.release();
           connect();
         }, delay);
       }
@@ -846,6 +880,7 @@ function createBot(config) {
       return Promise.resolve({
         stop() {
           stopped = true;
+          reconnectSlot.release();
           clearTimeout(reconnectTimer);
           clearTimeout(aliveTimer);
           clearInterval(healthTimer);
@@ -868,4 +903,4 @@ function createBot(config) {
   };
 }
 
-module.exports = { createBot, _internal: { waitForNetworkReady, classifyFeishuApiError, getRestProbeFailureAction, REST_PROBE_DISABLE_MS } };
+module.exports = { createBot, _internal: { waitForNetworkReady, createReconnectSlot, classifyFeishuApiError, getRestProbeFailureAction, REST_PROBE_DISABLE_MS } };

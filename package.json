@@ -18,7 +18,7 @@
         "skills/"
     ],
     "scripts": {
-        "test": "node --test scripts/*.test.js",
+        "test": "node --require ./scripts/test-env-setup.js --test scripts/*.test.js",
         "test:daemon-status": "node --test scripts/daemon-restart-status.test.js",
         "start": "node index.js",
         "push": "bash scripts/bin/push-clean.sh",

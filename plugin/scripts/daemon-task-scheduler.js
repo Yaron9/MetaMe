@@ -301,7 +301,10 @@ function createTaskScheduler(deps) {
             return { pass: true, context: content };
           }
         } catch { /* file doesn't exist or unreadable */ }
-        log('INFO', `Precondition failed for ${task.name}: file empty or missing`);
+        // A gating precondition not being met is a normal SKIP, not a failure.
+        // Avoid the word "failed" so the ops log scanner does not mistake this
+        // recurring idle event for a real error and spawn repair missions.
+        log('INFO', `Precondition not met for ${task.name}, skipping (file empty or missing)`);
         return { pass: false, context: '' };
       }
 

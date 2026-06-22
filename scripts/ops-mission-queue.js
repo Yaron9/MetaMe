@@ -19,6 +19,15 @@ const RECENT_LOG_LINES = 500;
 const ERROR_THRESHOLD = 3;
 const BOOTSTRAP_MISSION_ID = 'bootstrap-001';
 
+// Expected operational events logged at WARN that must NOT be treated as code
+// defects. The streaming watchdog (daemon-claude-engine.js) kills idle/stalled
+// subprocesses by design and logs "<reason> timeout for chatId ... — killing
+// process group". A busy chat hitting this repeatedly is normal protective
+// behavior driven by runtime conditions (slow model, network, long tool waits),
+// not something a repair mission can fix. Counting it as a "recurring error"
+// only spawns an infinite, unfixable repair loop.
+const BENIGN_OPERATIONAL_WARN = /timeout for chatId\b.*killing process group/i;
+
 function getMetameDir() {
   return process.env.METAME_DIR || path.join(os.homedir(), '.metame');
 }
@@ -109,7 +118,13 @@ function collectRecurringErrors() {
     const content = fs.readFileSync(logPath, 'utf8');
     const recent = content.split('\n').slice(-RECENT_LOG_LINES);
     for (const line of recent) {
+      // INFO/DEBUG lines are informational by definition — a benign recurring
+      // skip (e.g. "Precondition not met ... file empty or missing") must never
+      // be classified as an error and spawn a "Fix recurring error" mission.
+      if (/\[(?:INFO|DEBUG)\]/i.test(line)) continue;
       if (!/\bERR\b|\bWARN\b|\bError\b|\bfailed\b/i.test(line)) continue;
+      // Expected protective watchdog kills are operational, not defects.
+      if (BENIGN_OPERATIONAL_WARN.test(line)) continue;
       const normalized = normalizeLogLine(line);
       if (normalized.length < 20) continue;
       const key = normalized.slice(0, 120);
@@ -165,15 +180,37 @@ function pruneObsoleteMissions(cwd) {
   const recurringErrors = collectRecurringErrors();
   const now = Date.now();
   const pruned = [];
+  const resolved = [];
 
+  // Pending: drop obsolete missions outright (they were never started).
   sections.pending = sections.pending.filter((mission) => {
     const keep = shouldKeepMission(mission.title, cwd, recurringErrors, now);
     if (!keep) pruned.push(mission);
     return keep;
   });
 
-  if (pruned.length > 0) writeSections(cwd, sections);
-  return { success: true, pruned: pruned.length, pruned_ids: pruned.map(m => m.id) };
+  // Active: a mission whose precondition no longer holds (test now passes,
+  // project no longer stale, error no longer recurring) was fixed elsewhere
+  // since activation. Move it to completed so the perpetual loop stops
+  // re-dispatching it instead of spinning forever on a phantom task.
+  sections.active = sections.active.filter((mission) => {
+    const keep = shouldKeepMission(mission.title, cwd, recurringErrors, now);
+    if (!keep) {
+      mission.status = 'completed';
+      sections.completed.push(mission);
+      resolved.push(mission);
+    }
+    return keep;
+  });
+
+  if (pruned.length > 0 || resolved.length > 0) writeSections(cwd, sections);
+  return {
+    success: true,
+    pruned: pruned.length,
+    pruned_ids: pruned.map(m => m.id),
+    resolved: resolved.length,
+    resolved_ids: resolved.map(m => m.id),
+  };
 }
 
 // ── Standard queue commands ──────────────────────────────────
@@ -183,9 +220,28 @@ function nextMission(cwd) {
   if (sections.active.length > 0) {
     return { success: false, message: `already active: ${sections.active[0].id}` };
   }
-  if (sections.pending.length === 0) return { success: false, message: 'no pending missions' };
+  // Re-validate candidates before handing one to the loop. The completion-hook
+  // path (runCompletionHooks → next → activate) does NOT prune, so a
+  // "Fix failing tests"/stale/recurring mission whose precondition was resolved
+  // since it was queued would otherwise be activated as a phantom task and the
+  // perpetual loop would spin on it. Walk the priority order, dropping obsolete
+  // missions we skip past, and return the first one that still holds.
+  const recurringErrors = collectRecurringErrors();
+  const now = Date.now();
   const sorted = [...sections.pending].sort((a, b) => a.priority - b.priority);
-  return { success: true, topic: { id: sorted[0].id, title: sorted[0].title, status: 'pending', priority: sorted[0].priority } };
+  const dropped = [];
+  let chosen = null;
+  for (const mission of sorted) {
+    if (shouldKeepMission(mission.title, cwd, recurringErrors, now)) { chosen = mission; break; }
+    dropped.push(mission.id);
+  }
+  if (dropped.length > 0) {
+    const droppedSet = new Set(dropped);
+    sections.pending = sections.pending.filter(m => !droppedSet.has(m.id));
+    writeSections(cwd, sections);
+  }
+  if (!chosen) return { success: false, message: 'no pending missions' };
+  return { success: true, topic: { id: chosen.id, title: chosen.title, status: 'pending', priority: chosen.priority } };
 }
 
 function activateMission(cwd, id) {

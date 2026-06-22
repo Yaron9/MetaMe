@@ -20,6 +20,28 @@ function extractInboundText(itemList) {
   return '';
 }
 
+// Node's global fetch collapses nearly every transport failure into a bare
+// `TypeError: fetch failed`; the actionable reason (ENOTFOUND, ECONNREFUSED,
+// UND_ERR_CONNECT_TIMEOUT, cert errors…) lives on err.cause. Walk the cause
+// chain so a recurring poll error is diagnosable instead of opaque.
+function describeFetchError(err) {
+  if (!err) return 'unknown error';
+  const parts = [String(err.message || err)];
+  const seen = new Set();
+  let cause = err.cause;
+  while (cause && typeof cause === 'object' && !seen.has(cause)) {
+    seen.add(cause);
+    const code = cause.code
+      || (cause.errno !== undefined && cause.errno !== null ? `errno ${cause.errno}` : '');
+    const piece = code
+      ? [code, cause.syscall, cause.hostname].filter(Boolean).join(' ')
+      : String(cause.message || cause);
+    if (piece && !parts.includes(piece)) parts.push(piece);
+    cause = cause.cause;
+  }
+  return parts.join(' ← ');
+}
+
 function createContextTokenStore() {
   const store = new Map();
   return {
@@ -123,6 +145,8 @@ function createWeixinBridge(deps = {}) {
       botType: String(cfg.bot_type || '3').trim(),
       routeTag: cfg.route_tag === undefined || cfg.route_tag === null ? null : String(cfg.route_tag).trim(),
       pollTimeoutMs: Number(cfg.poll_timeout_ms || DEFAULT_LONG_POLL_TIMEOUT_MS),
+      pollErrorBackoffMs: Number(cfg.poll_error_backoff_ms) || 1000,
+      pollErrorBackoffMaxMs: Number(cfg.poll_error_backoff_max_ms) || 30000,
       allowedChatIds: Array.isArray(cfg.allowed_chat_ids) ? cfg.allowed_chat_ids.map(String) : [],
       accountId: String(cfg.account_id || '').trim(),
     };
@@ -182,8 +206,11 @@ function createWeixinBridge(deps = {}) {
     let currentAccount = null;
     let currentBot = null;
     let missingAccountLogged = false;
-    let pollErrorDelay = 1000;        // exponential backoff on poll errors
-    const MAX_POLL_ERROR_DELAY = 30000;
+    const initialPollErrorDelay = cfg.pollErrorBackoffMs;   // exponential backoff on poll errors
+    const maxPollErrorDelay = cfg.pollErrorBackoffMaxMs;
+    let pollErrorDelay = initialPollErrorDelay;
+    let pollErrorStreak = 0;         // consecutive poll failures, reset on a successful poll
+    let lastPollErrorDetail = null;  // dedupe: WARN on a new/changed cause, DEBUG on repeats
 
     function sameAccount(a, b) {
       if (!a || !b) return false;
@@ -240,7 +267,12 @@ function createWeixinBridge(deps = {}) {
           getUpdatesBuf,
           timeoutMs: liveBridgeCfg.pollTimeoutMs,
         });
-        pollErrorDelay = 1000; // reset as soon as HTTP poll succeeds — downstream processMessage errors should not cause poll backoff
+        pollErrorDelay = initialPollErrorDelay; // reset as soon as HTTP poll succeeds — downstream processMessage errors should not cause poll backoff
+        if (pollErrorStreak > 0) {
+          log('INFO', `[WEIXIN] poll recovered after ${pollErrorStreak} failed attempt(s) (last: ${lastPollErrorDetail})`);
+          pollErrorStreak = 0;
+          lastPollErrorDetail = null;
+        }
         if (resp && typeof resp.get_updates_buf === 'string' && resp.get_updates_buf) {
           getUpdatesBuf = resp.get_updates_buf;
         }
@@ -266,9 +298,16 @@ function createWeixinBridge(deps = {}) {
           });
         }
       } catch (err) {
-        log('WARN', `[WEIXIN] poll error: ${err.message} — retrying in ${Math.round(pollErrorDelay / 1000)}s`);
+        const detail = describeFetchError(err);
+        pollErrorStreak += 1;
+        // WARN on the first failure or a changed cause; identical repeats during
+        // the same streak drop to DEBUG so a self-healing network blip (the
+        // backoff already absorbs it) doesn't flood the log.
+        const level = detail === lastPollErrorDetail ? 'DEBUG' : 'WARN';
+        lastPollErrorDetail = detail;
+        log(level, `[WEIXIN] poll error: ${detail} — retrying in ${Math.round(pollErrorDelay / 1000)}s (attempt ${pollErrorStreak})`);
         nextDelayMs = pollErrorDelay;
-        pollErrorDelay = Math.min(pollErrorDelay * 2, MAX_POLL_ERROR_DELAY);
+        pollErrorDelay = Math.min(pollErrorDelay * 2, maxPollErrorDelay);
       } finally {
         processing = false;
         scheduleNext(nextDelayMs);
@@ -309,4 +348,5 @@ module.exports = {
   createContextTokenStore,
   createPersistentContextTokenStore,
   extractInboundText,
+  describeFetchError,
 };

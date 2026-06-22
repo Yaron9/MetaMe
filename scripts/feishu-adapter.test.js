@@ -134,3 +134,44 @@ describe('feishu-adapter waitForNetworkReady', () => {
     assert.match(r.error, /ENOTFOUND/);
   });
 });
+
+describe('feishu-adapter createReconnectSlot', () => {
+  const { createReconnectSlot } = _internal;
+
+  it('grants one slot and blocks concurrent acquirers until released', () => {
+    const slot = createReconnectSlot();
+    assert.equal(slot.acquire(), true);   // first reconnect signal owns the slot
+    assert.equal(slot.held, true);
+    assert.equal(slot.acquire(), false);  // signal during in-flight attempt → dropped
+    assert.equal(slot.acquire(), false);
+    slot.release();                        // attempt finished
+    assert.equal(slot.held, false);
+    assert.equal(slot.acquire(), true);    // next attempt may proceed
+  });
+
+  // Regression: the slot must stay held across the async reconnect attempt
+  // (delay + waitForNetworkReady). Releasing before the await — the original
+  // bug — let periodic health/ws-close/wake signals start a SECOND concurrent
+  // waitForNetworkReady loop, producing overlapping 63s DNS-probe storms.
+  it('keeps the slot held across an async attempt so only one network-wait runs', async () => {
+    const slot = createReconnectSlot();
+    let netWaits = 0;
+    let resolveWait;
+    const fakeNetWait = () => new Promise((r) => { resolveWait = r; });
+    // Emulates the (fixed) timer callback: acquire happens in scheduleReconnect,
+    // release happens only AFTER the await resolves.
+    async function attempt() {
+      netWaits += 1;
+      await fakeNetWait();
+      slot.release();
+    }
+    assert.equal(slot.acquire(), true);
+    const p = attempt();
+    // Signals arriving mid network-wait must NOT start a second wait.
+    assert.equal(slot.acquire(), false);
+    assert.equal(netWaits, 1);
+    resolveWait();
+    await p;
+    assert.equal(slot.acquire(), true); // a fresh attempt can run after completion
+  });
+});

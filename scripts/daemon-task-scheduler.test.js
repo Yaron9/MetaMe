@@ -2,7 +2,7 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { _private } = require('./daemon-task-scheduler');
+const { _private, createTaskScheduler } = require('./daemon-task-scheduler');
 
 const {
   parseAtTime,
@@ -102,5 +102,34 @@ describe('daemon-task-scheduler private helpers', () => {
     assert.equal(next.getDate(), 26);
     assert.equal(next.getHours(), 9);
     assert.equal(next.getMinutes(), 0);
+  });
+});
+
+describe('checkPrecondition logging semantics', () => {
+  function makeScheduler() {
+    const logs = [];
+    const scheduler = createTaskScheduler({
+      fs: require('fs'),
+      path: require('path'),
+      HOME: require('os').homedir(),
+      execSync: () => '',
+      log: (level, msg) => logs.push({ level, msg }),
+    });
+    return { scheduler, logs };
+  }
+
+  it('treats a missing `test -s` file as a benign skip, not a failure', () => {
+    const { scheduler, logs } = makeScheduler();
+    const result = scheduler.checkPrecondition({
+      name: 'cognitive-distill',
+      precondition: 'test -s /nonexistent/metame/raw_signals.jsonl',
+    });
+
+    assert.equal(result.pass, false);
+    // A gating precondition that isn't met is a SKIP, not an error. It must
+    // not be worded as "failed": the ops log scanner treats recurring
+    // "failed" lines as errors and spawns false "Fix recurring error" missions.
+    const msg = logs.map((l) => l.msg).join('\n');
+    assert.doesNotMatch(msg, /failed/i);
   });
 });
