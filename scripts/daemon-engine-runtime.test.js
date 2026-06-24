@@ -12,6 +12,7 @@ const {
 describe('daemon-engine-runtime normalize', () => {
   it('normalizes known engines and defaults to claude', () => {
     assert.equal(normalizeEngineName('codex'), 'codex');
+    assert.equal(normalizeEngineName('agy'), 'agy');
     assert.equal(normalizeEngineName('Claude'), 'claude');
     assert.equal(normalizeEngineName(''), 'claude');
     assert.equal(normalizeEngineName('unknown'), 'claude');
@@ -41,6 +42,12 @@ describe('daemon-engine-runtime args builder', () => {
     assert.ok(args.includes('-'));
     assert.ok(args.includes('--dangerously-bypass-approvals-and-sandbox'));
     assert.ok(!args.includes('-C'));
+  });
+
+  it('rejects Claude-only continue markers instead of silently starting fresh Codex', () => {
+    assert.throws(() => _private.buildCodexArgs({
+      session: { id: '__continue__', started: true },
+    }), /codex_continue_session_unsupported/);
   });
 
   it('keeps explicit codex sandbox flags on native resume when not full access', () => {
@@ -131,6 +138,14 @@ describe('daemon-engine-runtime args builder', () => {
     assert.ok(args.includes('--session-id'));
     assert.ok(args.includes('sid-2'));
     assert.ok(args.includes('Read'));
+    assert.ok(!args.includes('Bash'));
+    assert.ok(!args.includes('Edit'));
+  });
+
+  it('does not let caller tools widen Claude read-only mode', () => {
+    const args = _private.buildClaudeArgs({ readOnly: true, allowedTools: ['Bash', 'Edit'] });
+    assert.ok(!args.includes('Bash'));
+    assert.ok(!args.includes('Edit'));
   });
 
   it('always uses --dangerously-skip-permissions for claude when not read-only', () => {
@@ -141,6 +156,41 @@ describe('daemon-engine-runtime args builder', () => {
     });
     assert.ok(args.includes('--dangerously-skip-permissions'));
     assert.ok(!args.includes('--allowedTools'));
+  });
+
+  it('maps the same structured output contract to native Claude and Codex flags', () => {
+    const schema = { type: 'object', required: ['status'] };
+    const claude = _private.buildClaudeArgs({ outputSchema: schema });
+    const codex = _private.buildCodexArgs({ outputSchemaPath: '/tmp/completion.schema.json' });
+    assert.equal(claude[claude.indexOf('--json-schema') + 1], JSON.stringify(schema));
+    assert.equal(codex[codex.indexOf('--output-schema') + 1], '/tmp/completion.schema.json');
+  });
+
+  it('builds agy adapter args and ignores fresh placeholder session IDs', () => {
+    const fresh = _private.buildAgyArgs({
+      adapterPath: '/tmp/agy-adapter.js',
+      cwd: '/tmp/proj',
+      session: { started: false, id: 'placeholder' },
+    });
+    assert.deepEqual(fresh.slice(0, 3), ['/tmp/agy-adapter.js', '--cwd', '/tmp/proj']);
+    assert.equal(fresh.includes('--session'), false);
+    const resumed = _private.buildAgyArgs({
+      adapterPath: '/tmp/agy-adapter.js',
+      cwd: '/tmp/proj',
+      session: { started: true, id: 'real-id' },
+    });
+    assert.equal(resumed[resumed.indexOf('--session') + 1], 'real-id');
+  });
+
+  it('rejects unsupported task-level capability restrictions for agy', () => {
+    assert.throws(() => _private.buildAgyArgs({
+      adapterPath: '/tmp/agy-adapter.js',
+      allowedTools: ['Read'],
+    }), /agy_capability_unsupported/);
+    assert.throws(() => _private.buildAgyArgs({
+      adapterPath: '/tmp/agy-adapter.js',
+      mcpConfig: '/tmp/.mcp.json',
+    }), /agy_capability_unsupported/);
   });
 });
 
@@ -171,6 +221,11 @@ describe('daemon-engine-runtime model resolution', () => {
   it('does not leak legacy non-codex custom model ids into codex', () => {
     const model = resolveEngineModel('codex', { model: 'MiniMax-M2.1' });
     assert.equal(model, 'auto');
+  });
+
+  it('does not leak legacy Claude models into agy', () => {
+    assert.equal(resolveEngineModel('agy', { model: 'opus' }), 'auto');
+    assert.equal(resolveEngineModel('agy', { models: { agy: 'gemini-custom' } }), 'gemini-custom');
   });
 
   it('normalizes legacy custom claude model ids back to canonical slots', () => {
@@ -208,6 +263,16 @@ describe('daemon-engine-runtime parsers', () => {
     assert.equal(events[0].toolName, 'Write');
     assert.equal(events[1].type, 'text');
     assert.equal(events[1].text, 'done');
+  });
+
+  it('parses normalized agy adapter events', () => {
+    assert.deepEqual(_private.parseAgyStreamEvent('{"type":"heartbeat"}'), []);
+    const session = _private.parseAgyStreamEvent('{"type":"session","session_id":"agy-1"}');
+    const text = _private.parseAgyStreamEvent('{"type":"text","text":"answer"}');
+    const error = _private.parseAgyStreamEvent('{"type":"error","code":"AGY_CWD_BUSY","message":"busy"}');
+    assert.equal(session[0].sessionId, 'agy-1');
+    assert.equal(text[0].text, 'answer');
+    assert.equal(error[0].code, 'AGY_CWD_BUSY');
   });
 });
 
@@ -250,6 +315,19 @@ describe('daemon-engine-runtime factory', () => {
     assert.equal(codex.stdinBehavior, 'write-and-close');
     assert.equal(codex.defaultModel, 'auto');
   });
+
+  it('creates agy runtime through the protocol adapter', () => {
+    const getRuntime = createEngineRuntimeFactory({
+      AGY_BIN: '/tmp/agy',
+      AGY_ADAPTER: '/tmp/agy-adapter.js',
+    });
+    const agy = getRuntime('agy');
+    assert.equal(agy.name, 'agy');
+    assert.equal(agy.binary, process.execPath);
+    assert.equal(agy.nativeBinary, '/tmp/agy');
+    assert.equal(agy.capabilities.outputSchema, false);
+    assert.equal(agy.buildEnv({}).AGY_BIN, '/tmp/agy');
+  });
 });
 
 describe('daemon-engine-runtime timeout resolution', () => {
@@ -262,6 +340,13 @@ describe('daemon-engine-runtime timeout resolution', () => {
 
   it('keeps claude on idle/tool watchdogs only', () => {
     const timeouts = _private.resolveEngineTimeouts('claude');
+    assert.equal(timeouts.idleMs, 20 * 60 * 1000);
+    assert.equal(timeouts.toolMs, 25 * 60 * 1000);
+    assert.equal(timeouts.ceilingMs, null);
+  });
+
+  it('keeps agy on idle/tool watchdogs only', () => {
+    const timeouts = _private.resolveEngineTimeouts('agy');
     assert.equal(timeouts.idleMs, 20 * 60 * 1000);
     assert.equal(timeouts.toolMs, 25 * 60 * 1000);
     assert.equal(timeouts.ceilingMs, null);

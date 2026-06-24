@@ -10,6 +10,7 @@ const {
   _private: { resolveCodexPermissionProfile },
 } = require('./daemon-engine-runtime');
 const { rawChatId } = require('./core/thread-chat-id');
+const { resolveScopedEngine, fallbackForUnavailableRuntime } = require('./core/engine-policy');
 const { buildAgentContextForEngine, buildMemorySnapshotContent, selectSnapshotContext, refreshMemorySnapshot } = require('./agent-layer');
 const {
   adaptDaemonHintForEngine,
@@ -241,6 +242,7 @@ function createClaudeEngine(deps) {
       if (rt.name === 'codex') {
         return 'Codex CLI 未安装。请先运行: npm install -g @openai/codex';
       }
+      if (rt.name === 'agy') return 'agy adapter 无法启动，请运行 `/doctor` 检查 agy CLI。';
       return 'Claude CLI 未安装或不在 PATH。请先确认 `claude` 可执行。';
     }
     return err.message || String(err);
@@ -1293,7 +1295,14 @@ function createClaudeEngine(deps) {
       if (agentMatch) {
         const { key, proj, rest } = agentMatch;
         const projCwd = normalizeCwd(proj.cwd);
-        attachOrCreateSession(chatId, projCwd, proj.name || key, proj.engine ? normalizeEngineName(proj.engine) : getDefaultEngine());
+        const nicknamePolicy = resolveScopedEngine({
+          requestedEngine: proj.engine || getDefaultEngine(),
+          projectKey: key,
+          project: proj,
+          daemonCfg: (config && config.daemon) || {},
+          defaultEngine: getDefaultEngine(),
+        });
+        attachOrCreateSession(chatId, projCwd, proj.name || key, nicknamePolicy.engine);
         log('INFO', `Agent switch via nickname: ${key} (${projCwd})`);
         if (!rest) {
           // Pure nickname call — confirm switch and stop
@@ -1325,17 +1334,35 @@ function createClaudeEngine(deps) {
       const sessionChatId = getSessionChatId(chatId, boundProjectKey);
       const sessionRaw = getSession(sessionChatId);
       const boundCwd = (boundProject && boundProject.cwd) ? normalizeCwd(boundProject.cwd) : null;
-      const boundEngineName = (boundProject && boundProject.engine) ? normalizeEngineName(boundProject.engine) : getDefaultEngine();
+      let enginePolicy = resolveScopedEngine({
+        requestedEngine: (boundProject && boundProject.engine) || getDefaultEngine(),
+        projectKey: boundProjectKey || '',
+        project: boundProject,
+        daemonCfg,
+        defaultEngine: getDefaultEngine(),
+      });
+      let boundEngineName = enginePolicy.engine;
       // effectiveCwd: single source of truth for this request's working directory.
       // For bound projects, config always wins over stored session cwd.
       // Resolved once here; all downstream createSession/spawn calls use this.
       let effectiveCwd = boundCwd || null;
 
       // Engine is determined from config only — bound agent config wins, then global default.
-      const engineName = normalizeEngineName(
-        (boundProject && boundProject.engine) || getDefaultEngine()
-      );
-      const runtime = getEngineRuntime(engineName);
+      let engineName = enginePolicy.engine;
+      let runtime = getEngineRuntime(engineName);
+      if (engineName === 'agy' && (
+        !runtime.nativeBinary
+        || runtime.nativeBinary === 'agy'
+        || (typeof runtime.isReady === 'function' && !runtime.isReady())
+      )) {
+        enginePolicy = fallbackForUnavailableRuntime(enginePolicy, boundProject, getDefaultEngine());
+        engineName = enginePolicy.engine;
+        boundEngineName = engineName;
+        runtime = getEngineRuntime(engineName);
+      }
+      if (enginePolicy.fallback) {
+        log('WARN', `[EnginePolicy] ${boundProjectKey || chatId}: agy -> ${engineName} (${enginePolicy.reason})`);
+      }
       const requestedCodexPermissionProfile = engineName === 'codex'
         ? getCodexPermissionProfile(readOnly, daemonCfg)
         : null;
@@ -2017,7 +2044,7 @@ function createClaudeEngine(deps) {
             ...(engines[runtime.name] || {}),
             id: safeNextId,
             started: true,
-            ...(runtime.name === 'codex' ? { runtimeSessionObserved: true } : {}),
+            ...((runtime.name === 'codex' || runtime.name === 'agy') ? { runtimeSessionObserved: true } : {}),
             ...(runtime.name === 'codex' ? actualPermissionProfile : {}),
           };
           return { ...cur, cwd: effectiveCwd || cur.cwd || HOME, engines };
@@ -2552,10 +2579,10 @@ function createClaudeEngine(deps) {
         return { ok: !timedOut };
       } else {
         const errMsg = error || 'Unknown error';
-        const userErrMsg = (errorCode === 'AUTH_REQUIRED' || errorCode === 'RATE_LIMIT')
+        const userErrMsg = (errorCode === 'AUTH_REQUIRED' || errorCode === 'AGY_AUTH_REQUIRED' || errorCode === 'RATE_LIMIT')
           ? errMsg
           : `Error: ${errMsg.slice(0, 200)}`;
-        log('ERROR', `ask${runtime.name === 'codex' ? 'Codex' : 'Claude'} failed for ${chatId}: ${errMsg.slice(0, 300)} (${errorCode || 'NO_CODE'})`);
+        log('ERROR', `[${runtime.name}] ask failed for ${chatId}: ${errMsg.slice(0, 300)} (${errorCode || 'NO_CODE'})`);
 
         // Merge-pause: save card for reuse, don't show error to user
         if (errorCode === 'INTERRUPTED_MERGE_PAUSE') {

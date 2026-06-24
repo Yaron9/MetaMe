@@ -107,7 +107,7 @@ describe('agent-layer', () => {
       fs.writeFileSync(result.paths.soul, '# Soul\nResearch mode', 'utf8');
       fs.writeFileSync(result.paths.memory, '# Memory Snapshot\nLong-term focus', 'utf8');
 
-      for (const engine of ['claude', 'codex']) {
+      for (const engine of ['claude', 'codex', 'agy']) {
         const ctx = buildAgentContextForEngine({ agent_id: 'researcher' }, engine, home);
         assert.equal(ctx.soul, '', `${engine}: soul must be empty in agentHint (loaded via CLAUDE.md/@SOUL.md or AGENTS.md)`);
         assert.match(ctx.hint, /Agent memory snapshot/, `${engine}: memory must be in hint`);

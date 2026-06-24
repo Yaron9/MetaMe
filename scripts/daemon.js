@@ -33,6 +33,7 @@ process.on('uncaughtException', (err) => {
 });
 
 const fs = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 const os = require('os');
 const { execSync, execFileSync, execFile, spawn } = require('child_process');
@@ -144,6 +145,15 @@ const {
   normalizeUsageCategory,
 } = require('./usage-classifier');
 const { createAudit } = require('./core/audit');
+const { createControlDb } = require('./control-db');
+const { createLoopStore } = require('./loop-store');
+const { createLoopTriggerAdapter } = require('./daemon-loop-triggers');
+const { createLoopExecutionStore } = require('./loop-execution-store');
+const { createLoopGovernanceStore } = require('./loop-governance-store');
+const { createLoopCoordinator } = require('./daemon-loop-coordinator');
+const { createLoopReconciler } = require('./daemon-loop-reconciler');
+const { createDeterministicVerifier } = require('./daemon-verifier');
+const { createWorkspaceBroker } = require('./daemon-workspace-broker');
 const { createTaskBoard } = require('./task-board');
 const taskEnvelope = require('./daemon-task-envelope');
 const { createAdminCommandHandler } = require('./daemon-admin-commands');
@@ -171,6 +181,7 @@ const { repairAgentLayer } = require('./agent-layer');
 const { createNotifier } = require('./daemon-notify');
 const { createClaudeEngine } = require('./daemon-claude-engine');
 const { createEngineRuntimeFactory, detectDefaultEngine, resolveEngineModel, ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
+const { createBackgroundRunner } = require('./daemon-background-runner');
 const { createCommandRouter } = require('./daemon-command-router');
 const { createMessagePipeline } = require('./daemon-message-pipeline');
 const { createWarmPool } = require('./daemon-warm-pool');
@@ -228,10 +239,11 @@ const {
   cleanupCheckpoints,
 } = createCheckpointUtils({ execSync, execFile, path, log });
 
+const worktreeUtils = createWorktreeUtils({ fs, path, execFile, log, HOME });
 const {
   resolveWorktreeKey: _resolveWorktreeKey,
   getOrCreateWorktree,
-} = createWorktreeUtils({ fs, path, execFile, log, HOME });
+} = worktreeUtils;
 
 // ---------------------------------------------------------
 // CONFIG & STATE
@@ -410,9 +422,14 @@ function recordTokens(state, tokens, meta = null) {
 }
 
 
-const taskBoard = createTaskBoard({
+const controlDb = createControlDb({
   logger: (msg) => log('WARN', msg),
 });
+const taskBoard = createTaskBoard({ controlDb, logger: (msg) => log('WARN', msg) });
+const loopStore = createLoopStore({ controlDb });
+const loopTriggerAdapter = createLoopTriggerAdapter({ loopStore });
+const loopExecutionStore = createLoopExecutionStore({ controlDb });
+const loopGovernanceStore = createLoopGovernanceStore({ controlDb });
 
 // ---------------------------------------------------------
 // AGENT DISPATCH — virtual chatId inter-agent communication
@@ -1876,6 +1893,11 @@ function getProcessName(pid) {
     return execSync(`ps -p ${pid} -o comm=`, { encoding: 'utf8', timeout: 2000 }).trim();
   } catch { return null; }
 }
+function getProcessCommand(pid) {
+  try {
+    return execSync(`ps -p ${pid} -o command=`, { encoding: 'utf8', timeout: 2000 }).trim();
+  } catch { return null; }
+}
 function killOrphanPids() {
   try {
     if (!fs.existsSync(ACTIVE_PIDS_FILE)) return;
@@ -1886,9 +1908,11 @@ function killOrphanPids() {
         if (!Number.isFinite(pid) || pid <= 0) continue;
         // Safety: only kill if PID still belongs to a known agent process (prevent PID reuse accidents)
         const comm = getProcessName(pid);
-        const isKnownAgent = !!comm && (comm.includes('claude') || comm.includes('codex'));
+        const command = getProcessCommand(pid);
+        const isAgyAdapter = rec && rec.engine === 'agy' && !!command && command.includes('agy-adapter.js');
+        const isKnownAgent = !!comm && (comm.includes('claude') || comm.includes('codex') || isAgyAdapter);
         if (!isKnownAgent) {
-          log('WARN', `Skipping PID ${pid} (chatId: ${chatId}): process is "${comm}", not claude/codex`);
+          log('WARN', `Skipping PID ${pid} (chatId: ${chatId}): process is "${comm}", not a known engine`);
           continue;
         }
         process.kill(pid, 'SIGKILL');
@@ -1935,6 +1959,25 @@ const getEngineRuntime = createEngineRuntimeFactory({
   CLAUDE_BIN,
   getActiveProviderEnv,
 });
+const backgroundRunner = createBackgroundRunner({ getEngineRuntime });
+const daemonBootId = crypto.randomUUID();
+const loopVerifier = createDeterministicVerifier();
+const loopWorkspaceBroker = createWorkspaceBroker({ worktreeUtils });
+const loopCoordinator = createLoopCoordinator({
+  loopStore,
+  executionStore: loopExecutionStore,
+  governanceStore: loopGovernanceStore,
+  backgroundRunner,
+  verifier: loopVerifier,
+  workspaceBroker: loopWorkspaceBroker,
+  bootId: daemonBootId,
+  pid: process.pid,
+});
+const loopReconciler = createLoopReconciler({
+  executionStore: loopExecutionStore,
+  governanceStore: loopGovernanceStore,
+  worktreeUtils,
+});
 
 let wakeRecoveryHook = null;
 
@@ -1967,6 +2010,8 @@ const {
   setSleepMode: (next) => { _inSleepMode = !!next; },
   getWakeRecoveryHook: () => wakeRecoveryHook,
   skillEvolution,
+  backgroundRunner,
+  loopTriggerAdapter,
 });
 
 
@@ -2456,6 +2501,7 @@ async function main() {
     'model',          // legacy (still valid as fallback)
     'models',         // per-engine model map: { claude, codex }
     'distill_models', // per-engine distill model map
+    'experimental_engines', // scoped opt-in engines such as agy
     'log_max_size',
     'heartbeat_check_interval',
     'session_allowed_tools',
@@ -2583,6 +2629,35 @@ async function main() {
 
   // Start heartbeat scheduler
   let heartbeatTimer = startHeartbeat(config, notifyFn, notifyPersonalFn, adminNotifyFn);
+  const loopEnabled = !!(config.loop && config.loop.enabled === true);
+  const loopExecuteV2 = !!(loopEnabled && config.loop.execute_v2 === true);
+  if (loopEnabled) {
+    log('INFO', `Loop v2 enabled (execute_v2=${loopExecuteV2}, reactive_v2=${config.loop.reactive_v2 === true})`);
+    try {
+      controlDb.run(db => db.prepare('SELECT 1 FROM goals LIMIT 1').get());
+      const recoveredRuns = loopReconciler.recoverExecutions(daemonBootId);
+      if (recoveredRuns.length > 0) log('WARN', `Recovered ${recoveredRuns.length} interrupted Loop Run(s)`);
+    } catch (err) {
+      log('ERROR', `Loop recovery failed: ${err.message}`);
+    }
+  }
+  const loopCoordinatorHandle = loopExecuteV2 ? loopCoordinator.start({ log }) : null;
+  const deliverLoopOutbox = message => adminNotifyFn(
+    `🔁 Loop ${message.topic}\n${JSON.stringify(message.payload)}`
+  );
+  const flushLoopOutbox = () => loopReconciler.flushOutbox(deliverLoopOutbox)
+    .catch(err => log('WARN', `Loop outbox flush failed: ${err.message}`));
+  if (loopEnabled) flushLoopOutbox();
+  if (loopEnabled) {
+    try {
+      const removed = loopReconciler.cleanupWorkspaces();
+      if (removed.length > 0) log('INFO', `Cleaned ${removed.length} stale Loop worktree(s)`);
+    } catch (err) {
+      log('WARN', `Loop workspace cleanup failed: ${err.message}`);
+    }
+  }
+  const loopOutboxTimer = loopEnabled ? setInterval(flushLoopOutbox, 15000) : null;
+  if (loopOutboxTimer && typeof loopOutboxTimer.unref === 'function') loopOutboxTimer.unref();
 
   let shuttingDown = false;
   function spawnReplacementDaemon(reason) {
@@ -2687,6 +2762,9 @@ async function main() {
     await notifyActiveUsers('关闭').catch(() => {});
     runtimeWatchers.stop();
     if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (loopCoordinatorHandle) loopCoordinatorHandle.stop();
+    backgroundRunner.shutdown('SIGKILL');
+    if (loopOutboxTimer) clearInterval(loopOutboxTimer);
     if (dispatchSocket) try { dispatchSocket.close(); } catch { }
     try { fs.unlinkSync(SOCK_PATH); } catch { }
     if (telegramBridge) telegramBridge.stop();
@@ -2705,6 +2783,7 @@ async function main() {
     }
     activeProcesses.clear();
     try { if (fs.existsSync(ACTIVE_PIDS_FILE)) fs.unlinkSync(ACTIVE_PIDS_FILE); } catch { }
+    controlDb.close();
     cleanPid();
     releaseDaemonLock();
     const s = loadState();
@@ -2771,6 +2850,7 @@ if (process.argv.includes('--run')) {
 } else {
   main().catch(e => {
     log('ERROR', `Fatal: ${e.message}`);
+    controlDb.close();
     cleanPid();
     process.exit(1);
   });

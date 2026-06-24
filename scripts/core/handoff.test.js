@@ -1071,4 +1071,62 @@ describe('runAsyncCommand', () => {
     assert.deepEqual(result, { output: null, error: 'ERR_STREAM_DESTROYED' });
     assert.deepEqual(killCalls, ['SIGTERM']);
   });
+
+  it('cancels through AbortSignal with the shared interrupted result', async () => {
+    let closeHandler = null;
+    const killCalls = [];
+    const controller = new AbortController();
+    const fakeChild = {
+      pid: 999,
+      stdout: { on() {} },
+      stderr: { on() {} },
+      stdin: { on() {}, write() {}, end() {} },
+      kill(signal) { killCalls.push(signal); },
+      on(event, handler) { if (event === 'close') closeHandler = handler; },
+    };
+    const promise = runAsyncCommand({
+      spawn() { return fakeChild; },
+      cmd: 'codex',
+      args: ['exec'],
+      signal: controller.signal,
+      useProcessGroup: false,
+    });
+    controller.abort();
+    closeHandler(143);
+    assert.deepEqual(await promise, { output: null, error: 'Aborted', errorCode: 'INTERRUPTED' });
+    assert.deepEqual(killCalls, ['SIGTERM']);
+  });
+
+  it('detaches process groups and caps collected output', async () => {
+    let closeHandler = null;
+    let spawnOptions = null;
+    const fakeChild = {
+      stdout: { on(_event, handler) { handler(Buffer.from('123456')); } },
+      stderr: { on() {} },
+      stdin: { on() {}, write() {}, end() {} },
+      on(event, handler) { if (event === 'close') closeHandler = handler; },
+    };
+    const promise = runAsyncCommand({
+      spawn(_cmd, _args, options) { spawnOptions = options; return fakeChild; },
+      cmd: 'claude', args: [], useProcessGroup: true, maxStdoutBytes: 4,
+    });
+    closeHandler(0);
+    assert.deepEqual(await promise, { output: '1234', error: null, stdoutTruncated: true });
+    assert.equal(spawnOptions.detached, true);
+  });
+
+  it('can retain bounded stdout tail for JSONL final events', async () => {
+    let closeHandler = null;
+    const fakeChild = {
+      stdout: { on(_event, handler) { handler(Buffer.from('old\nfinal')); } },
+      stderr: { on() {} }, stdin: { on() {}, write() {}, end() {} },
+      on(event, handler) { if (event === 'close') closeHandler = handler; },
+    };
+    const promise = runAsyncCommand({
+      spawn() { return fakeChild; }, cmd: 'codex', args: [],
+      maxStdoutBytes: 5, stdoutBufferMode: 'tail',
+    });
+    closeHandler(0);
+    assert.deepEqual(await promise, { output: 'final', error: null, stdoutTruncated: true });
+  });
 });

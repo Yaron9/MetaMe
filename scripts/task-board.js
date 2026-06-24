@@ -1,10 +1,11 @@
 'use strict';
 
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
+const {
+  DEFAULT_CONTROL_DB_PATH,
+  _internal: controlDbInternal,
+} = require('./control-db');
 
-const DEFAULT_DB_PATH = path.join(os.homedir(), '.metame', 'task_board.db');
+const DEFAULT_DB_PATH = DEFAULT_CONTROL_DB_PATH;
 
 function parseJsonSafe(raw, fallback) {
   try { return JSON.parse(raw); } catch { return fallback; }
@@ -32,114 +33,24 @@ function sanitizeStringArray(values, maxItems = 40, maxItemLen = 500) {
   return out;
 }
 
-function isSqliteBusyError(err) {
-  const msg = err && (err.code || err.message || String(err));
-  return /SQLITE_(BUSY|LOCKED)|database is locked/i.test(String(msg || ''));
-}
-
-function sleepSync(ms) {
-  if (ms <= 0) return;
-  const view = new Int32Array(new SharedArrayBuffer(4));
-  Atomics.wait(view, 0, 0, ms);
-}
-
-function runSqliteWithRetry(operation, opts = {}) {
-  const maxRetries = Number.isInteger(opts.maxRetries) ? opts.maxRetries : 3;
-  const baseDelayMs = Number.isFinite(opts.baseDelayMs) ? opts.baseDelayMs : 100;
-  let lastErr = null;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return operation();
-    } catch (err) {
-      lastErr = err;
-      if (!isSqliteBusyError(err) || attempt >= maxRetries) throw err;
-      sleepSync(baseDelayMs * (2 ** attempt));
-    }
-  }
-  throw lastErr;
-}
-
 function createTaskBoard(opts = {}) {
-  const dbPath = opts.dbPath || DEFAULT_DB_PATH;
   const logger = typeof opts.logger === 'function' ? opts.logger : null;
-  let db = null;
+  if (!opts.controlDb || typeof opts.controlDb.run !== 'function') {
+    throw new TypeError('createTaskBoard requires an injected controlDb');
+  }
+  const controlDb = opts.controlDb;
+  const dbPath = controlDb.dbPath;
 
   function logWarn(msg) {
     if (logger) logger(msg);
   }
 
-  function getDb() {
-    if (db) return db;
-    const dir = path.dirname(dbPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-    const { DatabaseSync } = require('node:sqlite');
-    db = new DatabaseSync(dbPath);
-    db.exec('PRAGMA journal_mode = WAL');
-    db.exec('PRAGMA busy_timeout = 5000');
-
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS tasks (
-        task_id             TEXT PRIMARY KEY,
-        scope_id            TEXT NOT NULL DEFAULT '',
-        parent_task_id      TEXT,
-        from_agent          TEXT NOT NULL,
-        to_agent            TEXT NOT NULL,
-        goal                TEXT NOT NULL,
-        task_kind           TEXT NOT NULL DEFAULT 'team',
-        participants        TEXT NOT NULL DEFAULT '[]',
-        definition_of_done  TEXT NOT NULL DEFAULT '[]',
-        inputs              TEXT NOT NULL DEFAULT '{}',
-        artifacts           TEXT NOT NULL DEFAULT '[]',
-        owned_paths         TEXT NOT NULL DEFAULT '[]',
-        status              TEXT NOT NULL DEFAULT 'queued',
-        priority            TEXT NOT NULL DEFAULT 'normal',
-        summary             TEXT NOT NULL DEFAULT '',
-        last_error          TEXT NOT NULL DEFAULT '',
-        created_at          TEXT NOT NULL,
-        updated_at          TEXT NOT NULL
-      )
-    `);
-    for (const col of [
-      "ALTER TABLE tasks ADD COLUMN scope_id TEXT NOT NULL DEFAULT ''",
-      "ALTER TABLE tasks ADD COLUMN task_kind TEXT NOT NULL DEFAULT 'team'",
-      "ALTER TABLE tasks ADD COLUMN participants TEXT NOT NULL DEFAULT '[]'",
-    ]) {
-      try { db.exec(col); } catch (e) {
-        if (!e.message.includes('duplicate column name')) throw e;
-      }
-    }
-
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS handoffs (
-        handoff_id          TEXT PRIMARY KEY,
-        task_id             TEXT NOT NULL,
-        from_agent          TEXT NOT NULL,
-        to_agent            TEXT NOT NULL,
-        payload             TEXT NOT NULL DEFAULT '{}',
-        status              TEXT NOT NULL DEFAULT 'sent',
-        created_at          TEXT NOT NULL,
-        updated_at          TEXT NOT NULL
-      )
-    `);
-
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS task_events (
-        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-        task_id             TEXT NOT NULL,
-        event_type          TEXT NOT NULL,
-        actor               TEXT NOT NULL,
-        body                TEXT NOT NULL DEFAULT '{}',
-        created_at          TEXT NOT NULL
-      )
-    `);
-
-    try { db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)'); } catch {}
-    try { db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_scope_id ON tasks(scope_id)'); } catch {}
-    try { db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at)'); } catch {}
-    try { db.exec('CREATE INDEX IF NOT EXISTS idx_events_task_id ON task_events(task_id)'); } catch {}
-    try { db.exec('CREATE INDEX IF NOT EXISTS idx_handoffs_task_id ON handoffs(task_id)'); } catch {}
-    return db;
+  function validateLoopLinks(db, safe) {
+    if (!safe.run_id) return;
+    if (!safe.goal_id) throw new Error('task_run_requires_goal');
+    const run = db.prepare('SELECT goal_id FROM runs WHERE run_id = ?').get(safe.run_id);
+    if (!run) throw new Error('task_run_not_found');
+    if (run.goal_id !== safe.goal_id) throw new Error('task_goal_run_mismatch');
   }
 
   function upsertTask(task) {
@@ -149,6 +60,8 @@ function createTaskBoard(opts = {}) {
       task_id: sanitizeText(task.task_id, 80),
       scope_id: sanitizeText(task.scope_id, 120) || sanitizeText(task.task_id, 80),
       parent_task_id: sanitizeText(task.parent_task_id, 80) || null,
+      goal_id: sanitizeText(task.goal_id, 120) || null,
+      run_id: sanitizeText(task.run_id, 120) || null,
       from_agent: sanitizeText(task.from_agent, 80) || 'unknown',
       to_agent: sanitizeText(task.to_agent, 80),
       goal: sanitizeText(task.goal, 500),
@@ -171,13 +84,15 @@ function createTaskBoard(opts = {}) {
 
     const sql = `
       INSERT INTO tasks (
-        task_id, scope_id, parent_task_id, from_agent, to_agent, goal, task_kind, participants,
+        task_id, scope_id, parent_task_id, goal_id, run_id, from_agent, to_agent, goal, task_kind, participants,
         definition_of_done, inputs, artifacts, owned_paths, status, priority, summary, last_error,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(task_id) DO UPDATE SET
         scope_id = excluded.scope_id,
         parent_task_id = excluded.parent_task_id,
+        goal_id = excluded.goal_id,
+        run_id = excluded.run_id,
         from_agent = excluded.from_agent,
         to_agent = excluded.to_agent,
         goal = excluded.goal,
@@ -194,26 +109,31 @@ function createTaskBoard(opts = {}) {
         updated_at = excluded.updated_at
     `;
     try {
-      runSqliteWithRetry(() => getDb().prepare(sql).run(
-        safe.task_id,
-        safe.scope_id,
-        safe.parent_task_id,
-        safe.from_agent,
-        safe.to_agent,
-        safe.goal,
-        safe.task_kind,
-        toJson(safe.participants, []),
-        toJson(safe.definition_of_done, []),
-        toJson(safe.inputs, {}),
-        toJson(safe.artifacts, []),
-        toJson(safe.owned_paths, []),
-        safe.status,
-        safe.priority,
-        safe.summary,
-        safe.last_error,
-        safe.created_at,
-        safe.updated_at
-      ));
+      controlDb.transaction(db => {
+        validateLoopLinks(db, safe);
+        db.prepare(sql).run(
+          safe.task_id,
+          safe.scope_id,
+          safe.parent_task_id,
+          safe.goal_id,
+          safe.run_id,
+          safe.from_agent,
+          safe.to_agent,
+          safe.goal,
+          safe.task_kind,
+          toJson(safe.participants, []),
+          toJson(safe.definition_of_done, []),
+          toJson(safe.inputs, {}),
+          toJson(safe.artifacts, []),
+          toJson(safe.owned_paths, []),
+          safe.status,
+          safe.priority,
+          safe.summary,
+          safe.last_error,
+          safe.created_at,
+          safe.updated_at
+        );
+      });
       return { ok: true, task_id: safe.task_id };
     } catch (e) {
       logWarn(`TaskBoard upsertTask failed: ${e.message}`);
@@ -228,7 +148,7 @@ function createTaskBoard(opts = {}) {
     const safeActor = sanitizeText(actor, 80) || 'system';
     const nowIso = new Date().toISOString();
     try {
-      runSqliteWithRetry(() => getDb().prepare(`
+      controlDb.run(db => db.prepare(`
         INSERT INTO task_events (task_id, event_type, actor, body, created_at)
         VALUES (?, ?, ?, ?, ?)
       `).run(safeTaskId, safeEvent, safeActor, toJson(body, {}), nowIso));
@@ -253,7 +173,7 @@ function createTaskBoard(opts = {}) {
     };
     if (!safe.handoff_id || !safe.task_id || !safe.to_agent) return { ok: false, error: 'handoff_fields_missing' };
     try {
-      runSqliteWithRetry(() => getDb().prepare(`
+      controlDb.run(db => db.prepare(`
         INSERT INTO handoffs (handoff_id, task_id, from_agent, to_agent, payload, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(handoff_id) DO UPDATE SET
@@ -281,7 +201,7 @@ function createTaskBoard(opts = {}) {
     const safeTaskId = sanitizeText(taskId, 80);
     if (!safeTaskId) return null;
     try {
-      const row = getDb().prepare('SELECT * FROM tasks WHERE task_id = ?').get(safeTaskId);
+      const row = controlDb.run(db => db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(safeTaskId));
       if (!row) return null;
       return {
         ...row,
@@ -310,7 +230,7 @@ function createTaskBoard(opts = {}) {
       if (where.length > 0) sql += ' WHERE ' + where.join(' AND ');
       sql += ' ORDER BY updated_at DESC LIMIT ?';
       params.push(lim);
-      const rows = getDb().prepare(sql).all(...params);
+      const rows = controlDb.run(db => db.prepare(sql).all(...params));
       return rows.map(r => ({
         ...r,
         participants: parseJsonSafe(r.participants, []),
@@ -330,9 +250,9 @@ function createTaskBoard(opts = {}) {
     if (!safeTaskId) return [];
     const lim = Math.max(1, Math.min(200, Number(limit) || 20));
     try {
-      const rows = getDb()
+      const rows = controlDb.run(db => db
         .prepare('SELECT * FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT ?')
-        .all(safeTaskId, lim);
+        .all(safeTaskId, lim));
       return rows.map(r => ({ ...r, body: parseJsonSafe(r.body, {}) }));
     } catch (e) {
       logWarn(`TaskBoard listTaskEvents failed: ${e.message}`);
@@ -345,9 +265,9 @@ function createTaskBoard(opts = {}) {
     if (!safeScopeId) return [];
     const lim = Math.max(1, Math.min(200, Number(limit) || 30));
     try {
-      const rows = getDb()
+      const rows = controlDb.run(db => db
         .prepare('SELECT * FROM tasks WHERE scope_id = ? ORDER BY updated_at DESC LIMIT ?')
-        .all(safeScopeId, lim);
+        .all(safeScopeId, lim));
       return rows.map(r => ({
         ...r,
         participants: parseJsonSafe(r.participants, []),
@@ -404,9 +324,7 @@ function createTaskBoard(opts = {}) {
   }
 
   function close() {
-    if (!db) return;
-    try { db.close(); } catch {}
-    db = null;
+    // Connection lifecycle belongs to control-db, not this repository.
   }
 
   return {
@@ -428,5 +346,8 @@ function createTaskBoard(opts = {}) {
 module.exports = {
   createTaskBoard,
   DEFAULT_DB_PATH,
-  _internal: { isSqliteBusyError, runSqliteWithRetry },
+  _internal: {
+    isSqliteBusyError: controlDbInternal.isSqliteBusyError,
+    runSqliteWithRetry: controlDbInternal.runSqliteWithRetry,
+  },
 };

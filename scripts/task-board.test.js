@@ -7,6 +7,8 @@ const os = require('os');
 const path = require('path');
 
 const { createTaskBoard, _internal } = require('./task-board');
+const { createControlDb } = require('./control-db');
+const { createLoopStore } = require('./loop-store');
 
 function newTmpDbPath() {
   const rand = Math.random().toString(36).slice(2, 8);
@@ -15,7 +17,8 @@ function newTmpDbPath() {
 
 test('task board upsert/get/list/status flow', () => {
   const dbPath = newTmpDbPath();
-  const board = createTaskBoard({ dbPath });
+  const controlDb = createControlDb({ dbPath });
+  const board = createTaskBoard({ controlDb });
   const taskId = 't_test_001';
 
   const up = board.upsertTask({
@@ -79,6 +82,7 @@ test('task board upsert/get/list/status flow', () => {
   assert.deepEqual(participants.sort(), ['assistant', 'coder', 'reviewer'].sort());
 
   board.close();
+  controlDb.close();
   try { fs.unlinkSync(dbPath); } catch {}
 });
 
@@ -96,4 +100,56 @@ test('task board retries transient sqlite busy write failures', () => {
 
   assert.equal(result, 'ok');
   assert.equal(attempts, 3);
+});
+
+test('task board rejects hidden database ownership', () => {
+  assert.throws(() => createTaskBoard({ dbPath: newTmpDbPath() }), /requires an injected controlDb/);
+});
+
+test('task board uses injected control DB without owning its lifecycle', () => {
+  const dbPath = newTmpDbPath();
+  const controlDb = createControlDb({ dbPath });
+  const board = createTaskBoard({ controlDb });
+
+  assert.equal(board.upsertTask({
+    task_id: 't_shared_001',
+    from_agent: 'assistant',
+    to_agent: 'coder',
+    goal: 'share one connection',
+  }).ok, true);
+
+  board.close();
+  const row = controlDb.run(db => db.prepare('SELECT goal FROM tasks WHERE task_id = ?').get('t_shared_001'));
+  assert.equal(row.goal, 'share one connection');
+
+  controlDb.close();
+  try { fs.unlinkSync(dbPath); } catch {}
+  try { fs.unlinkSync(`${dbPath}-wal`); } catch {}
+  try { fs.unlinkSync(`${dbPath}-shm`); } catch {}
+});
+
+test('task board rejects mismatched loop ownership links', () => {
+  const dbPath = newTmpDbPath();
+  const controlDb = createControlDb({ dbPath });
+  let id = 0;
+  const loop = createLoopStore({ controlDb, newId: prefix => `${prefix}_${++id}` });
+  loop.createGoal({ goal_id: 'goal-1', objective: 'first' });
+  loop.createGoal({ goal_id: 'goal-2', objective: 'second' });
+  const run = loop.enqueueWake({ wake_id: 'wake-1', goal_id: 'goal-1' }).run;
+  const board = createTaskBoard({ controlDb });
+  const result = board.upsertTask({
+    task_id: 't_bad_link',
+    goal_id: 'goal-2',
+    run_id: run.run_id,
+    from_agent: 'manager',
+    to_agent: 'worker',
+    goal: 'must reject mismatched owner',
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /task_goal_run_mismatch/);
+
+  controlDb.close();
+  for (const suffix of ['', '-wal', '-shm', '.pre-control-v2.bak']) {
+    try { fs.unlinkSync(`${dbPath}${suffix}`); } catch {}
+  }
 });

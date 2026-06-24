@@ -334,6 +334,10 @@ function createExecCommandHandler(deps) {
         await bot.sendMessage(chatId, '❌ No active session to compact.');
         return true;
       }
+      if (String(engine).toLowerCase() === 'agy') {
+        await bot.sendMessage(chatId, '⚠️ agy 会话暂不支持 /compact，请继续当前会话或使用 /new。');
+        return true;
+      }
       await bot.sendMessage(chatId, '🗜 Compacting session...');
 
       // Step 1: Read conversation (JSONL for Claude, rollout JSONL for Codex)

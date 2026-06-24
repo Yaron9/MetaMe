@@ -3,6 +3,8 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  ENGINE_NAMES,
+  isKnownEngineName,
   normalizeEngineName,
   normalizeCodexSandboxMode,
   normalizeCodexApprovalPolicy,
@@ -14,6 +16,14 @@ describe('normalizeEngineName', () => {
     assert.equal(normalizeEngineName('codex'), 'codex');
     assert.equal(normalizeEngineName('CODEX'), 'codex');
     assert.equal(normalizeEngineName(' Codex '), 'codex');
+  });
+
+  it('recognizes agy without widening unknown engine values', () => {
+    assert.deepEqual(ENGINE_NAMES, ['claude', 'codex', 'agy']);
+    assert.equal(normalizeEngineName(' AGY '), 'agy');
+    assert.equal(isKnownEngineName('agy'), true);
+    assert.equal(isKnownEngineName('unknown'), false);
+    assert.equal(normalizeEngineName('unknown'), 'claude');
   });
 
   it('returns claude by default', () => {

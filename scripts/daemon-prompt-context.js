@@ -22,11 +22,13 @@ function buildAgentHint({
 }) {
   if (sessionStarted || (!boundProject && !sessionCwd)) return '';
   try {
-    return buildAgentContextForEngine(
+    const memoryHint = buildAgentContextForEngine(
       boundProject || { cwd: sessionCwd },
       engineName,
       HOME,
     ).hint || '';
+    if (normalizeEngineName(engineName) !== 'agy') return memoryHint;
+    return `${memoryHint}\n\n[agy workspace bootstrap (internal): Before acting, read and follow AGENTS.md and SOUL.md in the current workspace when present. Project-local skills remain at .claude/skills/<name>/SKILL.md; read the selected skill before executing it.]`;
   } catch (e) {
     if (typeof log === 'function') log('WARN', `Agent context injection failed: ${e.message}`);
     return '';

@@ -188,12 +188,26 @@ heartbeat:
     # precondition: shell command, empty output → skip (zero tokens)
     # type: "script" → runs command directly instead of claude -p
 
+# Loop Engineering v2 rollout gates. Disabled by default for upgrades.
+# enabled=true records legacy schedules into the new control plane (shadow mode).
+# execute_v2=true additionally lets the v2 coordinator execute non-legacy Goals.
+loop:
+  enabled: false
+  execute_v2: false
+  reactive_v2: false
+
 budget:
   daily_limit: 50000
   warning_threshold: 0.8
 
 daemon:
   model: sonnet  # sonnet, opus, haiku — model for mobile sessions
+  # Experimental engines are opt-in and project-scoped. agy is never selected
+  # globally or for newly created agents.
+  experimental_engines:
+    agy:
+      enabled: false
+      allowed_projects: [digital_me, munger]
   log_max_size: 1048576
   wiki_output_dir: ~/Documents/ObsidianVault/MetaMe/wiki  # Obsidian vault wiki subdirectory
   heartbeat_check_interval: 60

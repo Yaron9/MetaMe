@@ -123,7 +123,49 @@ function createWorktreeUtils(deps) {
     return fs.existsSync(worktreePath) ? worktreePath : null;
   }
 
-  return { resolveWorktreeKey, getOrCreateWorktree };
+  function listRunWorktrees() {
+    const found = [];
+    if (!fs.existsSync(WORKTREES_BASE)) return found;
+    for (const project of fs.readdirSync(WORKTREES_BASE)) {
+      const projectDir = path.join(WORKTREES_BASE, project);
+      let entries = [];
+      try { entries = fs.readdirSync(projectDir); } catch { continue; }
+      for (const entry of entries) {
+        if (!entry.startsWith('run_')) continue;
+        const worktreePath = path.join(projectDir, entry);
+        try {
+          const stat = fs.statSync(worktreePath);
+          if (stat.isDirectory()) found.push({ path: worktreePath, modifiedAt: stat.mtimeMs });
+        } catch { /* disappeared */ }
+      }
+    }
+    return found;
+  }
+
+  function removeRunWorktree(worktreePath) {
+    const resolved = path.resolve(String(worktreePath || ''));
+    if (!resolved.startsWith(`${path.resolve(WORKTREES_BASE)}${path.sep}`)) return false;
+    if (!path.basename(resolved).startsWith('run_')) return false;
+    try {
+      execFileSync('git', ['worktree', 'remove', '--force', resolved], {
+        cwd: resolved,
+        stdio: 'ignore',
+        timeout: 15000,
+        ...WIN_HIDE,
+      });
+    } catch {
+      // A linked worktree uses a .git file. Never rm it behind Git's back or
+      // the main repository keeps a stale registration. Plain fallback repos
+      // have a .git directory and are safe to remove directly.
+      try {
+        if (!fs.statSync(path.join(resolved, '.git')).isDirectory()) return false;
+        fs.rmSync(resolved, { recursive: true, force: true });
+      } catch { return false; }
+    }
+    return !fs.existsSync(resolved);
+  }
+
+  return { resolveWorktreeKey, getOrCreateWorktree, listRunWorktrees, removeRunWorktree };
 }
 
 module.exports = { createWorktreeUtils };

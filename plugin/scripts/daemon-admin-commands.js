@@ -7,6 +7,7 @@ const {
 } = require('./usage-classifier');
 const { IS_WIN } = require('./platform');
 const { ENGINE_MODEL_CONFIG, resolveEngineModel, normalizeClaudeModel } = require('./daemon-engine-runtime');
+const { resolveScopedEngine } = require('./core/engine-policy');
 const { resolveProjectKey: _resolveProjectKey } = require('./daemon-team-dispatch');
 const { buildDispatchResponseCard } = require('./daemon-dispatch-cards');
 const {
@@ -1518,8 +1519,13 @@ function createAdminCommandHandler(deps) {
 
       const hasClaude = hasCli(execSync, 'claude');
       const hasCodex = hasCli(execSync, 'codex');
+      const hasAgy = hasCli(execSync, 'agy');
       checks.push(hasClaude ? '✅ Claude CLI' : '⚠️ Claude CLI 未找到');
       checks.push(hasCodex ? '✅ Codex CLI' : '⚠️ Codex CLI 未找到');
+      const agyCfg = daemonCfg.experimental_engines && daemonCfg.experimental_engines.agy;
+      if (agyCfg && agyCfg.enabled === true) checks.push(hasAgy ? '✅ agy CLI' : '❌ agy 已启用但 CLI 未找到');
+      else checks.push(hasAgy ? 'ℹ️ agy CLI（scoped engine 未启用）' : 'ℹ️ agy CLI 未安装');
+      if (agyCfg && agyCfg.enabled === true && !hasAgy) issues++;
 
       const currentEngine = getDefaultEngine() === 'codex' ? 'codex' : 'claude';
       if (currentEngine === 'claude' && !hasClaude) {
@@ -1678,7 +1684,14 @@ function createAdminCommandHandler(deps) {
       const boundProject = boundProjectKey && config && config.projects ? config.projects[boundProjectKey] : null;
       if (!arg) {
         const cur = boundProject && boundProject.engine ? String(boundProject.engine).trim().toLowerCase() : getDefaultEngine();
-        const safeCur = cur === 'codex' ? 'codex' : 'claude';
+        const policy = resolveScopedEngine({
+          requestedEngine: cur,
+          projectKey: boundProjectKey || '',
+          project: boundProject,
+          daemonCfg: (config && config.daemon) || {},
+          defaultEngine: getDefaultEngine(),
+        });
+        const safeCur = policy.engine;
         const curEngineCfg = ENGINE_MODEL_CONFIG[safeCur] || ENGINE_MODEL_CONFIG.claude;
         const activeProvider = (safeCur === 'claude' && providerMod)
           ? providerMod.getActiveName()
@@ -1691,6 +1704,7 @@ function createAdminCommandHandler(deps) {
           : `📍 当前 chat 使用全局默认引擎`;
         await bot.sendMessage(chatId, [
           `🔧 引擎: ${safeCur}  |  Provider: ${activeProvider}`,
+          ...(policy.fallback ? [`↩️ 配置为 ${policy.requested}，当前回退原因: ${policy.reason}`] : []),
           `🤖 会话模型: ${currentModel}  |  后台轻量: ${distill}`,
           scopeLine,
           '',

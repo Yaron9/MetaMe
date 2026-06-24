@@ -669,6 +669,11 @@ function runAsyncCommand(opts) {
     killSignal = 'SIGTERM',
     useProcessGroup = false,
     forceKillDelayMs = 5000,
+    signal = null,
+    maxStdoutBytes = 1024 * 1024,
+    maxStderrBytes = 1024 * 1024,
+    stdoutBufferMode = 'prefix',
+    onChild = null,
     formatSpawnError = (err) => err && err.message ? err.message : String(err || 'Unknown spawn error'),
   } = opts;
 
@@ -684,13 +689,27 @@ function runAsyncCommand(opts) {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
+      detached: useProcessGroup,
     });
+    if (typeof onChild === 'function') onChild(child);
 
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let aborted = false;
     let sigkillTimer = null;
     let stdinFailureError = null;
+    let timer = null;
+    let stdoutTruncated = false;
+
+    function armTimer() {
+      if (aborted || timedOut) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        timedOut = true;
+        ({ timer: sigkillTimer } = escalateKill(child, killSignal, forceKillDelayMs, { useProcessGroup }));
+      }, timeoutMs);
+    }
 
     function abortForStdinFailure(err) {
       if (stdinFailureError) return;
@@ -702,13 +721,37 @@ function runAsyncCommand(opts) {
       }
     }
 
-    const timer = setTimeout(() => {
-      timedOut = true;
+    armTimer();
+    const abortHandler = () => {
+      if (aborted) return;
+      aborted = true;
+      clearTimeout(timer);
       ({ timer: sigkillTimer } = escalateKill(child, killSignal, forceKillDelayMs, { useProcessGroup }));
-    }, timeoutMs);
+    };
+    if (signal) {
+      if (signal.aborted) abortHandler();
+      else signal.addEventListener('abort', abortHandler, { once: true });
+    }
 
-    child.stdout.on('data', (data) => { stdout += data.toString(); });
-    child.stderr.on('data', (data) => { stderr += data.toString(); });
+    child.stdout.on('data', (data) => {
+      const chunk = data.toString();
+      if (stdoutBufferMode === 'tail') {
+        const combined = `${stdout}${chunk}`;
+        stdoutTruncated = stdoutTruncated || combined.length > maxStdoutBytes;
+        stdout = combined.slice(-maxStdoutBytes);
+      } else if (stdout.length < maxStdoutBytes) {
+        const remaining = maxStdoutBytes - stdout.length;
+        stdoutTruncated = stdoutTruncated || chunk.length > remaining;
+        stdout += chunk.slice(0, remaining);
+      } else if (chunk.length > 0) {
+        stdoutTruncated = true;
+      }
+      armTimer();
+    });
+    child.stderr.on('data', (data) => {
+      if (stderr.length < maxStderrBytes) stderr += data.toString().slice(0, maxStderrBytes - stderr.length);
+      armTimer();
+    });
     if (child.stdin && typeof child.stdin.on === 'function') {
       child.stdin.on('error', (err) => { abortForStdinFailure(err); });
     }
@@ -716,21 +759,31 @@ function runAsyncCommand(opts) {
     child.on('close', (code) => {
       clearTimeout(timer);
       clearTimeout(sigkillTimer);
+      if (signal) signal.removeEventListener('abort', abortHandler);
       if (stdinFailureError) {
         finalize({ output: null, error: stdinFailureError });
+      } else if (aborted) {
+        finalize({ output: null, error: 'Aborted', errorCode: 'INTERRUPTED' });
       } else if (timedOut) {
         finalize({ output: null, error: `Timeout: engine took too long (${Math.round(timeoutMs / 1000)}s)` });
       } else if (code !== 0) {
         finalize({ output: null, error: stderr || `Exit code ${code}` });
       } else {
-        finalize({ output: stdout.trim(), error: null });
+        finalize({
+          output: stdout.trim(),
+          error: null,
+          ...(stdoutTruncated ? { stdoutTruncated: true } : {}),
+        });
       }
     });
 
     child.on('error', (err) => {
       clearTimeout(timer);
       clearTimeout(sigkillTimer);
-      finalize({ output: null, error: formatSpawnError(err) });
+      if (signal) signal.removeEventListener('abort', abortHandler);
+      finalize(aborted
+        ? { output: null, error: 'Aborted', errorCode: 'INTERRUPTED' }
+        : { output: null, error: formatSpawnError(err) });
     });
 
     try {

@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const { classifyTaskUsage } = require('./usage-classifier');
 const { resolveEngineModel } = require('./daemon-engine-runtime');
+const { resolveScopedEngine } = require('./core/engine-policy');
 
 const WEEKDAY_INDEX = Object.freeze({
   sun: 0,
@@ -178,8 +179,6 @@ function createTaskScheduler(deps) {
     fs,
     path,
     HOME,
-    CLAUDE_BIN,
-    spawn: _spawn,
     execSync,
     parseInterval,
     loadState,
@@ -196,89 +195,24 @@ function createTaskScheduler(deps) {
     setSleepMode,
     getWakeRecoveryHook,
     skillEvolution,
+    backgroundRunner,
+    loopTriggerAdapter,
   } = deps;
 
   // Max characters from precondition context to inject into prompts (prevents token bombs)
   const MAX_PRECONDITION_CHARS = 4000;
-  // Cap stdout buffer to prevent memory growth in long-running tasks (output_preview uses 200 chars anyway)
-  const MAX_STDOUT_BYTES = 1024 * 1024;
 
-  // Shared primitive: spawn a single claude -p invocation with silence watchdog.
-  // Resolves to { ok, output, error } — never rejects.
-  // label is used only for log messages (e.g. "Task foo" or "Workflow bar step 2").
-  function spawnClaude(args, prompt, timeoutMs, cwdPath, label) {
-    const env = { ...process.env, ...getDaemonProviderEnv(), CLAUDECODE: undefined, METAME_INTERNAL_PROMPT: '1' };
-    return new Promise((resolve) => {
-      const child = spawn(CLAUDE_BIN, args, {
-        cwd: cwdPath || undefined,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        detached: process.platform !== 'win32',
-        env,
-      });
-
-      let stdout = '';
-      let stderr = '';
-      let timedOut = false;
-      let lastActivity = Date.now();
-      let sigkillTimer = null;
-
-      const watchdog = setInterval(() => {
-        if (Date.now() - lastActivity >= timeoutMs) {
-          clearInterval(watchdog);
-          timedOut = true;
-          log('WARN', `${label} silent for ${timeoutMs / 1000}s — killing`);
-          try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
-          sigkillTimer = setTimeout(() => {
-            try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { } }
-          }, 5000);
-        }
-      }, Math.min(timeoutMs, 30000));
-
-      child.stdin.write(prompt);
-      child.stdin.end();
-      child.stdout.on('data', (d) => { lastActivity = Date.now(); if (stdout.length < MAX_STDOUT_BYTES) stdout += d.toString(); });
-      child.stderr.on('data', (d) => { lastActivity = Date.now(); stderr += d.toString(); });
-
-      child.on('close', (code) => {
-        clearInterval(watchdog);
-        if (sigkillTimer) clearTimeout(sigkillTimer);
-        const output = stdout.trim();
-        if (timedOut) return resolve({ ok: false, error: 'silent_timeout', output });
-        if (code !== 0) return resolve({ ok: false, error: (stderr || `Exit code ${code}`).slice(0, 200), output: '' });
-        resolve({ ok: true, output, stderr });
-      });
-
-      child.on('error', (err) => {
-        clearInterval(watchdog);
-        resolve({ ok: false, error: err.message, output: '' });
-      });
+  function resolveTaskEngine(task, config) {
+    const projectKey = task && task._project && task._project.key ? String(task._project.key) : '';
+    const project = projectKey && config && config.projects ? config.projects[projectKey] : null;
+    return resolveScopedEngine({
+      requestedEngine: (task && task.engine) || 'claude',
+      projectKey,
+      project,
+      daemonCfg: (config && config.daemon) || {},
+      defaultEngine: 'claude',
     });
   }
-
-  // On Windows, resolve .cmd → actual Node.js entry to avoid cmd.exe flash
-  function _resolveNodeEntry(cmdPath) {
-    try {
-      const content = require('fs').readFileSync(cmdPath, 'utf8');
-      const m = content.match(/"([^"]+\.js)"\s*%\*\s*$/m);
-      if (m) {
-        const entry = m[1].replace(/%dp0%/gi, require('path').dirname(cmdPath) + require('path').sep);
-        if (require('fs').existsSync(entry)) return entry;
-      }
-    } catch { /* ignore */ }
-    return null;
-  }
-
-  function spawn(cmd, args, options) {
-    if (process.platform !== 'win32') return _spawn(cmd, args, options);
-    const lowerCmd = String(cmd || '').toLowerCase();
-    if (lowerCmd.endsWith('.cmd') || lowerCmd.endsWith('.bat') || lowerCmd === 'claude' || lowerCmd === 'codex') {
-      const entry = _resolveNodeEntry(cmd);
-      if (entry) return _spawn(process.execPath, [entry, ...args], { ...options, windowsHide: true });
-      return _spawn(cmd, args, { ...options, shell: process.env.COMSPEC || true, windowsHide: true });
-    }
-    return _spawn(cmd, args, { ...options, windowsHide: true });
-  }
-
   function checkPrecondition(task) {
     if (!task.precondition) return { pass: true, context: '' };
 
@@ -467,7 +401,12 @@ function createTaskScheduler(deps) {
     }
 
     const preamble = buildProfilePreamble();
-    const model = normalizeModel(task.model || getDistillModel());
+    const enginePolicy = resolveTaskEngine(task, config);
+    const engine = enginePolicy.engine;
+    if (enginePolicy.fallback) log('WARN', `Task ${task.name} engine fallback: agy -> ${engine} (${enginePolicy.reason})`);
+    const model = engine === 'claude'
+      ? normalizeModel(task.model || getDistillModel())
+      : resolveEngineModel(engine, (config && config.daemon) || {}, task.model);
     // If precondition returned context data, append it to the prompt (truncated to prevent token bombs)
     let taskPrompt = task.prompt;
     if (precheck.context) {
@@ -478,8 +417,6 @@ function createTaskScheduler(deps) {
     }
     const fullPrompt = preamble + taskPrompt;
 
-    const claudeArgs = ['-p', '--model', model, '--dangerously-skip-permissions'];
-    for (const t of (task.allowedTools || [])) claudeArgs.push('--allowedTools', t);
     // Auto-detect MCP config in task cwd or project directory
     const cwd = task.cwd ? task.cwd.replace(/^~/, HOME) : undefined;
     const mcpConfig = task.mcp_config
@@ -487,7 +424,7 @@ function createTaskScheduler(deps) {
       : cwd && fs.existsSync(path.join(cwd, '.mcp.json'))
         ? path.join(cwd, '.mcp.json')
         : null;
-    if (mcpConfig) claudeArgs.push('--mcp-config', mcpConfig);
+    let sessionRef = {};
 
     // Persistent session: reuse same session across runs (for tasks like weekly-review)
     if (task.persistent_session) {
@@ -513,11 +450,11 @@ function createTaskScheduler(deps) {
       );
 
       if (savedSessionId && !shouldRotate) {
-        claudeArgs.push('--resume', savedSessionId);
+        sessionRef = { started: true, id: savedSessionId };
         log('INFO', `Executing task: ${task.name} (model: ${model}, resuming session ${savedSessionId.slice(0, 8)}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''})`);
       } else {
         const newSessionId = crypto.randomUUID();
-        claudeArgs.push('--session-id', newSessionId);
+        sessionRef = { started: false, id: newSessionId };
         if (!state.tasks[task.name]) state.tasks[task.name] = {};
         state.tasks[task.name].session_id = newSessionId;
         state.tasks[task.name].session_created_at = new Date().toISOString();
@@ -533,14 +470,34 @@ function createTaskScheduler(deps) {
     }
 
     const timeoutMs = resolveTimeoutMs(task.timeout, 1800);
-    return spawnClaude(claudeArgs, fullPrompt, timeoutMs, cwd, `Task ${task.name}`).then((result) => {
+    if (!backgroundRunner || typeof backgroundRunner.startTurn !== 'function') {
+      throw new Error('background_runner_required');
+    }
+    return backgroundRunner.startTurn({
+      engine,
+      model,
+      prompt: fullPrompt,
+      cwd,
+      sessionRef,
+      timeoutMs,
+      allowedTools: task.allowedTools || [],
+      mcpConfig,
+      daemonCfg: (config && config.daemon) || {},
+      structured: false,
+      providerEnv: typeof getDaemonProviderEnv === 'function' ? getDaemonProviderEnv() : {},
+      internalPrompt: true,
+    }).then((result) => {
       const { output } = result;
+      if (task.persistent_session && result.sessionId) {
+        if (!state.tasks[task.name]) state.tasks[task.name] = {};
+        state.tasks[task.name].session_id = result.sessionId;
+      }
       const prevSid = state.tasks[task.name]?.session_id;
       const prevCreatedAt = state.tasks[task.name]?.session_created_at;
       const sessionFields = { ...(prevSid && { session_id: prevSid }), ...(prevCreatedAt && { session_created_at: prevCreatedAt }) };
 
       if (!result.ok) {
-        if (result.error === 'silent_timeout') {
+        if (result.errorCode === 'TIMEOUT') {
           state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: `Task silent for ${timeoutMs / 1000}s`, ...sessionFields };
           saveState(state);
           return { success: false, error: 'silent_timeout', output: output || '' };
@@ -582,10 +539,13 @@ function createTaskScheduler(deps) {
     if (steps.length === 0) return { success: false, error: 'No steps defined', output: '' };
 
     // Workflow tasks match the user's session model setting (same quality as interactive)
-    const sessionModel = resolveEngineModel('claude', (config && config.daemon) || {});
-    const model = normalizeModel(task.model || sessionModel);
+    const enginePolicy = resolveTaskEngine(task, config);
+    const engine = enginePolicy.engine;
+    if (enginePolicy.fallback) log('WARN', `Workflow ${task.name} engine fallback: agy -> ${engine} (${enginePolicy.reason})`);
+    const sessionModel = resolveEngineModel(engine, (config && config.daemon) || {});
+    const model = engine === 'codex' ? (task.model || sessionModel) : normalizeModel(task.model || sessionModel);
     const cwd = task.cwd ? task.cwd.replace(/^~/, HOME) : HOME;
-    const sessionId = crypto.randomUUID();
+    let sessionId = crypto.randomUUID();
     const outputs = [];
     let totalTokens = 0;
     const allowed = task.allowedTools || [];
@@ -608,15 +568,27 @@ function createTaskScheduler(deps) {
           : precheck.context;
         prompt += `\n\n相关数据:\n\`\`\`\n${ctx}\n\`\`\``;
       }
-      const args = ['-p', '--model', model, '--dangerously-skip-permissions'];
-      for (const tool of allowed) args.push('--allowedTools', tool);
-      if (mcpConfig) args.push('--mcp-config', mcpConfig);
-      args.push(i === 0 ? '--session-id' : '--resume', sessionId);
-
       log('INFO', `Workflow ${task.name} step ${i + 1}/${steps.length}: ${step.skill || 'prompt'}`);
       // Steps share a session and must run sequentially
-      const stepResult = await spawnClaude(args, prompt, resolveTimeoutMs(step.timeout, 1800), cwd, `Workflow ${task.name} step ${i + 1}`);
+      if (!backgroundRunner || typeof backgroundRunner.startTurn !== 'function') {
+        throw new Error('background_runner_required');
+      }
+      const stepResult = await backgroundRunner.startTurn({
+        engine,
+        model,
+        prompt,
+        cwd,
+        sessionRef: { started: i > 0, id: sessionId },
+        timeoutMs: resolveTimeoutMs(step.timeout, 1800),
+        allowedTools: allowed,
+        mcpConfig,
+        daemonCfg: (config && config.daemon) || {},
+        structured: false,
+        providerEnv: typeof getDaemonProviderEnv === 'function' ? getDaemonProviderEnv() : {},
+        internalPrompt: true,
+      });
       if (stepResult.ok) {
+        if (stepResult.sessionId) sessionId = stepResult.sessionId;
         const output = stepResult.output;
         const tk = Math.ceil((prompt.length + output.length) / 4);
         totalTokens += tk;
@@ -664,6 +636,9 @@ function createTaskScheduler(deps) {
   }
 
   function startHeartbeat(config, notifyFn, notifyPersonalFn, adminNotifyFn) {
+    const activeLoopTriggerAdapter = config.loop && config.loop.enabled === true
+      ? loopTriggerAdapter
+      : null;
     const { all: tasks } = getAllTasks(config);
 
     const enabledTasks = tasks.filter(t => t.enabled !== false);
@@ -757,6 +732,7 @@ function createTaskScheduler(deps) {
         const schedule = taskSchedules.get(task.name);
         if (!schedule) continue;
         if (currentTime >= (nextRun[task.name] || 0)) {
+          const scheduledTime = nextRun[task.name] || currentTime;
           // Dream tasks: only run when user is idle
           if (task.require_idle && !isUserIdle()) {
             // Retry on next scheduler tick instead of waiting full interval.
@@ -775,11 +751,28 @@ function createTaskScheduler(deps) {
           const { next: nextRunTime, failed: schedFailed } = safeNextRun(task.name, schedule, currentTime);
           nextRun[task.name] = nextRunTime;
           if (schedFailed) continue; // back off, skip execution this cycle
+          let loopContext = null;
+          if (activeLoopTriggerAdapter && typeof activeLoopTriggerAdapter.beginScheduledTask === 'function') {
+            try {
+              loopContext = activeLoopTriggerAdapter.beginScheduledTask(task, schedule, scheduledTime, nextRunTime);
+              if (!loopContext.shouldExecute) {
+                log('INFO', `Task ${task.name} schedule already recorded — skipping duplicate tick`);
+                continue;
+              }
+            } catch (err) {
+              log('WARN', `Task ${task.name} loop trigger recording failed: ${err.message}`);
+            }
+          }
           runningTasks.add(task.name);
           // executeTask now returns a Promise (async, non-blocking, process-group kill)
           Promise.resolve(executeTask(task, config))
             .then((result) => {
               runningTasks.delete(task.name);
+              if (loopContext && activeLoopTriggerAdapter) {
+                try { activeLoopTriggerAdapter.completeScheduledTask(loopContext, result); } catch (err) {
+                  log('WARN', `Task ${task.name} loop completion recording failed: ${err.message}`);
+                }
+              }
               // Budget exceeded: back off until next day instead of retrying every interval
               if (result.error === 'budget_exceeded') {
                 const tomorrow = new Date();
@@ -801,6 +794,9 @@ function createTaskScheduler(deps) {
             })
             .catch((err) => {
               runningTasks.delete(task.name);
+              if (loopContext && activeLoopTriggerAdapter) {
+                try { activeLoopTriggerAdapter.completeScheduledTask(loopContext, { success: false, error: err.message }); } catch { }
+              }
               log('ERROR', `Task ${task.name} threw: ${err.message}`);
             });
         }
@@ -864,5 +860,12 @@ module.exports = {
     buildTaskSchedule,
     computeInitialNextRun,
     nextRunAfter,
+    resolveTaskEngine: (task, config) => resolveScopedEngine({
+      requestedEngine: (task && task.engine) || 'claude',
+      projectKey: task && task._project ? String(task._project.key || '') : '',
+      project: task && task._project && config && config.projects ? config.projects[task._project.key] : null,
+      daemonCfg: (config && config.daemon) || {},
+      defaultEngine: 'claude',
+    }),
   },
 };

@@ -57,3 +57,15 @@ test('normalizeTaskEnvelope keeps explicit scope and merges participants', () =>
   assert.equal(env.scope_id, 'scope_A_1');
   assert.deepEqual(env.participants.sort(), ['assistant', 'coder', 'reviewer'].sort());
 });
+
+test('normalizeTaskEnvelope preserves optional loop ownership links', () => {
+  const env = normalizeTaskEnvelope({
+    from_agent: 'manager',
+    to_agent: 'worker',
+    goal: 'fix regression',
+    goal_id: 'goal_repo_health',
+    run_id: 'run_123',
+  });
+  assert.equal(env.goal_id, 'goal_repo_health');
+  assert.equal(env.run_id, 'run_123');
+});

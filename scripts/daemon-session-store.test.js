@@ -1079,3 +1079,45 @@ describe('daemon-session-store codex metadata', () => {
     assert.equal(parsed.message.content[0].signature, undefined);
   });
 });
+
+describe('daemon-session-store agy sessions', () => {
+  it('keeps fresh placeholders unstarted until the runtime reports a real conversation', () => {
+    const state = { sessions: {} };
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-agy-session-'));
+    const store = createSessionStore({
+      fs, path, HOME: tempHome,
+      loadState: () => state,
+      saveState: (next) => { state.sessions = next.sessions; },
+      log: () => {}, formatRelativeTime: () => 'now', cpExtractTimestamp: () => null,
+    });
+    const created = store.createSession('chat-agy', tempHome, 'Agy', 'agy');
+    assert.equal(created.engine, 'agy');
+    assert.equal(created.runtimeSessionObserved, false);
+    store.markSessionStarted('chat-agy', 'agy');
+    assert.equal(store.getSessionForEngine('chat-agy', 'agy').started, false);
+  });
+
+  it('validates agy conversations through durable artifacts', () => {
+    const state = { sessions: {} };
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-agy-session-'));
+    const store = createSessionStore({
+      fs, path, HOME: tempHome,
+      loadState: () => state, saveState: () => {}, log: () => {},
+      formatRelativeTime: () => 'now', cpExtractTimestamp: () => null,
+    });
+    const id = 'agy-conversation-id';
+    assert.equal(store.isEngineSessionValid('agy', id, tempHome), false);
+    const transcript = path.join(tempHome, '.gemini', 'antigravity-cli', 'brain', id, '.system_generated', 'logs', 'transcript.jsonl');
+    fs.mkdirSync(path.dirname(transcript), { recursive: true });
+    fs.writeFileSync(transcript, '{}\n');
+    assert.equal(store.isEngineSessionValid('agy', `${id}-new`, tempHome), false);
+    const newTranscript = path.join(tempHome, '.gemini', 'antigravity-cli', 'brain', `${id}-new`, '.system_generated', 'logs', 'transcript.jsonl');
+    fs.mkdirSync(path.dirname(newTranscript), { recursive: true });
+    fs.writeFileSync(newTranscript, '{}\n');
+    const cacheFile = path.join(tempHome, '.gemini', 'antigravity-cli', 'cache', 'last_conversations.json');
+    fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+    fs.writeFileSync(cacheFile, JSON.stringify({ [tempHome]: `${id}-new` }));
+    assert.equal(store.isEngineSessionValid('agy', `${id}-new`, tempHome), true);
+    assert.equal(store.isEngineSessionValid('agy', `${id}-new`, path.join(tempHome, 'other-project')), false);
+  });
+});

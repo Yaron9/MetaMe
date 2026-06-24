@@ -86,6 +86,7 @@ function createSessionStore(deps) {
 
   const CLAUDE_PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
   const GLOBAL_CODEX_DB = path.join(HOME, '.codex', 'state_5.sqlite');
+  const AGY_HOME = path.join(HOME, '.gemini', 'antigravity-cli');
   const _sessionFileCache = new Map(); // sessionId -> { path, ts }
   const _codexRolloutCache = new Map(); // sessionId -> { path, ts }
   let _sessionCache = null;
@@ -754,7 +755,7 @@ function createSessionStore(deps) {
       all = all.filter(s => s.projectPath === cwd);
     }
     if (engine) {
-      const safeEngine = String(engine).trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+      const safeEngine = normalizeEngineName(engine);
       all = all.filter(s => (s.engine || 'claude') === safeEngine);
     }
     return all.slice(0, limit || 10);
@@ -776,7 +777,7 @@ function createSessionStore(deps) {
 
       const compactContext = String(slot.compactContext || '').trim();
       const hasBridgeContext = compactContext.length > 0;
-      const hasPlaceholder = safeEngine === 'codex' && slot.runtimeSessionObserved === false;
+      const hasPlaceholder = (safeEngine === 'codex' || safeEngine === 'agy') && slot.runtimeSessionObserved === false;
       const hasId = !!String(slot.id || '').trim();
       const validId = hasId ? isEngineSessionValid(safeEngine, slot.id, sessionCwd) : false;
       if (validId) continue;
@@ -1090,6 +1091,8 @@ function createSessionStore(deps) {
       nextSlot.runtimeSessionObserved = false;
       const permissionMeta = normalizeCodexPermissionMeta(meta);
       if (permissionMeta) Object.assign(nextSlot, permissionMeta);
+    } else if (safeEngine === 'agy') {
+      nextSlot.runtimeSessionObserved = false;
     }
     state.sessions[chatId] = {
       cwd: safeCwd,
@@ -1286,7 +1289,7 @@ function createSessionStore(deps) {
       const safeEngine = normalizeEngineName(engine);
       if (!s.engines[safeEngine]) s.engines[safeEngine] = {};
       const slot = s.engines[safeEngine];
-      if (safeEngine === 'codex' && slot.runtimeSessionObserved === false) {
+      if ((safeEngine === 'codex' || safeEngine === 'agy') && slot.runtimeSessionObserved === false) {
         s.last_active = Date.now();
         saveState(state);
         return;
@@ -1407,6 +1410,23 @@ function createSessionStore(deps) {
     return false;
   }
 
+  function _isAgySessionValid(sessionId, normCwd) {
+    const id = String(sessionId || '').trim();
+    if (!id) return false;
+    const conversationFile = path.join(AGY_HOME, 'conversations', `${id}.pb`);
+    const transcriptFile = path.join(AGY_HOME, 'brain', id, '.system_generated', 'logs', 'transcript.jsonl');
+    try {
+      if (!fs.existsSync(conversationFile) && !fs.existsSync(transcriptFile)) return false;
+      const cacheFile = path.join(AGY_HOME, 'cache', 'last_conversations.json');
+      const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+      return Object.entries(cache || {}).some(([cachedCwd, cachedId]) => (
+        path.resolve(String(cachedCwd || '')) === normCwd && String(cachedId || '') === id
+      ));
+    } catch {
+      return false;
+    }
+  }
+
   function getCodexSessionSandboxProfile(sessionId, cwd = '') {
     try {
       if (!sessionId) return null;
@@ -1440,12 +1460,16 @@ function createSessionStore(deps) {
   function isEngineSessionValid(engine, sessionId, cwd) {
     if (!sessionId || !cwd || sessionId === '__continue__') return true;
     const normCwd = path.resolve(cwd);
-    const key = `${engine}@@${sessionId}@@${normCwd}`;
+    const safeEngine = normalizeEngineName(engine);
+    const key = `${safeEngine}@@${sessionId}@@${normCwd}`;
     const cached = _validateCache.get(key);
-    if (cached && Date.now() - cached.ts < SESSION_VALIDATE_TTL) return cached.valid;
-    const valid = engine === 'codex'
-      ? _isCodexSessionValid(sessionId, normCwd)
-      : _isClaudeSessionValid(sessionId, normCwd);
+    if (cached && Date.now() - cached.ts < SESSION_VALIDATE_TTL && (safeEngine !== 'agy' || cached.valid)) return cached.valid;
+    const backends = {
+      claude: () => _isClaudeSessionValid(sessionId, normCwd),
+      codex: () => _isCodexSessionValid(sessionId, normCwd),
+      agy: () => _isAgySessionValid(sessionId, normCwd),
+    };
+    const valid = backends[safeEngine]();
     return _cacheValidation(key, valid);
   }
 

@@ -77,6 +77,8 @@ function normalizeTaskEnvelope(raw, overrides = {}) {
 
   const taskId = sanitizeText(merged.task_id, 80) || newTaskId();
   const parentTaskId = sanitizeText(merged.parent_task_id, 80) || null;
+  const goalId = sanitizeText(merged.goal_id, 120) || null;
+  const runId = sanitizeText(merged.run_id, 120) || null;
   const fromAgent = sanitizeText(merged.from_agent, 80) || 'unknown';
   const toAgent = sanitizeText(merged.to_agent, 80);
   const scopeId = normalizeScopeId(merged.scope_id, taskId) || taskId;
@@ -102,6 +104,8 @@ function normalizeTaskEnvelope(raw, overrides = {}) {
     task_id: taskId,
     scope_id: scopeId,
     parent_task_id: parentTaskId,
+    goal_id: goalId,
+    run_id: runId,
     from_agent: fromAgent,
     to_agent: toAgent,
     participants,

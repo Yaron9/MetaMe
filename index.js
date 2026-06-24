@@ -4,11 +4,13 @@
 process.removeAllListeners('warning');
 
 const fs = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 const os = require('os');
-const { spawn, execSync } = require('child_process');
+const { spawn, execSync, execFileSync } = require('child_process');
 const { sleepSync, findProcessesByPattern, killProcessTree, icon } = require('./scripts/platform');
 const { collectDeployGroups, collectSyntaxCheckFiles } = require('./scripts/deploy-manifest');
+const { ensureAgyPlugin } = require('./scripts/agy-plugin-installer');
 const {
   findClaudeOnlyPluginHooks,
   disablePluginSections,
@@ -576,6 +578,25 @@ const binUpdated = syncDirFiles(path.join(__dirname, 'scripts', 'bin'), path.joi
 // Hooks: Claude Code event hooks (Stop, PostToolUse, etc.)
 const hooksUpdated = syncDirFiles(path.join(__dirname, 'scripts', 'hooks'), path.join(METAME_DIR, 'hooks'));
 
+// Install the credential-free agy MCP plugin from source assets. The installed
+// mcp_config is generated with absolute wrapper paths because agy 1.0.x does
+// not resolve plugin-relative command arguments reliably.
+let agyPluginUpdated = false;
+try {
+  const pluginResult = ensureAgyPlugin({
+    fs, path, crypto, execFileSync,
+    pluginSource: path.join(__dirname, 'scripts', 'agy-plugin'),
+    home: HOME_DIR,
+    metameDir: METAME_DIR,
+    nodeBinary: process.execPath,
+    platform: process.platform,
+  });
+  agyPluginUpdated = pluginResult.updated;
+  if (agyPluginUpdated) console.log(`${icon('plug')} agy plugin installed: metame-tools`);
+} catch (e) {
+  console.log(`${icon('warn')} agy plugin setup skipped: ${e.message}`);
+}
+
 // Migrate legacy reactive flat paths to per-project directory structure
 try {
   const { migrate } = require('./scripts/migrate-reactive-paths');
@@ -591,7 +612,7 @@ try {
   console.log(`${icon("warn")} Reactive path migration skipped: ${e.message}`);
 }
 
-const daemonCodeUpdated = scriptsUpdated || binUpdated || hooksUpdated;
+const daemonCodeUpdated = scriptsUpdated || binUpdated || hooksUpdated || agyPluginUpdated;
 const shouldAutoRestartAfterDeploy = (() => {
   const [cmd] = process.argv.slice(2);
   if (!cmd) return true;
@@ -2026,6 +2047,48 @@ const DAEMON_SHORTCUTS = ['start', 'stop', 'restart', 'status', 'logs'];
 if (DAEMON_SHORTCUTS.includes(process.argv[2])) {
   process.argv.splice(2, 0, 'daemon');
 }
+if (process.argv[2] === 'loop') {
+  const subCmd = process.argv[3];
+  const dryRun = process.argv.includes('--dry-run');
+  const apply = process.argv.includes('--apply') && process.argv.includes('--yes');
+  if (subCmd !== 'migrate' || (!dryRun && !apply)) {
+    console.error('Usage: metame loop migrate --dry-run | --apply --yes');
+    process.exit(1);
+  }
+  try {
+    const yaml = require('js-yaml');
+    const { planLegacyMigration, applyLegacyMigration } = require('./scripts/loop-migration');
+    const config = fs.existsSync(DAEMON_CONFIG_FILE)
+      ? (yaml.load(fs.readFileSync(DAEMON_CONFIG_FILE, 'utf8')) || {})
+      : {};
+    const report = planLegacyMigration(config, {
+      readPerpetual(cwd) {
+        const expanded = String(cwd || '').replace(/^~/, HOME_DIR);
+        const file = path.join(expanded, 'perpetual.yaml');
+        if (!fs.existsSync(file)) return {};
+        return { ...(yaml.load(fs.readFileSync(file, 'utf8')) || {}), _path: file };
+      },
+    });
+    if (dryRun) {
+      console.log(JSON.stringify(report, null, 2));
+    } else {
+      const { createControlDb } = require('./scripts/control-db');
+      const { createLoopStore } = require('./scripts/loop-store');
+      const controlDb = createControlDb();
+      try {
+        const applied = applyLegacyMigration(report, createLoopStore({ controlDb }));
+        console.log(JSON.stringify({ applied, source_plan: report }, null, 2));
+      } finally {
+        controlDb.close();
+      }
+    }
+    process.exit(0);
+  } catch (err) {
+    console.error(`Loop migration dry-run failed: ${err.message}`);
+    process.exit(1);
+  }
+}
+
 const isDaemon = process.argv.includes('daemon');
 if (isDaemon) {
   const daemonIndex = process.argv.indexOf('daemon');

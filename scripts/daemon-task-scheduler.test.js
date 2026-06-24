@@ -11,6 +11,7 @@ const {
   buildTaskSchedule,
   computeInitialNextRun,
   nextRunAfter,
+  resolveTaskEngine,
 } = _private;
 
 function nextDayOfWeek(base, day) {
@@ -20,6 +21,15 @@ function nextDayOfWeek(base, day) {
 }
 
 describe('daemon-task-scheduler private helpers', () => {
+  it('allows explicit agy only for enabled scoped project tasks', () => {
+    const task = { engine: 'agy', _project: { key: 'munger' } };
+    const enabled = {
+      daemon: { experimental_engines: { agy: { enabled: true, allowed_projects: ['munger'] } } },
+      projects: { munger: { fallback_engine: 'codex' } },
+    };
+    assert.equal(resolveTaskEngine(task, enabled).engine, 'agy');
+    assert.equal(resolveTaskEngine(task, { projects: enabled.projects }).engine, 'codex');
+  });
   it('parses HH:MM time for clock tasks', () => {
     assert.deepEqual(parseAtTime('09:30'), { hour: 9, minute: 30 });
     assert.deepEqual(parseAtTime('23:59'), { hour: 23, minute: 59 });
@@ -131,5 +141,92 @@ describe('checkPrecondition logging semantics', () => {
     // "failed" lines as errors and spawns false "Fix recurring error" missions.
     const msg = logs.map((l) => l.msg).join('\n');
     assert.doesNotMatch(msg, /failed/i);
+  });
+});
+
+describe('background runtime integration', () => {
+  it('uses agy auto model instead of mapping the distill Claude model', async () => {
+    const calls = [];
+    const state = { tasks: {} };
+    const scheduler = createTaskScheduler({
+      fs: require('fs'), path: require('path'), HOME: require('os').homedir(),
+      execSync: () => '', parseInterval: () => 60, loadState: () => state, saveState: () => {},
+      checkBudget: () => true, recordTokens: () => {}, buildProfilePreamble: () => '',
+      getDistillModel: () => 'haiku', log: () => {},
+      backgroundRunner: { startTurn: async options => { calls.push(options); return { ok: true, output: 'done' }; } },
+    });
+    const config = {
+      daemon: { experimental_engines: { agy: { enabled: true, allowed_projects: ['digital_me'] } } },
+      projects: { digital_me: { engine: 'agy', fallback_engine: 'claude' } },
+    };
+    const completed = await scheduler.executeTask({
+      name: 'agy-news', prompt: 'news', engine: 'agy', _project: { key: 'digital_me' },
+    }, config);
+    assert.equal(completed.success, true);
+    assert.equal(calls[0].engine, 'agy');
+    assert.equal(calls[0].model, 'auto');
+  });
+
+  it('routes a Codex heartbeat task through the shared background runner', async () => {
+    const calls = [];
+    const state = { tasks: {} };
+    const scheduler = createTaskScheduler({
+      fs: require('fs'),
+      path: require('path'),
+      HOME: require('os').homedir(),
+      execSync: () => '',
+      parseInterval: () => 60,
+      loadState: () => state,
+      saveState: () => {},
+      checkBudget: () => true,
+      recordTokens: () => {},
+      buildProfilePreamble: () => 'profile\n',
+      getDistillModel: () => 'haiku',
+      log: () => {},
+      backgroundRunner: {
+        startTurn: async options => {
+          calls.push(options);
+          return { ok: true, output: 'done', sessionId: 'codex-thread-1' };
+        },
+      },
+    });
+    const completed = await scheduler.executeTask({
+      name: 'codex-task',
+      prompt: 'inspect',
+      engine: 'codex',
+      persistent_session: true,
+    }, { daemon: { models: { codex: 'auto' } } });
+
+    assert.equal(completed.success, true);
+    assert.equal(calls[0].engine, 'codex');
+    assert.equal(calls[0].structured, false);
+    assert.equal(state.tasks['codex-task'].session_id, 'codex-thread-1');
+  });
+
+  it('resumes Codex workflow with the native thread id returned by step one', async () => {
+    const calls = [];
+    const state = { tasks: {} };
+    const scheduler = createTaskScheduler({
+      fs: require('fs'), path: require('path'), HOME: require('os').homedir(),
+      execSync: () => '', parseInterval: () => 60, loadState: () => state, saveState: () => {},
+      checkBudget: () => true, recordTokens: () => {}, buildProfilePreamble: () => '',
+      getDistillModel: () => 'haiku', getDaemonProviderEnv: () => ({ PROVIDER: 'daemon' }),
+      log: () => {},
+      backgroundRunner: {
+        startTurn: async options => {
+          calls.push(options);
+          return { ok: true, output: 'done', sessionId: 'native-codex-thread' };
+        },
+      },
+    });
+    const completed = await scheduler.executeTask({
+      name: 'codex-flow', type: 'workflow', engine: 'codex',
+      steps: [{ prompt: 'one' }, { prompt: 'two' }],
+    }, { daemon: {} });
+    assert.equal(completed.success, true);
+    assert.equal(calls[1].sessionRef.id, 'native-codex-thread');
+    assert.equal(calls[1].sessionRef.started, true);
+    assert.equal(calls[0].internalPrompt, true);
+    assert.deepEqual(calls[0].providerEnv, { PROVIDER: 'daemon' });
   });
 });

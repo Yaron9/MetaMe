@@ -1,5 +1,8 @@
 'use strict';
 
+const ENGINE_NAMES = Object.freeze(['claude', 'codex', 'agy']);
+const ENGINE_NAME_SET = new Set(ENGINE_NAMES);
+
 /**
  * daemon-utils.js
  *
@@ -9,9 +12,12 @@
 
 function normalizeEngineName(name, defaultEngine = 'claude') {
   const n = String(name || '').trim().toLowerCase();
-  if (n === 'codex') return 'codex';
-  if (n === 'claude') return 'claude';
+  if (ENGINE_NAME_SET.has(n)) return n;
   return typeof defaultEngine === 'function' ? defaultEngine() : defaultEngine;
+}
+
+function isKnownEngineName(name) {
+  return ENGINE_NAME_SET.has(String(name || '').trim().toLowerCase());
 }
 
 function normalizeCodexSandboxMode(value, fallback = null) {
@@ -51,6 +57,8 @@ function mergeAgentMaps(cfg) {
 }
 
 module.exports = {
+  ENGINE_NAMES,
+  isKnownEngineName,
   normalizeEngineName,
   normalizeCodexSandboxMode,
   normalizeCodexApprovalPolicy,

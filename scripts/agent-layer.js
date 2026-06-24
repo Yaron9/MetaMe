@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 
 const yaml = require('./resolve-yaml');
+const { normalizeEngineName } = require('./daemon-utils');
 
 const DEFAULT_SOUL_TEMPLATE = (name) => `# Soul
 
@@ -41,7 +42,7 @@ function sanitizeSlug(input, fallback = 'agent') {
 }
 
 function normalizeEngine(engine) {
-  return String(engine || '').trim().toLowerCase() === 'codex' ? 'codex' : 'claude';
+  return normalizeEngineName(engine);
 }
 
 function getAgentsRoot(homeDir = os.homedir()) {

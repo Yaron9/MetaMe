@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "node",
+      "args": ["__METAME_PLUGIN_ROOT__/bin/playwright-mcp.js"]
+    },
+    "akshare-stock": {
+      "command": "node",
+      "args": ["__METAME_PLUGIN_ROOT__/bin/akshare-stock-mcp.js"]
+    },
+    "trendradar": {
+      "command": "node",
+      "args": ["__METAME_PLUGIN_ROOT__/bin/trendradar-mcp.js"]
+    }
+  }
+}

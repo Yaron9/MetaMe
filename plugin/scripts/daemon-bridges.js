@@ -177,13 +177,14 @@ function createBridgeStarter(deps) {
     const engines = raw.engines && typeof raw.engines === 'object' ? raw.engines : {};
     const preferredEngine = String(fallback.engine || '').trim().toLowerCase();
     const slot = (preferredEngine && engines[preferredEngine])
+      || engines.agy
       || engines.codex
       || engines.claude
       || null;
     return {
       ...(slot && slot.id ? { id: String(slot.id) } : {}),
       cwd: raw.cwd || fallback.cwd,
-      engine: preferredEngine || (engines.codex ? 'codex' : 'claude'),
+      engine: preferredEngine || (engines.agy ? 'agy' : engines.codex ? 'codex' : 'claude'),
       logicalChatId: chatKey,
       ...((slot && slot.sandboxMode) ? { sandboxMode: slot.sandboxMode } : {}),
       ...((slot && slot.approvalPolicy) ? { approvalPolicy: slot.approvalPolicy } : {}),
