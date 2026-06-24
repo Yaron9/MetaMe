@@ -10,7 +10,7 @@
 - 多引擎 runtime 适配层：`scripts/daemon-engine-runtime.js`
 - 会话执行引擎（Claude/Codex 共用入口）：`scripts/daemon-claude-engine.js`
 - **核心纯逻辑模块**：`scripts/core/handoff.js`（子进程生命周期）、`scripts/core/audit.js`（审计状态）
-- Codex 宿主兼容：`scripts/core/codex-host.js`（插件 hooks 审计、配置隔离、原生 hooks 合并）
+- Codex 宿主兼容：`scripts/core/codex-host.js`（插件 hooks 审计、配置隔离、原生 hooks 合并）；`scripts/hooks/memory-recall-context.js` 复用 daemon recall gateway 为原生 Codex 按需注入历史上下文
 - 管理命令：`scripts/daemon-admin-commands.js`
 - 命令路由：`scripts/daemon-command-router.js`
 - 执行命令（`/stop`、`/compact` 等）：`scripts/daemon-exec-commands.js`
@@ -173,7 +173,7 @@
 2. 再看命令入口：`scripts/daemon-admin-commands.js`、`scripts/daemon-command-router.js`、`scripts/daemon-exec-commands.js`
 3. 再看执行链路：`scripts/daemon-engine-runtime.js` → `scripts/daemon-claude-engine.js` → `scripts/core/handoff.js`（纯逻辑）→ `scripts/mentor-engine.js`
 4. 团队/跨设备：`scripts/daemon-team-dispatch.js` → `scripts/daemon-remote-dispatch.js` → `scripts/daemon-bridges.js`
-5. 最后看离线任务：`scripts/distill.js`、`scripts/memory-extract.js`、`scripts/memory-nightly-reflect.js`
+5. 最后看离线任务：`scripts/distill.js`、`scripts/memory-extract.js`、`scripts/memory-nightly-reflect.js`；引擎由 `daemon-task-scheduler.js` 统一通过 `METAME_ENGINE` 传入
 
 ## 同步提示
 

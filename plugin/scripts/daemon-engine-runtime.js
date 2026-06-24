@@ -94,7 +94,7 @@ const ENGINE_MODEL_CONFIG = Object.freeze({
   },
   codex: {
     main:     CODEX_AUTO_MODEL,     // follow official Codex CLI default model
-    distill:  'gpt-5.1-codex-mini', // cost-effective mini
+    distill:  CODEX_AUTO_MODEL,     // account/model availability changes; follow the CLI default
     options:  [                     // quick-pick buttons (official model names)
       { value: CODEX_AUTO_MODEL,     label: 'auto · 跟随 Codex 官方默认' },
       { value: 'gpt-5-codex',        label: 'gpt-5-codex · 官方滚动别名' },
@@ -635,6 +635,7 @@ module.exports = {
   resolveBinary,
   detectDefaultEngine,
   resolveEngineModel,
+  buildCodexArgs,
   normalizeClaudeModel,
   ENGINE_MODEL_CONFIG,
   ENGINE_DISTILL_MAP,

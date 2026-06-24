@@ -2003,6 +2003,7 @@ const {
   buildProfilePreamble,
   getDaemonProviderEnv,
   getDistillModel,
+  getDefaultEngine,
   log,
   physiologicalHeartbeat,
   isUserIdle,

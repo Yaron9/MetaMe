@@ -121,8 +121,11 @@ function _searchSessions(query, scope) {
 }
 
 function _searchWorking(scope) {
+  // Working memory is agent-private. An absent key must not degrade into
+  // "read every agent" because that leaks unrelated task state across chats.
+  if (!scope.agentKey) return [];
   try {
-    const raw = memory.readWorkingMemory(scope.agentKey || null);
+    const raw = memory.readWorkingMemory(scope.agentKey);
     if (!raw) return [];
     return raw.split(/\n{2,}/)
       .map(s => s.trim())

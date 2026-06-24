@@ -59,6 +59,17 @@ describe('providers distill model config', () => {
     assert.throws(() => providers.setDistillModel('gpt@5mini'), /无效蒸馏模型/);
   });
 
+  it('parses Codex JSONL agent output and failure details', () => {
+    const providers = loadProvidersWithHome(tmpHome);
+    const stdout = [
+      JSON.stringify({ type: 'thread.started', thread_id: 't1' }),
+      JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }),
+    ].join('\n');
+    const failure = JSON.stringify({ type: 'turn.failed', error: { message: 'model is not supported' } });
+    assert.equal(providers._internal.extractCodexAgentText(stdout), 'done');
+    assert.equal(providers._internal.extractCodexError(failure), 'model is not supported');
+  });
+
   it('inherits Claude Code env mapping from ~/.claude/settings.json', () => {
     const providers = loadProvidersWithHome(tmpHome);
     const claudeDir = path.join(tmpHome, '.claude');

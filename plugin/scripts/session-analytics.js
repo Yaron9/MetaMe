@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { deriveProjectInfo } = require('./utils');
+const { sanitizePrompt, isInternalPrompt } = require('./hooks/hook-utils');
 
 const HOME = os.homedir();
 const PROJECTS_ROOT = path.join(HOME, '.claude', 'projects');
@@ -643,7 +644,7 @@ function formatForPrompt(skeleton) {
   parts.push(`Messages: ${skeleton.message_count}`);
   if (skeleton.total_tool_calls > 0) parts.push(`Tools: ${skeleton.total_tool_calls} (${toolSummary})`);
   if (skeleton.git_committed) parts.push('Git: committed');
-  if (skeleton.models.length > 0) {
+  if (Array.isArray(skeleton.models) && skeleton.models.length > 0) {
     const shortModels = skeleton.models.map(m => {
       if (m.includes('opus')) return 'opus';
       if (m.includes('sonnet')) return 'sonnet';
@@ -780,6 +781,32 @@ function findSessionById(sessionId) {
   return null;
 }
 
+function findCodexSessionById(sessionId) {
+  const sid = String(sessionId || '').trim();
+  if (!sid || !fs.existsSync(CODEX_SESSIONS_ROOT)) return null;
+  const stack = [CODEX_SESSIONS_ROOT];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+        continue;
+      }
+      if (!entry.name.endsWith(`-${sid}.jsonl`)) continue;
+      try {
+        const stat = fs.statSync(fullPath);
+        if (stat.size >= MIN_FILE_SIZE && stat.size <= MAX_FILE_SIZE) {
+          return { path: fullPath, session_id: sid, mtime: stat.mtimeMs, engine: 'codex' };
+        }
+      } catch { /* keep searching */ }
+    }
+  }
+  return null;
+}
+
 /**
  * Read declared goals from the user's profile.
  * Returns a compact string like "DECLARED_GOALS: focus1 | focus2" (~11 tokens).
@@ -856,10 +883,20 @@ function extractPivotPoints(jsonlPath) {
  * Only called for sessions with duration > 20min AND tool_calls > 15.
  * Returns { intent, pivots, outcome } or null.
  */
-function summarizeSession(skeleton, jsonlPath) {
+function summarizeSession(skeleton, jsonlPath, evidence = null) {
   // Trigger condition: long + complex session
   if (skeleton.duration_min < 20 || skeleton.total_tool_calls < 15) {
     return null;
+  }
+
+  if (skeleton.engine === 'codex') {
+    return {
+      intent: skeleton.user_snippets[0] || 'Unknown',
+      pivots: evidence && Array.isArray(evidence.tool_traces) ? evidence.tool_traces.slice(-3) : [],
+      outcome: evidence && Array.isArray(evidence.key_results) && evidence.key_results.length > 0
+        ? evidence.key_results[evidence.key_results.length - 1].slice(0, 160)
+        : 'exploratory',
+    };
   }
 
   const pivots = extractPivotPoints(jsonlPath);
@@ -981,46 +1018,120 @@ function findAllUnextractedCodexSessions(limit = 30) {
  * @param {string} rolloutPath - absolute path to rollout-*.jsonl
  * @param {Map}    historyMap  - returned by loadCodexHistory()
  */
-function buildCodexInput(rolloutPath, historyMap) {
+function buildCodexInput(rolloutPath, historyMap = new Map()) {
   let sessionMeta = null;
   let fileSessionId = null;
+  const rolloutUsers = [];
+  const assistantResults = [];
+  const toolTraces = [];
+  const fileAnchors = new Set();
+  const toolCounts = {};
+  let toolErrorCount = 0;
+  let firstEventTs = null;
+  let lastEventTs = null;
+
+  const addTimestamp = (ts) => {
+    if (!ts) return;
+    if (!firstEventTs || ts < firstEventTs) firstEventTs = ts;
+    if (!lastEventTs || ts > lastEventTs) lastEventTs = ts;
+  };
+
+  const messageText = (content, textType) => (Array.isArray(content) ? content : [])
+    .filter(item => item && (!textType || item.type === textType) && typeof item.text === 'string')
+    .map(item => item.text)
+    .join('\n')
+    .trim();
+
+  const recordTool = (payload) => {
+    const name = String(payload.name || 'unknown');
+    toolCounts[name] = (toolCounts[name] || 0) + 1;
+    let input = payload.input;
+    if (typeof input === 'string') {
+      try { input = JSON.parse(input); } catch { /* retain string */ }
+    }
+    const compact = typeof input === 'string' ? input : JSON.stringify(input || {});
+    toolTraces.push(`${name} ${compact.replace(/\s+/g, ' ').slice(0, 180)}`.trim());
+    if (input && typeof input === 'object') {
+      for (const key of ['path', 'file_path', 'workdir', 'cwd']) {
+        if (typeof input[key] === 'string' && input[key]) fileAnchors.add(input[key]);
+      }
+    }
+  };
+
   try {
     const m = path.basename(rolloutPath).match(CODEX_ROLLOUT_PATTERN);
     if (m) fileSessionId = m[1];
 
-    // Read only first 2KB to get session_meta without loading the full transcript
-    let fd;
-    try {
-      fd = fs.openSync(rolloutPath, 'r');
-      const buf = Buffer.alloc(2048);
-      const bytesRead = fs.readSync(fd, buf, 0, 2048, 0);
-      const firstLine = buf.slice(0, bytesRead).toString('utf8').split('\n')[0];
-      const parsed = JSON.parse(firstLine);
-      if (parsed.type === 'session_meta') sessionMeta = parsed.payload;
-    } finally {
-      if (fd !== undefined) try { fs.closeSync(fd); } catch { /* ignore */ }
+    const stat = fs.statSync(rolloutPath);
+    if (stat.size > MAX_FILE_SIZE) throw new Error('codex rollout exceeds size limit');
+    const lines = fs.readFileSync(rolloutPath, 'utf8').split('\n');
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let entry;
+      try { entry = JSON.parse(line); } catch { continue; }
+      addTimestamp(entry.timestamp);
+      const payload = entry.payload || {};
+      if (entry.type === 'session_meta') {
+        sessionMeta = payload;
+        addTimestamp(payload.timestamp);
+        continue;
+      }
+      if (entry.type === 'response_item' && payload.type === 'message') {
+        const textType = payload.role === 'assistant' ? 'output_text' : 'input_text';
+        const text = messageText(payload.content, textType);
+        if (payload.role === 'user' && text && text.length <= 6000 && !isInternalPrompt(text)) {
+          const clean = sanitizePrompt(text);
+          if (clean) rolloutUsers.push({ ts: entry.timestamp, text: clean });
+        } else if (payload.role === 'assistant' && text) {
+          assistantResults.push(text);
+        }
+        continue;
+      }
+      if (entry.type === 'response_item' && payload.type === 'custom_tool_call') {
+        recordTool(payload);
+        continue;
+      }
+      if (entry.type === 'response_item' && payload.type === 'custom_tool_call_output') {
+        const output = typeof payload.output === 'string' ? payload.output : JSON.stringify(payload.output || '');
+        if (/"(?:exit_code|code)"\s*:\s*[1-9]|"is_error"\s*:\s*true|process exited with code [1-9]/i.test(output)) {
+          toolErrorCount++;
+        }
+        continue;
+      }
+      if (entry.type === 'event_msg' && payload.type === 'task_complete' && payload.last_agent_message) {
+        assistantResults.push(String(payload.last_agent_message));
+      }
     }
   } catch { /* non-fatal */ }
 
   const sessionId = (sessionMeta && sessionMeta.id) || fileSessionId;
   const cwd = (sessionMeta && sessionMeta.cwd) || null;
   const { project, project_id: projectId } = deriveProjectInfo(cwd || '');
+  const isSubagent = !!(sessionMeta && sessionMeta.source
+    && typeof sessionMeta.source === 'object' && sessionMeta.source.subagent);
 
   // User messages from history index (sorted chronologically)
-  const userMsgs = (sessionId && historyMap.get(sessionId)) || [];
+  const historyUsers = (sessionId && historyMap.get(sessionId)) || [];
+  const userMsgs = historyUsers.length > 0 ? [...historyUsers] : (isSubagent ? [] : rolloutUsers);
   userMsgs.sort((a, b) => a.ts - b.ts);
 
-  const firstTs = userMsgs.length > 0 ? new Date(userMsgs[0].ts * 1000).toISOString() : null;
-  const lastTs  = userMsgs.length > 1 ? new Date(userMsgs[userMsgs.length - 1].ts * 1000).toISOString() : firstTs;
-  const durationMin = userMsgs.length > 1
-    ? Math.round((userMsgs[userMsgs.length - 1].ts - userMsgs[0].ts) / 6) / 10
-    : 0;
+  const toIso = (ts) => {
+    if (!ts) return null;
+    const raw = typeof ts === 'number' ? ts * 1000 : ts;
+    const ms = new Date(raw).getTime();
+    return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+  };
+  const firstTs = toIso(userMsgs[0] && userMsgs[0].ts) || firstEventTs || (sessionMeta && sessionMeta.timestamp) || null;
+  const lastTs = toIso(userMsgs[userMsgs.length - 1] && userMsgs[userMsgs.length - 1].ts) || lastEventTs || firstTs;
+  const durationMs = firstTs && lastTs ? new Date(lastTs).getTime() - new Date(firstTs).getTime() : 0;
+  const durationMin = durationMs > 0 ? Math.round(durationMs / 6000) / 10 : 0;
 
   const skeleton = {
     session_id:    sessionId || path.basename(rolloutPath, '.jsonl'),
     user_snippets: userMsgs.map(m => m.text.slice(0, 200)),
-    tool_counts:   {},
-    total_tool_calls: 0,
+    tool_counts:   toolCounts,
+    total_tool_calls: Object.values(toolCounts).reduce((sum, n) => sum + n, 0),
+    tool_error_count: toolErrorCount,
     message_count: userMsgs.length,
     duration_min:  durationMin,
     project:       project || 'unknown',
@@ -1028,6 +1139,7 @@ function buildCodexInput(rolloutPath, historyMap) {
     project_path:  cwd,
     branch:        null,
     engine:        'codex',
+    source:        isSubagent ? 'subagent' : (sessionMeta && sessionMeta.source),
     model_provider: sessionMeta && sessionMeta.model_provider,
     first_ts:      firstTs,
     last_ts:       lastTs,
@@ -1035,12 +1147,29 @@ function buildCodexInput(rolloutPath, historyMap) {
 
   const evidence = {
     user_messages: userMsgs.map(m => m.text).filter(Boolean).slice(0, 15),
-    tool_traces:   [],
-    key_results:   [],
-    file_anchors:  cwd ? [cwd] : [],
+    tool_traces:   toolTraces.slice(-12),
+    key_results:   [...new Set(assistantResults.map(x => x.replace(/\s+/g, ' ').trim()).filter(Boolean))].slice(-6),
+    file_anchors:  [...new Set([...(cwd ? [cwd] : []), ...fileAnchors])].slice(0, 12),
   };
 
   return { skeleton, evidence };
+}
+
+function buildSessionInputById(sessionId) {
+  const claude = findSessionById(sessionId);
+  if (claude) {
+    return {
+      engine: 'claude',
+      path: claude.path,
+      skeleton: extractSkeleton(claude.path),
+      evidence: extractEvidence(claude.path, 3000),
+    };
+  }
+  const codex = findCodexSessionById(sessionId);
+  if (!codex) return null;
+  const history = loadCodexHistory([codex.session_id]);
+  const input = buildCodexInput(codex.path, history);
+  return { engine: 'codex', path: codex.path, ...input };
 }
 
 /**
@@ -1053,6 +1182,8 @@ function markCodexFactsExtracted(sessionId) {
 module.exports = {
   findLatestUnanalyzedSession,
   findSessionById,
+  findCodexSessionById,
+  buildSessionInputById,
   findAllUnanalyzedSessions,
   findAllUnextractedSessions,
   extractSkeleton,

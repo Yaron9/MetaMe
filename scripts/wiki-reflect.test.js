@@ -8,7 +8,14 @@ const os = require('os');
 const path = require('path');
 const { applyWikiSchema } = require('./memory-wiki-schema');
 const { upsertWikiTopic, getWikiPageBySlug } = require('./core/wiki-db');
-const { runWikiReflect } = require('./wiki-reflect');
+const { runWikiReflect, _internal } = require('./wiki-reflect');
+
+test('wiki-sync resolves its output directory from daemon config', () => {
+  assert.equal(
+    _internal.resolveConfiguredOutputDir({ daemon: { wiki_output_dir: '~/Vault/MetaMe' } }, '/tmp/home'),
+    path.resolve('/tmp/home/Vault/MetaMe'),
+  );
+});
 
 function buildTestDb() {
   const db = new DatabaseSync(':memory:');

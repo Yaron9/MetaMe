@@ -6,8 +6,13 @@ const {
   createEngineRuntimeFactory,
   normalizeEngineName,
   resolveEngineModel,
+  ENGINE_MODEL_CONFIG,
   _private,
 } = require('./daemon-engine-runtime');
+
+it('uses the Codex CLI default for distill instead of a stale account-specific model', () => {
+  assert.equal(ENGINE_MODEL_CONFIG.codex.distill, 'auto');
+});
 
 describe('daemon-engine-runtime normalize', () => {
   it('normalizes known engines and defaults to claude', () => {

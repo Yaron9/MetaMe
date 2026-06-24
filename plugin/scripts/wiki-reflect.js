@@ -44,6 +44,12 @@ const LOCK_MAX_AGE_MS = 10 * 60 * 1000; // 10 minutes
 const STALENESS_THRESHOLD = 0.4;
 const MAX_RETRIES = 3;
 
+function resolveConfiguredOutputDir(config, home = os.homedir()) {
+  const configured = config && config.daemon && config.daemon.wiki_output_dir;
+  if (!configured) return DEFAULT_WIKI_DIR;
+  return path.resolve(String(configured).replace(/^~(?=$|[\\/])/, home));
+}
+
 /**
  * Run wiki reflect pipeline.
  *
@@ -233,6 +239,27 @@ async function runWikiReflect(db, {
   return { built, failed, exportFailed, docsExported, reflectExported };
 }
 
+async function runConfiguredWikiReflect({
+  home = os.homedir(),
+  configPath = path.join(home, '.metame', 'daemon.yaml'),
+  dbPath = path.join(home, '.metame', 'memory.db'),
+  providers = require('./providers'),
+} = {}) {
+  const yaml = require('./resolve-yaml');
+  const { DatabaseSync } = require('node:sqlite');
+  let config = {};
+  try { config = yaml.load(fs.readFileSync(configPath, 'utf8')) || {}; } catch { /* use defaults */ }
+  const db = new DatabaseSync(dbPath);
+  try {
+    return await runWikiReflect(db, {
+      providers,
+      outputDir: resolveConfiguredOutputDir(config, home),
+    });
+  } finally {
+    db.close();
+  }
+}
+
 // ── Lock helpers ──────────────────────────────────────────────────────────────
 
 function _acquireLock(lockFile) {
@@ -335,4 +362,17 @@ function _parseTags(raw) {
   return [];
 }
 
-module.exports = { runWikiReflect };
+module.exports = {
+  runWikiReflect,
+  runConfiguredWikiReflect,
+  _internal: { resolveConfiguredOutputDir },
+};
+
+if (require.main === module) {
+  runConfiguredWikiReflect()
+    .then(result => console.log('wiki-sync done', JSON.stringify(result)))
+    .catch(err => {
+      console.error(`[wiki-sync] ${err.message}`);
+      process.exitCode = 1;
+    });
+}

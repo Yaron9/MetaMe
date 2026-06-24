@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { extractSkeleton, detectSignificantSession } = require('./session-analytics');
+const { extractSkeleton, detectSignificantSession, buildCodexInput } = require('./session-analytics');
 
 function ts(baseMs, deltaSec) {
   return new Date(baseMs + deltaSec * 1000).toISOString();
@@ -64,4 +64,45 @@ test('detectSignificantSession uses numeric-only thresholds', () => {
   });
   assert.equal(b.significant, true);
   assert.ok(b.reasons.includes('long_debug_retry_loop'));
+});
+
+test('buildCodexInput reuses rollout evidence without ingesting internal prompts', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-codex-sa-'));
+  const sessionId = '019ef863-3ea5-7b01-9473-1dab91e60da4';
+  const file = path.join(tmpDir, `rollout-2026-06-24T14-48-34-${sessionId}.jsonl`);
+  const lines = [
+    { type: 'session_meta', timestamp: '2026-06-24T06:48:34.000Z', payload: { id: sessionId, cwd: '/tmp/demo', timestamp: '2026-06-24T06:48:34.000Z', model_provider: 'openai' } },
+    { type: 'response_item', timestamp: '2026-06-24T06:48:35.000Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'You are a MetaMe cognitive profile distiller. Ignore this internal task.' }] } },
+    { type: 'response_item', timestamp: '2026-06-24T06:48:36.000Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '请修复后台 Codex 记忆链路。' }] } },
+    { type: 'response_item', timestamp: '2026-06-24T06:48:37.000Z', payload: { type: 'custom_tool_call', name: 'exec_command', input: JSON.stringify({ cmd: 'node --test', workdir: '/tmp/demo' }) } },
+    { type: 'response_item', timestamp: '2026-06-24T06:48:38.000Z', payload: { type: 'custom_tool_call_output', output: JSON.stringify({ exit_code: 0, output: '12 tests passed' }) } },
+    { type: 'event_msg', timestamp: '2026-06-24T06:48:39.000Z', payload: { type: 'task_complete', last_agent_message: '修复完成，12 项测试通过。' } },
+  ];
+  fs.writeFileSync(file, lines.map(x => JSON.stringify(x)).join('\n') + '\n', 'utf8');
+
+  const { skeleton, evidence } = buildCodexInput(file);
+  assert.equal(skeleton.engine, 'codex');
+  assert.equal(skeleton.message_count, 1);
+  assert.equal(skeleton.total_tool_calls, 1);
+  assert.equal(skeleton.tool_counts.exec_command, 1);
+  assert.deepEqual(evidence.user_messages, ['请修复后台 Codex 记忆链路。']);
+  assert.match(evidence.tool_traces[0], /node --test/);
+  assert.ok(evidence.file_anchors.includes('/tmp/demo'));
+  assert.ok(evidence.key_results.includes('修复完成，12 项测试通过。'));
+});
+
+test('buildCodexInput leaves subagent rollouts to their parent session', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-codex-subagent-'));
+  const sessionId = '019ef863-3ea5-7b01-9473-1dab91e60db5';
+  const file = path.join(tmpDir, `rollout-2026-06-24T14-48-34-${sessionId}.jsonl`);
+  const lines = [
+    { type: 'session_meta', payload: { id: sessionId, cwd: '/tmp/demo', source: { subagent: { thread_spawn: { parent_thread_id: 'parent' } } } } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '审查父任务。' }] } },
+    { type: 'event_msg', payload: { type: 'task_complete', last_agent_message: '审查完成。' } },
+  ];
+  fs.writeFileSync(file, lines.map(x => JSON.stringify(x)).join('\n') + '\n' + 'x'.repeat(1200), 'utf8');
+
+  const { skeleton } = buildCodexInput(file);
+  assert.equal(skeleton.source, 'subagent');
+  assert.equal(skeleton.message_count, 0);
 });

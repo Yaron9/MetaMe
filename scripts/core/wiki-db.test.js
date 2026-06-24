@@ -296,8 +296,11 @@ describe('wiki-db', () => {
     it('only updates pages whose primary_topic matches the tag', () => {
       const db = openTestDb();
 
+      upsertWikiTopic(db, 'Session Management', { force: true });
+      upsertWikiTopic(db, 'Model Switching', { force: true });
+
       upsertWikiPage(db, {
-        slug: 'target-page',
+        slug: 'session-management',
         primary_topic: 'Session Management',
         title: 'Session',
         content: 'x',
@@ -305,7 +308,7 @@ describe('wiki-db', () => {
       });
 
       upsertWikiPage(db, {
-        slug: 'other-page',
+        slug: 'model-switching',
         primary_topic: 'Model Switching',
         title: 'Model',
         content: 'y',
@@ -315,8 +318,8 @@ describe('wiki-db', () => {
       const dirtyTags = new Map([['session management', 4]]);
       updateStalenessForTags(db, dirtyTags);
 
-      const target = getWikiPageBySlug(db, 'target-page');
-      const other = getWikiPageBySlug(db, 'other-page');
+      const target = getWikiPageBySlug(db, 'session-management');
+      const other = getWikiPageBySlug(db, 'model-switching');
 
       assert.ok(target.staleness > 0, 'target page staleness should increase');
       assert.equal(other.staleness, 0.0, 'other page should be untouched');
@@ -327,8 +330,10 @@ describe('wiki-db', () => {
     it('staleness formula: newFacts / (rawSourceCount + newFacts)', () => {
       const db = openTestDb();
 
+      upsertWikiTopic(db, 'formula-topic', { force: true });
+
       upsertWikiPage(db, {
-        slug: 'stale-formula',
+        slug: 'formula-topic',
         primary_topic: 'formula-topic',
         title: 'Formula',
         content: 'x',
@@ -339,7 +344,7 @@ describe('wiki-db', () => {
       const dirtyTags = new Map([['formula-topic', 4]]);
       updateStalenessForTags(db, dirtyTags);
 
-      const row = getWikiPageBySlug(db, 'stale-formula');
+      const row = getWikiPageBySlug(db, 'formula-topic');
       const expected = 4 / (10 + 4);
       assert.ok(Math.abs(row.staleness - expected) < 0.001, `staleness should be ~${expected}, got ${row.staleness}`);
     });
@@ -347,8 +352,10 @@ describe('wiki-db', () => {
     it('skips tags with count <= 0', () => {
       const db = openTestDb();
 
+      upsertWikiTopic(db, 'zero-topic', { force: true });
+
       upsertWikiPage(db, {
-        slug: 'zero-count',
+        slug: 'zero-topic',
         primary_topic: 'zero-topic',
         title: 'Zero',
         content: 'x',
@@ -357,7 +364,7 @@ describe('wiki-db', () => {
 
       updateStalenessForTags(db, new Map([['zero-topic', 0]]));
 
-      const row = getWikiPageBySlug(db, 'zero-count');
+      const row = getWikiPageBySlug(db, 'zero-topic');
       assert.equal(row.staleness, 0.0);
       assert.equal(row.new_facts_since_build, 0);
     });
@@ -416,8 +423,10 @@ describe('wiki-db', () => {
     it('resets staleness, new_facts_since_build, sets raw_source_count and last_built_at', () => {
       const db = openTestDb();
 
+      upsertWikiTopic(db, 'reset-topic', { force: true });
+
       upsertWikiPage(db, {
-        slug: 'reset-me',
+        slug: 'reset-topic',
         primary_topic: 'reset-topic',
         title: 'Reset',
         content: 'x',
@@ -426,12 +435,12 @@ describe('wiki-db', () => {
 
       // Dirty it
       updateStalenessForTags(db, new Map([['reset-topic', 3]]));
-      let row = getWikiPageBySlug(db, 'reset-me');
+      let row = getWikiPageBySlug(db, 'reset-topic');
       assert.ok(row.staleness > 0, 'staleness should be dirty before reset');
 
       // Reset
-      resetPageStaleness(db, 'reset-me', 12);
-      row = getWikiPageBySlug(db, 'reset-me');
+      resetPageStaleness(db, 'reset-topic', 12);
+      row = getWikiPageBySlug(db, 'reset-topic');
       assert.equal(row.staleness, 0.0);
       assert.equal(row.new_facts_since_build, 0);
       assert.equal(row.raw_source_count, 12);

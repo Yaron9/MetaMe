@@ -62,6 +62,7 @@ describe('codex host compatibility', () => {
   it('merges MetaMe hooks idempotently without deleting user hooks', () => {
     const managed = buildMetaMeCodexHooks({
       signalCaptureScript: '/home/.metame/signal-capture.js',
+      memoryRecallScript: '/home/.metame/hooks/memory-recall-context.js',
       stopCaptureScript: '/home/.metame/hooks/stop-session-capture.js',
     });
     const existing = {
@@ -75,6 +76,7 @@ describe('codex host compatibility', () => {
     const once = mergeMetaMeCodexHooks(existing, managed);
     const twice = mergeMetaMeCodexHooks(once, managed);
     assert.deepEqual(twice, once);
+    assert.equal(once.hooks.UserPromptSubmit[0].hooks.length, 2);
     assert.equal(once.hooks.Stop.length, 2);
     assert.match(once.hooks.Stop[0].hooks[0].command, /custom\.js/);
     assert.match(once.hooks.Stop[1].hooks[0].command, /\.metame\/hooks\/stop-session-capture\.js/);

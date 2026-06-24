@@ -35,6 +35,7 @@ feishu:
 - 共享能力：`skills/` 与 `scripts/`，由 MetaMe 部署后供两个引擎使用。
 - Claude hooks：写入 `~/.claude/settings.json`。
 - Codex hooks：按 Codex 原生 schema 合并写入 `~/.codex/hooks.json`，不复用 Claude 插件 hooks。
+- 原生 Codex 的 `UserPromptSubmit` 同时运行信号采集和按需记忆召回；召回复用 `core/recall-prepare.js`，不维护第二套路由/检索实现。
 - `metame codex` 启动前检查已启用插件。仅当插件 hooks 同时满足“Codex 非法顶层字段”和“引用 `CLAUDE_PLUGIN_ROOT`”时，才在 Codex 配置中将其隔离。
 - 隔离前备份 `~/.codex/config.toml` 到 `config.toml.pre-metame-codex-compat.bak`；不修改 `~/.codex/plugins/cache/`。
 - 可用 `METAME_CODEX_COMPAT=off metame codex` 关闭自动兼容审计。

@@ -174,6 +174,18 @@ function computeInitialNextRun(task, schedule, state, nowMs, checkIntervalSec, n
   return nextClockRunAfter(schedule, nowMs);
 }
 
+function resolveTaskEnginePolicy(task, config, defaultEngine = 'claude') {
+  const projectKey = task && task._project && task._project.key ? String(task._project.key) : '';
+  const project = projectKey && config && config.projects ? config.projects[projectKey] : null;
+  return resolveScopedEngine({
+    requestedEngine: (task && task.engine) || (project && project.engine) || defaultEngine,
+    projectKey,
+    project,
+    daemonCfg: (config && config.daemon) || {},
+    defaultEngine,
+  });
+}
+
 function createTaskScheduler(deps) {
   const {
     fs,
@@ -188,6 +200,7 @@ function createTaskScheduler(deps) {
     buildProfilePreamble,
     getDaemonProviderEnv,
     getDistillModel,
+    getDefaultEngine = () => 'claude',
     log,
     physiologicalHeartbeat,
     isUserIdle,
@@ -203,15 +216,7 @@ function createTaskScheduler(deps) {
   const MAX_PRECONDITION_CHARS = 4000;
 
   function resolveTaskEngine(task, config) {
-    const projectKey = task && task._project && task._project.key ? String(task._project.key) : '';
-    const project = projectKey && config && config.projects ? config.projects[projectKey] : null;
-    return resolveScopedEngine({
-      requestedEngine: (task && task.engine) || 'claude',
-      projectKey,
-      project,
-      daemonCfg: (config && config.daemon) || {},
-      defaultEngine: 'claude',
-    });
+    return resolveTaskEnginePolicy(task, config, getDefaultEngine());
   }
   function checkPrecondition(task) {
     if (!task.precondition) return { pass: true, context: '' };
@@ -348,12 +353,15 @@ function createTaskScheduler(deps) {
     // Script tasks: run a local script directly (e.g. distill.js), no claude -p
     if (task.type === 'script') {
       const scriptCmd = task.command.replace(/^~|(?<=\s)~/g, HOME);
-      log('INFO', `Executing script task: ${task.name} → ${scriptCmd}`);
+      const enginePolicy = resolveTaskEngine(task, config);
+      const engine = enginePolicy.engine === 'codex' ? 'codex' : 'claude';
+      log('INFO', `Executing script task: ${task.name} [${engine}] → ${scriptCmd}`);
       try {
         const scriptEnv = {
           ...process.env,
           METAME_ROOT: process.env.METAME_ROOT || '',
           METAME_INTERNAL_PROMPT: '1',
+          METAME_ENGINE: engine,
         };
         delete scriptEnv.CLAUDECODE;
         const output = execSync(scriptCmd, {
@@ -860,12 +868,6 @@ module.exports = {
     buildTaskSchedule,
     computeInitialNextRun,
     nextRunAfter,
-    resolveTaskEngine: (task, config) => resolveScopedEngine({
-      requestedEngine: (task && task.engine) || 'claude',
-      projectKey: task && task._project ? String(task._project.key || '') : '',
-      project: task && task._project && config && config.projects ? config.projects[task._project.key] : null,
-      daemonCfg: (config && config.daemon) || {},
-      defaultEngine: 'claude',
-    }),
+    resolveTaskEngine: resolveTaskEnginePolicy,
   },
 };

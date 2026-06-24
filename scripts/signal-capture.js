@@ -15,6 +15,7 @@ process.on('unhandledRejection', () => process.exit(0));
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { sanitizePrompt, isInternalPrompt } = require('./hooks/hook-utils');
 
 const BUFFER_FILE = path.join(os.homedir(), '.metame', 'raw_signals.jsonl');
 const OVERFLOW_FILE = path.join(os.homedir(), '.metame', 'raw_signals.overflow.jsonl');
@@ -44,45 +45,6 @@ const CORRECTION_EN = /(no,? I meant|that's not what I|you misunderstood|wrong.+
 // Metacognitive signals → normal confidence (self-reflection, strategy shifts)
 const META_ZH = /我(发现|意识到|觉得|反思|总结|复盘)|想错了|换个(思路|方向|方案)|回头(想想|看看)|之前的(方案|思路|方向).*(不行|不对|有问题)|我的(问题|毛病|习惯)是|下次(应该|要|得)/;
 const META_EN = /(I realize|looking back|on reflection|my (mistake|problem|habit) is|let me rethink|wrong approach|next time I should)/i;
-
-// Internal/system prompts must never enter cognition signal buffer.
-const INTERNAL_PROMPT_PATTERNS = [
-  /You are a MetaMe cognitive profile distiller/i,
-  /You are a metacognition pattern detector/i,
-  /你是精准的知识提取引擎/,
-  /RECALLED LONG-TERM FACTS \(context only/i,
-  /\[System hints - DO NOT mention these to user:/i,
-  /\[Mac automation policy - do NOT expose this block:/i,
-  /MANDATORY FIRST ACTION: The user has not been calibrated yet/i,
-  /<\!--\s*FACTS:START\s*-->/i,
-  /<\!--\s*MEMORY:START\s*-->/i,
-  /\[Task notification\]/i,
-  /<task-notification\b/i,
-];
-
-function sanitizeMetaMePrompt(text) {
-  let prompt = String(text || '');
-  if (!prompt) return '';
-
-  // Remove daemon-injected RAG blocks
-  prompt = prompt.replace(/<!--\s*FACTS:START\s*-->[\s\S]*?<!--\s*FACTS:END\s*-->/gi, ' ');
-  prompt = prompt.replace(/<!--\s*MEMORY:START\s*-->[\s\S]*?<!--\s*MEMORY:END\s*-->/gi, ' ');
-
-  // Remove daemon/system internal hint blocks
-  prompt = prompt.replace(/\[System hints - DO NOT mention these to user:[\s\S]*?\]/gi, ' ');
-  prompt = prompt.replace(/\[Mac automation policy - do NOT expose this block:[\s\S]*?\]/gi, ' ');
-  prompt = prompt.replace(/\[Task notification\][\s\S]*?(?=\n{2,}|$)/gi, ' ');
-  prompt = prompt.replace(/<task-notification\b[\s\S]*?<\/task-notification>/gi, ' ');
-  prompt = prompt.replace(/<task-notification\b[\s\S]*$/gi, ' ');
-
-  return prompt.trim();
-}
-
-function isInternalPrompt(text) {
-  const prompt = String(text || '');
-  if (!prompt) return false;
-  return INTERNAL_PROMPT_PATTERNS.some((re) => re.test(prompt));
-}
 
 function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -144,7 +106,7 @@ process.stdin.on('end', () => {
     }
 
     // Strip daemon/system injected wrappers first; keep user payload if present.
-    prompt = sanitizeMetaMePrompt(prompt);
+    prompt = sanitizePrompt(prompt);
     if (!prompt) {
       process.exit(0);
     }

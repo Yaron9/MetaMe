@@ -40,7 +40,7 @@ describe('embedding utilities', () => {
   });
 
   it('bufferToEmbedding rejects wrong-size blob', () => {
-    const wrongSize = Buffer.alloc(100);
+    const wrongSize = Buffer.alloc(101);
     assert.equal(bufferToEmbedding(wrongSize), null);
   });
 

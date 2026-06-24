@@ -30,6 +30,16 @@ describe('daemon-task-scheduler private helpers', () => {
     assert.equal(resolveTaskEngine(task, enabled).engine, 'agy');
     assert.equal(resolveTaskEngine(task, { projects: enabled.projects }).engine, 'codex');
   });
+  it('inherits the daemon engine when a task and project do not override it', () => {
+    assert.equal(resolveTaskEngine({ name: 'memory-extract' }, {}, 'codex').engine, 'codex');
+  });
+
+  it('prefers task then project engine over the daemon default', () => {
+    const config = { projects: { research: { engine: 'codex' } } };
+    const scoped = { name: 'wiki-sync', _project: { key: 'research' } };
+    assert.equal(resolveTaskEngine(scoped, config, 'claude').engine, 'codex');
+    assert.equal(resolveTaskEngine({ ...scoped, engine: 'claude' }, config, 'codex').engine, 'claude');
+  });
   it('parses HH:MM time for clock tasks', () => {
     assert.deepEqual(parseAtTime('09:30'), { hour: 9, minute: 30 });
     assert.deepEqual(parseAtTime('23:59'), { hour: 23, minute: 59 });
@@ -145,6 +155,25 @@ describe('checkPrecondition logging semantics', () => {
 });
 
 describe('background runtime integration', () => {
+  it('passes the resolved Codex engine to script tasks', () => {
+    const calls = [];
+    const state = { tasks: {} };
+    const scheduler = createTaskScheduler({
+      fs: require('fs'), path: require('path'), HOME: require('os').homedir(),
+      execSync: (cmd, options) => { calls.push({ cmd, env: options.env }); return ''; },
+      loadState: () => state, saveState: () => {}, checkBudget: () => true,
+      recordTokens: () => {}, log: () => {}, getDefaultEngine: () => 'codex',
+    });
+
+    const result = scheduler.executeTask({
+      name: 'memory-extract', type: 'script', command: 'node ~/.metame/memory-extract.js',
+    }, { daemon: {} });
+
+    assert.equal(result.success, true);
+    assert.equal(calls[0].env.METAME_ENGINE, 'codex');
+    assert.equal(calls[0].env.METAME_INTERNAL_PROMPT, '1');
+  });
+
   it('uses agy auto model instead of mapping the distill Claude model', async () => {
     const calls = [];
     const state = { tasks: {} };

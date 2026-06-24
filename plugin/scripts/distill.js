@@ -424,21 +424,29 @@ async function distill() {
     let targetSessionPath = null;
     if (sessionAnalytics) {
       try {
-        let targetSession = null;
-        if (signalAnchorSessionId && typeof sessionAnalytics.findSessionById === 'function') {
-          targetSession = sessionAnalytics.findSessionById(signalAnchorSessionId);
-          if (!targetSession) {
+        let targetInput = null;
+        if (signalAnchorSessionId && typeof sessionAnalytics.buildSessionInputById === 'function') {
+          targetInput = sessionAnalytics.buildSessionInputById(signalAnchorSessionId);
+          if (!targetInput) {
             console.log(`[distill] signal session ${signalAnchorSessionId.slice(0, 8)} not found — skip session context to avoid cross-session mismatch`);
           }
         } else {
-          targetSession = sessionAnalytics.findLatestUnanalyzedSession();
+          const targetSession = sessionAnalytics.findLatestUnanalyzedSession();
+          if (targetSession) {
+            targetInput = {
+              engine: 'claude',
+              path: targetSession.path,
+              skeleton: sessionAnalytics.extractSkeleton(targetSession.path),
+              evidence: sessionAnalytics.extractEvidence(targetSession.path, 3000),
+            };
+          }
         }
-        if (targetSession) {
-          skeleton = sessionAnalytics.extractSkeleton(targetSession.path);
-          targetSessionPath = targetSession.path;
+        if (targetInput) {
+          skeleton = targetInput.skeleton;
+          targetSessionPath = targetInput.path;
           sessionContext = sessionAnalytics.formatForPrompt(skeleton);
           // For long sessions, extract pivot points
-          sessionSummary = sessionAnalytics.summarizeSession(skeleton, targetSession.path);
+          sessionSummary = sessionAnalytics.summarizeSession(skeleton, targetInput.path, targetInput.evidence);
         }
       } catch (e) {
         console.log(`[distill] session context extraction failed: ${e.message}`);
@@ -629,9 +637,9 @@ Do NOT repeat existing unchanged values.`;
       try { fs.unlinkSync(LOCK_FILE); } catch { }
       const isTimeout = err.killed || (err.signal === 'SIGTERM');
       if (isTimeout) {
-        return { updated: false, behavior: null, summary: 'Skipped — API too slow. Will retry next launch.' };
+        return { updated: false, failed: true, behavior: null, summary: 'Skipped — distill API too slow. Will retry next launch.' };
       }
-      return { updated: false, behavior: null, summary: 'Skipped — Claude not available. Will retry next launch.' };
+      return { updated: false, failed: true, behavior: null, summary: 'Skipped — configured distill engine unavailable. Will retry next launch.' };
     }
 
     // 7. Parse result
@@ -1474,6 +1482,7 @@ if (require.main === module) {
     const MAX_BATCH_ROUNDS = 5;
     let totalTokens = 0;
     let roundsRun = 0;
+    let hadFailure = false;
 
     for (let round = 0; round < MAX_BATCH_ROUNDS; round++) {
       // Check if buffer still has signals
@@ -1484,6 +1493,7 @@ if (require.main === module) {
 
       const result = await distill();
       roundsRun++;
+      if (result.failed) hadFailure = true;
 
       // Write session log if behavior was detected
       if (result.behavior) {
@@ -1509,5 +1519,6 @@ if (require.main === module) {
 
     console.log(`__TOKENS__:${totalTokens}`);
     if (roundsRun > 1) console.log(`[distill] processed ${roundsRun} batches in one run`);
+    if (hadFailure) process.exitCode = 1;
   })();
 }

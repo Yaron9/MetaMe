@@ -63,10 +63,14 @@ function disablePluginSections(configText, pluginIds) {
   }).join('\n');
 }
 
-function buildMetaMeCodexHooks({ signalCaptureScript, stopCaptureScript }) {
+function buildMetaMeCodexHooks({ signalCaptureScript, memoryRecallScript, stopCaptureScript }) {
+  const promptHooks = [{ type: 'command', command: `node "${signalCaptureScript}"` }];
+  if (memoryRecallScript) {
+    promptHooks.push({ type: 'command', command: `node "${memoryRecallScript}"` });
+  }
   return {
     UserPromptSubmit: [{
-      hooks: [{ type: 'command', command: `node "${signalCaptureScript}"` }],
+      hooks: promptHooks,
     }],
     Stop: [{
       hooks: [{ type: 'command', command: `node "${stopCaptureScript}"` }],

@@ -22,6 +22,7 @@ const path = require('path');
 const os = require('os');
 
 const yaml = require('./resolve-yaml');
+const { buildCodexArgs } = require('./daemon-engine-runtime');
 
 const DEFAULT_DISTILL_MODEL = 'haiku';
 const DISTILL_MODEL_ALIASES = new Map([
@@ -359,7 +360,7 @@ function callDistillModel(input, extraEnv, timeout, options = {}) {
   const engine = options.engine || _currentEngine;
   const bin = engine === 'codex' ? 'codex' : 'claude';
   const args = engine === 'codex'
-    ? ['exec', '--json', '-m', model, '--full-auto', '-']
+    ? buildCodexArgs({ model, readOnly: true, cwd: process.cwd() })
     : ['-p', '--model', model, '--no-session-persistence'];
   // On Windows, bare binary names need shell:true to resolve .cmd wrappers.
   // For codex, also sanitize CODEX_HOME if it points to a non-existent path.
@@ -374,39 +375,56 @@ function callDistillModel(input, extraEnv, timeout, options = {}) {
     ...(isWin ? { shell: process.env.COMSPEC || true, windowsHide: true } : {}),
   };
   return new Promise((resolve, reject) => {
-    const proc = execFile(
-      bin, args,
-      spawnOpts,
-      (err, stdout, stderr) => {
+    const run = (runArgs, allowModelFallback) => {
+      const proc = execFile(bin, runArgs, spawnOpts, (err, stdout, stderr) => {
+        if (err && engine === 'codex' && allowModelFallback && /model[^\n]+not supported/i.test(stdout || '')) {
+          run(buildCodexArgs({ model: 'auto', readOnly: true, cwd: process.cwd() }), false);
+          return;
+        }
         if (err) {
-          const detail = (stderr || stdout || '').trim().split('\n')[0];
+          const codexDetail = engine === 'codex' ? extractCodexError(stdout) : '';
+          const detail = codexDetail || (stderr || stdout || '').trim().split('\n')[0];
           err.message = detail || err.message;
           err.stdout = stdout;
           err.stderr = stderr;
           reject(err);
-        } else {
-          // codex --json outputs JSON lines; extract agent message text
-          if (engine === 'codex') {
-            try {
-              const lines = stdout.trim().split('\n');
-              for (let i = lines.length - 1; i >= 0; i--) {
-                const evt = JSON.parse(lines[i]);
-                if (evt.type === 'item.completed' && evt.item && evt.item.type === 'agent_message') {
-                  // item.text (string) is the primary field; content[] is an alternative format
-                  const text = evt.item.text
-                    || (evt.item.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
-                  if (text && text.trim()) { resolve(text.trim()); return; }
-                }
-              }
-            } catch { /* fall through */ }
-          }
-          resolve(stdout.trim());
+          return;
         }
-      },
-    );
-    proc.stdin.write(input);
-    proc.stdin.end();
+        resolve(engine === 'codex' ? (extractCodexAgentText(stdout) || stdout.trim()) : stdout.trim());
+      });
+      proc.stdin.write(input);
+      proc.stdin.end();
+    };
+    run(args, model !== 'auto');
   });
+}
+
+function parseCodexEvents(stdout) {
+  return String(stdout || '').trim().split('\n').map(line => {
+    try { return JSON.parse(line); } catch { return null; }
+  }).filter(Boolean);
+}
+
+function extractCodexAgentText(stdout) {
+  const events = parseCodexEvents(stdout);
+  for (let i = events.length - 1; i >= 0; i--) {
+    const evt = events[i];
+    if (evt.type !== 'item.completed' || !evt.item || evt.item.type !== 'agent_message') continue;
+    const text = evt.item.text
+      || (evt.item.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+    if (text && text.trim()) return text.trim();
+  }
+  return '';
+}
+
+function extractCodexError(stdout) {
+  const events = parseCodexEvents(stdout);
+  for (let i = events.length - 1; i >= 0; i--) {
+    const evt = events[i];
+    if (evt.type === 'turn.failed' && evt.error && evt.error.message) return String(evt.error.message);
+    if (evt.type === 'error' && evt.message) return String(evt.message);
+  }
+  return '';
 }
 
 // ---------------------------------------------------------
@@ -438,6 +456,7 @@ const api = {
   listFormatted,
   callDistillModel,
   callHaiku,
+  _internal: { extractCodexAgentText, extractCodexError },
   getProvidersFilePath,
   setEngine,
   getEngine,

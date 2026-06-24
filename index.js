@@ -842,6 +842,7 @@ function ensureCodexHooksInstalled() {
     if (fs.existsSync(hooksFile)) existing = JSON.parse(fs.readFileSync(hooksFile, 'utf8'));
     const managed = buildMetaMeCodexHooks({
       signalCaptureScript: SIGNAL_CAPTURE_SCRIPT.replace(/\\/g, '/'),
+      memoryRecallScript: path.join(METAME_DIR, 'hooks', 'memory-recall-context.js').replace(/\\/g, '/'),
       stopCaptureScript: path.join(METAME_DIR, 'hooks', 'stop-session-capture.js').replace(/\\/g, '/'),
     });
     const merged = mergeMetaMeCodexHooks(existing, managed);

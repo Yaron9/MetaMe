@@ -172,6 +172,21 @@ test('assembleRecallContext: working mode populates from working memory file', a
   });
 });
 
+test('assembleRecallContext: working mode never reads all agents without an agent key', async () => {
+  await withFreshMemoryHome(async (_memory, assembleRecallContext) => {
+    const dir = path.join(process.env.HOME, '.metame', 'memory', 'now');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'private-agent.md'), 'private task state must not cross agent boundaries');
+
+    const result = await assembleRecallContext({
+      plan: TRUE_PLAN({ modes: ['working'] }),
+      scope: { project: 'metame', workspaceScope: 'main', agentKey: null },
+    });
+    assert.equal(result.text, '');
+    assert.equal(result.breakdown.working, 0);
+  });
+});
+
 test('assembleRecallContext: recallMeta carries plan + breakdown but no raw transcripts', async () => {
   await withFreshMemoryHome(async (memory, assembleRecallContext) => {
     memory.saveMemoryItem({

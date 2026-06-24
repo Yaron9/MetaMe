@@ -20,6 +20,25 @@ const { callHaiku, buildDistillEnv } = require('./providers');
 
 const HOME = os.homedir();
 const LOCK_FILE = path.join(HOME, '.metame', 'memory-extract.lock');
+const ALLOWED_FACT_RELATIONS = new Set([
+  'tech_decision',
+  'bug_lesson',
+  'arch_convention',
+  'config_fact',
+  'config_change',
+  'workflow_rule',
+  'project_milestone',
+]);
+
+function isValidExtractedFact(f) {
+  if (!f || !f.entity || !f.relation || !f.value) return false;
+  if (!ALLOWED_FACT_RELATIONS.has(f.relation)) return false;
+  if (f.value.length < 20 || f.value.length > 300) return false;
+  if (VAGUE_PATTERNS.some(re => re.test(f.value))) return false;
+  if (!f.entity.includes('.') && !ALLOWED_FLAT.has(f.entity)) return false;
+  if (f.confidence === 'medium' && (!f.tags || f.tags.length === 0)) return false;
+  return true;
+}
 
 // Atomic fact extraction prompt (local copy — distill.js no longer exports this)
 const FACT_EXTRACTION_PROMPT = `你是精准的知识提取引擎。从以下会话材料中提取「值得长期记住的原子事实」。
@@ -203,14 +222,7 @@ async function extractFacts(skeleton, evidence, distillEnv) {
   let facts = Array.isArray(parsed.facts) ? parsed.facts : [];
   const session_name = parsed.session_name || "未命名会话";
 
-  const filteredFacts = facts.filter(f => {
-    if (!f.entity || !f.relation || !f.value) return false;
-    if (f.value.length < 20 || f.value.length > 300) return false;
-    if (VAGUE_PATTERNS.some(re => re.test(f.value))) return false;
-    if (!f.entity.includes('.') && !ALLOWED_FLAT.has(f.entity)) return false;
-    if (f.confidence === 'medium' && (!f.tags || f.tags.length === 0)) return false;
-    return true;
-  });
+  const filteredFacts = facts.filter(isValidExtractedFact);
 
   return { ok: true, facts: filteredFacts, session_name };
 }
@@ -275,6 +287,7 @@ async function run() {
     let totalSaved = 0;
     let totalSkipped = 0;
     let processed = 0;
+    let failed = 0;
 
     for (const session of sessions) {
       try {
@@ -297,6 +310,7 @@ async function run() {
         if (!ok) {
           if (sourceRow) saveSessionSource(memory, 'claude', session.path, skeleton, 'error', 'fact extraction failed');
           console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)}: extraction failed, will retry later`);
+          failed++;
           continue;
         }
 
@@ -340,6 +354,7 @@ async function run() {
         processed++;
       } catch (e) {
         console.log(`[memory-extract] Session error: ${e.message}`);
+        failed++;
       }
     }
 
@@ -367,6 +382,7 @@ async function run() {
           if (!ok) {
             if (sourceRow) saveSessionSource(memory, 'codex', cs.path, skeleton, 'error', 'fact extraction failed');
             console.log(`[memory-extract] Codex ${cs.session_id.slice(0, 8)}: extraction failed, will retry later`);
+            failed++;
             continue;
           }
 
@@ -410,25 +426,27 @@ async function run() {
           processed++;
         } catch (e) {
           console.log(`[memory-extract] Codex session error: ${e.message}`);
+          failed++;
         }
       }
     }
     // ── end Codex ────────────────────────────────────────────────────────────
 
     memory.close();
-    return { sessionsProcessed: processed, factsSaved: totalSaved, factsSkipped: totalSkipped };
+    return { sessionsProcessed: processed, sessionsFailed: failed, factsSaved: totalSaved, factsSkipped: totalSkipped };
   } finally {
     try { fs.unlinkSync(LOCK_FILE); } catch { }
   }
 }
 
 if (require.main === module) {
-  run().then(({ sessionsProcessed, factsSaved, factsSkipped }) => {
-    console.log(`✅ memory-extract: ${sessionsProcessed} session(s), ${factsSaved} facts saved, ${factsSkipped} skipped`);
+  run().then(({ sessionsProcessed, sessionsFailed = 0, factsSaved, factsSkipped }) => {
+    console.log(`✅ memory-extract: ${sessionsProcessed} session(s), ${sessionsFailed} failed, ${factsSaved} facts saved, ${factsSkipped} skipped`);
     // Report estimated token usage for daemon budget tracking
     // Each session processed ≈ 1 callHaiku invocation ≈ 3k tokens
     const estTokens = sessionsProcessed * 3000;
     if (estTokens > 0) console.log(`__TOKENS__:${estTokens}`);
+    if (sessionsFailed > 0) process.exitCode = 1;
   }).catch(e => {
     console.error(`[memory-extract] Fatal: ${e.message}`);
     process.exit(1);
@@ -438,4 +456,5 @@ if (require.main === module) {
 module.exports = {
   run,
   extractFacts,
+  _internal: { isValidExtractedFact },
 };
