@@ -4,11 +4,11 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { DatabaseSync } = require('node:sqlite');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { applyWikiSchema } = require('./memory-wiki-schema');
 const { upsertWikiTopic, getWikiPageBySlug } = require('./core/wiki-db');
 const { runWikiReflect, _internal } = require('./wiki-reflect');
+const { mkdtempForTest } = require('./test-support/test-utils');
 
 test('wiki-sync resolves its output directory from daemon config', () => {
   assert.equal(
@@ -40,7 +40,7 @@ function buildTestDb() {
 }
 
 function makeTmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-reflect-test-'));
+  return mkdtempForTest('wiki-reflect-test-');
 }
 
 function makeProviders({ response = 'Wiki content.', shouldFail = false } = {}) {
@@ -328,7 +328,7 @@ test('runWikiReflect skips permanent_error slugs', async () => {
 });
 
 test('runWikiReflect exports doc pages from DB to vault', async (_t) => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wkr-'));
+  const tmp = mkdtempForTest('wkr-');
   const { DatabaseSync } = require('node:sqlite');
   const db = new DatabaseSync(':memory:');
 
@@ -371,7 +371,7 @@ test('runWikiReflect exports doc pages from DB to vault', async (_t) => {
 });
 
 test('runWikiReflect mirrors decisions dir to vault', async (_t) => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wkr-'));
+  const tmp = mkdtempForTest('wkr-');
   const { DatabaseSync } = require('node:sqlite');
   const db = new DatabaseSync(':memory:');
   _setupSchema(db);

@@ -17,9 +17,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
-
-const DEFAULT_WIKI_DIR = path.join(os.homedir(), '.metame', 'wiki');
+const { defaultWikiOutputDir } = require('./core/wiki-paths');
 
 /**
  * Write a wiki page as a Markdown file (atomic: write .tmp → rename).
@@ -30,7 +28,8 @@ const DEFAULT_WIKI_DIR = path.join(os.homedir(), '.metame', 'wiki');
  * @param {string} content - Article body (no frontmatter)
  * @param {string} [outputDir]
  */
-function exportWikiPage(slug, frontmatter, content, outputDir = DEFAULT_WIKI_DIR) {
+function exportWikiPage(slug, frontmatter, content, outputDir) {
+  outputDir = resolveOutputDir(outputDir);
   _ensureDir(outputDir);
 
   // Ensure slug in frontmatter matches the positional slug argument
@@ -55,7 +54,8 @@ function exportWikiPage(slug, frontmatter, content, outputDir = DEFAULT_WIKI_DIR
  *                 raw_source_count: number }>} pages
  * @param {string} [outputDir]
  */
-function rebuildIndex(pages, outputDir = DEFAULT_WIKI_DIR, options = {}) {
+function rebuildIndex(pages, outputDir, options = {}) {
+  outputDir = resolveOutputDir(outputDir);
   _ensureDir(outputDir);
   const sessionCount = Number(options.sessionCount) || 0;
   const capsuleCount = Number(options.capsuleCount) || 0;
@@ -84,6 +84,8 @@ function rebuildIndex(pages, outputDir = DEFAULT_WIKI_DIR, options = {}) {
   }
 
   lines.push('', '## Navigation', '');
+  lines.push('- [[_audit|Wiki Audit]]');
+  lines.push('- [[_cleanup-manifest|Cleanup Manifest]]');
   lines.push(`- [[sessions/_index|Session Summaries]]${sessionCount > 0 ? ` (${sessionCount})` : ''}`);
   lines.push(`- [[capsules/_index|Knowledge Capsules]]${capsuleCount > 0 ? ` (${capsuleCount})` : ''}`);
 
@@ -96,7 +98,8 @@ function rebuildIndex(pages, outputDir = DEFAULT_WIKI_DIR, options = {}) {
   fs.renameSync(tmpPath, filePath);
 }
 
-function exportSessionSummary(entry, outputDir = DEFAULT_WIKI_DIR, options = {}) {
+function exportSessionSummary(entry, outputDir, options = {}) {
+  outputDir = resolveOutputDir(outputDir);
   const sessionsDir = path.join(outputDir, 'sessions');
   _ensureDir(sessionsDir);
 
@@ -135,7 +138,8 @@ function exportSessionSummary(entry, outputDir = DEFAULT_WIKI_DIR, options = {})
   return filePath;
 }
 
-function rebuildSessionsIndex(entries, outputDir = DEFAULT_WIKI_DIR) {
+function rebuildSessionsIndex(entries, outputDir) {
+  outputDir = resolveOutputDir(outputDir);
   const sessionsDir = path.join(outputDir, 'sessions');
   _ensureDir(sessionsDir);
   const lines = [
@@ -178,7 +182,8 @@ function rebuildSessionsIndex(entries, outputDir = DEFAULT_WIKI_DIR) {
   fs.renameSync(tmpPath, filePath);
 }
 
-function exportCapsuleFile(sourcePath, outputDir = DEFAULT_WIKI_DIR) {
+function exportCapsuleFile(sourcePath, outputDir) {
+  outputDir = resolveOutputDir(outputDir);
   const capsulesDir = path.join(outputDir, 'capsules');
   _ensureDir(capsulesDir);
 
@@ -196,7 +201,8 @@ function exportCapsuleFile(sourcePath, outputDir = DEFAULT_WIKI_DIR) {
   return targetPath;
 }
 
-function rebuildCapsulesIndex(capsuleFiles, outputDir = DEFAULT_WIKI_DIR) {
+function rebuildCapsulesIndex(capsuleFiles, outputDir) {
+  outputDir = resolveOutputDir(outputDir);
   const capsulesDir = path.join(outputDir, 'capsules');
   _ensureDir(capsulesDir);
 
@@ -235,7 +241,8 @@ function rebuildCapsulesIndex(capsuleFiles, outputDir = DEFAULT_WIKI_DIR) {
  * @param {string} [outputDir]
  * @returns {string[]}      — list of destination file paths written
  */
-function exportReflectDir(srcDir, subdir, outputDir = DEFAULT_WIKI_DIR) {
+function exportReflectDir(srcDir, subdir, outputDir) {
+  outputDir = resolveOutputDir(outputDir);
   if (!fs.existsSync(srcDir) || !fs.statSync(srcDir).isDirectory()) return [];
   const destDir = path.join(outputDir, subdir);
   _ensureDir(destDir);
@@ -264,7 +271,8 @@ function exportReflectDir(srcDir, subdir, outputDir = DEFAULT_WIKI_DIR) {
  * @param {string}   subdir     — 'decisions' | 'lessons'
  * @param {string}   [outputDir]
  */
-function rebuildReflectDirIndex(fileNames, subdir, outputDir = DEFAULT_WIKI_DIR) {
+function rebuildReflectDirIndex(fileNames, subdir, outputDir) {
+  outputDir = resolveOutputDir(outputDir);
   const destDir = path.join(outputDir, subdir);
   _ensureDir(destDir);
 
@@ -303,7 +311,8 @@ function rebuildReflectDirIndex(fileNames, subdir, outputDir = DEFAULT_WIKI_DIR)
  * @param {string} [outputDir]
  * @returns {{ exported: string[], skipped: string[] }}
  */
-function exportDocPages(db, outputDir = DEFAULT_WIKI_DIR) {
+function exportDocPages(db, outputDir) {
+  outputDir = resolveOutputDir(outputDir);
   _ensureDir(outputDir);
   const rows = db.prepare(
     `SELECT slug, title, primary_topic, source_type, content,
@@ -339,6 +348,10 @@ function exportDocPages(db, outputDir = DEFAULT_WIKI_DIR) {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+function resolveOutputDir(outputDir) {
+  return outputDir || defaultWikiOutputDir();
+}
 
 function _ensureDir(dir) {
   if (!fs.existsSync(dir)) {

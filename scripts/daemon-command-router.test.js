@@ -46,10 +46,6 @@ function createBot(sent) {
   };
 }
 
-function wait(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function createConfig(overrides = {}) {
   return {
     telegram: {},

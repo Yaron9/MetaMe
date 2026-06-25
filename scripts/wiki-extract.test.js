@@ -3,7 +3,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
+const { mkdtempForTest } = require('./test-support/test-utils');
 
 describe('slugFromFilename', () => {
   it('kebab-cases the basename', () => {
@@ -23,22 +23,32 @@ describe('slugFromFilename', () => {
 describe('extractText md/txt', () => {
   it('returns content and extractor=direct for .md', async () => {
     const { extractText } = require('./wiki-extract');
-    const tmpFile = path.join(os.tmpdir(), `test-extract-${Date.now()}.md`);
-    fs.writeFileSync(tmpFile, '# Hello\nWorld');
-    const result = await extractText(tmpFile);
-    assert.equal(result.extractStatus, 'ok');
-    assert.equal(result.extractor, 'direct');
-    assert.ok(result.text.includes('Hello'));
-    assert.equal(result.title, 'Hello');
+    const tmpDir = mkdtempForTest('test-extract-');
+    try {
+      const tmpFile = path.join(tmpDir, 'source.md');
+      fs.writeFileSync(tmpFile, '# Hello\nWorld');
+      const result = await extractText(tmpFile);
+      assert.equal(result.extractStatus, 'ok');
+      assert.equal(result.extractor, 'direct');
+      assert.ok(result.text.includes('Hello'));
+      assert.equal(result.title, 'Hello');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('returns extractStatus=ok for plain .txt', async () => {
     const { extractText } = require('./wiki-extract');
-    const tmpFile = path.join(os.tmpdir(), `test-extract-${Date.now()}.txt`);
-    fs.writeFileSync(tmpFile, 'Just some text');
-    const result = await extractText(tmpFile);
-    assert.equal(result.extractStatus, 'ok');
-    assert.ok(result.text.includes('Just some text'));
+    const tmpDir = mkdtempForTest('test-extract-');
+    try {
+      const tmpFile = path.join(tmpDir, 'source.txt');
+      fs.writeFileSync(tmpFile, 'Just some text');
+      const result = await extractText(tmpFile);
+      assert.equal(result.extractStatus, 'ok');
+      assert.ok(result.text.includes('Just some text'));
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 

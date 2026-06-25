@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { bootstrapReactiveProject, handleReactiveOutput, parseReactiveSignals, replayEventLog, __test } = require('./daemon-reactive-lifecycle');
-const { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, loadProjectManifest, resolveProjectScripts, generateStateFile, buildRunningMemory, scanRelevantArtifacts, buildWorkingMemory, persistMemoryFiles, extractInlineFacts, extractOutputSummary, loadWorkingMemory } = __test;
+const { runProjectVerifier, readPhaseFromState, resolveProjectCwd, appendEvent, projectProgressTsv, loadProjectManifest, resolveProjectScripts, buildRunningMemory, scanRelevantArtifacts, persistMemoryFiles, extractInlineFacts, extractOutputSummary, loadWorkingMemory } = __test;
 const { resolveReactivePaths } = require('./core/reactive-paths');
 
 // ── parseReactiveSignals ──────────────────────────────────────
@@ -163,7 +163,7 @@ describe('handleReactiveOutput — reactive parent', () => {
   });
 
   it('MISSION_COMPLETE with budget exceeded skips auto-start but still completes', () => {
-    const { deps, dispatches, notifications, state } = makeDeps({
+    const { deps, dispatches, state } = makeDeps({
       checkBudget: () => false,
     });
     handleReactiveOutput('scientist', 'MISSION_COMPLETE', REACTIVE_CONFIG, deps);

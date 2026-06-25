@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { toSlug, sanitizeFts5 } = require('./wiki-slug.js');
+const { assertValidWikiSlug, isValidWikiSlug, toSlug, sanitizeFts5 } = require('./wiki-slug.js');
 
 // --- toSlug tests ---
 
@@ -25,6 +25,20 @@ test('toSlug: truncates to 80 chars', () => {
 
 test('toSlug: collapses multiple hyphens', () => {
   assert.equal(toSlug('hello--world'), 'hello-world');
+});
+
+test('isValidWikiSlug: rejects only known junk slugs', () => {
+  assert.equal(isValidWikiSlug(''), false);
+  assert.equal(isValidWikiSlug('   '), false);
+  assert.equal(isValidWikiSlug('undefined'), false);
+  assert.equal(isValidWikiSlug('null'), false);
+  assert.equal(isValidWikiSlug('-2'), false);
+  assert.equal(isValidWikiSlug('topic-2'), true);
+  assert.equal(isValidWikiSlug('钱'), true);
+});
+
+test('assertValidWikiSlug: throws for invalid slug', () => {
+  assert.throws(() => assertValidWikiSlug('-2', 'test'), /invalid slug/);
 });
 
 // --- sanitizeFts5 tests ---

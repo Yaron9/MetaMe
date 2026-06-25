@@ -126,7 +126,7 @@ async function testCollectAndFlushAfterChainDies() {
   const ctx = makeCtx(bot);
 
   // Start first message
-  const p = pipeline.processMessage('chat1', 'msg1', ctx);
+  pipeline.processMessage('chat1', 'msg1', ctx);
   await new Promise(r => setTimeout(r, 20));
 
   // Follow-up → pause + collect (no debounce timer yet)
@@ -180,7 +180,7 @@ async function testMessagesAfterFlushGoToCollecting() {
   const ctx = makeCtx(bot);
 
   // msg1 processing
-  const p = pipeline.processMessage('chat1', 'first', ctx);
+  pipeline.processMessage('chat1', 'first', ctx);
   await new Promise(r => setTimeout(r, 20));
 
   // Follow-up → pause + collect

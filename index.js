@@ -9,7 +9,12 @@ const path = require('path');
 const os = require('os');
 const { spawn, execSync, execFileSync } = require('child_process');
 const { sleepSync, findProcessesByPattern, killProcessTree, icon } = require('./scripts/platform');
-const { collectDeployGroups, collectSyntaxCheckFiles } = require('./scripts/deploy-manifest');
+const {
+  collectDeployGroups,
+  collectSyntaxCheckFiles,
+  isDeployableManagedFile,
+  isTestScriptFile,
+} = require('./scripts/deploy-manifest');
 const { ensureAgyPlugin } = require('./scripts/agy-plugin-installer');
 const {
   findClaudeOnlyPluginHooks,
@@ -216,7 +221,9 @@ function syncDirFiles(srcDir, destDir, { fileList, chmod } = {}) {
   if (!fs.existsSync(srcDir)) return false;
   if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
   let updated = false;
-  const files = fileList || fs.readdirSync(srcDir).filter(f => fs.statSync(path.join(srcDir, f)).isFile());
+  const files = fileList || fs.readdirSync(srcDir).filter(f => {
+    return fs.statSync(path.join(srcDir, f)).isFile() && isDeployableManagedFile(f);
+  });
   for (const f of files) {
     const src = path.join(srcDir, f);
     const dest = path.join(destDir, f);
@@ -488,10 +495,56 @@ function requestDaemonRestart({
 // IMPORTANT: daemon.yaml is USER CONFIG — never overwrite it. Only daemon-default.yaml (template) is synced.
 const scriptsDir = path.join(__dirname, 'scripts');
 const EXCLUDED_SCRIPTS = new Set(['sync-readme.js', 'test_daemon.js', 'daemon.yaml']);
+const OBSOLETE_RUNTIME_ARTIFACTS = [
+  'memory-migrate-v2.js',
+  'test-env-setup.js',
+  'verify-reactive-claude-md.js',
+  path.join('.last-good', 'memory-migrate-v2.js'),
+  path.join('.last-good', 'test-env-setup.js'),
+  path.join('.last-good', 'verify-reactive-claude-md.js'),
+];
+const OBSOLETE_RUNTIME_TEST_DIRS = ['', '.last-good', 'core', 'hooks', 'bin'];
 const SCRIPT_DEPLOY_GROUPS = collectDeployGroups(fs, path, scriptsDir, {
   excludedScripts: EXCLUDED_SCRIPTS,
   includeNestedDirs: ['core'],
 });
+
+function cleanupObsoleteRuntimeArtifacts() {
+  for (const rel of OBSOLETE_RUNTIME_ARTIFACTS) {
+    try {
+      const target = path.join(METAME_DIR, rel);
+      if (fs.existsSync(target) && fs.statSync(target).isFile()) fs.unlinkSync(target);
+    } catch { /* best-effort obsolete artifact cleanup */ }
+  }
+
+  for (const relDir of OBSOLETE_RUNTIME_TEST_DIRS) {
+    try {
+      const dir = relDir ? path.join(METAME_DIR, relDir) : METAME_DIR;
+      if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) continue;
+      for (const entry of fs.readdirSync(dir)) {
+        if (!isTestScriptFile(entry)) continue;
+        const target = path.join(dir, entry);
+        if (fs.statSync(target).isFile()) fs.unlinkSync(target);
+      }
+    } catch { /* best-effort obsolete test artifact cleanup */ }
+  }
+
+  try {
+    const stack = [METAME_DIR];
+    while (stack.length) {
+      const dir = stack.pop();
+      if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) continue;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const target = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          stack.push(target);
+        } else if (entry.isFile() && entry.name === '.DS_Store') {
+          fs.unlinkSync(target);
+        }
+      }
+    }
+  } catch { /* best-effort macOS metadata cleanup */ }
+}
 
 // Protect daemon.yaml: create backup before any sync operation
 const DAEMON_YAML_BACKUP = path.join(METAME_DIR, 'daemon.yaml.bak');
@@ -553,6 +606,8 @@ if (scriptsUpdated) {
     console.log(`${icon("pkg")} Scripts synced to ~/.metame/.`);
   }
 }
+
+cleanupObsoleteRuntimeArtifacts();
 
 try {
   const runtimeEnvFile = path.join(METAME_DIR, 'runtime-env.json');
@@ -618,6 +673,7 @@ const shouldAutoRestartAfterDeploy = (() => {
   if (!cmd) return true;
   if (cmd === 'daemon') return false;
   if (['start', 'stop', 'restart', 'status', 'logs'].includes(cmd)) return false;
+  if (cmd === 'deploy') return true;
   return ['codex', 'continue', 'sync'].includes(cmd);
 })();
 if (daemonCodeUpdated && shouldAutoRestartAfterDeploy) {
@@ -718,6 +774,11 @@ if (!fs.existsSync(DAEMON_CONFIG_FILE)) {
       fs.copyFileSync(daemonTemplate, DAEMON_CONFIG_FILE);
     }
   }
+}
+
+if (process.argv[2] === 'deploy') {
+  console.log(`${icon("ok")} Deploy complete.`);
+  process.exit(0);
 }
 
 // ---------------------------------------------------------
@@ -1286,7 +1347,7 @@ try {
 // Non-session commands (daemon ops, version, help) should not show genesis message
 const _arg2 = process.argv[2];
 const _isNonSessionCmd = ['daemon', 'start', 'stop', 'status', 'logs', 'codex',
-  'sync', 'continue', '-v', '--version', '-h', '--help', 'distill', 'evolve'].includes(_arg2);
+  'sync', 'continue', 'deploy', '-v', '--version', '-h', '--help', 'distill', 'evolve'].includes(_arg2);
 
 let finalProtocol;
 if (isKnownUser) {
@@ -2847,7 +2908,7 @@ if (isSync) {
 if (process.env.METAME_ACTIVE_SESSION === 'true') {
   console.error(`\n${icon("stop")} ACTION BLOCKED: Nested Session Detected`);
   console.error("   You are actively running inside a MetaMe session.");
-  console.error("   Edit source files under \x1b[36mscripts/\x1b[0m only, then redeploy with \x1b[36mnode index.js\x1b[0m.");
+  console.error("   Edit source files under \x1b[36mscripts/\x1b[0m only, then redeploy with \x1b[36mnpm run deploy\x1b[0m.");
   console.error("   Do not edit \x1b[36m~/.metame/\x1b[0m directly; it is a generated runtime copy.\n");
   process.exit(1);
 }

@@ -1,5 +1,16 @@
 'use strict';
 
+const MANAGED_FILE_RE = /\.(js|yaml|sh)$/;
+const TEST_SCRIPT_RE = /(?:^test-.*\.js$|\.test\.js$)/;
+
+function isTestScriptFile(filename) {
+  return TEST_SCRIPT_RE.test(filename);
+}
+
+function isDeployableManagedFile(filename) {
+  return MANAGED_FILE_RE.test(filename) && !isTestScriptFile(filename);
+}
+
 function collectFilesInDir(fs, path, srcDir, opts = {}) {
   const excludedScripts = opts.excludedScripts || new Set();
   const applyExclusions = opts.applyExclusions === true;
@@ -9,8 +20,7 @@ function collectFilesInDir(fs, path, srcDir, opts = {}) {
     const stat = fs.statSync(fullPath);
     if (!stat.isFile()) continue;
     if (applyExclusions && excludedScripts.has(entry)) continue;
-    if (/\.test\.js$/.test(entry)) continue;
-    if (!/\.(js|yaml|sh)$/.test(entry)) continue;
+    if (!isDeployableManagedFile(entry)) continue;
     files.push(entry);
   }
   return files;
@@ -29,8 +39,7 @@ function collectNestedGroups(fs, path, rootDir, destPrefix = '') {
       groups.push(...collectNestedGroups(fs, path, fullPath, childPrefix));
       continue;
     }
-    if (/\.test\.js$/.test(entry)) continue;
-    if (!/\.(js|yaml|sh)$/.test(entry)) continue;
+    if (!isDeployableManagedFile(entry)) continue;
     files.push(entry);
   }
 
@@ -87,4 +96,6 @@ module.exports = {
   collectDeployGroups,
   collectSyntaxCheckFiles,
   collectNestedGroups,
+  isDeployableManagedFile,
+  isTestScriptFile,
 };

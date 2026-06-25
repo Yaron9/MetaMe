@@ -8,6 +8,7 @@
  *   /wiki research <query>    — search wiki + facts, format answer (trackSearch: true)
  *   /wiki page <slug>         — show full content of a page
  *   /wiki sync                — force rebuild stale pages (staleness ≥ 0.4)
+ *   /wiki audit               — write lightweight audit reports into Obsidian
  *   /wiki pin <tag> [title]   — manually register a topic (force=true, pinned=1)
  *   /wiki open                — open Obsidian vault
  *
@@ -25,9 +26,16 @@ const {
   searchWikiAndFacts,
   upsertWikiTopic,
 } = require('./core/wiki-db');
+const {
+  buildInventory,
+  buildSafeFixPlan,
+  writeDbReviewBundle,
+  writeAuditReport,
+  writeCleanupManifest,
+} = require('./core/wiki-audit');
+const { resolveWikiOutputDir } = require('./core/wiki-paths');
 
 const STALENESS_THRESHOLD = 0.4;
-const DEFAULT_WIKI_DIR = path.join(os.homedir(), 'Documents', 'MetaMe-Wiki');
 
 function createWikiCommandHandler(deps) {
   const {
@@ -37,7 +45,7 @@ function createWikiCommandHandler(deps) {
     log = () => {},
   } = deps;
 
-  const outputDir = wikiOutputDir || DEFAULT_WIKI_DIR;
+  const outputDir = resolveWikiOutputDir(wikiOutputDir);
 
   /**
    * Main entry point. Returns true if /wiki command was handled.
@@ -65,6 +73,10 @@ function createWikiCommandHandler(deps) {
     }
     if (trimmed === '/wiki sync') {
       await _handleSync(bot, chatId);
+      return true;
+    }
+    if (trimmed === '/wiki audit') {
+      await _handleAudit(bot, chatId);
       return true;
     }
     if (trimmed === '/wiki pin' || trimmed.startsWith('/wiki pin ')) {
@@ -305,6 +317,41 @@ function createWikiCommandHandler(deps) {
     }
   }
 
+  async function _handleAudit(bot, chatId) {
+    try {
+      const db = getDb();
+      const inventory = buildInventory({ activeOutputDir: outputDir, db });
+      const plan = buildSafeFixPlan(inventory);
+      const reviewFiles = writeDbReviewBundle(inventory, db);
+      const auditPath = writeAuditReport(inventory);
+      const manifestPath = writeCleanupManifest(inventory);
+      const dbLine = inventory.db.checked
+        ? `- db rows: ${inventory.db.pageCount} · empty slugs: ${inventory.db.emptySlugs.length} · weird slugs: ${inventory.db.weirdSlugs.length}`
+        : '- db rows: not checked';
+
+      await bot.sendMessage(chatId, [
+        '🧹 Wiki 审计完成',
+        '',
+        `- active dir: \`${inventory.activeOutputDir}\``,
+        `- markdown files: ${inventory.active.fileCount}`,
+        `- deprecated dirs: ${inventory.deprecatedOutputDirs.length}`,
+        `- weird filenames: ${inventory.active.weirdFilenames.length}`,
+        `- duplicate basenames: ${inventory.active.duplicateBasenames.length}`,
+        dbLine,
+        `- db review files: ${reviewFiles.length}`,
+        `- safe-fix dry-run actions: ${plan.actions.length}`,
+        '',
+        `已写入: \`${auditPath}\``,
+        `已写入: \`${manifestPath}\``,
+        '',
+        '未移动、删除或重命名任何文件。',
+      ].join('\n'));
+    } catch (err) {
+      log('ERROR', `[wiki-audit] ${err.message}`);
+      await bot.sendMessage(chatId, `❌ Wiki 审计失败: ${err.message}`);
+    }
+  }
+
   async function _handlePin(bot, chatId, args) {
     if (!args) {
       await bot.sendMessage(chatId, '用法: `/wiki pin <标签> [显示名称]`\n例: `/wiki pin session Session管理`');
@@ -408,6 +455,7 @@ function createWikiCommandHandler(deps) {
       '`/wiki research <关键词>` — 搜索知识',
       '`/wiki page <slug>` — 查看页面全文',
       '`/wiki sync` — 重建陈旧页面',
+      '`/wiki audit` — 生成 Wiki 健康审计与清理清单',
       '`/wiki import <路径>` — 导入本地文档 (md/txt/PDF)',
       '`/wiki pin <标签> [标题]` — 手工注册主题',
       '`/wiki open` — 在 Obsidian 中打开 vault',

@@ -767,7 +767,7 @@ function buildRunningMemory(projectKey, config, deps, parsedEvents) {
  * @param {object} deps
  * @returns {Array<{ path: string, desc: string }>} Top 5 artifacts
  */
-function scanRelevantArtifacts(projectKey, config, deps) {
+function scanRelevantArtifacts(projectKey, config, _deps) {
   const projectCwd = resolveProjectCwd(projectKey, config);
   if (!projectCwd) return [];
 
@@ -834,7 +834,7 @@ function buildWorkingMemory(projectKey, config, deps) {
   const parts = [];
 
   // Phase history as causal chain from event replay
-  const { phase, mission, history } = replayEventLog(projectKey, deps);
+  const { phase, mission } = replayEventLog(projectKey, deps);
 
   // FTS5 query: mission title + current phase (fixed rule, no smart inference)
   const query = ((mission?.title || '') + ' ' + (phase || '')).trim();
@@ -949,7 +949,7 @@ function persistMemoryFiles(projectKey, config, deps, opts = {}) {
  * @param {string} [phase]
  * @returns {Array<{ entity: string, relation: string, value: string, confidence: string }>}
  */
-function extractInlineFacts(projectKey, memberOutput, phase) {
+function extractInlineFacts(projectKey, memberOutput, _phase) {
   if (!memberOutput || typeof memberOutput !== 'string') return [];
 
   const facts = [];

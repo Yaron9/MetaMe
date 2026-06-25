@@ -28,7 +28,7 @@
  *   updateStalenessForTags(db, dirtyTagCounts: Map<string, number>) → void
  */
 
-const { toSlug, sanitizeFts5 } = require('./wiki-slug');
+const { assertValidWikiSlug, toSlug, sanitizeFts5 } = require('./wiki-slug');
 const { calcStaleness } = require('./wiki-staleness');
 
 // ── wiki_pages CRUD ────────────────────────────────────────────────────────────
@@ -87,6 +87,8 @@ function upsertWikiPage(db, {
   membership_hash = null,
   cluster_size = null,
 }) {
+  assertValidWikiSlug(slug, 'upsertWikiPage');
+
   const rawSourceIdsStr = typeof raw_source_ids === 'string'
     ? raw_source_ids : JSON.stringify(raw_source_ids);
   const capsuleRefsStr = typeof capsule_refs === 'string'

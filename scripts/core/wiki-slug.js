@@ -41,6 +41,19 @@ function toSlug(tag) {
   return s;
 }
 
+function isValidWikiSlug(slug) {
+  if (typeof slug !== 'string') return false;
+  const s = slug.trim();
+  if (!s || s === 'undefined' || s === 'null') return false;
+  return !/^-\d*$/.test(s);
+}
+
+function assertValidWikiSlug(slug, label = 'wiki slug') {
+  if (!isValidWikiSlug(slug)) {
+    throw new Error(`${label}: invalid slug ${JSON.stringify(slug)}`);
+  }
+}
+
 /**
  * sanitizeFts5(input) → string | null
  * Strips FTS5 special characters: " * ^ ( ) { } :
@@ -63,4 +76,4 @@ function sanitizeFts5(input) {
   return s;
 }
 
-module.exports = { toSlug, sanitizeFts5 };
+module.exports = { assertValidWikiSlug, isValidWikiSlug, toSlug, sanitizeFts5 };

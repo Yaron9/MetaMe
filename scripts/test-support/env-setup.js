@@ -1,7 +1,13 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+
+const originalTmpdir = os.tmpdir;
+if (path.resolve(originalTmpdir()) === process.cwd()) {
+  os.tmpdir = () => '/tmp';
+}
 
 const originalMkdtempSync = fs.mkdtempSync;
 const createdDirs = new Set();
@@ -22,15 +28,14 @@ fs.mkdtempSync = function(prefix, options) {
   return dir;
 };
 
-// Cleanup on exit
 process.on('exit', () => {
   for (const dir of createdDirs) {
     try {
       if (fs.existsSync(dir)) {
         fs.rmSync(dir, { recursive: true, force: true });
       }
-    } catch (e) {
-      // ignore
+    } catch {
+      // ignore cleanup errors
     }
   }
 });

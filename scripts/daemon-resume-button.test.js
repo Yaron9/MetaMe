@@ -109,7 +109,6 @@ function createRouterHarness(options = {}) {
   const state = { sessions: {} };
   if (options.stateSessions) Object.assign(state.sessions, options.stateSessions);
   if (options.stateExtra && typeof options.stateExtra === 'object') Object.assign(state, options.stateExtra);
-  let savedState = null;
   let sessionCommandCalled = null;
 
   const { handleCommand } = createCommandRouter({

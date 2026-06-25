@@ -33,8 +33,11 @@ const {
   rebuildReflectDirIndex,
   exportDocPages,
 } = require('./wiki-reflect-export');
+const {
+  defaultWikiOutputDir,
+  resolveConfiguredWikiOutputDir,
+} = require('./core/wiki-paths');
 
-const DEFAULT_WIKI_DIR = path.join(os.homedir(), '.metame', 'wiki');
 const DEFAULT_CAPSULES_DIR = path.join(os.homedir(), '.metame', 'memory', 'capsules');
 const DEFAULT_LOG_PATH = path.join(os.homedir(), '.metame', 'wiki_reflect_log.jsonl');
 const DEFAULT_DECISIONS_DIR = path.join(os.homedir(), '.metame', 'memory', 'decisions');
@@ -45,9 +48,7 @@ const STALENESS_THRESHOLD = 0.4;
 const MAX_RETRIES = 3;
 
 function resolveConfiguredOutputDir(config, home = os.homedir()) {
-  const configured = config && config.daemon && config.daemon.wiki_output_dir;
-  if (!configured) return DEFAULT_WIKI_DIR;
-  return path.resolve(String(configured).replace(/^~(?=$|[\\/])/, home));
+  return resolveConfiguredWikiOutputDir(config, { home });
 }
 
 /**
@@ -64,7 +65,7 @@ function resolveConfiguredOutputDir(config, home = os.homedir()) {
  * @returns {{ built: string[], failed: object[], exportFailed: string[] }}
  */
 async function runWikiReflect(db, {
-  outputDir = DEFAULT_WIKI_DIR,
+  outputDir = defaultWikiOutputDir(),
   capsulesDir = DEFAULT_CAPSULES_DIR,
   decisionsDir = DEFAULT_DECISIONS_DIR,
   lessonsDir   = DEFAULT_LESSONS_DIR,

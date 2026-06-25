@@ -10,6 +10,7 @@
         "index.js",
         "scripts/",
         "!scripts/**/*.test.js",
+        "!scripts/test-support/",
         "!scripts/test_daemon.js",
         "!scripts/sync-readme.js",
         "!scripts/hooks/test-*.js",
@@ -18,9 +19,10 @@
         "skills/"
     ],
     "scripts": {
-        "test": "node --require ./scripts/test-env-setup.js --test scripts/*.test.js",
+        "test": "node --require ./scripts/test-support/env-setup.js --test scripts/*.test.js",
         "test:daemon-status": "node --test scripts/daemon-restart-status.test.js",
         "start": "node index.js",
+        "deploy": "node index.js deploy",
         "push": "bash scripts/bin/push-clean.sh",
         "sync:plugin": "node scripts/sync-plugin.js",
         "sync:readme": "node scripts/sync-readme.js",

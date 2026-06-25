@@ -1,6 +1,6 @@
 'use strict';
 
-const { describe, it, beforeEach } = require('node:test');
+const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 
 const { createCommandRouter } = require('./daemon-command-router');
@@ -483,7 +483,6 @@ describe('Session Sticky — Virtual chatId agents (_agent_*)', () => {
 
   for (const { chatId } of virtualAgents) {
     it(`${chatId}: normal message should NOT create new session`, async () => {
-      const agentKey = chatId.replace('_agent_', '');
       const { deps, attachCalls, logEntries } = createDeps();
       const router = createCommandRouter(deps);
       const bot = createBot([]);
@@ -752,7 +751,7 @@ describe('Session Sticky — team_sticky with all bound chats', () => {
     // Set team_sticky to a member whose session does not exist
     state.team_sticky['oc_84be4bf1a1dabc6c1f0c22d0b6feaf8d'] = 'yi';
     // But _agent_yi session exists in our state, so it should NOT trigger
-    const { deps, attachCalls, logEntries } = createDeps({ _state: state });
+    const { deps, attachCalls } = createDeps({ _state: state });
     const router = createCommandRouter(deps);
     const bot = createBot([]);
 

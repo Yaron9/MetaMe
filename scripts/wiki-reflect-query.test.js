@@ -4,10 +4,10 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { DatabaseSync } = require('node:sqlite');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { applyWikiSchema } = require('./memory-wiki-schema');
 const { queryRawFacts } = require('./wiki-reflect-query');
+const { mkdtempForTest } = require('./test-support/test-utils');
 
 function buildTestDb() {
   const db = new DatabaseSync(':memory:');
@@ -108,7 +108,7 @@ test('queryRawFacts returns capsuleExcerpts as empty string when dir missing', (
 
 test('queryRawFacts reads capsule files matching tag', () => {
   const db = buildTestDb();
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-test-'));
+  const tmpDir = mkdtempForTest('wiki-test-');
 
   try {
     fs.writeFileSync(path.join(tmpDir, 'session-management.md'),
@@ -128,7 +128,7 @@ test('queryRawFacts reads capsule files matching tag', () => {
 
 test('queryRawFacts strips frontmatter from capsule excerpts', () => {
   const db = buildTestDb();
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-test-'));
+  const tmpDir = mkdtempForTest('wiki-test-');
 
   try {
     fs.writeFileSync(path.join(tmpDir, 'session.md'),

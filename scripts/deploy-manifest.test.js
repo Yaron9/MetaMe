@@ -3,25 +3,30 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 
 const { collectDeployGroups, collectSyntaxCheckFiles } = require('./deploy-manifest');
+const { mkdtempForTest } = require('./test-support/test-utils');
 
 function makeTempScriptsTree() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-deploy-manifest-'));
+  const root = mkdtempForTest('metame-deploy-manifest-');
   const scriptsDir = path.join(root, 'scripts');
   const coreDir = path.join(scriptsDir, 'core');
   const nestedDir = path.join(coreDir, 'nested');
+  const testSupportDir = path.join(scriptsDir, 'test-support');
   fs.mkdirSync(nestedDir, { recursive: true });
+  fs.mkdirSync(testSupportDir, { recursive: true });
 
   fs.writeFileSync(path.join(scriptsDir, 'daemon.js'), 'console.log("daemon");\n', 'utf8');
+  fs.writeFileSync(path.join(scriptsDir, 'test-helper.js'), 'test\n', 'utf8');
   fs.writeFileSync(path.join(scriptsDir, 'daemon.test.js'), 'test\n', 'utf8');
   fs.writeFileSync(path.join(scriptsDir, 'daemon-default.yaml'), 'enabled: false\n', 'utf8');
   fs.writeFileSync(path.join(scriptsDir, 'sync-readme.js'), 'console.log("skip");\n', 'utf8');
   fs.writeFileSync(path.join(coreDir, 'audit.js'), 'module.exports = {};\n', 'utf8');
+  fs.writeFileSync(path.join(coreDir, 'test-audit.js'), 'test\n', 'utf8');
   fs.writeFileSync(path.join(nestedDir, 'deeper.js'), 'module.exports = 1;\n', 'utf8');
   fs.writeFileSync(path.join(coreDir, 'audit.test.js'), 'test\n', 'utf8');
+  fs.writeFileSync(path.join(testSupportDir, 'test-utils.js'), 'module.exports = {};\n', 'utf8');
 
   return { root, scriptsDir };
 }
@@ -40,6 +45,7 @@ describe('collectDeployGroups', () => {
     assert.deepEqual(groups[1].fileList, ['audit.js']);
     assert.equal(groups[2].destSubdir, path.join('core', 'nested'));
     assert.deepEqual(groups[2].fileList, ['deeper.js']);
+    assert.equal(groups.some(group => group.destSubdir === 'test-support'), false);
   });
 });
 

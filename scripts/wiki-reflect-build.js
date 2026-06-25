@@ -22,7 +22,7 @@ const { extractText, extractSections } = require('./wiki-extract');
 const { extractPaperFacts, buildTier1Prompt } = require('./wiki-facts');
 const { buildComparisonMatrix, buildTimeline, detectContradictions, buildCoverageReport } = require('./wiki-synthesis');
 const { upsertWikiPage, resetPageStaleness, appendWikiTimeline } = require('./core/wiki-db');
-const { chunkText } = require('./core/chunker');
+const { enqueueContentChunks } = require('./core/wiki-chunks');
 const { membershipHash, findMatchingCluster } = require('./wiki-cluster');
 
 const LLM_TIMEOUT_MS = 60000; // Sonnet needs more time than Haiku
@@ -67,6 +67,7 @@ async function generateWikiContent(prompt, providers, allowedSlugs) {
  *           cluster_size?: number }} pageSpec
  * @param {string} content
  * @param {{ docSourceIds?: number[], role?: string }} opts
+ * @returns {string[]} inserted chunk ids
  */
 function writeWikiPageWithChunks(db, pageSpec, content, { docSourceIds = [], role } = {}) {
   const {
@@ -116,19 +117,7 @@ function writeWikiPageWithChunks(db, pageSpec, content, { docSourceIds = [], rol
     // Delete old chunks
     db.prepare('DELETE FROM content_chunks WHERE page_slug = ?').run(slug);
 
-    // Create new chunks + enqueue
-    const chunks = chunkText(content, { targetWords: 300 });
-    const insertChunk = db.prepare(
-      'INSERT INTO content_chunks (id, page_slug, chunk_text, chunk_idx) VALUES (?, ?, ?, ?)',
-    );
-    const enqueue = db.prepare(
-      "INSERT INTO embedding_queue (item_type, item_id) VALUES ('chunk', ?)",
-    );
-    for (let i = 0; i < chunks.length; i++) {
-      const chunkId = `ck_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      insertChunk.run(chunkId, slug, chunks[i], i);
-      enqueue.run(chunkId);
-    }
+    const chunkIds = enqueueContentChunks(db, slug, content);
 
     // Link doc_sources if provided
     if (docSourceIds.length > 0) {
@@ -142,6 +131,7 @@ function writeWikiPageWithChunks(db, pageSpec, content, { docSourceIds = [], rol
     }
 
     db.prepare('COMMIT').run();
+    return chunkIds;
   } catch (err) {
     try { db.prepare('ROLLBACK').run(); } catch { /* ignore */ }
     throw err; // propagate DB errors to caller
@@ -175,7 +165,7 @@ async function buildWikiPage(db, topic, queryResult, { allowedSlugs = [], provid
 
   // Write to DB in a transaction
   const topicTagsArr = [topic.tag];
-  writeWikiPageWithChunks(db, {
+  const chunkIds = writeWikiPageWithChunks(db, {
     slug: topic.slug,
     primary_topic: topic.tag,
     title: topic.label || topic.tag,
@@ -186,8 +176,7 @@ async function buildWikiPage(db, topic, queryResult, { allowedSlugs = [], provid
   }, content, { docSourceIds: [] });
 
   // Append evidence to timeline (compiled truth was just rewritten above)
-  const chunks = chunkText(content, { targetWords: 300 });
-  appendWikiTimeline(db, topic.slug, `基于 ${totalCount} 条 facts 重建 (${rawSourceIds.length} 条直接引用, ${chunks.length} chunks)`);
+  appendWikiTimeline(db, topic.slug, `基于 ${totalCount} 条 facts 重建 (${rawSourceIds.length} 条直接引用, ${chunkIds.length} chunks)`);
 
   return { slug: topic.slug, content, strippedLinks, rawSourceIds };
 }

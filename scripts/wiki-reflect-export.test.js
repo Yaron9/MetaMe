@@ -3,8 +3,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
+const { mkdtempForTest } = require('./test-support/test-utils');
 const {
   exportWikiPage,
   rebuildIndex,
@@ -18,7 +18,7 @@ const {
 } = require('./wiki-reflect-export');
 
 function makeTmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-export-test-'));
+  return mkdtempForTest('wiki-export-test-');
 }
 
 const SAMPLE_FRONTMATTER = {
@@ -161,6 +161,18 @@ test('rebuildIndex adds capsules navigation', () => {
     rebuildIndex([], dir, { capsuleCount: 2 });
     const content = fs.readFileSync(path.join(dir, '_index.md'), 'utf8');
     assert.ok(content.includes('[[capsules/_index|Knowledge Capsules]] (2)'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rebuildIndex links audit and cleanup reports', () => {
+  const dir = makeTmpDir();
+  try {
+    rebuildIndex([], dir);
+    const content = fs.readFileSync(path.join(dir, '_index.md'), 'utf8');
+    assert.ok(content.includes('[[_audit|Wiki Audit]]'));
+    assert.ok(content.includes('[[_cleanup-manifest|Cleanup Manifest]]'));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

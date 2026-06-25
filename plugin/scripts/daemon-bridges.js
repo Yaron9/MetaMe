@@ -32,7 +32,7 @@ function createBridgeStarter(deps) {
     messageQueue: _messageQueue,       // legacy — now handled by pipeline
     sendRemoteDispatch,          // optional — send packet to remote peer via relay chat
     handleRemoteDispatchMessage, // optional — intercept relay chat messages
-    getOrCreateWorktree,         // optional — isolated worktree per actor
+    getOrCreateWorktree: _getOrCreateWorktree, // optional — isolated worktree per actor
   } = deps;
 
   async function sendAclReply(bot, chatId, text) {

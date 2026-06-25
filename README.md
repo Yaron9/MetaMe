@@ -718,7 +718,7 @@ MetaMe is early-stage and evolving fast. Every issue and PR directly shapes the 
 
 **Submit a PR:**
 1. Fork the repo and create a branch from `main`
-2. All source edits go in `scripts/`. `~/.metame/` is a generated runtime copy, not a source directory. Run `node index.js` to redeploy local runtime files after edits, and use `npm run sync:plugin` only when you need to refresh `plugin/scripts/`
+2. All source edits go in `scripts/`. `~/.metame/` is a generated runtime copy, not a source directory. Run `npm run deploy` to redeploy local runtime files after edits, and use `npm run sync:plugin` only when you need to refresh `plugin/scripts/`
 3. Run `npx eslint scripts/daemon*.js` — zero errors required
 4. Run `npm test` — all tests must pass
 5. Open a PR against `main` with a clear description

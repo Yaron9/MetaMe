@@ -10,9 +10,12 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { DatabaseSync } = require('node:sqlite');
+const fs = require('fs');
+const path = require('path');
 const { applyWikiSchema } = require('./memory-wiki-schema');
 const { upsertWikiTopic } = require('./core/wiki-db');
 const { createWikiCommandHandler } = require('./daemon-wiki');
+const { mkdtempForTest } = require('./test-support/test-utils');
 
 function buildTestDb() {
   const db = new DatabaseSync(':memory:');
@@ -53,16 +56,17 @@ function makeProviders({ response = 'Wiki content.', fail = false } = {}) {
   };
 }
 
-function makeHandler(db, providers) {
+function makeTempDir() {
+  return mkdtempForTest('metame-daemon-wiki-');
+}
+
+function makeHandler(db, providers, extra = {}) {
   const handler = createWikiCommandHandler({
     getDb: () => db,
     providers,
+    ...extra,
   });
   return handler;
-}
-
-async function send(handler, bot, text) {
-  return handler.handleWikiCommand({ bot, chatId: 'chat_test', text });
 }
 
 // ── /wiki (list) ──────────────────────────────────────────────────────────────
@@ -183,6 +187,48 @@ test('/wiki pin without args shows usage', async () => {
   db.close();
 });
 
+// ── /wiki audit ───────────────────────────────────────────────────────────────
+
+test('/wiki audit writes audit reports without moving wiki files', async () => {
+  const db = buildTestDb();
+  const wikiOutputDir = makeTempDir();
+  db.prepare(`
+    INSERT INTO wiki_pages (id, slug, title, content, primary_topic)
+    VALUES ('wp_empty', '', 'Bad Slug', 'Old content', 'broken')
+  `).run();
+  db.prepare(`
+    INSERT INTO wiki_pages (id, slug, title, content, primary_topic)
+    VALUES ('wp_bad', '-2', 'Bad Slug', 'Canonical content', 'broken')
+  `).run();
+  fs.writeFileSync(path.join(wikiOutputDir, '-2.md'), [
+    '---',
+    'title: Bad Slug',
+    '---',
+    '',
+  ].join('\n'), 'utf8');
+
+  const bot = makeMockBot();
+  const { handleWikiCommand } = makeHandler(db, makeProviders(), { wikiOutputDir });
+
+  const handled = await handleWikiCommand({ bot, chatId: 'c1', text: '/wiki audit' });
+  assert.equal(handled, true);
+  assert.equal(fs.existsSync(path.join(wikiOutputDir, '_audit.md')), true);
+  assert.equal(fs.existsSync(path.join(wikiOutputDir, '_cleanup-manifest.md')), true);
+  const reviewDir = path.join(wikiOutputDir, '_review', 'wiki-db');
+  assert.equal(fs.existsSync(reviewDir), true);
+  assert.equal(fs.readdirSync(reviewDir).filter(name => name.endsWith('.md')).length, 1);
+  assert.equal(fs.existsSync(path.join(wikiOutputDir, '-2.md')), true, 'audit must not move weird files');
+  assert.ok(bot.messages[0].includes('Wiki 审计完成'), 'should confirm audit');
+  assert.ok(bot.messages[0].includes('empty slugs: 1'), 'should report DB empty slug count');
+  assert.ok(bot.messages[0].includes('weird slugs: 1'), 'should report DB weird slug count');
+  assert.ok(bot.messages[0].includes('db review files: 1'), 'should report review bundle count');
+  assert.ok(bot.messages[0].includes('未移动、删除或重命名'), 'should state no destructive action');
+  const audit = fs.readFileSync(path.join(wikiOutputDir, '_audit.md'), 'utf8');
+  assert.match(audit, /## DB Quality Signals/);
+  assert.match(audit, /empty slugs: 1/);
+  db.close();
+});
+
 // ── /wiki help / unknown subcommand ───────────────────────────────────────────
 
 test('/wiki help shows command list', async () => {
@@ -194,6 +240,7 @@ test('/wiki help shows command list', async () => {
   assert.equal(handled, true);
   assert.ok(bot.messages[0].includes('research'), 'help should mention research');
   assert.ok(bot.messages[0].includes('sync'), 'help should mention sync');
+  assert.ok(bot.messages[0].includes('audit'), 'help should mention audit');
   db.close();
 });
 

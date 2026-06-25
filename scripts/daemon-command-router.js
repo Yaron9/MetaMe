@@ -2,6 +2,7 @@
 
 const { resolveEngineModel } = require('./daemon-engine-runtime');
 const { rawChatId: extractOriginalChatId, isThreadChatId } = require('./core/thread-chat-id');
+const { resolveConfiguredWikiOutputDir } = require('./core/wiki-paths');
 const { createWikiCommandHandler } = require('./daemon-wiki');
 
 function createCommandRouter(deps) {
@@ -460,9 +461,7 @@ function createCommandRouter(deps) {
         callHaiku: (...args) => providerMod.callHaiku(...args),
         buildDistillEnv: (...args) => providerMod.buildDistillEnv(...args),
       } : null;
-      const wikiOutputDir = config && config.daemon && config.daemon.wiki_output_dir
-        ? config.daemon.wiki_output_dir.replace(/^~/, process.env.HOME || '')
-        : null;
+      const wikiOutputDir = resolveConfiguredWikiOutputDir(config, { home: process.env.HOME || undefined });
       const { handleWikiCommand } = createWikiCommandHandler({ getDb, providers: wikiProviders, wikiOutputDir, log });
       if (await handleWikiCommand({ bot, chatId, text })) return;
     }

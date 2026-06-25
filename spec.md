@@ -112,6 +112,16 @@ Reactive loop 通过正则读取 `NEXT_DISPATCH` 和 `MISSION_COMPLETE`。这适
 
 Runtime 启动时应做 capability probe，不把某一 CLI 版本的具体 flag 当成永恒接口；flag 映射集中在 `daemon-engine-runtime.js`。
 
+### 2.5 EverOS 参考取舍
+
+EverOS 值得吸收的是边界纪律，不是运行时依赖：
+
+1. **可读源与可重建投影分离。** EverOS 以 Markdown 作为用户可读、可编辑、可 diff 的事实源，SQLite/LanceDB 只是索引和状态投影。MetaMe 的控制面反向取舍：Goal/Run/Attempt 的事务事实源必须是 SQLite，Markdown/TSV/wiki 只能是可重建投影；知识与 wiki 内容则继续保持 Markdown 优先。
+2. **路径表达作用域。** EverOS 用 `<app>/<project>/<scope>` 目录承载隔离边界，而不是把所有语义塞进 frontmatter。MetaMe 的项目、agent、workspace、wiki 输出也应优先用路径/数据库外键表达所有权，frontmatter 只保留展示和检索所需字段。
+3. **单向依赖与嵌入式栈。** EverOS 的 entrypoint -> service -> domain -> persistence 边界值得吸收；但 MetaMe 不复制其 Python 服务、LanceDB、cascade daemon 或 OME。现阶段只保留 Node daemon + SQLite + Markdown 投影，避免多一套常驻系统。
+
+因此，本规格吸收 EverOS 的工程约束，不把 EverOS 作为系统依赖。
+
 ## 3. 目标与非目标
 
 ### 3.1 目标
@@ -123,6 +133,8 @@ Runtime 启动时应做 capability probe，不把某一 CLI 版本的具体 flag
 - 同一 Goal 不重入；多 Goal 可受控并发。
 - 用户可查询、暂停、恢复、取消、立即运行，且状态含义一致。
 - 兼容现有配置并允许无停机迁移。
+- 清理已有遗留输出与重复状态；新增入口必须同时给出审计、回收和删除边界，不能只增加新路径。
+- runtime/package 只携带仍有读者的运行入口、幂等维护工具和迁移期脚本；一次性验收脚本、已完成的破坏性迁移器不得继续分发，除非有显式命令、幂等保护和测试覆盖。
 
 ### 3.2 非目标
 
@@ -131,6 +143,9 @@ Runtime 启动时应做 capability probe，不把某一 CLI 版本的具体 flag
 - 不在首版实现通用 Manager/Worker DAG；运行时内部子 Agent 使用 Claude/Codex 原生能力，跨进程协作继续复用现有 Task Envelope。
 - 不实现第二套工具级 sandbox、approval、session、compaction、worktree 或结构化输出系统。
 - 不自动 merge、push、publish 或执行不可逆外部动作；这些仍受现有确认边界约束。
+- 不引入 EverOS、LanceDB、Redis、Elasticsearch 等新常驻依赖作为本轮收敛前提；需要索引时先证明现有 SQLite/FTS/Markdown 投影不足。
+- 不保留无人读取的旧输出目录、旧数据库行或旧配置键作为“兼容性保险”；兼容必须有读者、迁移期和删除条件。
+- 不把“历史验证通过”作为保留脚本的理由；验证逻辑应进入测试或审计工具，过期 verifier 必须删除或归档出发布面。
 
 ## 4. 统一领域模型
 

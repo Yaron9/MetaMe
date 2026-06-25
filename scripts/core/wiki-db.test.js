@@ -158,6 +158,30 @@ describe('wiki-db', () => {
       assert.equal(row.content, 'v2 content');
       assert.equal(row.raw_source_count, 8);
     });
+
+    it('should reject empty and junk slugs before writing', () => {
+      const db = openTestDb();
+
+      assert.throws(() => {
+        upsertWikiPage(db, { slug: '', primary_topic: 'broken', title: 'Broken', content: 'x' });
+      }, /invalid slug/);
+      assert.throws(() => {
+        upsertWikiPage(db, { slug: '-2', primary_topic: 'broken', title: 'Broken', content: 'x' });
+      }, /invalid slug/);
+
+      const count = db.prepare('SELECT COUNT(*) AS n FROM wiki_pages').get().n;
+      assert.equal(count, 0);
+    });
+
+    it('should allow normal collision suffixes and short Chinese slugs', () => {
+      const db = openTestDb();
+
+      upsertWikiPage(db, { slug: 'topic-2', primary_topic: 'topic', title: 'Topic 2', content: 'x' });
+      upsertWikiPage(db, { slug: '钱', primary_topic: '钱', title: '钱', content: 'x' });
+
+      assert.ok(getWikiPageBySlug(db, 'topic-2'));
+      assert.ok(getWikiPageBySlug(db, '钱'));
+    });
   });
 
   // ── Test 8: getStalePages ──────────────────────────────────────────────────
