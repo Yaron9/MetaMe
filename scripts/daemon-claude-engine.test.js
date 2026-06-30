@@ -9,7 +9,7 @@ const { PassThrough } = require('stream');
 const { EventEmitter } = require('events');
 const { createClaudeEngine } = require('./daemon-claude-engine');
 
-function createEngineWithState(state) {
+function createEngineWithState(state, overrides = {}) {
   return createClaudeEngine({
     fs,
     path,
@@ -62,6 +62,7 @@ function createEngineWithState(state) {
       killSignal: 'SIGTERM',
       timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: 2000 },
     }),
+    ...overrides,
   });
 }
 
@@ -235,6 +236,15 @@ describe('daemon-claude-engine private helpers', () => {
         ceilingMs: 60 * 60 * 1000,
       }
     );
+  });
+
+  it('formats empty final replies without a completed placeholder', () => {
+    const state = { sessions: {} };
+    const engine = createEngineWithState(state);
+
+    assert.match(engine._private.formatEmptyFinalReplyNotice([]), /没有返回最终文字回复/);
+    assert.doesNotMatch(engine._private.formatEmptyFinalReplyNotice([]), /✅\s*完成/);
+    assert.match(engine._private.formatEmptyFinalReplyNotice(['/tmp/a.md']), /1 个文件变更/);
   });
 
   it('preserves explicit zero-valued streaming timeout overrides', () => {
@@ -650,7 +660,7 @@ describe('daemon-claude-engine private helpers', () => {
         parseStreamEvent: (line) => {
           const raw = JSON.parse(line);
           if (raw.kind === 'session') return [{ type: 'session', sessionId: raw.id }];
-          if (raw.kind === 'assistant') return [{ type: 'assistant', text: raw.text }];
+          if (raw.kind === 'assistant') return [{ type: 'text', text: raw.text }];
           return [];
         },
         classifyError: () => null,
@@ -2396,6 +2406,29 @@ describe('daemon-claude-engine private helpers', () => {
     assert.equal(idleResult.ok, false);
     assert.ok(sent.some((text) => /工具执行.*超时/.test(text)));
     assert.ok(sent.some((text) => /无输出/.test(text)));
+  });
+
+  it('does not report empty final replies as completed', async () => {
+    const state = { sessions: {} };
+    const sent = [];
+    const engine = createEngineWithState(state, {
+      spawn: () => createFakeCodexProcess([]),
+    });
+
+    const bot = {
+      sendTyping: async () => {},
+      sendMessage: async (_chatId, text) => {
+        sent.push(String(text));
+        return { message_id: `msg-${sent.length}` };
+      },
+    };
+
+    const result = await engine.askClaude(bot, 'empty-chat', 'empty prompt', {}, false, 'ou_admin');
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'EMPTY_FINAL_REPLY');
+    assert.ok(sent.some((text) => /没有返回最终文字回复/.test(text)));
+    assert.ok(sent.every((text) => !/✅\s*完成/.test(text)));
   });
 
   it('fails fast on streaming stdin errors without waiting for close', async () => {

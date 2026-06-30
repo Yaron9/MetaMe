@@ -43,6 +43,7 @@ tasks/
 upload/
 
 # Generated test files
+metame-*/
 test_daemon.js
 scripts/test_daemon.js
 run_test.js

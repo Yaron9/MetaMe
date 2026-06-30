@@ -520,6 +520,14 @@ function createClaudeEngine(deps) {
     return { markedFiles, cleanOutput };
   }
 
+  function formatEmptyFinalReplyNotice(files) {
+    const fileCount = Array.isArray(files) ? files.length : 0;
+    if (fileCount > 0) {
+      return `⚠️ 任务已结束，检测到 ${fileCount} 个文件变更，但模型没有返回最终文字回复。`;
+    }
+    return '⚠️ 任务已结束，但模型没有返回最终文字回复；未发送“完成”占位。请重试，或查看 daemon 日志定位上游空回复。';
+  }
+
   /**
    * Merge explicit [[FILE:...]] paths with auto-detected content files.
    * Returns a Set of unique file paths.
@@ -2299,7 +2307,8 @@ function createClaudeEngine(deps) {
         }
       }
 
-      // When Claude completes with no text output (pure tool work), send a done notice
+      // No text output is not a valid final reply. Keep explicit dispatch confirmation,
+      // but do not mask ordinary empty responses as a successful "done".
       if (output === '' && !error) {
         // Special case: if dispatch_to was called, send a "forwarded" confirmation
         const dispatchedTargets = (toolUsageLog || [])
@@ -2323,20 +2332,22 @@ function createClaudeEngine(deps) {
           if (wasNew) markSessionStarted(sessionChatId, engineName);
           return { ok: true };
         }
-        const filesDesc = files && files.length > 0 ? `\n修改了 ${files.length} 个文件` : '';
-        const doneText = `✅ 完成${filesDesc}`;
+        const emptyReplyText = formatEmptyFinalReplyNotice(files);
         let doneMsg;
         if (statusMsgId && bot.editMessage) {
-          await bot.editMessage(chatId, statusMsgId, doneText, _ackCardHeader).catch(() => {});
+          await bot.editMessage(chatId, statusMsgId, emptyReplyText, _ackCardHeader).catch(() => {});
           doneMsg = { message_id: statusMsgId };
         } else {
           if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => {});
-          doneMsg = await bot.sendMessage(chatId, doneText);
+          doneMsg = await bot.sendMessage(chatId, emptyReplyText);
         }
         if (doneMsg && doneMsg.message_id && session) trackMsgSession(doneMsg.message_id, session, projectKeyFromVirtualChatId(chatId));
         const wasNew = !session.started;
         if (wasNew) markSessionStarted(sessionChatId, engineName);
-        return { ok: true };
+        const hasFileChanges = Array.isArray(files) && files.length > 0;
+        return hasFileChanges
+          ? { ok: true, warning: 'EMPTY_FINAL_REPLY' }
+          : { ok: false, error: 'EMPTY_FINAL_REPLY' };
       }
 
       // Merge-pause with partial output: save card for reuse, discard partial output
@@ -2722,6 +2733,7 @@ function createClaudeEngine(deps) {
       buildCodexFallbackBridgePrompt,
       projectKeyFromVirtualChatId,
       buildAgentCardHeaderForChat,
+      formatEmptyFinalReplyNotice,
     },
   };
 }
