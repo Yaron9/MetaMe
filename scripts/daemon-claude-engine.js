@@ -232,6 +232,7 @@ function createClaudeEngine(deps) {
       && (!output || !!errorCode)
       && failureKind !== 'user-stop'
       && failureKind !== 'merge-pause'
+      && failureKind !== 'fatal'
       && !!canRetry;
   }
 
@@ -455,6 +456,30 @@ function createClaudeEngine(deps) {
     const message = String(error || '').trim();
     const code = String(errorCode || '').trim();
     const lowered = message.toLowerCase();
+    const nonRetryable = (
+      code === 'AUTH_REQUIRED'
+      || code === 'RATE_LIMIT'
+      || lowered.includes('usage limit')
+      || lowered.includes('purchase more credits')
+      || lowered.includes('quota')
+      || lowered.includes('rate limit')
+      || lowered.includes('too many requests')
+      || lowered.includes('429')
+      || lowered.includes('unauthorized')
+      || lowered.includes('authentication')
+      || lowered.includes('api key')
+      || lowered.includes('login')
+      || lowered.includes('forbidden')
+      || lowered.includes('401')
+      || lowered.includes('403')
+    );
+    if (nonRetryable) {
+      return {
+        kind: 'fatal',
+        userMessage: '',
+        retryPromptPrefix: '',
+      };
+    }
     if (code === 'INTERRUPTED_USER') {
       return {
         kind: 'user-stop',
@@ -2590,6 +2615,26 @@ function createClaudeEngine(deps) {
         return { ok: !timedOut };
       } else {
         const errMsg = error || 'Unknown error';
+        if (errorCode === 'EMPTY_ENGINE_RESPONSE') {
+          const emptyReplyText = formatEmptyFinalReplyNotice(files);
+          let doneMsg;
+          if (statusMsgId && bot.editMessage) {
+            await bot.editMessage(chatId, statusMsgId, emptyReplyText, _ackCardHeader).catch(() => {});
+            doneMsg = { message_id: statusMsgId };
+          } else {
+            if (statusMsgId && bot.deleteMessage) bot.deleteMessage(chatId, statusMsgId).catch(() => {});
+            doneMsg = await bot.sendMessage(chatId, emptyReplyText);
+          }
+          if (doneMsg && doneMsg.message_id && session) {
+            trackMsgSession(doneMsg.message_id, session, projectKeyFromVirtualChatId(chatId));
+          }
+          const wasNew = !session.started;
+          if (wasNew) markSessionStarted(sessionChatId, engineName);
+          const hasFileChanges = Array.isArray(files) && files.length > 0;
+          return hasFileChanges
+            ? { ok: true, warning: 'EMPTY_FINAL_REPLY' }
+            : { ok: false, error: 'EMPTY_FINAL_REPLY', errorCode };
+        }
         const userErrMsg = (errorCode === 'AUTH_REQUIRED' || errorCode === 'AGY_AUTH_REQUIRED' || errorCode === 'RATE_LIMIT')
           ? errMsg
           : `Error: ${errMsg.slice(0, 200)}`;

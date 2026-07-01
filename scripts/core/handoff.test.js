@@ -413,6 +413,36 @@ describe('resolveStreamingClosePayload', () => {
     assert.equal(result.error, 'friendly message');
     assert.equal(result.errorCode, 'EXEC_FAILURE');
   });
+
+  it('surfaces classified engine errors even when adapter exits zero with no final output', () => {
+    const result = resolveStreamingClosePayload({
+      code: 0,
+      streamState: emptyStream,
+      watchdog: { isKilled: () => false, getKilledReason: () => null },
+      timeoutConfig: defaultTimeout,
+      classifiedError: { message: 'agy returned no final answer', code: 'AGY_EXEC_FAILURE' },
+      stderr: '',
+    });
+
+    assert.equal(result.output, null);
+    assert.equal(result.error, 'agy returned no final answer');
+    assert.equal(result.errorCode, 'AGY_EXEC_FAILURE');
+  });
+
+  it('does not treat zero-exit empty engine output as a successful reply', () => {
+    const result = resolveStreamingClosePayload({
+      code: 0,
+      streamState: emptyStream,
+      watchdog: { isKilled: () => false, getKilledReason: () => null },
+      timeoutConfig: defaultTimeout,
+      classifiedError: null,
+      stderr: '',
+    });
+
+    assert.equal(result.output, null);
+    assert.equal(result.error, 'Engine completed without a final response.');
+    assert.equal(result.errorCode, 'EMPTY_ENGINE_RESPONSE');
+  });
 });
 
 describe('accumulateStreamingStderr', () => {

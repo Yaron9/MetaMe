@@ -209,7 +209,7 @@ function classifyEngineError(text) {
       message: '认证失败，请先执行 `codex login`（或配置 OPENAI_API_KEY）后重试。',
     };
   }
-  if (/(rate.?limit|too many requests|quota|429)/i.test(msg)) {
+  if (/(rate.?limit|usage limit|too many requests|quota|purchase more credits|429)/i.test(msg)) {
     return {
       code: 'RATE_LIMIT',
       message: '请求频率或配额受限，请稍后重试。',

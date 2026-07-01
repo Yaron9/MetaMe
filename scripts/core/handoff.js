@@ -253,6 +253,13 @@ function resolveStreamingClosePayload(opts) {
     }, { timedOut: true });
   }
 
+  if (classifiedError && classifiedError.message && !finalResult) {
+    return buildStreamingResult({
+      ...base,
+      error: classifiedError.message,
+    }, { errorCode: classifiedError.code });
+  }
+
   if (code !== 0) {
     return buildStreamingResult({
       ...base,
@@ -260,6 +267,13 @@ function resolveStreamingClosePayload(opts) {
         ? classifiedError.message
         : (stderr || `Exit code ${code}`),
     }, { errorCode: classifiedError ? classifiedError.code : undefined });
+  }
+
+  if (!finalResult) {
+    return buildStreamingResult({
+      ...base,
+      error: 'Engine completed without a final response.',
+    }, { errorCode: 'EMPTY_ENGINE_RESPONSE' });
   }
 
   return buildStreamingResult({

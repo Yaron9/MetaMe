@@ -845,6 +845,16 @@ describe('daemon-claude-engine private helpers', () => {
       failureKind: 'user-stop',
       canRetry: true,
     }), false);
+
+    assert.equal(engine._private.shouldRetryCodexResumeFallback({
+      runtimeName: 'codex',
+      wasResumeAttempt: true,
+      output: '',
+      error: "You've hit your usage limit.",
+      errorCode: 'RATE_LIMIT',
+      failureKind: 'fatal',
+      canRetry: true,
+    }), false);
   });
 
   it('classifies interrupted codex resume separately from expired sessions', () => {
@@ -876,6 +886,15 @@ describe('daemon-claude-engine private helpers', () => {
     assert.equal(expired.kind, 'expired');
     assert.match(expired.userMessage, /session 已过期/);
     assert.match(expired.retryPromptPrefix, /session expired/i);
+
+    const usageLimit = engine._private.classifyCodexResumeFailure(
+      "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.",
+      'EXEC_FAILURE'
+    );
+    assert.equal(usageLimit.kind, 'fatal');
+
+    const auth = engine._private.classifyCodexResumeFailure('Unauthorized. Please login.', 'AUTH_REQUIRED');
+    assert.equal(auth.kind, 'fatal');
   });
 
   it('enforces codex resume retry window by chat id', () => {
@@ -1650,6 +1669,120 @@ describe('daemon-claude-engine private helpers', () => {
     assert.deepEqual(spawnCalls[0].slice(0, 3), ['exec', 'resume', 'resume-thread-1']);
     assert.deepEqual(spawnCalls[1].slice(0, 3), ['exec', 'resume', 'resume-thread-1']);
     assert.equal(createCount, 0);
+  });
+
+  it('does not create a fresh codex session when resume fails with usage limit', async () => {
+    const state = {
+      sessions: {
+        _bound_metame: {
+          cwd: '/tmp/metame',
+          engines: {
+            codex: {
+              id: 'resume-thread-quota',
+              started: true,
+              runtimeSessionObserved: true,
+              sandboxMode: 'danger-full-access',
+              approvalPolicy: 'never',
+              permissionMode: 'danger-full-access',
+            },
+          },
+        },
+      },
+    };
+    const spawnCalls = [];
+    const sentMessages = [];
+    let createCount = 0;
+
+    const engine = createClaudeEngine({
+      fs,
+      path,
+      spawn: (_cmd, args) => {
+        spawnCalls.push(args.slice());
+        return createFakeCodexProcess([
+          {
+            type: 'error',
+            message: "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 5:33 PM.",
+          },
+        ]);
+      },
+      CLAUDE_BIN: 'claude',
+      HOME: os.homedir(),
+      CONFIG_FILE: '/tmp/daemon.yaml',
+      getActiveProviderEnv: () => ({}),
+      activeProcesses: new Map(),
+      saveActivePids: () => {},
+      messageQueue: new Map(),
+      log: () => {},
+      yaml: { load: () => ({}) },
+      providerMod: null,
+      writeConfigSafe: () => {},
+      loadConfig: () => ({
+        feishu: { chat_agent_map: { oc_metame: 'metame' } },
+        projects: { metame: { cwd: '/tmp/metame', name: 'MetaMe', engine: 'codex' } },
+      }),
+      loadState: () => state,
+      saveState: (next) => {
+        Object.assign(state, next);
+        state.sessions = next.sessions;
+      },
+      routeAgent: () => null,
+      routeSkill: () => null,
+      attachOrCreateSession: () => {},
+      normalizeCwd: (p) => path.resolve(String(p || '')),
+      isContentFile: () => false,
+      sendFileButtons: async () => [],
+      findSessionFile: () => null,
+      listRecentSessions: () => [],
+      getSession: (chatId) => state.sessions[chatId] || null,
+      getSessionForEngine: (chatId, engineName) => {
+        const raw = state.sessions[chatId];
+        if (!raw) return null;
+        const slot = raw.engines && raw.engines[engineName];
+        return slot ? { cwd: raw.cwd, engine: engineName, ...slot } : null;
+      },
+      createSession: () => {
+        createCount += 1;
+        return { id: `new-session-${createCount}`, cwd: '/tmp/metame', started: false, engine: 'codex' };
+      },
+      getSessionName: () => '',
+      writeSessionName: () => {},
+      markSessionStarted: () => {},
+      isEngineSessionValid: () => true,
+      getCodexSessionSandboxProfile: () => ({ sandboxMode: 'danger-full-access', approvalPolicy: 'never', permissionMode: 'danger-full-access' }),
+      getCodexSessionPermissionMode: () => 'danger-full-access',
+      getSessionRecentContext: () => null,
+      gitCheckpoint: () => {},
+      gitCheckpointAsync: async () => {},
+      recordTokens: () => {},
+      skillEvolution: null,
+      touchInteraction: () => {},
+      getDefaultEngine: () => 'codex',
+    });
+
+    const bot = {
+      sendTyping: async () => {},
+      sendMessage: async (_chatId, text) => {
+        sentMessages.push(text);
+        return { message_id: 'msg-send' };
+      },
+      sendMarkdown: async () => ({ message_id: 'msg-md' }),
+      sendCard: async () => ({ message_id: 'msg-card' }),
+      editMessage: async () => true,
+      deleteMessage: async () => true,
+    };
+
+    const result = await engine.askClaude(bot, 'oc_metame', 'commit', {
+      feishu: { chat_agent_map: { oc_metame: 'metame' } },
+      projects: { metame: { cwd: '/tmp/metame', name: 'MetaMe', engine: 'codex' } },
+    }, false, 'ou_admin');
+
+    assert.equal(result.ok, false);
+    assert.equal(result.errorCode, 'RATE_LIMIT');
+    assert.equal(spawnCalls.length, 1);
+    assert.deepEqual(spawnCalls[0].slice(0, 3), ['exec', 'resume', 'resume-thread-quota']);
+    assert.equal(createCount, 0);
+    assert.equal(state.sessions._bound_metame.engines.codex.id, 'resume-thread-quota');
+    assert.ok(sentMessages.some((msg) => /请求频率或配额受限/.test(msg)));
   });
 
   it('stabilizes onto a fresh codex thread when observed codex permissions degrade mid-turn', async () => {
@@ -2720,7 +2853,8 @@ describe('daemon-claude-engine private helpers', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 40));
 
-    assert.equal(result.error, null);
+    assert.equal(result.error, 'Engine completed without a final response.');
+    assert.equal(result.errorCode, 'EMPTY_ENGINE_RESPONSE');
     assert.deepEqual(result.files, ['/tmp/late.txt']);
     assert.deepEqual(result.toolUsageLog, [{ tool: 'Write', context: 'late.txt' }]);
     assert.deepEqual(proc.killSignals, []);
