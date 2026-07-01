@@ -3,6 +3,8 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('events');
+const os = require('os');
+const path = require('path');
 const adapter = require('./agy-adapter');
 
 describe('agy-adapter invocation', () => {
@@ -53,5 +55,74 @@ describe('agy-adapter invocation', () => {
     });
     assert.equal(result.error.code, 'AGY_TIMEOUT');
     assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
+  });
+
+  it('asks agy to summarize existing tool evidence when the first turn has no final text', async () => {
+    const cwd = path.join(os.tmpdir(), `metame-agy-finalize-${Date.now()}-${Math.random()}`);
+    const sessionId = 'sess-finalize';
+    const records = [];
+    const prompts = [];
+
+    const result = await adapter.run({
+      cwd,
+      model: 'auto',
+      sessionId,
+      timeoutMs: 1000,
+      readOnly: false,
+    }, '管网阀门相关被错误定价的股有哪些', {
+      readCache: () => ({ [cwd]: sessionId }),
+      readTranscript: () => records.slice(),
+      sleep: async () => {},
+      spawnAgy: async (_options, prompt) => {
+        prompts.push(prompt);
+        if (prompts.length === 1) {
+          records.push(
+            { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: prompt },
+            { type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE', tool_calls: [{ name: 'search_web' }] },
+            { type: 'SEARCH_WEB', source: 'MODEL', status: 'DONE', content: '搜索结果：A公司管网阀门业务占比高，估值低；B公司传感器订单增长。' },
+          );
+        } else {
+          records.push(
+            { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: prompt },
+            { type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE', content: '结论：优先看A公司，B公司作为备选。依据是已有搜索结果显示A估值低且管网阀门业务占比高。' },
+          );
+        }
+        return { code: 0, output: '', errorOutput: '' };
+      },
+    });
+
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[1], /不要再调用工具/);
+    assert.match(prompts[1], /搜索结果：A公司/);
+    assert.equal(result.error, undefined);
+    assert.match(result.text, /优先看A公司/);
+  });
+
+  it('reports a clear failure when there is no final text and no tool evidence', async () => {
+    const cwd = path.join(os.tmpdir(), `metame-agy-no-evidence-${Date.now()}-${Math.random()}`);
+    const sessionId = 'sess-no-evidence';
+    const records = [];
+
+    const result = await adapter.run({
+      cwd,
+      model: 'auto',
+      sessionId,
+      timeoutMs: 1000,
+      readOnly: false,
+    }, '查一下结果', {
+      readCache: () => ({ [cwd]: sessionId }),
+      readTranscript: () => records.slice(),
+      sleep: async () => {},
+      spawnAgy: async (_options, prompt) => {
+        records.push(
+          { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: prompt },
+          { type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE', tool_calls: [{ name: 'search_web' }] },
+        );
+        return { code: 0, output: '', errorOutput: '' };
+      },
+    });
+
+    assert.equal(result.error.code, 'AGY_EXEC_FAILURE');
+    assert.match(result.error.message, /agy exited with code 0/);
   });
 });

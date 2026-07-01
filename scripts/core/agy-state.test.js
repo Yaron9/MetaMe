@@ -48,6 +48,31 @@ describe('agy-state transcript parsing', () => {
     assert.equal(agy.selectFinalResponse(records), 'final answer');
     assert.deepEqual(agy.recordsAfterLatestUser(records), records.slice(1));
   });
+
+  it('builds a finalization prompt from tool evidence when no final answer exists', () => {
+    const records = [
+      { type: 'USER_INPUT', source: 'USER_EXPLICIT', content: 'question' },
+      { type: 'PLANNER_RESPONSE', status: 'DONE', tool_calls: [{ name: 'search' }] },
+      { type: 'SEARCH_WEB', status: 'DONE', content: 'search result summary' },
+      { type: 'RUN_COMMAND', status: 'DONE', content: 'command output' },
+    ];
+
+    const evidence = agy.collectToolEvidence(records);
+    const prompt = agy.buildFinalizationPrompt('原始问题', records);
+
+    assert.deepEqual(evidence.map(item => item.type), ['SEARCH_WEB', 'RUN_COMMAND']);
+    assert.match(prompt, /不要再调用工具/);
+    assert.match(prompt, /原始问题/);
+    assert.match(prompt, /search result summary/);
+    assert.match(prompt, /command output/);
+  });
+
+  it('does not build a finalization prompt when no tool evidence exists', () => {
+    assert.equal(agy.buildFinalizationPrompt('原始问题', [
+      { type: 'USER_INPUT', source: 'USER_EXPLICIT', content: 'question' },
+      { type: 'PLANNER_RESPONSE', status: 'DONE', tool_calls: [{ name: 'search' }] },
+    ]), '');
+  });
 });
 
 describe('agy-state safety decisions', () => {

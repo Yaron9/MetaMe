@@ -9,6 +9,15 @@ const AGY_TOOL_TYPES = Object.freeze({
   SEARCH_WEB: 'WebSearch',
 });
 
+const AGY_EVIDENCE_TYPES = new Set([
+  ...Object.keys(AGY_TOOL_TYPES),
+  'GENERIC',
+  'ERROR_MESSAGE',
+]);
+
+const FINALIZATION_EVIDENCE_LIMIT = 10;
+const FINALIZATION_CONTENT_LIMIT = 14000;
+
 function canonicalizeCwd(cwd, deps = {}) {
   const pathMod = deps.path || path;
   const realpath = deps.realpath;
@@ -105,6 +114,59 @@ function recordsAfterLatestUser(records) {
   return lastUserIndex >= 0 ? records.slice(lastUserIndex) : [];
 }
 
+function normalizeWhitespace(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function collectToolEvidence(records, opts = {}) {
+  const limit = Number(opts.limit || FINALIZATION_EVIDENCE_LIMIT);
+  const maxChars = Number(opts.maxChars || FINALIZATION_CONTENT_LIMIT);
+  const out = [];
+  let used = 0;
+  for (const record of records || []) {
+    if (!record || typeof record !== 'object') continue;
+    const type = String(record.type || '').toUpperCase();
+    if (!AGY_EVIDENCE_TYPES.has(type)) continue;
+    const content = normalizeWhitespace(record.content || record.message || record.error || '');
+    if (!content) continue;
+    const remaining = maxChars - used;
+    if (remaining <= 0 || out.length >= limit) break;
+    const clipped = content.slice(0, remaining);
+    used += clipped.length;
+    out.push({
+      type,
+      status: String(record.status || '').toUpperCase(),
+      content: clipped,
+    });
+  }
+  return out;
+}
+
+function buildFinalizationPrompt(originalPrompt, records, opts = {}) {
+  const evidence = collectToolEvidence(records, opts);
+  if (evidence.length === 0) return '';
+  const userText = normalizeWhitespace(originalPrompt).slice(0, 2000);
+  const evidenceText = evidence.map((item, index) => [
+    `## 材料 ${index + 1}: ${item.type}${item.status ? ` / ${item.status}` : ''}`,
+    item.content,
+  ].join('\n')).join('\n\n');
+  return [
+    '上一轮已经执行了搜索或工具调用，但没有给用户输出最终回答。现在必须补上最终回答。',
+    '',
+    '严格要求：',
+    '1. 不要再调用工具，不要继续搜索。',
+    '2. 只基于下面“已有工具材料”总结给用户。',
+    '3. 如果材料足够，直接给结论和关键依据。',
+    '4. 如果材料不足、工具失败、或无法得出结论，明确告诉用户哪里不足/哪里失败。',
+    '5. 用中文回答，简明但要可执行。',
+    '',
+    `用户原始问题：${userText || '(未捕获)'}`,
+    '',
+    '已有工具材料：',
+    evidenceText,
+  ].join('\n');
+}
+
 function isLockStale(lock, opts = {}) {
   if (!lock || typeof lock !== 'object') return true;
   const now = Number(opts.now || Date.now());
@@ -154,6 +216,8 @@ module.exports = {
   normalizeTranscriptRecord,
   selectFinalResponse,
   recordsAfterLatestUser,
+  collectToolEvidence,
+  buildFinalizationPrompt,
   isLockStale,
   isFallbackEligible,
   collectDescendantPids,

@@ -13,6 +13,7 @@ const {
   normalizeTranscriptRecord,
   selectFinalResponse,
   recordsAfterLatestUser,
+  buildFinalizationPrompt,
   isLockStale,
   collectDescendantPids,
 } = require('../core/agy-state');
@@ -50,6 +51,14 @@ function readCache(retries = 1) {
   return {};
 }
 
+function getReadCache(deps = {}) {
+  return deps.readCache || readCache;
+}
+
+function getReadTranscript(deps = {}) {
+  return deps.readTranscript || readTranscript;
+}
+
 function transcriptFile(sessionId) {
   return path.join(AGY_HOME, 'brain', sessionId, '.system_generated', 'logs', 'transcript.jsonl');
 }
@@ -72,12 +81,14 @@ function sleep(ms) {
 
 async function waitForArtifacts(before, options, minRecordCount = 0, deps = {}) {
   const wait = deps.sleep || sleep;
+  const readCacheFn = getReadCache(deps);
+  const readTranscriptFn = getReadTranscript(deps);
   for (let attempt = 0; attempt < 21; attempt += 1) {
-    const after = readCache();
+    const after = readCacheFn();
     const sessionId = captureConversationId(before, after, options.cwd, options.sessionId);
     if (sessionId) {
       try {
-        const records = readTranscript(sessionId);
+        const records = readTranscriptFn(sessionId);
         if (records.length > minRecordCount) return { sessionId, records };
       } catch { /* retry */ }
     }
@@ -238,13 +249,16 @@ async function readStdin() {
 async function run(options, prompt, deps = {}) {
   const release = acquireLock(options);
   if (!release) return { error: { code: 'AGY_CWD_BUSY', message: '同一 agy 工作区或会话已有任务运行。' } };
-  const before = readCache();
+  const readCacheFn = getReadCache(deps);
+  const readTranscriptFn = getReadTranscript(deps);
+  const spawnAgyFn = deps.spawnAgy || spawnAgy;
+  const before = readCacheFn();
   let beforeRecordCount = 0;
   if (options.sessionId) {
-    try { beforeRecordCount = readTranscript(options.sessionId).length; } catch { /* validated after run */ }
+    try { beforeRecordCount = readTranscriptFn(options.sessionId).length; } catch { /* validated after run */ }
   }
   try {
-    const result = await spawnAgy(options, prompt, deps);
+    const result = await spawnAgyFn(options, prompt, deps);
     if (result.error) return result;
     const artifacts = await waitForArtifacts(before, options, beforeRecordCount, deps);
     if (!artifacts) return { error: { code: 'AGY_SESSION_CAPTURE_FAILED', message: 'agy 已执行，但无法确认 conversation 与 transcript，结果状态未知。' } };
@@ -252,7 +266,36 @@ async function run(options, prompt, deps = {}) {
     const newRecords = options.sessionId ? allRecords.slice(beforeRecordCount) : allRecords;
     const records = recordsAfterLatestUser(newRecords);
     const text = selectFinalResponse(records);
-    if (!text) return { error: classifyFailure(result), sessionId };
+    if (!text) {
+      const finalizationPrompt = buildFinalizationPrompt(prompt, records);
+      if (!finalizationPrompt) return { error: classifyFailure(result), sessionId, records };
+
+      const finalizationOptions = { ...options, sessionId };
+      const finalizationResult = await spawnAgyFn(finalizationOptions, finalizationPrompt, deps);
+      if (finalizationResult.error) return { error: finalizationResult.error, sessionId, records };
+
+      const finalArtifacts = await waitForArtifacts(before, finalizationOptions, allRecords.length, deps);
+      if (!finalArtifacts) {
+        return {
+          error: { code: 'AGY_FINALIZATION_CAPTURE_FAILED', message: '已有工具结果，但无法确认 agy 最终总结 transcript。' },
+          sessionId,
+          records,
+        };
+      }
+
+      const finalRecords = recordsAfterLatestUser(finalArtifacts.records.slice(allRecords.length));
+      const finalText = selectFinalResponse(finalRecords);
+      const combinedRecords = [...records, ...finalRecords];
+      if (finalText) return { sessionId, text: finalText, records: combinedRecords };
+      return {
+        error: {
+          code: 'AGY_FINALIZATION_FAILED',
+          message: '已有工具结果，但 agy 未能生成最终总结；请重试或缩小问题范围。',
+        },
+        sessionId,
+        records: combinedRecords,
+      };
+    }
     return { sessionId, text, records };
   } finally {
     release();
