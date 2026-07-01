@@ -163,6 +163,46 @@ function createCommandRouter(deps) {
     return inferredKey ? `_bound_${inferredKey}` : rawChatId;
   }
 
+  function buildCodexGoalConfig(config, chatId) {
+    const base = config || {};
+    const chatIdStr = String(chatId || '');
+    const rawChatId = extractOriginalChatId(chatIdStr);
+    const existingMap = {
+      ...(base.telegram ? base.telegram.chat_agent_map || {} : {}),
+      ...(base.feishu ? base.feishu.chat_agent_map || {} : {}),
+      ...(base.imessage ? base.imessage.chat_agent_map || {} : {}),
+      ...(base.siri_bridge ? base.siri_bridge.chat_agent_map || {} : {}),
+    };
+    const existingProjectKey = existingMap[chatIdStr] || existingMap[rawChatId] || projectKeyFromVirtualChatId(chatIdStr);
+    const existingProject = existingProjectKey && base.projects ? base.projects[existingProjectKey] : null;
+    const safeChatKey = (rawChatId || chatIdStr || 'chat').replace(/[^a-zA-Z0-9_-]/g, '_').slice(-48);
+    const goalProjectKey = `_codex_goal_${safeChatKey || 'chat'}`;
+    const goalProject = {
+      ...(existingProject || {}),
+      name: existingProject && existingProject.name ? `${existingProject.name} · Codex Goal` : 'Codex Goal',
+      cwd: (existingProject && existingProject.cwd) || process.cwd(),
+      engine: 'codex',
+    };
+    const patchMap = (platformCfg = {}) => ({
+      ...platformCfg,
+      chat_agent_map: {
+        ...(platformCfg.chat_agent_map || {}),
+        [chatIdStr]: goalProjectKey,
+        [rawChatId]: goalProjectKey,
+      },
+    });
+    return {
+      ...base,
+      telegram: patchMap(base.telegram || {}),
+      feishu: patchMap(base.feishu || {}),
+      imessage: patchMap(base.imessage || {}),
+      projects: {
+        ...(base.projects || {}),
+        [goalProjectKey]: goalProject,
+      },
+    };
+  }
+
   function resolveCurrentSessionContext(chatId, config) {
     const chatIdStr = String(chatId || '');
     const threadScoped = isThreadChatId(chatIdStr);
@@ -479,6 +519,26 @@ function createCommandRouter(deps) {
       return;
     }
 
+    // /goal — bridge mobile command to Codex goal tools.
+    if (/^\/goal(\s|$)/i.test(text)) {
+      const goalArg = text.replace(/^\/goal\s*/i, '').trim();
+      let goalPrompt;
+      if (!goalArg || /^(status|current|查看|状态)$/i.test(goalArg)) {
+        goalPrompt = '请调用 get_goal 查看当前 Codex goal，并用一句话汇报状态。';
+      } else if (/^(done|complete|完成|已完成)$/i.test(goalArg)) {
+        goalPrompt = '请调用 update_goal，将当前 Codex goal 标记为 complete。只有在目标确实已经完成且没有剩余必需工作时才执行；否则说明还差什么。';
+      } else {
+        goalPrompt = [
+          '请调用 create_goal 创建一个新的 Codex goal。',
+          `目标: ${goalArg}`,
+          '如果已有未完成 goal 导致创建失败，请调用 get_goal 查看当前状态并简要说明。'
+        ].join('\n');
+      }
+      resetCooldown(chatId);
+      await askClaude(bot, chatId, goalPrompt, buildCodexGoalConfig(config, chatId), false, senderId);
+      return;
+    }
+
     if (text.startsWith('/')) {
       const currentModel = resolveEngineModel('claude', (config && config.daemon) || {});
       const currentProvider = providerMod ? providerMod.getActiveName() : 'anthropic';
@@ -502,6 +562,7 @@ function createCommandRouter(deps) {
         '',
         '💬 快捷:',
         '/btw <问题> — 快速旁白提问（只读，不打断主任务）',
+        '/goal [目标|status|done] — 管理 Codex goal',
         '',
         '📂 Session 管理:',
         '/new [path] [name] — 新建会话',

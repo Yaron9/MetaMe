@@ -122,6 +122,84 @@ describe('/btw side question command', () => {
   });
 });
 
+describe('/goal codex goal command', () => {
+  it('should create a Codex goal from the provided objective', async () => {
+    let claudeArgs = null;
+    const deps = createDeps({
+      askClaude: async (bot, chatId, prompt, config, readOnly, senderId) => {
+        claudeArgs = { chatId, prompt, readOnly, senderId };
+        return { ok: true };
+      },
+    });
+    const { handleCommand } = createCommandRouter(deps);
+    const sent = [];
+    const config = createConfig();
+
+    await handleCommand(createBot(sent), 'chat1', '/goal 修复登录超时', config, null, 'user-1', false);
+    assert.ok(claudeArgs, 'askClaude should be called');
+    assert.equal(claudeArgs.readOnly, false, 'goal tools require write-capable execution');
+    assert.ok(claudeArgs.prompt.includes('create_goal'), 'should ask Codex to create a goal');
+    assert.ok(claudeArgs.prompt.includes('修复登录超时'), 'should include the objective');
+    assert.equal(sent.length, 0, 'should not show generic slash-command help');
+  });
+
+  it('should force the goal bridge through Codex even from a Claude-bound chat', async () => {
+    let claudeArgs = null;
+    const deps = createDeps({
+      askClaude: async (bot, chatId, prompt, config, readOnly, senderId) => {
+        claudeArgs = { chatId, prompt, config, readOnly, senderId };
+        return { ok: true };
+      },
+    });
+    const { handleCommand } = createCommandRouter(deps);
+    const originalConfig = createConfig({
+      feishu: { chat_agent_map: { chat1: 'writer' } },
+      projects: {
+        writer: { name: 'Writer', cwd: '/tmp/writer', engine: 'claude' },
+      },
+    });
+
+    await handleCommand(createBot([]), 'chat1', '/goal status', originalConfig, null, 'user-1', false);
+
+    assert.ok(claudeArgs, 'askClaude should be called');
+    const goalProjectKey = claudeArgs.config.feishu.chat_agent_map.chat1;
+    assert.notEqual(goalProjectKey, 'writer');
+    assert.equal(claudeArgs.config.projects[goalProjectKey].engine, 'codex');
+    assert.equal(claudeArgs.config.projects[goalProjectKey].cwd, '/tmp/writer');
+    assert.equal(originalConfig.feishu.chat_agent_map.chat1, 'writer', 'must not mutate persisted config');
+    assert.equal(originalConfig.projects.writer.engine, 'claude', 'must not mutate bound project engine');
+  });
+
+  it('should request current goal status when no objective is provided', async () => {
+    let prompt = null;
+    const deps = createDeps({
+      askClaude: async (_bot, _chatId, p) => {
+        prompt = p;
+        return { ok: true };
+      },
+    });
+    const { handleCommand } = createCommandRouter(deps);
+
+    await handleCommand(createBot([]), 'chat1', '/goal', createConfig(), null, 'user-1', false);
+    assert.ok(prompt.includes('get_goal'), 'should ask Codex to inspect the current goal');
+  });
+
+  it('should complete the active goal for /goal done', async () => {
+    let prompt = null;
+    const deps = createDeps({
+      askClaude: async (_bot, _chatId, p) => {
+        prompt = p;
+        return { ok: true };
+      },
+    });
+    const { handleCommand } = createCommandRouter(deps);
+
+    await handleCommand(createBot([]), 'chat1', '/goal done', createConfig(), null, 'user-1', false);
+    assert.ok(prompt.includes('update_goal'), 'should ask Codex to update the active goal');
+    assert.ok(prompt.includes('complete'), 'should ask Codex to mark it complete');
+  });
+});
+
 describe('chat_agent_map session reuse (multi-engine format)', () => {
   it('should NOT recreate session when multi-engine session already has the correct engine slot', async () => {
     let attachCalls = 0;
