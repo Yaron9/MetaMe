@@ -50,7 +50,7 @@ function createAdminCommandHandler(deps) {
     saveState,
     getDefaultEngine = () => 'claude',
     setDefaultEngine = () => {},
-    getDistillModel = () => 'haiku',
+    getDistillModel = () => 'auto',
     weixinAuthStore = null,
   } = deps;
 
@@ -253,7 +253,7 @@ function createAdminCommandHandler(deps) {
       if (quotedModel) return { model: quotedModel[1] };
     }
 
-    const knownToken = text.match(new RegExp(`${setVerb}\\s*(?:为|成|到|to)?\\s*[:：]?\\s*(gpt-5\\.1-codex-mini|gpt-5-mini|haiku|sonnet|opus|5\\.1mini|5mini|codex-mini)\\b`, 'i'));
+    const knownToken = text.match(new RegExp(`${setVerb}\\s*(?:为|成|到|to)?\\s*[:：]?\\s*(agy|auto|gpt-5\\.1-codex-mini|gpt-5-mini|haiku|sonnet|opus|5\\.1mini|5mini|codex-mini)\\b`, 'i'));
     if (knownToken) return { model: knownToken[1] };
 
     return null;
@@ -1607,7 +1607,10 @@ function createAdminCommandHandler(deps) {
             : '');
 
       if (!arg) {
-        const statusLine = `🤖 [${currentEngine}] 会话模型: ${currentModel}  Provider: ${activeProvider}\n🧪 后台轻量: ${distillModel}  (/distill-model 修改)${hintLine}`;
+        const distillEngine = providerMod && typeof providerMod.getDistillEngine === 'function'
+          ? providerMod.getDistillEngine()
+          : 'agy';
+        const statusLine = `🤖 [${currentEngine}] 会话模型: ${currentModel}  Provider: ${activeProvider}\n🧪 后台蒸馏/记忆沉淀: ${distillEngine}/${distillModel}  (/distill-model 修改模型)${hintLine}`;
         if (bot.sendButtons && optionEntries.length > 0) {
           const buttons = optionEntries.map(({ value, label }) => [{
             text: value === currentModel ? `${label} ✓` : label,
@@ -1634,7 +1637,7 @@ function createAdminCommandHandler(deps) {
 
       const modelName = optionValues.includes(normalizedArg) ? normalizedArg : arg;
       if (modelName === currentModel) {
-        await bot.sendMessage(chatId, `🤖 已经是 ${modelName}（后台轻量模型: ${distillModel}）`);
+        await bot.sendMessage(chatId, `🤖 已经是 ${modelName}（后台蒸馏/记忆沉淀模型: ${distillModel}）`);
         return { handled: true, config };
       }
 
@@ -1646,7 +1649,7 @@ function createAdminCommandHandler(deps) {
         cfg.daemon.models[currentEngine] = modelName;
         writeConfigSafe(cfg);
         config = loadConfig();
-        await bot.sendMessage(chatId, `✅ [${currentEngine}] 会话模型: ${currentModel} → ${modelName}\n🧪 后台轻量模型: ${distillModel}（如需修改用 /distill-model）`);
+        await bot.sendMessage(chatId, `✅ [${currentEngine}] 会话模型: ${currentModel} → ${modelName}\n🧪 后台蒸馏/记忆沉淀模型: ${distillModel}（如需修改用 /distill-model）`);
       } catch (e) {
         await bot.sendMessage(chatId, `❌ 切换失败: ${e.message}`);
       }
@@ -1676,8 +1679,7 @@ function createAdminCommandHandler(deps) {
       return { handled: true, config };
     }
 
-    // /engine [name] — show or switch default engine (claude/codex)
-    // Switching engine auto-syncs: distill model + preferred provider (if available)
+    // /engine [name] — show or switch default session engine (claude/codex)
     if (text === '/engine' || text.startsWith('/engine ')) {
       const arg = text.slice('/engine'.length).trim().toLowerCase();
       const boundProjectKey = resolveBoundProjectKey(chatId, config);
@@ -1697,6 +1699,9 @@ function createAdminCommandHandler(deps) {
           ? providerMod.getActiveName()
           : curEngineCfg.provider;
         const distill = getDistillModel();
+        const distillEngine = providerMod && typeof providerMod.getDistillEngine === 'function'
+          ? providerMod.getDistillEngine()
+          : 'agy';
         const daemonCfg = config.daemon || {};
         const currentModel = resolveEngineModel(safeCur, daemonCfg, boundProject && boundProject.model);
         const scopeLine = boundProjectKey
@@ -1705,13 +1710,13 @@ function createAdminCommandHandler(deps) {
         await bot.sendMessage(chatId, [
           `🔧 引擎: ${safeCur}  |  Provider: ${activeProvider}`,
           ...(policy.fallback ? [`↩️ 配置为 ${policy.requested}，当前回退原因: ${policy.reason}`] : []),
-          `🤖 会话模型: ${currentModel}  |  后台轻量: ${distill}`,
+          `🤖 会话模型: ${currentModel}  |  后台: ${distillEngine}/${distill}`,
           scopeLine,
           '',
           '用法: /engine claude 或 /engine codex',
           boundProjectKey
             ? '当前 chat 已绑定 Agent；切换时会同步更新该 Agent 的 engine/model'
-            : '切换引擎将自动同步 distill model 和首选 provider',
+            : '切换引擎只影响会话引擎；后台蒸馏/记忆沉淀固定走 agy',
         ].join('\n'));
         return { handled: true, config };
       }
@@ -1722,8 +1727,11 @@ function createAdminCommandHandler(deps) {
 
       const preferredProvider = (ENGINE_MODEL_CONFIG[arg] || {}).provider;
 
-      setDefaultEngine(arg); // syncs distill model + providerMod.setEngine (no longer resets session model)
+      setDefaultEngine(arg); // switches session engine only; background distill stays on agy
       const distill = getDistillModel();
+      const distillEngine = providerMod && typeof providerMod.getDistillEngine === 'function'
+        ? providerMod.getDistillEngine()
+        : 'agy';
       let freshCfg = loadConfig();
       if (boundProjectKey && freshCfg && freshCfg.projects && freshCfg.projects[boundProjectKey]) {
         const nextCfg = JSON.parse(JSON.stringify(freshCfg));
@@ -1760,7 +1768,7 @@ function createAdminCommandHandler(deps) {
       const scopeNote = boundProjectKey
         ? `\n📍 已同步当前 Agent: ${boundProjectKey}`
         : '';
-      await bot.sendMessage(chatId, `✅ 引擎已切换: ${arg}\n🤖 会话模型: ${syncedModel}\n🧪 后台轻量模型: ${distill}${scopeNote}${providerNote}`);
+      await bot.sendMessage(chatId, `✅ 引擎已切换: ${arg}\n🤖 会话模型: ${syncedModel}\n🧪 后台蒸馏/记忆沉淀: ${distillEngine}/${distill}${scopeNote}${providerNote}`);
       return { handled: true, config: freshCfg };
     }
 
@@ -1772,7 +1780,8 @@ function createAdminCommandHandler(deps) {
       }
       const arg = text.slice('/distill-model'.length).trim();
       if (!arg) {
-        await bot.sendMessage(chatId, `🧪 当前蒸馏模型: ${providerMod.getDistillModel()}\n用法: /distill-model <model>\n示例: /distill-model gpt-5.1-codex-mini`);
+        const engine = typeof providerMod.getDistillEngine === 'function' ? providerMod.getDistillEngine() : 'agy';
+        await bot.sendMessage(chatId, `🧪 当前后台蒸馏/记忆沉淀: ${engine}/${providerMod.getDistillModel()}\n用法: /distill-model <model>\n示例: /distill-model auto`);
         return { handled: true, config };
       }
       try {

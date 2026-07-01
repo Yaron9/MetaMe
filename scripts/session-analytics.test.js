@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { extractSkeleton, detectSignificantSession, buildCodexInput } = require('./session-analytics');
+const { extractSkeleton, detectSignificantSession, buildCodexInput, _internal } = require('./session-analytics');
 
 function ts(baseMs, deltaSec) {
   return new Date(baseMs + deltaSec * 1000).toISOString();
@@ -105,4 +105,37 @@ test('buildCodexInput leaves subagent rollouts to their parent session', () => {
   const { skeleton } = buildCodexInput(file);
   assert.equal(skeleton.source, 'subagent');
   assert.equal(skeleton.message_count, 0);
+});
+
+test('Codex state_5.sqlite rollout_path can be discovered for memory extraction', () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-codex-state-db-'));
+  const sessionId = '019ef863-3ea5-7b01-9473-1dab91e60dc6';
+  const rollout = path.join(tmpDir, `rollout-2026-06-24T14-48-34-${sessionId}.jsonl`);
+  fs.writeFileSync(rollout, [
+    JSON.stringify({ type: 'session_meta', payload: { id: sessionId, cwd: tmpDir } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '沉淀 Codex session 记忆。' }] } }),
+  ].join('\n') + '\n' + 'x'.repeat(1200), 'utf8');
+
+  const dbPath = path.join(tmpDir, 'state_5.sqlite');
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE threads (
+      id TEXT PRIMARY KEY,
+      rollout_path TEXT,
+      updated_at INTEGER,
+      created_at INTEGER,
+      archived INTEGER DEFAULT 0
+    )
+  `);
+  db.prepare('INSERT INTO threads (id, rollout_path, updated_at, created_at, archived) VALUES (?, ?, ?, ?, 0)')
+    .run(sessionId, rollout, 1780000000, 1780000000);
+  db.close();
+
+  const rows = _internal.queryCodexThreadRows(dbPath, sessionId);
+  assert.equal(rows.length, 1);
+  const item = _internal.codexSessionFromRolloutPath(rows[0].rollout_path, rows[0].id);
+  assert.equal(item.session_id, sessionId);
+  assert.equal(item.path, rollout);
+  assert.equal(item.engine, 'codex');
 });

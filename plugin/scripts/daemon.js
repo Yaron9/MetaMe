@@ -180,7 +180,7 @@ const { createPidManager, setupRuntimeWatchers } = require('./daemon-runtime-lif
 const { repairAgentLayer } = require('./agent-layer');
 const { createNotifier } = require('./daemon-notify');
 const { createClaudeEngine } = require('./daemon-claude-engine');
-const { createEngineRuntimeFactory, detectDefaultEngine, resolveEngineModel, ENGINE_MODEL_CONFIG } = require('./daemon-engine-runtime');
+const { createEngineRuntimeFactory, detectDefaultEngine, resolveEngineModel } = require('./daemon-engine-runtime');
 const { createBackgroundRunner } = require('./daemon-background-runner');
 const { createCommandRouter } = require('./daemon-command-router');
 const { createMessagePipeline } = require('./daemon-message-pipeline');
@@ -1940,11 +1940,6 @@ function setDefaultEngine(engine) {
   st.default_engine = engine;
   saveState(st);
   if (providerMod) {
-    // Sync distill model to this engine's default
-    if (typeof providerMod.setDistillModel === 'function') {
-      const distill = (ENGINE_MODEL_CONFIG[engine] || ENGINE_MODEL_CONFIG.claude).distill;
-      try { providerMod.setDistillModel(distill); } catch { /* ignore */ }
-    }
     if (typeof providerMod.setEngine === 'function') {
       try { providerMod.setEngine(engine); } catch { /* ignore */ }
     }

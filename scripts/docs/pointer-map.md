@@ -16,7 +16,7 @@
 - 执行命令（`/stop`、`/compact` 等）：`scripts/daemon-exec-commands.js`
 - 会话存储：`scripts/daemon-session-store.js`
 - 默认配置：`scripts/daemon-default.yaml`
-- Provider/蒸馏模型配置：`scripts/providers.js`（`/provider`、`/distill-model`）
+- Provider/蒸馏模型配置：`scripts/providers.js`（`/provider`、`/distill-model`；后台蒸馏/记忆沉淀默认 `agy/auto`）
 - 跨平台基础设施：`scripts/platform.js`（`killProcessTree`、`socketPath`、`sleepSync`、`icon`）
 - 热重载安全机制：`scripts/daemon-runtime-lifecycle.js`（语法预检、last-good 备份、crash-loop 自愈）
 - 打包工具：`scripts/deploy-manifest.js`（部署清单）、`scripts/sync-plugin.js`（plugin 镜像同步）
@@ -64,6 +64,10 @@
 - 会话命令与兼容边界：
   - `scripts/daemon-exec-commands.js`
   - 关键点：`/stop` 引擎中性；`/compact` 在 codex 会话返回"暂不支持"
+
+- Codex session 记忆沉淀：
+  - `scripts/session-analytics.js`：优先读 `state_5.sqlite -> threads.rollout_path`，兼容旧版 `~/.codex/sessions` rollout 文件
+  - `scripts/memory-extract.js`：复用同一事实提取链路，使用 `codex_facts:<session_id>` 做已处理标记
 
 - 运行时引擎切换与诊断：
   - `scripts/daemon-admin-commands.js`

@@ -24,8 +24,10 @@ const os = require('os');
 const yaml = require('./resolve-yaml');
 const { buildCodexArgs } = require('./daemon-engine-runtime');
 
-const DEFAULT_DISTILL_MODEL = 'haiku';
+const DEFAULT_DISTILL_ENGINE = 'agy';
+const DEFAULT_DISTILL_MODEL = 'auto';
 const DISTILL_MODEL_ALIASES = new Map([
+  ['agy', 'auto'],
   ['5.1mini', 'gpt-5.1-codex-mini'],
   ['gpt5.1mini', 'gpt-5.1-codex-mini'],
   ['gpt-5.1-mini', 'gpt-5.1-codex-mini'],
@@ -33,6 +35,16 @@ const DISTILL_MODEL_ALIASES = new Map([
   ['codex-mini', 'gpt-5.1-codex-mini'],
   ['5mini', 'gpt-5-mini'],
   ['gpt5mini', 'gpt-5-mini'],
+]);
+const LEGACY_NON_AGY_DISTILL_MODELS = new Set([
+  'haiku',
+  'sonnet',
+  'opus',
+  'gpt-5-mini',
+  'gpt-5.1-codex-mini',
+  'gpt-5.1-codex-max',
+  'gpt-5.3-codex',
+  'gpt-5-codex',
 ]);
 
 function canonicalizeAliasKey(input) {
@@ -62,6 +74,20 @@ function resolveDistillModel(config, overrideModel) {
   return DEFAULT_DISTILL_MODEL;
 }
 
+function resolveDistillEngine(config, overrideEngine) {
+  const raw = String(overrideEngine || (config && config.distill_engine) || process.env.METAME_DISTILL_ENGINE || DEFAULT_DISTILL_ENGINE).trim().toLowerCase();
+  if (raw === 'agy' || raw === 'codex' || raw === 'claude') return raw;
+  return DEFAULT_DISTILL_ENGINE;
+}
+
+function resolveDistillModelForEngine(config, engine, overrideModel) {
+  const model = resolveDistillModel(config, overrideModel);
+  if (engine === 'agy' && LEGACY_NON_AGY_DISTILL_MODELS.has(String(model || '').toLowerCase())) {
+    return DEFAULT_DISTILL_MODEL;
+  }
+  return model;
+}
+
 // ---------------------------------------------------------
 // DEFAULT CONFIG
 // ---------------------------------------------------------
@@ -73,6 +99,7 @@ function defaultConfig() {
     },
     distill_provider: null,
     daemon_provider: null,
+    distill_engine: DEFAULT_DISTILL_ENGINE,
     distill_model: null,
   };
 }
@@ -126,14 +153,19 @@ function loadProviders(options = {}) {
     }
     if (!data.providers) data.providers = {};
     if (!data.providers.anthropic) data.providers.anthropic = { label: 'Anthropic (Official)' };
+    const explicitDistillEngine = String(data.distill_engine || '').trim();
+    const loadedDistillModel = (() => {
+      try { return normalizeDistillModel(data.distill_model, { allowEmpty: true }); } catch { return null; }
+    })();
     _providersCache = {
       active: data.active || 'anthropic',
       providers: data.providers,
       distill_provider: data.distill_provider || null,
       daemon_provider: data.daemon_provider || null,
-      distill_model: (() => {
-        try { return normalizeDistillModel(data.distill_model, { allowEmpty: true }); } catch { return null; }
-      })(),
+      distill_engine: resolveDistillEngine(data),
+      distill_model: (!explicitDistillEngine && LEGACY_NON_AGY_DISTILL_MODELS.has(String(loadedDistillModel || '').toLowerCase()))
+        ? null
+        : loadedDistillModel,
     };
     _providersCachePath = providersFile;
     _providersCacheStamp = currentStamp;
@@ -300,12 +332,24 @@ function getDistillModel() {
   return resolveDistillModel(config);
 }
 
+function getDistillEngine() {
+  const config = loadProviders();
+  return resolveDistillEngine(config);
+}
+
 function setDistillModel(model) {
   const config = loadProviders();
   const normalized = normalizeDistillModel(model, { allowEmpty: true });
   config.distill_model = normalized || null;
   saveProviders(config);
   return config.distill_model;
+}
+
+function setDistillEngine(engine) {
+  const config = loadProviders();
+  config.distill_engine = resolveDistillEngine(config, engine);
+  saveProviders(config);
+  return config.distill_engine;
 }
 
 // ---------------------------------------------------------
@@ -331,6 +375,7 @@ function listFormatted() {
     if (dm) lines.push(`  Daemon provider:  ${dm}`);
   }
   lines.push(`  Distill model:    ${resolveDistillModel(config)}`);
+  lines.push(`  Distill engine:   ${resolveDistillEngine(config)}`);
 
   return lines.join('\n');
 }
@@ -348,7 +393,8 @@ function callHaiku(input, extraEnv, timeout, options = {}) {
 
 /**
  * Call distill model as a subprocess with extra env vars.
- * Engine-aware: claude uses `claude -p --model`, codex uses `codex exec --json -m`.
+ * Engine-aware: agy uses the MetaMe agy adapter, claude uses `claude -p --model`,
+ * codex uses `codex exec --json -m`.
  */
 function callDistillModel(input, extraEnv, timeout, options = {}) {
   const { execFile } = require('child_process');
@@ -356,12 +402,14 @@ function callDistillModel(input, extraEnv, timeout, options = {}) {
   delete env.CLAUDECODE;
   // Force refresh to pick up cross-process edits to providers.yaml immediately.
   const config = loadProviders({ force: true });
-  const model = resolveDistillModel(config, options.model);
-  const engine = options.engine || _currentEngine;
-  const bin = engine === 'codex' ? 'codex' : 'claude';
-  const args = engine === 'codex'
-    ? buildCodexArgs({ model, readOnly: true, cwd: process.cwd() })
-    : ['-p', '--model', model, '--no-session-persistence'];
+  const engine = resolveDistillEngine(config, options.engine);
+  const model = resolveDistillModelForEngine(config, engine, options.model);
+  const bin = engine === 'agy' ? process.execPath : engine === 'codex' ? 'codex' : 'claude';
+  const args = engine === 'agy'
+    ? buildAgyDistillArgs({ model, timeout, cwd: process.cwd() })
+    : engine === 'codex'
+      ? buildCodexArgs({ model, readOnly: true, cwd: process.cwd() })
+      : ['-p', '--model', model, '--no-session-persistence'];
   // On Windows, bare binary names need shell:true to resolve .cmd wrappers.
   // For codex, also sanitize CODEX_HOME if it points to a non-existent path.
   const isWin = process.platform === 'win32';
@@ -377,26 +425,43 @@ function callDistillModel(input, extraEnv, timeout, options = {}) {
   return new Promise((resolve, reject) => {
     const run = (runArgs, allowModelFallback) => {
       const proc = execFile(bin, runArgs, spawnOpts, (err, stdout, stderr) => {
-        if (err && engine === 'codex' && allowModelFallback && /model[^\n]+not supported/i.test(stdout || '')) {
-          run(buildCodexArgs({ model: 'auto', readOnly: true, cwd: process.cwd() }), false);
+        if (err && (engine === 'codex' || engine === 'agy') && allowModelFallback && /model[^\n]+not supported/i.test(stdout || stderr || '')) {
+          const fallbackArgs = engine === 'agy'
+            ? buildAgyDistillArgs({ model: 'auto', timeout, cwd: process.cwd() })
+            : buildCodexArgs({ model: 'auto', readOnly: true, cwd: process.cwd() });
+          run(fallbackArgs, false);
           return;
         }
         if (err) {
-          const codexDetail = engine === 'codex' ? extractCodexError(stdout) : '';
-          const detail = codexDetail || (stderr || stdout || '').trim().split('\n')[0];
+          const engineDetail = engine === 'codex'
+            ? extractCodexError(stdout)
+            : engine === 'agy'
+              ? extractAgyError(stdout)
+              : '';
+          const detail = engineDetail || (stderr || stdout || '').trim().split('\n')[0];
           err.message = detail || err.message;
           err.stdout = stdout;
           err.stderr = stderr;
           reject(err);
           return;
         }
-        resolve(engine === 'codex' ? (extractCodexAgentText(stdout) || stdout.trim()) : stdout.trim());
+        resolve(engine === 'codex'
+          ? (extractCodexAgentText(stdout) || stdout.trim())
+          : engine === 'agy'
+            ? (extractAgyAgentText(stdout) || stdout.trim())
+            : stdout.trim());
       });
       proc.stdin.write(input);
       proc.stdin.end();
     };
     run(args, model !== 'auto');
   });
+}
+
+function buildAgyDistillArgs({ model, timeout, cwd }) {
+  const adapterPath = path.join(__dirname, 'bin', 'agy-adapter.js');
+  const args = [adapterPath, '--cwd', cwd || process.cwd(), '--model', model || 'auto', '--timeout-ms', String(timeout || 60000), '--read-only'];
+  return args;
 }
 
 function parseCodexEvents(stdout) {
@@ -427,11 +492,26 @@ function extractCodexError(stdout) {
   return '';
 }
 
+function extractAgyAgentText(stdout) {
+  const events = parseCodexEvents(stdout);
+  const texts = events.filter(evt => evt.type === 'text' && evt.text).map(evt => String(evt.text).trim()).filter(Boolean);
+  return texts.length ? texts[texts.length - 1] : '';
+}
+
+function extractAgyError(stdout) {
+  const events = parseCodexEvents(stdout);
+  for (let i = events.length - 1; i >= 0; i--) {
+    const evt = events[i];
+    if (evt.type === 'error' && evt.message) return String(evt.message);
+  }
+  return '';
+}
+
 // ---------------------------------------------------------
 // ENGINE AWARENESS (set by daemon.js setDefaultEngine)
 // ---------------------------------------------------------
-let _currentEngine = process.env.METAME_ENGINE === 'codex' ? 'codex' : 'claude';
-function setEngine(name) { _currentEngine = (name === 'codex') ? 'codex' : 'claude'; }
+let _currentEngine = resolveDistillEngine(null, process.env.METAME_DISTILL_ENGINE);
+function setEngine(name) { _currentEngine = resolveDistillEngine(null, name); }
 function getEngine() { return _currentEngine; }
 
 // ---------------------------------------------------------
@@ -451,12 +531,14 @@ const api = {
   removeProvider,
   setRole,
   getDistillModel,
+  getDistillEngine,
   setDistillModel,
+  setDistillEngine,
   normalizeDistillModel,
   listFormatted,
   callDistillModel,
   callHaiku,
-  _internal: { extractCodexAgentText, extractCodexError },
+  _internal: { extractCodexAgentText, extractCodexError, extractAgyAgentText, extractAgyError, resolveDistillEngine, resolveDistillModelForEngine },
   getProvidersFilePath,
   setEngine,
   getEngine,

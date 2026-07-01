@@ -73,13 +73,21 @@ feishu:
   - 查询当前默认引擎：`/engine`
   - 切换默认引擎：`/engine claude` 或 `/engine codex`
 - `/distill-model`：
-  - 查询当前蒸馏模型：`/distill-model`
-  - 设置蒸馏模型：`/distill-model gpt-5.1-codex-mini`
-  - 也支持严格自然语言：`把蒸馏模型改成 5.1mini`
+  - 后台蒸馏/记忆沉淀统一走 `agy`，默认模型为 `auto`
+  - 查询当前后台模型：`/distill-model`
+  - 设置后台模型：`/distill-model auto`（或 agy CLI 支持的模型名）
+  - 也支持严格自然语言：`把蒸馏模型改成 auto`
 - `/doctor`：
   - 同时检查 Claude/Codex CLI 可用性
   - 仅在"当前默认引擎对应 CLI 不可用"时判为故障
   - 自定义 provider 下允许任意合法模型名（不再强制 sonnet/opus/haiku）
+
+## 4.1 Codex session 记忆沉淀
+
+- 入口：`scripts/memory-extract.js` → `scripts/session-analytics.js`
+- 新版 Codex 优先从 `state_5.sqlite` 的 `threads.rollout_path` 定位 rollout transcript；已知 DB 包括 `~/.codex/state_5.sqlite` 和 daemon state 里各 session cwd 下的 `.codex/state_5.sqlite`。
+- 旧版兼容仍扫描 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`。
+- 去重标记使用 analytics state DB 的 `codex_facts:<session_id>`，不会和 Claude session 标记碰撞。
 
 ## 5. Agent Soul 身份层
 

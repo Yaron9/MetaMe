@@ -545,7 +545,7 @@ Use from mobile: `/dispatch to windows:hunter research competitors` or just ment
 | `/list` | Browse & download project files |
 | `/model` | Switch model (sonnet/opus/haiku) |
 | `/engine` | Show/switch default engine (`claude`/`codex`) |
-| `/distill-model` | Show/update background distill model (default: `haiku`) |
+| `/distill-model` | Show/update background distill model (background engine: `agy`, default model: `auto`) |
 | `/mentor` | Mentor mode control: on/off/level/status |
 | `/activate` | Activate and bind the most recently created pending agent in a new group |
 | `/agent new` | Interactive wizard to create a new agent |
@@ -672,6 +672,7 @@ If hook installation fails, MetaMe logs and continues the session (non-blocking 
 - **Nightly Reflection**: Daily at 01:00. Distills hot-zone facts into decision logs/lessons, writes back `synthesized_insight`, and generates knowledge capsules.
 - **Memory Index**: Daily at 01:30. Regenerates the global memory index for fast retrieval.
 - **Session Summarize**: Generates a brief summary for idle sessions. Injected as context when resuming after a 2h+ gap.
+- **Codex session memory**: Codex memory extraction reads `state_5.sqlite -> threads.rollout_path` first, then falls back to legacy `~/.codex/sessions` rollout files.
 
 ## Scripts Docs Pointer Map
 
@@ -701,7 +702,7 @@ For day-2 operations and troubleshooting (engine routing, codex login/rate-limit
 | Session summary (per session) | ~400–900 tokens input + ≤250 tokens output (distill model configurable) |
 | Mobile commands (`/stop`, `/list`, `/undo`) | 0 tokens |
 
-> Memory consolidation and session summarization run in the background via the configured distill model (`/distill-model`, default `haiku`). Input is capped by code: skeleton text ≤ 3,000 chars, summary output ≤ 500 chars. Neither runs per-message — memory consolidation follows heartbeat schedule with idle/precondition guards, and summaries trigger once per idle session on sleep-mode transitions.
+> Memory consolidation and session summarization run in the background through `agy` with the configured distill model (`/distill-model`, default `auto`). Input is capped by code: skeleton text ≤ 3,000 chars, summary output ≤ 500 chars. Neither runs per-message — memory consolidation follows heartbeat schedule with idle/precondition guards, and summaries trigger once per idle session on sleep-mode transitions.
 
 ## Plugin
 

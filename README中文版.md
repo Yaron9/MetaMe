@@ -312,7 +312,7 @@ systemctl --user start metame
 
 | 能力 | 说明 |
 |------|------|
-| **认知画像** | 跨会话学习你的思维方式。Schema 约束、800 token 预算、默认 Haiku 蒸馏（可通过 `/distill-model` 调整）。任何值标 `# [LOCKED]` 即不可覆写。 |
+| **认知画像** | 跨会话学习你的思维方式。Schema 约束、800 token 预算，后台统一通过 `agy/auto` 蒸馏（可通过 `/distill-model` 调整模型）。任何值标 `# [LOCKED]` 即不可覆写。 |
 | **分层记忆** | 三层记忆：长期事实（含 concept 标签）、历史检索、高阶沉淀（含 synthesized_insight / 全局索引 / 胶囊）。全自动。 |
 | **手机桥接** | 通过 Telegram/飞书完整使用 Claude/Codex。有状态会话、双向文件互传、实时工具调用状态。 |
 | **技能进化** | 队列化技能进化：采集任务信号、生成工作流提案，并通过 `/skill-evo` 显式审批/结案。 |
@@ -433,7 +433,7 @@ feishu:
 | `/list` | 浏览和下载项目文件 |
 | `/model` | 切换模型（sonnet/opus/haiku） |
 | `/engine` | 查看/切换默认引擎（`claude`/`codex`） |
-| `/distill-model` | 查看/设置后台蒸馏模型（默认 `haiku`） |
+| `/distill-model` | 查看/设置后台蒸馏模型（后台引擎 `agy`，默认模型 `auto`） |
 | `/mentor` | 导师模式控制：on/off/level/status |
 | `/activate` | 在新群里激活并绑定最近创建的 Agent |
 | `/agent new` | 交互式向导新建 Agent |
@@ -553,7 +553,7 @@ Hook 安装失败不会阻断会话；MetaMe 会记录日志并继续运行。
 | 记忆巩固（每会话） | ~1,500–2,000 token 输入 + ~50–300 token 输出（蒸馏模型可配） |
 | 手机命令（`/stop`、`/list`、`/undo`） | 0 token |
 
-> 记忆巩固由后台蒸馏模型处理（`/distill-model`，默认 `haiku`）。输入经代码硬截：skeleton 文本 ≤ 3,000 字符。它不是每条消息触发，而是按心跳调度并受 idle/precondition 守卫控制。
+> 记忆巩固统一由后台 `agy` 执行，模型通过 `/distill-model` 配置（默认 `auto`）。输入经代码硬截：skeleton 文本 ≤ 3,000 字符。它不是每条消息触发，而是按心跳调度并受 idle/precondition 守卫控制。Codex 会话优先通过 `state_5.sqlite -> threads.rollout_path` 进入沉淀链路，再回退扫描旧版 `~/.codex/sessions` rollout 文件。
 
 ## 插件版
 

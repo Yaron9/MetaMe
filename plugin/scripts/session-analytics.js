@@ -783,7 +783,16 @@ function findSessionById(sessionId) {
 
 function findCodexSessionById(sessionId) {
   const sid = String(sessionId || '').trim();
-  if (!sid || !fs.existsSync(CODEX_SESSIONS_ROOT)) return null;
+  if (!sid) return null;
+  for (const dbPath of getKnownCodexDbPaths()) {
+    const rows = queryCodexThreadRows(dbPath, sid);
+    for (const row of rows) {
+      if (!row || row.archived || !row.rollout_path) continue;
+      const item = codexSessionFromRolloutPath(String(row.rollout_path), sid);
+      if (item) return item;
+    }
+  }
+  if (!fs.existsSync(CODEX_SESSIONS_ROOT)) return null;
   const stack = [CODEX_SESSIONS_ROOT];
   while (stack.length > 0) {
     const dir = stack.pop();
@@ -941,8 +950,96 @@ function detectSignificantSession(skeleton) {
 
 const CODEX_SESSIONS_ROOT  = path.join(HOME, '.codex', 'sessions');
 const CODEX_HISTORY_FILE   = path.join(HOME, '.codex', 'history.jsonl');
+const CODEX_GLOBAL_DB      = path.join(HOME, '.codex', 'state_5.sqlite');
+const DAEMON_STATE_FILE    = path.join(HOME, '.metame', 'daemon_state.json');
 // Matches: rollout-YYYY-MM-DDTHH-MM-SS-<uuid>.jsonl  (colons replaced with dashes)
 const CODEX_ROLLOUT_PATTERN = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)\.jsonl$/;
+
+function codexSessionFromRolloutPath(fullPath, fallbackId = '') {
+  if (!fullPath) return null;
+  const m = path.basename(fullPath).match(CODEX_ROLLOUT_PATTERN);
+  const sessionId = fallbackId || (m && m[1]) || '';
+  if (!sessionId) return null;
+  try {
+    const stat = fs.statSync(fullPath);
+    if (stat.size < MIN_FILE_SIZE || stat.size > MAX_FILE_SIZE) return null;
+    return { path: fullPath, session_id: sessionId, mtime: stat.mtimeMs, engine: 'codex' };
+  } catch {
+    return null;
+  }
+}
+
+function loadDaemonSessionCwds() {
+  const out = new Set();
+  try {
+    const raw = JSON.parse(fs.readFileSync(DAEMON_STATE_FILE, 'utf8'));
+    const sessions = raw && raw.sessions && typeof raw.sessions === 'object' ? raw.sessions : {};
+    for (const session of Object.values(sessions)) {
+      if (!session || typeof session !== 'object' || !session.cwd) continue;
+      out.add(path.resolve(String(session.cwd)));
+    }
+  } catch { /* optional */ }
+  return [...out];
+}
+
+function getKnownCodexDbPaths() {
+  const out = [];
+  const seen = new Set();
+  const add = (candidate) => {
+    const value = String(candidate || '').trim();
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    out.push(value);
+  };
+  add(CODEX_GLOBAL_DB);
+  for (const cwd of loadDaemonSessionCwds()) {
+    add(path.join(cwd, '.codex', 'state_5.sqlite'));
+  }
+  return out;
+}
+
+function queryCodexThreadRows(dbPath, sessionId = '') {
+  let db = null;
+  try {
+    if (!fs.existsSync(dbPath)) return [];
+    const { DatabaseSync } = require('node:sqlite');
+    db = new DatabaseSync(dbPath, { readonly: true });
+    const sql = `
+      SELECT id, rollout_path, updated_at, created_at, archived
+      FROM threads
+      ${sessionId ? 'WHERE id = ?' : ''}
+      ORDER BY updated_at DESC
+      LIMIT 500
+    `;
+    const rows = sessionId ? db.prepare(sql).all(sessionId) : db.prepare(sql).all();
+    db.close();
+    db = null;
+    return rows || [];
+  } catch {
+    if (db) { try { db.close(); } catch { /* ignore */ } }
+    return [];
+  }
+}
+
+function findCodexSessionsFromStateDb(limit = 30) {
+  const results = [];
+  const seen = new Set();
+  for (const dbPath of getKnownCodexDbPaths()) {
+    for (const row of queryCodexThreadRows(dbPath)) {
+      if (!row || row.archived || !row.id || !row.rollout_path) continue;
+      if (seen.has(row.id) || isProcessed('codex_facts', row.id)) continue;
+      const item = codexSessionFromRolloutPath(String(row.rollout_path), String(row.id));
+      if (!item) continue;
+      item.mtime = Number(row.updated_at || row.created_at || 0) > 0
+        ? Number(row.updated_at || row.created_at) * 1000
+        : item.mtime;
+      seen.add(row.id);
+      results.push(item);
+    }
+  }
+  results.sort((a, b) => b.mtime - a.mtime);
+  return results.slice(0, limit);
+}
 
 /**
  * Load ~/.codex/history.jsonl into a Map<session_id, [{ts, text}]>.
@@ -975,7 +1072,13 @@ function loadCodexHistory(sessionIds = null) {
  * Filename pattern: rollout-YYYY-MM-DDTHH-MM-SS-<uuid>.jsonl
  */
 function findAllUnextractedCodexSessions(limit = 30) {
-  if (!fs.existsSync(CODEX_SESSIONS_ROOT)) return [];
+  const byId = new Map();
+  for (const item of findCodexSessionsFromStateDb(limit)) {
+    byId.set(item.session_id, item);
+  }
+  if (!fs.existsSync(CODEX_SESSIONS_ROOT)) {
+    return [...byId.values()].sort((a, b) => b.mtime - a.mtime).slice(0, limit);
+  }
   const results = [];
   try {
     const years = fs.readdirSync(CODEX_SESSIONS_ROOT).filter(d => /^\d{4}$/.test(d));
@@ -997,15 +1100,18 @@ function findAllUnextractedCodexSessions(limit = 30) {
             const sessionId = m[1];
             if (isProcessed('codex_facts', sessionId)) continue;
             const fullPath = path.join(dayDir, file);
-            let fstat;
-            try { fstat = fs.statSync(fullPath); } catch { continue; }
-            if (fstat.size < MIN_FILE_SIZE) continue;
-            results.push({ path: fullPath, session_id: sessionId, mtime: fstat.mtimeMs });
+            const item = codexSessionFromRolloutPath(fullPath, sessionId);
+            if (item) results.push(item);
           }
         }
       }
     }
   } catch { return []; }
+  for (const item of results) {
+    if (!byId.has(item.session_id)) byId.set(item.session_id, item);
+  }
+  results.length = 0;
+  results.push(...byId.values());
   results.sort((a, b) => b.mtime - a.mtime);
   return results.slice(0, limit);
 }
@@ -1199,6 +1305,10 @@ module.exports = {
   findAllUnextractedCodexSessions,
   buildCodexInput,
   markCodexFactsExtracted,
+  _internal: {
+    codexSessionFromRolloutPath,
+    queryCodexThreadRows,
+  },
 };
 
 // Direct execution for testing

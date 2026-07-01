@@ -682,8 +682,9 @@ describe('daemon-admin-commands /TeamTask', () => {
 
 describe('daemon-admin-commands distill model controls', () => {
   function createProviderStub() {
-    let model = 'haiku';
+    let model = 'auto';
     return {
+      getDistillEngine: () => 'agy',
       getDistillModel: () => model,
       setDistillModel: (next) => {
         const raw = String(next || '').trim();
@@ -716,7 +717,7 @@ describe('daemon-admin-commands distill model controls', () => {
     });
 
     assert.equal(res.handled, true);
-    assert.match(sent[0], /当前蒸馏模型: haiku/);
+    assert.match(sent[0], /当前后台蒸馏\/记忆沉淀: agy\/auto/);
   });
 
   it('updates model via /distill-model <name>', async () => {
@@ -781,7 +782,7 @@ describe('daemon-admin-commands distill model controls', () => {
 
     assert.equal(res.handled, false);
     assert.equal(sent.length, 0);
-    assert.equal(providerStub.getDistillModel(), 'haiku');
+    assert.equal(providerStub.getDistillModel(), 'auto');
   });
 
   it('does not trigger when model is only mentioned without set intent', async () => {
@@ -803,7 +804,7 @@ describe('daemon-admin-commands distill model controls', () => {
 
     assert.equal(res.handled, false);
     assert.equal(sent.length, 0);
-    assert.equal(providerStub.getDistillModel(), 'haiku');
+    assert.equal(providerStub.getDistillModel(), 'auto');
   });
 });
 
