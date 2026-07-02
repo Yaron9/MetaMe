@@ -57,6 +57,44 @@ describe('agy-adapter invocation', () => {
     assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
   });
 
+  it('returns the transcript final text before lingering background work closes', async () => {
+    const child = new EventEmitter();
+    child.pid = 234567;
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    const cwd = path.join(os.tmpdir(), `metame-agy-early-final-${Date.now()}-${Math.random()}`);
+    const sessionId = 'sess-early-final';
+    const records = [
+      { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: '查一下工业富联' },
+      {
+        type: 'PLANNER_RESPONSE',
+        source: 'MODEL',
+        status: 'DONE',
+        content: '结论：已有最终回答应该立刻返回，不继续等待后台 search-web 进程退出。',
+      },
+      { type: 'RUN_COMMAND', source: 'MODEL', status: 'RUNNING', content: 'search-web trailing work' },
+    ];
+    const signals = [];
+
+    const result = await adapter.spawnAgy({
+      cwd, model: 'auto', sessionId, timeoutMs: 10_000, readOnly: false,
+    }, '查一下工业富联', {
+      allowAnyPlatform: true,
+      spawn: () => child,
+      readCache: () => ({ [cwd]: sessionId }),
+      readTranscript: () => records.slice(),
+      beforeCache: { [cwd]: sessionId },
+      minRecordCount: 0,
+      finalPollIntervalMs: 1,
+      terminateTree: (_child, signal) => signals.push(signal),
+      killAfterMs: 10_000,
+    });
+
+    assert.equal(result.error, undefined);
+    assert.match(result.earlyFinal.text, /已有最终回答应该立刻返回/);
+    assert.deepEqual(signals, ['SIGTERM']);
+  });
+
   it('asks agy to summarize existing tool evidence when the first turn has no final text', async () => {
     const cwd = path.join(os.tmpdir(), `metame-agy-finalize-${Date.now()}-${Math.random()}`);
     const sessionId = 'sess-finalize';

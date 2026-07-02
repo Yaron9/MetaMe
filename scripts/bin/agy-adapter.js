@@ -22,6 +22,7 @@ const AGY_HOME = path.join(os.homedir(), '.gemini', 'antigravity-cli');
 const CACHE_FILE = path.join(AGY_HOME, 'cache', 'last_conversations.json');
 const LOCK_DIR = path.join(os.homedir(), '.metame', 'runtime', 'agy-locks');
 const MAX_PROMPT_BYTES = 512 * 1024;
+const FINAL_POLL_INTERVAL_MS = 500;
 
 function parseArgs(argv) {
   const out = { cwd: process.cwd(), model: 'auto', sessionId: '', timeoutMs: 20 * 60 * 1000, readOnly: false };
@@ -97,6 +98,20 @@ async function waitForArtifacts(before, options, minRecordCount = 0, deps = {}) 
   return null;
 }
 
+function readFinalResponseArtifact(before, options, minRecordCount = 0, deps = {}) {
+  const readCacheFn = getReadCache(deps);
+  const readTranscriptFn = getReadTranscript(deps);
+  const after = readCacheFn();
+  const sessionId = captureConversationId(before, after, options.cwd, options.sessionId);
+  if (!sessionId) return null;
+  const allRecords = readTranscriptFn(sessionId);
+  if (allRecords.length <= minRecordCount) return null;
+  const newRecords = options.sessionId ? allRecords.slice(minRecordCount) : allRecords;
+  const records = recordsAfterLatestUser(newRecords);
+  const text = selectFinalResponse(records);
+  return text ? { sessionId, text, records } : null;
+}
+
 function isProcessAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
@@ -170,6 +185,7 @@ function spawnAgy(options, prompt, deps = {}) {
   return new Promise((resolve) => {
     let output = '';
     let errorOutput = '';
+    let finished = false;
     const child = spawnFn(scriptBin, buildAgyArgs(options, prompt, agyBin), {
       cwd: options.cwd,
       env: { ...process.env, METAME_INTERNAL_PROMPT: '1' },
@@ -184,8 +200,30 @@ function spawnAgy(options, prompt, deps = {}) {
     const timeoutPaddingMs = deps.timeoutPaddingMs ?? 5_000;
     const killAfterMs = deps.killAfterMs ?? 5_000;
     const forceFinishAfterMs = deps.forceFinishAfterMs ?? 7_000;
+    const finalPollIntervalMs = deps.finalPollIntervalMs ?? FINAL_POLL_INTERVAL_MS;
     let killTimer = null;
     let forceFinishTimer = null;
+    let finalPollTimer = null;
+    const requestFinalStop = () => {
+      stop('SIGTERM');
+      const hardKillTimer = setTimeout(() => stop('SIGKILL'), killAfterMs);
+      if (typeof hardKillTimer.unref === 'function') hardKillTimer.unref();
+    };
+    const pollFinalResponse = () => {
+      if (finished || !deps.beforeCache) return;
+      let finalResponse = null;
+      try {
+        finalResponse = readFinalResponseArtifact(
+          deps.beforeCache,
+          options,
+          Number(deps.minRecordCount || 0),
+          deps
+        );
+      } catch { return; }
+      if (!finalResponse) return;
+      requestFinalStop();
+      finish({ code: 0, output, errorOutput, earlyFinal: finalResponse });
+    };
     const requestStop = (reason) => {
       if (reason === 'timeout') timedOut = true;
       else interrupted = true;
@@ -201,6 +239,11 @@ function spawnAgy(options, prompt, deps = {}) {
     const onTerm = () => requestStop('signal');
     process.once('SIGTERM', onTerm);
     process.once('SIGINT', onTerm);
+    if (deps.beforeCache && finalPollIntervalMs > 0) {
+      finalPollTimer = setInterval(pollFinalResponse, finalPollIntervalMs);
+      if (typeof finalPollTimer.unref === 'function') finalPollTimer.unref();
+      pollFinalResponse();
+    }
     child.stdout.on('data', (data) => { output = `${output}${data}`.slice(-256 * 1024); });
     child.stderr.on('data', (data) => { errorOutput = `${errorOutput}${data}`.slice(-64 * 1024); });
     child.on('error', (err) => finish({ spawnError: err }));
@@ -209,11 +252,11 @@ function spawnAgy(options, prompt, deps = {}) {
       : interrupted
         ? { error: { code: 'AGY_EXEC_FAILURE', message: 'agy 执行已停止。' } }
         : { code, output, errorOutput }));
-    let finished = false;
     function finish(result) {
       if (finished) return;
       finished = true;
       clearInterval(heartbeat);
+      if (finalPollTimer) clearInterval(finalPollTimer);
       clearTimeout(timeout);
       if (killTimer) clearTimeout(killTimer);
       if (forceFinishTimer) clearTimeout(forceFinishTimer);
@@ -258,8 +301,9 @@ async function run(options, prompt, deps = {}) {
     try { beforeRecordCount = readTranscriptFn(options.sessionId).length; } catch { /* validated after run */ }
   }
   try {
-    const result = await spawnAgyFn(options, prompt, deps);
+    const result = await spawnAgyFn(options, prompt, { ...deps, beforeCache: before, minRecordCount: beforeRecordCount });
     if (result.error) return result;
+    if (result.earlyFinal) return result.earlyFinal;
     const artifacts = await waitForArtifacts(before, options, beforeRecordCount, deps);
     if (!artifacts) return { error: { code: 'AGY_SESSION_CAPTURE_FAILED', message: 'agy 已执行，但无法确认 conversation 与 transcript，结果状态未知。' } };
     const { sessionId, records: allRecords } = artifacts;
