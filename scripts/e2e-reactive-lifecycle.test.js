@@ -1,5 +1,6 @@
 'use strict';
 
+require('./test-support/env-setup');
 /**
  * E2E test for the complete reactive lifecycle.
  *

@@ -20,7 +20,7 @@
     ],
     "scripts": {
         "test": "node --require ./scripts/test-support/env-setup.js --test scripts/*.test.js",
-        "test:daemon-status": "node --test scripts/daemon-restart-status.test.js",
+        "test:daemon-status": "node --require ./scripts/test-support/env-setup.js --test scripts/daemon-restart-status.test.js",
         "start": "node index.js",
         "deploy": "node index.js deploy",
         "push": "bash scripts/bin/push-clean.sh",

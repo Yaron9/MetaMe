@@ -1,5 +1,6 @@
 'use strict';
 
+require('./test-support/env-setup');
 const assert = require('assert');
 const { createMessagePipeline } = require('./daemon-message-pipeline');
 

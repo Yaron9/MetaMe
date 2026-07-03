@@ -1,5 +1,6 @@
 'use strict';
 
+require('./test-support/env-setup');
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const os = require('os');

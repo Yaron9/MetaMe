@@ -1,5 +1,6 @@
 'use strict';
 
+require('./test-support/env-setup');
 /**
  * memory-wiki-integration.test.js
  *

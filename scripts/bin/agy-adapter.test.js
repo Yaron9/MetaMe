@@ -1,5 +1,6 @@
 'use strict';
 
+require('../test-support/env-setup');
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('events');
@@ -162,6 +163,75 @@ describe('agy-adapter invocation', () => {
 
     assert.equal(result.error.code, 'AGY_EXEC_FAILURE');
     assert.match(result.error.message, /agy exited with code 0/);
+  });
+
+  it('retries once when agy OAuth refresh wins after the CLI auth timeout', async () => {
+    const cwd = path.join(os.tmpdir(), `metame-agy-auth-retry-${Date.now()}-${Math.random()}`);
+    const sessionId = 'sess-auth-retry';
+    const records = [];
+    const calls = [];
+
+    const result = await adapter.run({
+      cwd,
+      model: 'auto',
+      sessionId,
+      timeoutMs: 1000,
+      readOnly: false,
+    }, '查一下登录态是否可用', {
+      readCache: () => ({ [cwd]: sessionId }),
+      readTranscript: () => records.slice(),
+      sleep: async () => {},
+      authRetryDelayMs: 0,
+      spawnAgy: async (_options, prompt) => {
+        calls.push(prompt);
+        if (calls.length === 1) {
+          return {
+            code: 1,
+            output: 'Waiting for authentication (timeout 30s)...\nError: authentication timed out.',
+            errorOutput: '',
+          };
+        }
+        records.push(
+          { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: prompt },
+          { type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE', content: '登录态已复用，第二次运行成功。' },
+        );
+        return { code: 0, output: '', errorOutput: '' };
+      },
+    });
+
+    assert.equal(calls.length, 2);
+    assert.equal(result.error, undefined);
+    assert.match(result.text, /登录态已复用/);
+  });
+
+  it('does not retry successful answers that mention OAuth', async () => {
+    const cwd = path.join(os.tmpdir(), `metame-agy-oauth-answer-${Date.now()}-${Math.random()}`);
+    const records = [];
+    const calls = [];
+
+    const result = await adapter.run({
+      cwd,
+      model: 'auto',
+      sessionId: 'stale-session',
+      timeoutMs: 1000,
+      readOnly: false,
+    }, '解释 OAuth', {
+      readCache: () => ({ [cwd]: 'stale-session' }),
+      readTranscript: () => records.slice(),
+      sleep: async () => {},
+      spawnAgy: async (_options, prompt) => {
+        calls.push(prompt);
+        records.push(
+          { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: prompt },
+          { type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE', content: 'OAuth 是一种授权协议。' },
+        );
+        return { code: 0, output: '', errorOutput: '' };
+      },
+    });
+
+    assert.equal(calls.length, 1);
+    assert.equal(result.error, undefined);
+    assert.match(result.text, /OAuth 是一种授权协议/);
   });
 
   it('uses stdout text when agy does not persist a transcript for a successful run', async () => {

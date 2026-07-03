@@ -1,5 +1,6 @@
 'use strict';
 
+require('./test-support/env-setup');
 /**
  * Phase C validation: Test that a non-research, single-agent, no-team
  * perpetual project works correctly on the unified control plane.

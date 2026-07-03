@@ -1,5 +1,6 @@
 'use strict';
 
+require('./test-support/env-setup');
 /**
  * daemon-recall-e2e.test.js — integration test for the daemon recall channel
  * end-to-end behaviour, addressing Codex final-audit Top 3 #3.

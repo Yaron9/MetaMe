@@ -1,5 +1,6 @@
 'use strict';
 
+require('./test-support/env-setup');
 /**
  * memory-gc-audit-retention.test.js — verifies cleanupRecallAudit prunes
  * old recall_audit rows past the retention window without touching

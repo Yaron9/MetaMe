@@ -23,6 +23,7 @@ const CACHE_FILE = path.join(AGY_HOME, 'cache', 'last_conversations.json');
 const LOCK_DIR = path.join(os.homedir(), '.metame', 'runtime', 'agy-locks');
 const MAX_PROMPT_BYTES = 512 * 1024;
 const FINAL_POLL_INTERVAL_MS = 500;
+const AUTH_REFRESH_RETRY_DELAY_MS = 1500;
 
 function parseArgs(argv) {
   const out = { cwd: process.cwd(), model: 'auto', sessionId: '', timeoutMs: 20 * 60 * 1000, readOnly: false };
@@ -278,6 +279,14 @@ function classifyFailure(result) {
   return { code: 'AGY_EXEC_FAILURE', message: text.slice(0, 1000) || `agy exited with code ${result.code}` };
 }
 
+function shouldRetryAfterAuthFailure(result) {
+  if (!result || result.code === 0 || result.error || result.earlyFinal) return false;
+  const failure = classifyFailure(result);
+  if (failure.code !== 'AGY_AUTH_REQUIRED') return false;
+  const text = `${result.errorOutput || ''}\n${result.output || ''}`.trim();
+  return /authentication timed out|auth timed out|waiting for authentication/i.test(text);
+}
+
 function stripAnsi(value) {
   return String(value || '').replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '');
 }
@@ -325,7 +334,11 @@ async function run(options, prompt, deps = {}) {
     try { beforeRecordCount = readTranscriptFn(options.sessionId).length; } catch { /* validated after run */ }
   }
   try {
-    const result = await spawnAgyFn(options, prompt, { ...deps, beforeCache: before, minRecordCount: beforeRecordCount });
+    let result = await spawnAgyFn(options, prompt, { ...deps, beforeCache: before, minRecordCount: beforeRecordCount });
+    if (shouldRetryAfterAuthFailure(result)) {
+      await (deps.sleep || sleep)(deps.authRetryDelayMs ?? AUTH_REFRESH_RETRY_DELAY_MS);
+      result = await spawnAgyFn(options, prompt, { ...deps, beforeCache: before, minRecordCount: beforeRecordCount });
+    }
     if (result.error) return result;
     if (result.earlyFinal) return result.earlyFinal;
     const artifacts = await waitForArtifacts(before, options, beforeRecordCount, deps);

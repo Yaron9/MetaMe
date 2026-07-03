@@ -1,5 +1,6 @@
 'use strict';
 
+require('./test-support/env-setup');
 /**
  * memory-track-search.test.js — verifies the trackSearch parameter on
  * searchMemoryItems / searchFacts / searchSessions per v4.1 §P1.3.

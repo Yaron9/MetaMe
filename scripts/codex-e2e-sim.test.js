@@ -1,5 +1,6 @@
 'use strict';
 
+require('./test-support/env-setup');
 /**
  * E2E Simulation: Mobile user sends message → daemon routes to codex engine → spawn codex → returns result.
  *

@@ -1,5 +1,6 @@
 'use strict';
 
+require('./test-support/env-setup');
 /**
  * daemon-wiki.test.js — Unit tests for daemon-wiki.js command handler
  *

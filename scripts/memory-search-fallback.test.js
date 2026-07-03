@@ -1,5 +1,6 @@
 'use strict';
 
+require('./test-support/env-setup');
 /**
  * memory-search-fallback.test.js — verifies the 3-tier progressive
  * degradation in scripts/memory.js searchMemoryItems:

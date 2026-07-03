@@ -1,4 +1,7 @@
 'use strict';
+
+require('./test-support/env-setup');
+'use strict';
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
