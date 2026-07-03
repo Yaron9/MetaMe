@@ -278,6 +278,30 @@ function classifyFailure(result) {
   return { code: 'AGY_EXEC_FAILURE', message: text.slice(0, 1000) || `agy exited with code ${result.code}` };
 }
 
+function stripAnsi(value) {
+  return String(value || '').replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '');
+}
+
+function looksLikeFailureOutput(text) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  if (/(auth|login|unauthorized|credential|oauth|401|403)/i.test(value)) return true;
+  if (value.length < 800 && /\b(error|failed|exception|not found|invalid|timeout|timed out)\b/i.test(value)) return true;
+  return false;
+}
+
+function extractStdoutFinalText(result) {
+  if (!result || result.code !== 0) return '';
+  const text = stripAnsi(result.output)
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map(line => line.trimEnd())
+    .join('\n')
+    .trim();
+  if (!text || looksLikeFailureOutput(text)) return '';
+  return text;
+}
+
 async function readStdin() {
   const chunks = [];
   let size = 0;
@@ -305,7 +329,16 @@ async function run(options, prompt, deps = {}) {
     if (result.error) return result;
     if (result.earlyFinal) return result.earlyFinal;
     const artifacts = await waitForArtifacts(before, options, beforeRecordCount, deps);
-    if (!artifacts) return { error: { code: 'AGY_SESSION_CAPTURE_FAILED', message: 'agy 已执行，但无法确认 conversation 与 transcript，结果状态未知。' } };
+    if (!artifacts) {
+      const stdoutText = extractStdoutFinalText(result);
+      if (stdoutText) return { sessionId: options.sessionId || '', text: stdoutText, records: [] };
+      return {
+        error: {
+          code: 'AGY_SESSION_CAPTURE_FAILED',
+          message: 'agy 已执行，但无法确认 conversation 与 transcript，且 stdout 没有可用最终文本。',
+        },
+      };
+    }
     const { sessionId, records: allRecords } = artifacts;
     const newRecords = options.sessionId ? allRecords.slice(beforeRecordCount) : allRecords;
     const records = recordsAfterLatestUser(newRecords);
@@ -320,6 +353,8 @@ async function run(options, prompt, deps = {}) {
 
       const finalArtifacts = await waitForArtifacts(before, finalizationOptions, allRecords.length, deps);
       if (!finalArtifacts) {
+        const stdoutText = extractStdoutFinalText(finalizationResult);
+        if (stdoutText) return { sessionId, text: stdoutText, records };
         return {
           error: { code: 'AGY_FINALIZATION_CAPTURE_FAILED', message: '已有工具结果，但无法确认 agy 最终总结 transcript。' },
           sessionId,
@@ -375,5 +410,14 @@ module.exports = {
   classifyFailure,
   spawnAgy,
   run,
-  _internal: { acquireLock, readCache, readTranscript, waitForArtifacts, listDescendantPids, terminateTree },
+  _internal: {
+    acquireLock,
+    readCache,
+    readTranscript,
+    waitForArtifacts,
+    listDescendantPids,
+    terminateTree,
+    stripAnsi,
+    extractStdoutFinalText,
+  },
 };

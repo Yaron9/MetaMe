@@ -163,4 +163,51 @@ describe('agy-adapter invocation', () => {
     assert.equal(result.error.code, 'AGY_EXEC_FAILURE');
     assert.match(result.error.message, /agy exited with code 0/);
   });
+
+  it('uses stdout text when agy does not persist a transcript for a successful run', async () => {
+    const cwd = path.join(os.tmpdir(), `metame-agy-stdout-${Date.now()}-${Math.random()}`);
+    const result = await adapter.run({
+      cwd,
+      model: 'auto',
+      sessionId: 'stale-session',
+      timeoutMs: 1000,
+      readOnly: false,
+    }, '怎么样', {
+      readCache: () => ({ [cwd]: 'stale-session' }),
+      readTranscript: () => [],
+      sleep: async () => {},
+      spawnAgy: async () => ({
+        code: 0,
+        output: '\u001b[32m这是 agy stdout 里的最终回答。\u001b[0m\n',
+        errorOutput: '',
+      }),
+    });
+
+    assert.equal(result.error, undefined);
+    assert.equal(result.sessionId, 'stale-session');
+    assert.equal(result.text, '这是 agy stdout 里的最终回答。');
+  });
+
+  it('does not treat stdout-looking errors as final answers', async () => {
+    const cwd = path.join(os.tmpdir(), `metame-agy-stdout-error-${Date.now()}-${Math.random()}`);
+    const result = await adapter.run({
+      cwd,
+      model: 'auto',
+      sessionId: 'stale-session',
+      timeoutMs: 1000,
+      readOnly: false,
+    }, '怎么样', {
+      readCache: () => ({ [cwd]: 'stale-session' }),
+      readTranscript: () => [],
+      sleep: async () => {},
+      spawnAgy: async () => ({
+        code: 0,
+        output: 'Error: conversation not found',
+        errorOutput: '',
+      }),
+    });
+
+    assert.equal(result.error.code, 'AGY_SESSION_CAPTURE_FAILED');
+    assert.match(result.error.message, /stdout 没有可用最终文本/);
+  });
 });
