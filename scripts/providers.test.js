@@ -28,9 +28,9 @@ describe('providers distill model config', () => {
     fs.rmSync(tmpHome, { recursive: true, force: true });
   });
 
-  it('defaults background distill to agy/auto when distill_model is empty', () => {
+  it('defaults unattended background distill to codex/auto when distill_model is empty', () => {
     const providers = loadProvidersWithHome(tmpHome);
-    assert.equal(providers.getDistillEngine(), 'agy');
+    assert.equal(providers.getDistillEngine(), 'codex');
     assert.equal(providers.getDistillModel(), 'auto');
   });
 
@@ -63,7 +63,7 @@ describe('providers distill model config', () => {
     assert.equal(providers.getDistillModel(), 'gpt-5-mini');
   });
 
-  it('migrates legacy Claude/Codex distill model config to agy auto when engine is absent', () => {
+  it('keeps legacy Claude/Codex distill model config on the non-AGY default engine', () => {
     const providers = loadProvidersWithHome(tmpHome);
     const metameDir = path.join(tmpHome, '.metame');
     fs.mkdirSync(metameDir, { recursive: true });
@@ -72,8 +72,8 @@ describe('providers distill model config', () => {
       providers: { anthropic: { label: 'Anthropic (Official)' } },
       distill_model: 'haiku',
     }), 'utf8');
-    assert.equal(providers.getDistillEngine(), 'agy');
-    assert.equal(providers.getDistillModel(), 'auto');
+    assert.equal(providers.getDistillEngine(), 'codex');
+    assert.equal(providers.getDistillModel(), 'haiku');
   });
 
   it('maps legacy per-call model overrides to auto for agy execution', () => {

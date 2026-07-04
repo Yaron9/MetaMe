@@ -24,6 +24,15 @@ const LOCK_DIR = path.join(os.homedir(), '.metame', 'runtime', 'agy-locks');
 const MAX_PROMPT_BYTES = 512 * 1024;
 const FINAL_POLL_INTERVAL_MS = 500;
 const AUTH_REFRESH_RETRY_DELAY_MS = 1500;
+const NONINTERACTIVE_AUTH_PATTERNS = [
+  /starting oauth authentication flow/i,
+  /authentication required/i,
+  /waiting for authentication/i,
+  /please (open|visit|go to)/i,
+  /accounts\.google\.com/i,
+  /auth timed out/i,
+  /authentication timed out/i,
+];
 
 function parseArgs(argv) {
   const out = { cwd: process.cwd(), model: 'auto', sessionId: '', timeoutMs: 20 * 60 * 1000, readOnly: false };
@@ -189,7 +198,12 @@ function spawnAgy(options, prompt, deps = {}) {
     let finished = false;
     const child = spawnFn(scriptBin, buildAgyArgs(options, prompt, agyBin), {
       cwd: options.cwd,
-      env: { ...process.env, METAME_INTERNAL_PROMPT: '1' },
+      env: {
+        ...process.env,
+        BROWSER: process.env.METAME_AGY_BROWSER || '/usr/bin/false',
+        METAME_INTERNAL_PROMPT: '1',
+        METAME_AGY_UNATTENDED: '1',
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     });
@@ -236,6 +250,20 @@ function spawnAgy(options, prompt, deps = {}) {
           : { code: 'AGY_EXEC_FAILURE', message: 'agy 执行已停止。' } }), forceFinishAfterMs);
       }
     };
+    const requestNonInteractiveAuthStop = () => {
+      stop('SIGTERM');
+      if (!killTimer) killTimer = setTimeout(() => stop('SIGKILL'), killAfterMs);
+      finish({
+        error: {
+          code: 'AGY_AUTH_REQUIRED',
+          message: 'agy 需要交互式 Google 登录，已阻止后台弹窗。请在前台终端完成 agy 登录后重试。',
+        },
+      });
+    };
+    const watchForInteractiveAuth = () => {
+      const text = `${errorOutput}\n${output}`;
+      if (NONINTERACTIVE_AUTH_PATTERNS.some(pattern => pattern.test(text))) requestNonInteractiveAuthStop();
+    };
     const timeout = setTimeout(() => requestStop('timeout'), options.timeoutMs + timeoutPaddingMs);
     const onTerm = () => requestStop('signal');
     process.once('SIGTERM', onTerm);
@@ -245,8 +273,14 @@ function spawnAgy(options, prompt, deps = {}) {
       if (typeof finalPollTimer.unref === 'function') finalPollTimer.unref();
       pollFinalResponse();
     }
-    child.stdout.on('data', (data) => { output = `${output}${data}`.slice(-256 * 1024); });
-    child.stderr.on('data', (data) => { errorOutput = `${errorOutput}${data}`.slice(-64 * 1024); });
+    child.stdout.on('data', (data) => {
+      output = `${output}${data}`.slice(-256 * 1024);
+      watchForInteractiveAuth();
+    });
+    child.stderr.on('data', (data) => {
+      errorOutput = `${errorOutput}${data}`.slice(-64 * 1024);
+      watchForInteractiveAuth();
+    });
     child.on('error', (err) => finish({ spawnError: err }));
     child.on('close', (code) => finish(timedOut
       ? { error: { code: 'AGY_TIMEOUT', message: `agy 超过 ${Math.ceil(options.timeoutMs / 1000)} 秒未完成。` } }

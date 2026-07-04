@@ -24,7 +24,7 @@ const os = require('os');
 const yaml = require('./resolve-yaml');
 const { buildCodexArgs } = require('./daemon-engine-runtime');
 
-const DEFAULT_DISTILL_ENGINE = 'agy';
+const DEFAULT_DISTILL_ENGINE = 'codex';
 const DEFAULT_DISTILL_MODEL = 'auto';
 const DISTILL_MODEL_ALIASES = new Map([
   ['agy', 'auto'],
@@ -154,6 +154,7 @@ function loadProviders(options = {}) {
     if (!data.providers) data.providers = {};
     if (!data.providers.anthropic) data.providers.anthropic = { label: 'Anthropic (Official)' };
     const explicitDistillEngine = String(data.distill_engine || '').trim();
+    const resolvedDistillEngine = resolveDistillEngine(data);
     const loadedDistillModel = (() => {
       try { return normalizeDistillModel(data.distill_model, { allowEmpty: true }); } catch { return null; }
     })();
@@ -162,8 +163,8 @@ function loadProviders(options = {}) {
       providers: data.providers,
       distill_provider: data.distill_provider || null,
       daemon_provider: data.daemon_provider || null,
-      distill_engine: resolveDistillEngine(data),
-      distill_model: (!explicitDistillEngine && LEGACY_NON_AGY_DISTILL_MODELS.has(String(loadedDistillModel || '').toLowerCase()))
+      distill_engine: resolvedDistillEngine,
+      distill_model: (!explicitDistillEngine && resolvedDistillEngine === 'agy' && LEGACY_NON_AGY_DISTILL_MODELS.has(String(loadedDistillModel || '').toLowerCase()))
         ? null
         : loadedDistillModel,
     };

@@ -96,6 +96,37 @@ describe('agy-adapter invocation', () => {
     assert.deepEqual(signals, ['SIGTERM']);
   });
 
+  it('blocks interactive OAuth browser login in unattended agy runs', async () => {
+    const child = new EventEmitter();
+    child.pid = 345678;
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    const signals = [];
+    let spawnedEnv = null;
+
+    const resultPromise = adapter.spawnAgy({
+      cwd: '/tmp', model: 'auto', sessionId: '', timeoutMs: 10_000, readOnly: false,
+    }, 'hello', {
+      allowAnyPlatform: true,
+      spawn: (_bin, _args, opts) => {
+        spawnedEnv = opts.env;
+        setImmediate(() => {
+          child.stderr.emit('data', 'Authentication required. Please open https://accounts.google.com/o/oauth2/auth');
+        });
+        return child;
+      },
+      terminateTree: (_child, signal) => signals.push(signal),
+      killAfterMs: 10_000,
+    });
+
+    const result = await resultPromise;
+    assert.equal(result.error.code, 'AGY_AUTH_REQUIRED');
+    assert.match(result.error.message, /已阻止后台弹窗/);
+    assert.equal(spawnedEnv.METAME_AGY_UNATTENDED, '1');
+    assert.equal(spawnedEnv.BROWSER, '/usr/bin/false');
+    assert.deepEqual(signals, ['SIGTERM']);
+  });
+
   it('asks agy to summarize existing tool evidence when the first turn has no final text', async () => {
     const cwd = path.join(os.tmpdir(), `metame-agy-finalize-${Date.now()}-${Math.random()}`);
     const sessionId = 'sess-finalize';
