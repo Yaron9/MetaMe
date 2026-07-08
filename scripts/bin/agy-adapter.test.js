@@ -4,6 +4,7 @@ require('../test-support/env-setup');
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('events');
+const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const adapter = require('./agy-adapter');
@@ -149,6 +150,72 @@ describe('agy-adapter invocation', () => {
     assert.equal(spawnedEnv.METAME_AGY_UNATTENDED, '1');
     assert.equal(spawnedEnv.BROWSER, '/usr/bin/false');
     assert.deepEqual(signals, ['SIGTERM']);
+  });
+
+  it('blocks interactive OAuth when it only appears in the PTY log file', async () => {
+    const child = new EventEmitter();
+    child.pid = 345680;
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    const logFile = path.join(os.tmpdir(), `metame-agy-auth-log-${Date.now()}-${Math.random()}.log`);
+    const signals = [];
+
+    try {
+      const resultPromise = adapter.spawnAgy({
+        cwd: '/tmp', model: 'auto', sessionId: '', timeoutMs: 10_000, readOnly: false,
+      }, 'hello', {
+        allowAnyPlatform: true,
+        logFile,
+        authLogPollIntervalMs: 1,
+        spawn: () => {
+          setImmediate(() => {
+            fs.writeFileSync(logFile, 'Authentication required. Please visit https://accounts.google.com/o/oauth2/auth', 'utf8');
+          });
+          return child;
+        },
+        terminateTree: (_child, signal) => signals.push(signal),
+        killAfterMs: 10_000,
+      });
+
+      const result = await resultPromise;
+      assert.equal(result.error.code, 'AGY_AUTH_REQUIRED');
+      assert.deepEqual(signals, ['SIGTERM']);
+    } finally {
+      fs.rmSync(logFile, { force: true });
+    }
+  });
+
+  it('places an open-command blocker before system PATH for unattended agy runs', async () => {
+    const child = new EventEmitter();
+    child.pid = 345679;
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    let spawnedEnv = null;
+    let cleaned = false;
+
+    const resultPromise = adapter.spawnAgy({
+      cwd: '/tmp', model: 'auto', sessionId: '', timeoutMs: 10_000, readOnly: false,
+    }, 'hello', {
+      allowAnyPlatform: true,
+      openBlocker: {
+        dir: '/tmp/metame-open-blocker-test',
+        cleanup: () => { cleaned = true; },
+      },
+      spawn: (_bin, _args, opts) => {
+        spawnedEnv = opts.env;
+        setImmediate(() => child.emit('close', 0));
+        return child;
+      },
+      terminateTree: () => {},
+      readCache: () => ({}),
+      readTranscript: () => [],
+      sleep: async () => {},
+    });
+
+    const result = await resultPromise;
+    assert.equal(result.code, 0);
+    assert.equal(spawnedEnv.PATH.split(path.delimiter)[0], '/tmp/metame-open-blocker-test');
+    assert.equal(cleaned, true);
   });
 
   it('asks agy to summarize existing tool evidence when the first turn has no final text', async () => {

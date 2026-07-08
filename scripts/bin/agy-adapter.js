@@ -30,8 +30,11 @@ const NONINTERACTIVE_AUTH_PATTERNS = [
   /starting oauth authentication flow/i,
   /authentication required/i,
   /waiting for authentication/i,
+  /if your browser didn't open/i,
+  /open the url below in your browser/i,
   /please (open|visit|go to)/i,
   /accounts\.google\.com/i,
+  /metame blocked unattended browser open/i,
   /auth timed out/i,
   /authentication timed out/i,
 ];
@@ -255,6 +258,26 @@ function terminateTree(child, signal) {
   try { process.kill(-child.pid, signal); } catch { try { child.kill(signal); } catch { } }
 }
 
+function createOpenBlockerDir(deps = {}) {
+  const fsMod = deps.fs || fs;
+  const base = deps.openBlockerBase || os.tmpdir();
+  const dir = fsMod.mkdtempSync(path.join(base, 'metame-agy-open-blocker-'));
+  const openPath = path.join(dir, 'open');
+  fsMod.writeFileSync(openPath, [
+    '#!/bin/sh',
+    'echo "METAME blocked unattended browser open: $*" >&2',
+    'exit 73',
+    '',
+  ].join('\n'), 'utf8');
+  fsMod.chmodSync(openPath, 0o755);
+  return {
+    dir,
+    cleanup: () => {
+      try { fsMod.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    },
+  };
+}
+
 function spawnAgy(options, prompt, deps = {}) {
   const spawnFn = deps.spawn || spawn;
   const agyBin = deps.agyBin || process.env.AGY_BIN || 'agy';
@@ -267,6 +290,8 @@ function spawnAgy(options, prompt, deps = {}) {
     let output = '';
     let errorOutput = '';
     let finished = false;
+    let polledLogOutput = '';
+    const openBlocker = deps.openBlocker || createOpenBlockerDir(deps);
     const child = spawnFn(scriptBin, buildAgyArgs({ ...options, logFile }, prompt, agyBin), {
       cwd: options.cwd,
       env: {
@@ -274,6 +299,7 @@ function spawnAgy(options, prompt, deps = {}) {
         BROWSER: process.env.METAME_AGY_BROWSER || '/usr/bin/false',
         METAME_INTERNAL_PROMPT: '1',
         METAME_AGY_UNATTENDED: '1',
+        PATH: `${openBlocker.dir}${path.delimiter}${process.env.PATH || '/usr/local/bin:/usr/bin:/bin'}`,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
@@ -287,9 +313,11 @@ function spawnAgy(options, prompt, deps = {}) {
     const killAfterMs = deps.killAfterMs ?? 5_000;
     const forceFinishAfterMs = deps.forceFinishAfterMs ?? 7_000;
     const finalPollIntervalMs = deps.finalPollIntervalMs ?? FINAL_POLL_INTERVAL_MS;
+    const authLogPollIntervalMs = deps.authLogPollIntervalMs ?? 250;
     let killTimer = null;
     let forceFinishTimer = null;
     let finalPollTimer = null;
+    let authLogPollTimer = null;
     const requestFinalStop = () => {
       stop('SIGTERM');
       const hardKillTimer = setTimeout(() => stop('SIGKILL'), killAfterMs);
@@ -332,8 +360,12 @@ function spawnAgy(options, prompt, deps = {}) {
       });
     };
     const watchForInteractiveAuth = () => {
-      const text = `${errorOutput}\n${output}`;
+      const text = `${errorOutput}\n${output}\n${polledLogOutput}`;
       if (NONINTERACTIVE_AUTH_PATTERNS.some(pattern => pattern.test(text))) requestNonInteractiveAuthStop();
+    };
+    const pollAuthLog = () => {
+      polledLogOutput = readLogTail(logFile, deps);
+      watchForInteractiveAuth();
     };
     const timeout = setTimeout(() => requestStop('timeout'), options.timeoutMs + timeoutPaddingMs);
     const onTerm = () => requestStop('signal');
@@ -343,6 +375,10 @@ function spawnAgy(options, prompt, deps = {}) {
       finalPollTimer = setInterval(pollFinalResponse, finalPollIntervalMs);
       if (typeof finalPollTimer.unref === 'function') finalPollTimer.unref();
       pollFinalResponse();
+    }
+    if (authLogPollIntervalMs > 0) {
+      authLogPollTimer = setInterval(pollAuthLog, authLogPollIntervalMs);
+      if (typeof authLogPollTimer.unref === 'function') authLogPollTimer.unref();
     }
     child.stdout.on('data', (data) => {
       output = `${output}${data}`.slice(-256 * 1024);
@@ -363,11 +399,13 @@ function spawnAgy(options, prompt, deps = {}) {
       finished = true;
       clearInterval(heartbeat);
       if (finalPollTimer) clearInterval(finalPollTimer);
+      if (authLogPollTimer) clearInterval(authLogPollTimer);
       clearTimeout(timeout);
       if (killTimer) clearTimeout(killTimer);
       if (forceFinishTimer) clearTimeout(forceFinishTimer);
       process.removeListener('SIGTERM', onTerm);
       process.removeListener('SIGINT', onTerm);
+      if (openBlocker && typeof openBlocker.cleanup === 'function') openBlocker.cleanup();
       resolve(result);
     }
   });
@@ -392,7 +430,7 @@ function classifyFailure(result) {
     return { code: 'AGY_MODEL_REQUIRED', message: 'agy 1.1.0 要求显式模型，但当前 MetaMe 传入的是 auto。请为该 agent 配置 models.agy 或将 agy 默认模型改为有效 Gemini 模型。' };
   }
   const hasAuthSuccess = /silent auth succeeded|OAuth: authenticated successfully|authenticated via keyring/i.test(text);
-  const hasHardAuthFailure = /authentication required|waiting for authentication|authentication timed out|auth timed out|please login|please log in|unauthorized|credential|401|403/i.test(text)
+  const hasHardAuthFailure = /authentication required|waiting for authentication|authentication timed out|auth timed out|please login|please log in|if your browser didn't open|open the url below in your browser|metame blocked unattended browser open|unauthorized|credential|401|403/i.test(text)
     || (/not logged into Antigravity/i.test(text) && !hasAuthSuccess);
   if (hasHardAuthFailure) {
     return { code: 'AGY_AUTH_REQUIRED', message: 'agy 认证不可用，请先在终端完成 agy 登录。' };
