@@ -9,6 +9,7 @@ const { execFileSync, spawn } = require('child_process');
 const {
   canonicalizeCwd,
   parseConversationCache,
+  getCachedConversationId,
   captureConversationId,
   normalizeTranscriptRecord,
   selectFinalResponse,
@@ -96,11 +97,11 @@ async function waitForArtifacts(before, options, minRecordCount = 0, deps = {}) 
   const readTranscriptFn = getReadTranscript(deps);
   for (let attempt = 0; attempt < 21; attempt += 1) {
     const after = readCacheFn();
-    const sessionId = captureConversationId(before, after, options.cwd, options.sessionId);
-    if (sessionId) {
+    for (const sessionId of candidateSessionIds(before, after, options)) {
       try {
         const records = readTranscriptFn(sessionId);
-        if (records.length > minRecordCount) return { sessionId, records };
+        const baseline = getBaselineRecordCount(deps.baselineRecordCounts, sessionId, minRecordCount);
+        if (records.length > baseline) return { sessionId, records, minRecordCount: baseline };
       } catch { /* retry */ }
     }
     if (attempt < 20) await wait(100);
@@ -112,14 +113,44 @@ function readFinalResponseArtifact(before, options, minRecordCount = 0, deps = {
   const readCacheFn = getReadCache(deps);
   const readTranscriptFn = getReadTranscript(deps);
   const after = readCacheFn();
-  const sessionId = captureConversationId(before, after, options.cwd, options.sessionId);
-  if (!sessionId) return null;
-  const allRecords = readTranscriptFn(sessionId);
-  if (allRecords.length <= minRecordCount) return null;
-  const newRecords = options.sessionId ? allRecords.slice(minRecordCount) : allRecords;
-  const records = recordsAfterLatestUser(newRecords);
-  const text = selectFinalResponse(records);
-  return text ? { sessionId, text, records } : null;
+  for (const sessionId of candidateSessionIds(before, after, options)) {
+    const allRecords = readTranscriptFn(sessionId);
+    const baseline = getBaselineRecordCount(deps.baselineRecordCounts, sessionId, minRecordCount);
+    if (allRecords.length <= baseline) continue;
+    const newRecords = allRecords.slice(baseline);
+    const records = recordsAfterLatestUser(newRecords);
+    const text = selectFinalResponse(records);
+    if (text) return { sessionId, text, records };
+  }
+  return null;
+}
+
+function candidateSessionIds(beforeCache, afterCache, options) {
+  const out = [];
+  const add = (value) => {
+    const id = String(value || '').trim();
+    if (id && !out.includes(id)) out.push(id);
+  };
+  add(captureConversationId(beforeCache, afterCache, options.cwd, options.sessionId));
+  add(options.sessionId);
+  add(getCachedConversationId(afterCache, options.cwd));
+  add(getCachedConversationId(beforeCache, options.cwd));
+  return out;
+}
+
+function getBaselineRecordCount(baselineRecordCounts, sessionId, fallback = 0) {
+  const explicit = Number(fallback || 0);
+  if (!baselineRecordCounts || typeof baselineRecordCounts !== 'object') return explicit;
+  const value = Number(baselineRecordCounts[sessionId] || 0);
+  return Math.max(explicit, Number.isFinite(value) ? value : 0);
+}
+
+function captureBaselineRecordCounts(beforeCache, options, readTranscriptFn) {
+  const out = {};
+  for (const sessionId of candidateSessionIds(beforeCache, beforeCache, options)) {
+    try { out[sessionId] = readTranscriptFn(sessionId).length; } catch { out[sessionId] = 0; }
+  }
+  return out;
 }
 
 function isProcessAlive(pid) {
@@ -363,31 +394,30 @@ async function run(options, prompt, deps = {}) {
   const readTranscriptFn = getReadTranscript(deps);
   const spawnAgyFn = deps.spawnAgy || spawnAgy;
   const before = readCacheFn();
-  let beforeRecordCount = 0;
-  if (options.sessionId) {
-    try { beforeRecordCount = readTranscriptFn(options.sessionId).length; } catch { /* validated after run */ }
-  }
+  const baselineRecordCounts = captureBaselineRecordCounts(before, options, readTranscriptFn);
+  const beforeRecordCount = getBaselineRecordCount(baselineRecordCounts, options.sessionId, 0);
+  const artifactDeps = { ...deps, baselineRecordCounts };
   try {
-    let result = await spawnAgyFn(options, prompt, { ...deps, beforeCache: before, minRecordCount: beforeRecordCount });
+    let result = await spawnAgyFn(options, prompt, { ...artifactDeps, beforeCache: before, minRecordCount: beforeRecordCount });
     if (shouldRetryAfterAuthFailure(result)) {
       await (deps.sleep || sleep)(deps.authRetryDelayMs ?? AUTH_REFRESH_RETRY_DELAY_MS);
-      result = await spawnAgyFn(options, prompt, { ...deps, beforeCache: before, minRecordCount: beforeRecordCount });
+      result = await spawnAgyFn(options, prompt, { ...artifactDeps, beforeCache: before, minRecordCount: beforeRecordCount });
     }
     if (result.error) return result;
     if (result.earlyFinal) return result.earlyFinal;
-    const artifacts = await waitForArtifacts(before, options, beforeRecordCount, deps);
+    const artifacts = await waitForArtifacts(before, options, beforeRecordCount, artifactDeps);
     if (!artifacts) {
       const stdoutText = extractStdoutFinalText(result);
       if (stdoutText) return { sessionId: options.sessionId || '', text: stdoutText, records: [] };
       return {
         error: {
           code: 'AGY_SESSION_CAPTURE_FAILED',
-          message: 'agy 已执行，但无法确认 conversation 与 transcript，且 stdout 没有可用最终文本。',
+          message: 'agy 已执行并退出成功，但未写入可读取的 conversation/transcript，stdout 也没有最终文本。可先发送 /new 重建会话后重试；若连续出现，请临时切回 codex。',
         },
       };
     }
-    const { sessionId, records: allRecords } = artifacts;
-    const newRecords = options.sessionId ? allRecords.slice(beforeRecordCount) : allRecords;
+    const { sessionId, records: allRecords, minRecordCount: artifactRecordCount = beforeRecordCount } = artifacts;
+    const newRecords = allRecords.slice(artifactRecordCount);
     const records = recordsAfterLatestUser(newRecords);
     const text = selectFinalResponse(records);
     if (!text) {
@@ -398,7 +428,7 @@ async function run(options, prompt, deps = {}) {
       const finalizationResult = await spawnAgyFn(finalizationOptions, finalizationPrompt, deps);
       if (finalizationResult.error) return { error: finalizationResult.error, sessionId, records };
 
-      const finalArtifacts = await waitForArtifacts(before, finalizationOptions, allRecords.length, deps);
+      const finalArtifacts = await waitForArtifacts(before, finalizationOptions, allRecords.length, artifactDeps);
       if (!finalArtifacts) {
         const stdoutText = extractStdoutFinalText(finalizationResult);
         if (stdoutText) return { sessionId, text: stdoutText, records };

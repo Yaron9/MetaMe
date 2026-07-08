@@ -289,6 +289,39 @@ describe('agy-adapter invocation', () => {
     assert.equal(result.text, '这是 agy stdout 里的最终回答。');
   });
 
+  it('uses appended transcript records when agy reuses the cached conversation id', async () => {
+    const cwd = path.join(os.tmpdir(), `metame-agy-reused-cache-${Date.now()}-${Math.random()}`);
+    const sessionId = 'cached-session';
+    const records = [
+      { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: '旧问题' },
+      { type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE', content: '旧回答' },
+    ];
+
+    const result = await adapter.run({
+      cwd,
+      model: 'auto',
+      sessionId: '',
+      timeoutMs: 1000,
+      readOnly: false,
+    }, '国投电力怎么样？', {
+      readCache: () => ({ [cwd]: sessionId }),
+      readTranscript: () => records.slice(),
+      sleep: async () => {},
+      spawnAgy: async (_options, prompt) => {
+        records.push(
+          { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: prompt },
+          { type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE', content: '新回答：长期持有价值取决于水电现金流和估值安全边际。' },
+        );
+        return { code: 0, output: '', errorOutput: '' };
+      },
+    });
+
+    assert.equal(result.error, undefined);
+    assert.equal(result.sessionId, sessionId);
+    assert.match(result.text, /新回答/);
+    assert.doesNotMatch(result.text, /旧回答/);
+  });
+
   it('does not treat stdout-looking errors as final answers', async () => {
     const cwd = path.join(os.tmpdir(), `metame-agy-stdout-error-${Date.now()}-${Math.random()}`);
     const result = await adapter.run({
@@ -309,6 +342,6 @@ describe('agy-adapter invocation', () => {
     });
 
     assert.equal(result.error.code, 'AGY_SESSION_CAPTURE_FAILED');
-    assert.match(result.error.message, /stdout 没有可用最终文本/);
+    assert.match(result.error.message, /未写入可读取的 conversation\/transcript/);
   });
 });
