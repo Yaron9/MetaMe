@@ -27,7 +27,7 @@ describe('agy-adapter invocation', () => {
   it('omits permission and model flags in read-only auto mode', () => {
     const args = adapter.buildAgyArgs({ model: 'auto', sessionId: '', timeoutMs: 1000, readOnly: true }, 'hello', 'agy');
     assert.equal(args.includes('--dangerously-skip-permissions'), false);
-    assert.equal(args.includes('--model'), false);
+    assert.equal(args[args.indexOf('--model') + 1], 'Gemini 3.5 Flash (Medium)');
     assert.deepEqual(args.slice(-2), ['-p', 'hello']);
   });
 
@@ -36,6 +36,30 @@ describe('agy-adapter invocation', () => {
     const pty = adapter.classifyFailure({ spawnError: { code: 'ENOENT', message: 'missing' } });
     assert.equal(pty.code, 'AGY_PTY_FAILED');
     assert.doesNotMatch(pty.message, /codex/i);
+  });
+
+  it('classifies agy 1.1 missing model failures from log output', () => {
+    const failure = adapter.classifyFailure({
+      code: 0,
+      output: '^D\b\b',
+      logOutput: 'failed to construct executor: neither PlanModel nor RequestedModel specified. You must specify a valid model.',
+    });
+    assert.equal(failure.code, 'AGY_MODEL_REQUIRED');
+    assert.match(failure.message, /显式模型/);
+  });
+
+  it('does not classify agy startup auth noise as failure after silent auth succeeds', () => {
+    const failure = adapter.classifyFailure({
+      code: 0,
+      output: '^D\b\b',
+      logOutput: [
+        'error getting token source: You are not logged into Antigravity.',
+        'keyringAuth: loaded token, expiry=2026-07-08 17:25:00 expired=false',
+        'OAuth: authenticated successfully as user@example.com',
+        'Print mode: silent auth succeeded',
+      ].join('\n'),
+    });
+    assert.notEqual(failure.code, 'AGY_AUTH_REQUIRED');
   });
 
   it('escalates an ignored timeout to SIGKILL and settles without close', async () => {
@@ -235,6 +259,46 @@ describe('agy-adapter invocation', () => {
     assert.match(result.text, /登录态已复用/);
   });
 
+  it('retries once when unattended auth interception fires before agy exits', async () => {
+    const cwd = path.join(os.tmpdir(), `metame-agy-auth-intercept-${Date.now()}-${Math.random()}`);
+    const sessionId = 'sess-auth-intercept';
+    const records = [];
+    const calls = [];
+
+    const result = await adapter.run({
+      cwd,
+      model: 'auto',
+      sessionId,
+      timeoutMs: 1000,
+      readOnly: false,
+    }, '查一下登录态是否可用', {
+      readCache: () => ({ [cwd]: sessionId }),
+      readTranscript: () => records.slice(),
+      sleep: async () => {},
+      authRetryDelayMs: 0,
+      spawnAgy: async (_options, prompt) => {
+        calls.push(prompt);
+        if (calls.length === 1) {
+          return {
+            error: {
+              code: 'AGY_AUTH_REQUIRED',
+              message: 'agy 需要交互式 Google 登录，已阻止后台弹窗。',
+            },
+          };
+        }
+        records.push(
+          { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: prompt },
+          { type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE', content: '第二次 keyring 刷新成功。' },
+        );
+        return { code: 0, output: '', errorOutput: '' };
+      },
+    });
+
+    assert.equal(calls.length, 2);
+    assert.equal(result.error, undefined);
+    assert.match(result.text, /第二次 keyring/);
+  });
+
   it('does not retry successful answers that mention OAuth', async () => {
     const cwd = path.join(os.tmpdir(), `metame-agy-oauth-answer-${Date.now()}-${Math.random()}`);
     const records = [];
@@ -322,6 +386,44 @@ describe('agy-adapter invocation', () => {
     assert.doesNotMatch(result.text, /旧回答/);
   });
 
+  it('uses a newly updated brain transcript when agy does not update the cwd cache', async () => {
+    const cwd = path.join(os.tmpdir(), `metame-agy-new-brain-${Date.now()}-${Math.random()}`);
+    const cachedSessionId = 'stale-cached-session';
+    const newSessionId = 'new-brain-session';
+    const recordsBySession = {
+      [cachedSessionId]: [
+        { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: '旧问题' },
+        { type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE', content: '旧回答' },
+      ],
+      [newSessionId]: [],
+    };
+
+    const result = await adapter.run({
+      cwd,
+      model: 'auto',
+      sessionId: '',
+      timeoutMs: 1000,
+      readOnly: false,
+    }, '国投电力的长期持有价值判断', {
+      readCache: () => ({ [cwd]: cachedSessionId }),
+      readTranscript: sessionId => (recordsBySession[sessionId] || []).slice(),
+      listRecentSessionIds: () => [newSessionId],
+      sleep: async () => {},
+      spawnAgy: async (_options, prompt) => {
+        recordsBySession[newSessionId].push(
+          { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: prompt },
+          { type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE', content: '新会话回答：等待估值安全边际和来水周期确认。' },
+        );
+        return { code: 0, output: '', errorOutput: '' };
+      },
+    });
+
+    assert.equal(result.error, undefined);
+    assert.equal(result.sessionId, newSessionId);
+    assert.match(result.text, /新会话回答/);
+    assert.doesNotMatch(result.text, /旧回答/);
+  });
+
   it('does not treat stdout-looking errors as final answers', async () => {
     const cwd = path.join(os.tmpdir(), `metame-agy-stdout-error-${Date.now()}-${Math.random()}`);
     const result = await adapter.run({
@@ -341,7 +443,29 @@ describe('agy-adapter invocation', () => {
       }),
     });
 
+    assert.equal(result.error.code, 'AGY_EXEC_FAILURE');
+    assert.match(result.error.message, /conversation not found/);
+  });
+
+  it('does not treat PTY control echoes as final answers', async () => {
+    const cwd = path.join(os.tmpdir(), `metame-agy-control-echo-${Date.now()}-${Math.random()}`);
+    const result = await adapter.run({
+      cwd,
+      model: 'auto',
+      sessionId: 'stale-session',
+      timeoutMs: 1000,
+      readOnly: false,
+    }, '怎么样', {
+      readCache: () => ({ [cwd]: 'stale-session' }),
+      readTranscript: () => [],
+      sleep: async () => {},
+      spawnAgy: async () => ({
+        code: 0,
+        output: '^D\b\b',
+        errorOutput: '',
+      }),
+    });
+
     assert.equal(result.error.code, 'AGY_SESSION_CAPTURE_FAILED');
-    assert.match(result.error.message, /未写入可读取的 conversation\/transcript/);
   });
 });

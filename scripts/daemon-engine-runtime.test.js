@@ -230,7 +230,7 @@ describe('daemon-engine-runtime model resolution', () => {
   });
 
   it('does not leak legacy Claude models into agy', () => {
-    assert.equal(resolveEngineModel('agy', { model: 'opus' }), 'auto');
+    assert.equal(resolveEngineModel('agy', { model: 'opus' }), 'Gemini 3.5 Flash (Medium)');
     assert.equal(resolveEngineModel('agy', { models: { agy: 'gemini-custom' } }), 'gemini-custom');
   });
 

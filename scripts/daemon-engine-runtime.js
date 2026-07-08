@@ -16,6 +16,7 @@ const CODEX_TOOL_MAP = Object.freeze({
 });
 
 const CODEX_AUTO_MODEL = 'auto';
+const AGY_AUTO_MODEL = 'Gemini 3.5 Flash (Medium)';
 
 const ENGINE_TIMEOUT_DEFAULTS = Object.freeze({
   codex: Object.freeze({
@@ -108,11 +109,11 @@ const ENGINE_MODEL_CONFIG = Object.freeze({
     hint:     '推荐 `auto` 或 `gpt-5-codex`，也可直接发送任意 OpenAI 模型名切换',
   },
   agy: {
-    main:     'auto',
-    distill:  'auto',
-    options:  [{ value: 'auto', label: 'auto · 跟随 agy 官方默认' }],
+    main:     AGY_AUTO_MODEL,
+    distill:  AGY_AUTO_MODEL,
+    options:  [{ value: AGY_AUTO_MODEL, label: 'Gemini 3.5 Flash · agy 默认' }],
     provider: 'google',
-    hint:     'agy 模型列表尚未纳入 MetaMe 快速切换；auto 跟随 CLI 默认',
+    hint:     'agy 1.1.0 需要显式模型；当前默认使用 Gemini 3.5 Flash (Medium)',
   },
 });
 

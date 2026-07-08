@@ -25,6 +25,7 @@ const LOCK_DIR = path.join(os.homedir(), '.metame', 'runtime', 'agy-locks');
 const MAX_PROMPT_BYTES = 512 * 1024;
 const FINAL_POLL_INTERVAL_MS = 500;
 const AUTH_REFRESH_RETRY_DELAY_MS = 1500;
+const AGY_AUTO_MODEL = 'Gemini 3.5 Flash (Medium)';
 const NONINTERACTIVE_AUTH_PATTERNS = [
   /starting oauth authentication flow/i,
   /authentication required/i,
@@ -87,6 +88,35 @@ function readTranscript(sessionId) {
   });
 }
 
+function listRecentTranscriptSessionIds(sinceMs = 0, deps = {}) {
+  const fsMod = deps.fs || fs;
+  const brainDir = deps.brainDir || path.join(AGY_HOME, 'brain');
+  const threshold = Number(sinceMs || 0) - 1000;
+  let entries = [];
+  try {
+    entries = fsMod.readdirSync(brainDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  return entries
+    .filter(entry => entry && entry.isDirectory && entry.isDirectory())
+    .map((entry) => {
+      const sessionId = entry.name;
+      const file = path.join(brainDir, sessionId, '.system_generated', 'logs', 'transcript.jsonl');
+      try {
+        const stat = fsMod.statSync(file);
+        return { sessionId, mtimeMs: Number(stat.mtimeMs || 0) };
+      } catch {
+        return null;
+      }
+    })
+    .filter(item => item && item.mtimeMs >= threshold)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, 20)
+    .map(item => item.sessionId);
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -97,7 +127,7 @@ async function waitForArtifacts(before, options, minRecordCount = 0, deps = {}) 
   const readTranscriptFn = getReadTranscript(deps);
   for (let attempt = 0; attempt < 21; attempt += 1) {
     const after = readCacheFn();
-    for (const sessionId of candidateSessionIds(before, after, options)) {
+    for (const sessionId of candidateSessionIds(before, after, options, deps)) {
       try {
         const records = readTranscriptFn(sessionId);
         const baseline = getBaselineRecordCount(deps.baselineRecordCounts, sessionId, minRecordCount);
@@ -113,7 +143,7 @@ function readFinalResponseArtifact(before, options, minRecordCount = 0, deps = {
   const readCacheFn = getReadCache(deps);
   const readTranscriptFn = getReadTranscript(deps);
   const after = readCacheFn();
-  for (const sessionId of candidateSessionIds(before, after, options)) {
+  for (const sessionId of candidateSessionIds(before, after, options, deps)) {
     const allRecords = readTranscriptFn(sessionId);
     const baseline = getBaselineRecordCount(deps.baselineRecordCounts, sessionId, minRecordCount);
     if (allRecords.length <= baseline) continue;
@@ -125,7 +155,14 @@ function readFinalResponseArtifact(before, options, minRecordCount = 0, deps = {
   return null;
 }
 
-function candidateSessionIds(beforeCache, afterCache, options) {
+function getRecentSessionIds(deps = {}) {
+  if (Array.isArray(deps.recentSessionIds)) return deps.recentSessionIds;
+  if (typeof deps.listRecentSessionIds === 'function') return deps.listRecentSessionIds();
+  if (!deps.startedAtMs) return [];
+  return listRecentTranscriptSessionIds(deps.startedAtMs, deps);
+}
+
+function candidateSessionIds(beforeCache, afterCache, options, deps = {}) {
   const out = [];
   const add = (value) => {
     const id = String(value || '').trim();
@@ -135,6 +172,7 @@ function candidateSessionIds(beforeCache, afterCache, options) {
   add(options.sessionId);
   add(getCachedConversationId(afterCache, options.cwd));
   add(getCachedConversationId(beforeCache, options.cwd));
+  for (const sessionId of getRecentSessionIds(deps)) add(sessionId);
   return out;
 }
 
@@ -191,9 +229,10 @@ function acquireLock(options) {
 
 function buildAgyArgs(options, prompt, agyBin) {
   const args = ['-q', '/dev/null', agyBin, '--print-timeout', `${Math.max(1, Math.ceil(options.timeoutMs / 1000))}s`];
+  if (options.logFile) args.push('--log-file', options.logFile);
   if (!options.readOnly) args.push('--dangerously-skip-permissions');
   if (options.sessionId) args.push('--conversation', options.sessionId);
-  if (options.model && options.model !== 'auto') args.push('--model', options.model);
+  args.push('--model', options.model && options.model !== 'auto' ? options.model : AGY_AUTO_MODEL);
   args.push('-p', prompt);
   return args;
 }
@@ -220,6 +259,7 @@ function spawnAgy(options, prompt, deps = {}) {
   const spawnFn = deps.spawn || spawn;
   const agyBin = deps.agyBin || process.env.AGY_BIN || 'agy';
   const scriptBin = deps.scriptBin || '/usr/bin/script';
+  const logFile = deps.logFile || path.join(os.tmpdir(), `metame-agy-${process.pid}-${Date.now()}.log`);
   if (process.platform !== 'darwin' && !deps.allowAnyPlatform) {
     return Promise.resolve({ error: { code: 'AGY_UNSUPPORTED_PLATFORM', message: 'agy 后台适配器当前仅支持 macOS。' } });
   }
@@ -227,7 +267,7 @@ function spawnAgy(options, prompt, deps = {}) {
     let output = '';
     let errorOutput = '';
     let finished = false;
-    const child = spawnFn(scriptBin, buildAgyArgs(options, prompt, agyBin), {
+    const child = spawnFn(scriptBin, buildAgyArgs({ ...options, logFile }, prompt, agyBin), {
       cwd: options.cwd,
       env: {
         ...process.env,
@@ -317,7 +357,7 @@ function spawnAgy(options, prompt, deps = {}) {
       ? { error: { code: 'AGY_TIMEOUT', message: `agy 超过 ${Math.ceil(options.timeoutMs / 1000)} 秒未完成。` } }
       : interrupted
         ? { error: { code: 'AGY_EXEC_FAILURE', message: 'agy 执行已停止。' } }
-        : { code, output, errorOutput }));
+        : { code, output, errorOutput, logOutput: readLogTail(logFile, deps) }));
     function finish(result) {
       if (finished) return;
       finished = true;
@@ -333,19 +373,37 @@ function spawnAgy(options, prompt, deps = {}) {
   });
 }
 
+function readLogTail(file, deps = {}) {
+  const fsMod = deps.fs || fs;
+  try {
+    const content = fsMod.readFileSync(file, 'utf8');
+    return content.slice(-64 * 1024);
+  } catch {
+    return '';
+  }
+}
+
 function classifyFailure(result) {
-  const text = `${result.errorOutput || ''}\n${result.output || ''}\n${result.spawnError ? result.spawnError.message : ''}`.trim();
+  const text = `${result.errorOutput || ''}\n${cleanStdout(result.output)}\n${result.logOutput || ''}\n${result.spawnError ? result.spawnError.message : ''}`.trim();
   if (result.spawnError && result.spawnError.code === 'ENOENT') {
     return { code: 'AGY_PTY_FAILED', message: '无法启动 agy PTY。' };
   }
-  if (/(auth|login|unauthorized|credential|oauth|401|403)/i.test(text)) {
+  if (/neither PlanModel nor RequestedModel specified|must specify a valid model/i.test(text)) {
+    return { code: 'AGY_MODEL_REQUIRED', message: 'agy 1.1.0 要求显式模型，但当前 MetaMe 传入的是 auto。请为该 agent 配置 models.agy 或将 agy 默认模型改为有效 Gemini 模型。' };
+  }
+  const hasAuthSuccess = /silent auth succeeded|OAuth: authenticated successfully|authenticated via keyring/i.test(text);
+  const hasHardAuthFailure = /authentication required|waiting for authentication|authentication timed out|auth timed out|please login|please log in|unauthorized|credential|401|403/i.test(text)
+    || (/not logged into Antigravity/i.test(text) && !hasAuthSuccess);
+  if (hasHardAuthFailure) {
     return { code: 'AGY_AUTH_REQUIRED', message: 'agy 认证不可用，请先在终端完成 agy 登录。' };
   }
   return { code: 'AGY_EXEC_FAILURE', message: text.slice(0, 1000) || `agy exited with code ${result.code}` };
 }
 
 function shouldRetryAfterAuthFailure(result) {
-  if (!result || result.code === 0 || result.error || result.earlyFinal) return false;
+  if (!result || result.earlyFinal) return false;
+  if (result.error) return result.error.code === 'AGY_AUTH_REQUIRED';
+  if (result.code === 0) return false;
   const failure = classifyFailure(result);
   if (failure.code !== 'AGY_AUTH_REQUIRED') return false;
   const text = `${result.errorOutput || ''}\n${result.output || ''}`.trim();
@@ -354,6 +412,12 @@ function shouldRetryAfterAuthFailure(result) {
 
 function stripAnsi(value) {
   return String(value || '').replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '');
+}
+
+function cleanStdout(value) {
+  return stripAnsi(value)
+    .replace(/\^D(?:\x08|\b)*/g, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
 }
 
 function looksLikeFailureOutput(text) {
@@ -366,7 +430,7 @@ function looksLikeFailureOutput(text) {
 
 function extractStdoutFinalText(result) {
   if (!result || result.code !== 0) return '';
-  const text = stripAnsi(result.output)
+  const text = cleanStdout(result.output)
     .replace(/\r/g, '\n')
     .split('\n')
     .map(line => line.trimEnd())
@@ -394,9 +458,10 @@ async function run(options, prompt, deps = {}) {
   const readTranscriptFn = getReadTranscript(deps);
   const spawnAgyFn = deps.spawnAgy || spawnAgy;
   const before = readCacheFn();
+  const startedAtMs = Date.now();
   const baselineRecordCounts = captureBaselineRecordCounts(before, options, readTranscriptFn);
   const beforeRecordCount = getBaselineRecordCount(baselineRecordCounts, options.sessionId, 0);
-  const artifactDeps = { ...deps, baselineRecordCounts };
+  const artifactDeps = { ...deps, baselineRecordCounts, startedAtMs };
   try {
     let result = await spawnAgyFn(options, prompt, { ...artifactDeps, beforeCache: before, minRecordCount: beforeRecordCount });
     if (shouldRetryAfterAuthFailure(result)) {
@@ -409,6 +474,8 @@ async function run(options, prompt, deps = {}) {
     if (!artifacts) {
       const stdoutText = extractStdoutFinalText(result);
       if (stdoutText) return { sessionId: options.sessionId || '', text: stdoutText, records: [] };
+      const failure = classifyFailure(result);
+      if (failure.message && !/^agy exited with code 0$/.test(failure.message)) return { error: failure };
       return {
         error: {
           code: 'AGY_SESSION_CAPTURE_FAILED',
@@ -492,6 +559,7 @@ module.exports = {
     readCache,
     readTranscript,
     waitForArtifacts,
+    listRecentTranscriptSessionIds,
     listDescendantPids,
     terminateTree,
     stripAnsi,
