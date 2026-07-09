@@ -175,7 +175,7 @@ describe('background runtime integration', () => {
     assert.equal(calls[0].env.METAME_INTERNAL_PROMPT, '1');
   });
 
-  it('uses agy auto model instead of mapping the distill Claude model', async () => {
+  it('uses the agy default model instead of mapping the distill Claude model', async () => {
     const calls = [];
     const state = { tasks: {} };
     const scheduler = createTaskScheduler({
@@ -194,7 +194,7 @@ describe('background runtime integration', () => {
     }, config);
     assert.equal(completed.success, true);
     assert.equal(calls[0].engine, 'agy');
-    assert.equal(calls[0].model, 'auto');
+    assert.equal(calls[0].model, 'Gemini 3.5 Flash (Medium)');
   });
 
   it('routes a Codex heartbeat task through the shared background runner', async () => {

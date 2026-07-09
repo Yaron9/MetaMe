@@ -420,6 +420,72 @@ describe('agy-adapter invocation', () => {
     assert.equal(result.text, '这是 agy stdout 里的最终回答。');
   });
 
+  it('automatically asks for the missing final answer when the first tool-heavy run is silent', async () => {
+    const cwd = path.join(os.tmpdir(), `metame-agy-silent-first-turn-${Date.now()}-${Math.random()}`);
+    const sessionId = 'sess-silent-first-turn';
+    const records = [];
+    const prompts = [];
+
+    const result = await adapter.run({
+      cwd,
+      model: 'auto',
+      sessionId,
+      timeoutMs: 1000,
+      readOnly: false,
+    }, '国投电力的长期持有价值判断 入场时机', {
+      readCache: () => ({ [cwd]: sessionId }),
+      readTranscript: () => records.slice(),
+      sleep: async () => {},
+      spawnAgy: async (_options, prompt) => {
+        prompts.push(prompt);
+        if (prompts.length === 1) {
+          return { code: 0, output: '^D\b\b', errorOutput: '' };
+        }
+        records.push(
+          { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: prompt },
+          {
+            type: 'PLANNER_RESPONSE',
+            source: 'MODEL',
+            status: 'DONE',
+            content: '结论：国投电力适合作为防守型现金流资产观察，但需要等待股息率和电价政策给出安全边际后再加仓。',
+          },
+        );
+        return { code: 0, output: '', errorOutput: '' };
+      },
+    });
+
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[1], /不要再调用任何工具/);
+    assert.match(prompts[1], /国投电力的长期持有价值判断/);
+    assert.equal(result.error, undefined);
+    assert.match(result.text, /防守型现金流资产/);
+  });
+
+  it('only tries the missing-final recovery once before returning a clear error', async () => {
+    const cwd = path.join(os.tmpdir(), `metame-agy-silent-recovery-fail-${Date.now()}-${Math.random()}`);
+    const sessionId = 'sess-silent-recovery-fail';
+    const prompts = [];
+
+    const result = await adapter.run({
+      cwd,
+      model: 'auto',
+      sessionId,
+      timeoutMs: 1000,
+      readOnly: false,
+    }, '国投电力的长期持有价值判断 入场时机', {
+      readCache: () => ({ [cwd]: sessionId }),
+      readTranscript: () => [],
+      sleep: async () => {},
+      spawnAgy: async (_options, prompt) => {
+        prompts.push(prompt);
+        return { code: 0, output: '^D\b\b', errorOutput: '' };
+      },
+    });
+
+    assert.equal(prompts.length, 2);
+    assert.equal(result.error.code, 'AGY_SESSION_CAPTURE_FAILED');
+  });
+
   it('uses appended transcript records when agy reuses the cached conversation id', async () => {
     const cwd = path.join(os.tmpdir(), `metame-agy-reused-cache-${Date.now()}-${Math.random()}`);
     const sessionId = 'cached-session';

@@ -478,6 +478,58 @@ function extractStdoutFinalText(result) {
   return text;
 }
 
+function buildMissingFinalRecoveryPrompt(originalPrompt) {
+  const userText = String(originalPrompt || '').replace(/\s+/g, ' ').trim().slice(0, 2000);
+  return [
+    '上一轮可能已经调用工具或完成分析，但没有把最终回答返回给用户。现在请补上最终回答。',
+    '',
+    '严格要求：',
+    '1. 不要再调用任何工具，不要继续搜索。',
+    '2. 直接基于当前会话里已有的搜索、工具结果和分析上下文回答。',
+    '3. 如果已有材料足够，给出结论、关键依据和可执行建议。',
+    '4. 如果已有材料不足或上一轮工具失败，明确告诉用户哪里不足/哪里失败。',
+    '5. 用中文回答，不要提到本条系统补救指令。',
+    '',
+    `用户原始问题：${userText || '(未捕获)'}`,
+  ].join('\n');
+}
+
+async function recoverMissingFinalTurn(options, originalPrompt, deps = {}) {
+  const readCacheFn = getReadCache(deps);
+  const readTranscriptFn = getReadTranscript(deps);
+  const spawnAgyFn = deps.spawnAgyFn || deps.spawnAgy || spawnAgy;
+  const before = readCacheFn();
+  const recoveryOptions = {
+    ...options,
+    sessionId: options.sessionId || getCachedConversationId(before, options.cwd),
+  };
+  const startedAtMs = Date.now();
+  const baselineRecordCounts = captureBaselineRecordCounts(before, recoveryOptions, readTranscriptFn);
+  const minRecordCount = getBaselineRecordCount(baselineRecordCounts, recoveryOptions.sessionId, 0);
+  const artifactDeps = { ...deps, baselineRecordCounts, startedAtMs };
+  const recoveryPrompt = buildMissingFinalRecoveryPrompt(originalPrompt);
+  const result = await spawnAgyFn(
+    recoveryOptions,
+    recoveryPrompt,
+    { ...artifactDeps, beforeCache: before, minRecordCount }
+  );
+  if (result.error) return { error: result.error };
+  if (result.earlyFinal) return result.earlyFinal;
+
+  const artifacts = await waitForArtifacts(before, recoveryOptions, minRecordCount, artifactDeps);
+  if (!artifacts) {
+    const stdoutText = extractStdoutFinalText(result);
+    if (stdoutText) return { sessionId: recoveryOptions.sessionId || '', text: stdoutText, records: [] };
+    return { error: null };
+  }
+
+  const { sessionId, records: allRecords, minRecordCount: artifactRecordCount = minRecordCount } = artifacts;
+  const records = recordsAfterLatestUser(allRecords.slice(artifactRecordCount));
+  const text = selectFinalResponse(records);
+  if (text) return { sessionId, text, records };
+  return { error: null, sessionId, records };
+}
+
 async function readStdin() {
   const chunks = [];
   let size = 0;
@@ -514,6 +566,9 @@ async function run(options, prompt, deps = {}) {
       if (stdoutText) return { sessionId: options.sessionId || '', text: stdoutText, records: [] };
       const failure = classifyFailure(result);
       if (failure.message && !/^agy exited with code 0$/.test(failure.message)) return { error: failure };
+      const recovered = await recoverMissingFinalTurn(options, prompt, { ...artifactDeps, spawnAgyFn });
+      if (recovered && !recovered.error && recovered.text) return recovered;
+      if (recovered && recovered.error) return recovered;
       return {
         error: {
           code: 'AGY_SESSION_CAPTURE_FAILED',
@@ -597,6 +652,8 @@ module.exports = {
     readCache,
     readTranscript,
     waitForArtifacts,
+    buildMissingFinalRecoveryPrompt,
+    recoverMissingFinalTurn,
     listRecentTranscriptSessionIds,
     listDescendantPids,
     terminateTree,
