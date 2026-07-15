@@ -6,8 +6,7 @@
  * Single source of truth for:
  *   - Project/team member resolution by name or nickname
  *   - Team roster hint generation (injected into member sessions)
- *   - Prompt enrichment with scoped context (private now / shared now / inbox / _latest.md)
- *   - Dispatch context file writes for target-only and team-shared tasks
+ *   - Prompt enrichment with transient inbox messages
  *
  * Used by: dispatch_to binary, daemon-admin-commands, daemon-bridges, daemon.js
  */
@@ -15,7 +14,6 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { resolveReactivePaths } = require('./core/reactive-paths');
 
 const METAME_DIR = path.join(os.homedir(), '.metame');
 
@@ -123,126 +121,13 @@ function resolveDispatchActor(sourceKey, projects) {
   return { key: rawKey || 'unknown', name: rawKey || 'unknown', icon: '🤖', isUser: false };
 }
 
-function buildPrivateNowContent({ actor, target, title, prompt, timeStr, dispatchId, taskId, scopeId, chain }) {
-  const lines = [
-    '# 当前任务',
-    `**最后更新**: ${timeStr} **更新者**: ${actor.icon} ${actor.name}`,
-    '',
-    '## 当前派发',
-    `- **目标**: ${target.icon} ${target.name} (${target.key})`,
-    `- **任务**: ${title || prompt.slice(0, 120) || '(empty)'}`,
-    dispatchId ? `- **编号**: ${dispatchId}` : '',
-    taskId ? `- **TeamTask**: ${taskId}` : '',
-    scopeId && scopeId !== taskId ? `- **Scope**: ${scopeId}` : '',
-    '',
-    '## 任务链',
-    chain && chain.length > 0 ? chain.join(' → ') : `${actor.key} → ${target.key}`,
-  ].filter(Boolean);
-  return `${lines.join('\n')}\n`;
-}
-
-function buildSharedNowContent({ actor, target, title, prompt, timeStr, dispatchId, taskId, scopeId, chain }) {
-  const lines = [
-    '# 共享当前状态',
-    `**最后更新**: ${timeStr} **更新者**: ${actor.icon} ${actor.name}`,
-    '',
-    '## 当前任务',
-    `- **派发给**: ${target.icon} ${target.name} (${target.key})`,
-    `- **任务**: ${title || prompt.slice(0, 120) || '(empty)'}`,
-    dispatchId ? `- **编号**: ${dispatchId}` : '',
-    taskId ? `- **TeamTask**: ${taskId}` : '',
-    scopeId && scopeId !== taskId ? `- **Scope**: ${scopeId}` : '',
-    `- **时间**: ${timeStr}`,
-    '',
-    '## 任务链',
-    chain && chain.length > 0 ? chain.join(' → ') : `${actor.key} → ${target.key}`,
-  ].filter(Boolean);
-  return `${lines.join('\n')}\n`;
-}
-
-function updateDispatchContextFiles({ fs: fsMod = fs, path: pathMod = path, baseDir = METAME_DIR, fullMsg, targetProject, config, envelope, logger = null }) {
-  if (!fullMsg || !targetProject) return { targetNowPath: null, sharedNowPath: null, tasksFilePath: null };
-
-  const logWarn = (msg) => {
-    if (typeof logger === 'function') logger(msg);
-  };
-  const rp = resolveReactivePaths(targetProject, baseDir);
-  const sharedDir = pathMod.join(baseDir, 'memory', 'shared');
-  const targetNowPath = rp.state;
-  const sharedNowPath = pathMod.join(baseDir, 'memory', 'now', 'shared.md');
-  const tasksFilePath = pathMod.join(sharedDir, 'tasks.md');
-  fsMod.mkdirSync(rp.dir, { recursive: true });
-
-  const projects = (config && config.projects) || {};
-  const actor = resolveDispatchActor((fullMsg && fullMsg.source_sender_key) || (fullMsg && fullMsg.from), projects);
-  const targetProj = projects[targetProject] || {};
-  const target = { key: targetProject, name: targetProj.name || targetProject, icon: targetProj.icon || '🤖' };
-  const prompt = String(fullMsg && fullMsg.payload && fullMsg.payload.prompt || '').trim();
-  const title = String(fullMsg && fullMsg.payload && fullMsg.payload.title || '').trim();
-  const now = new Date();
-  const timeStr = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
-  const dateStr = now.toISOString().slice(0, 10);
-  const taskId = String(envelope && envelope.task_id || '').trim();
-  const scopeId = String(envelope && envelope.scope_id || '').trim();
-  const isSharedTeamTask = !!(envelope && envelope.task_kind === 'team');
-
-  fsMod.writeFileSync(targetNowPath, buildPrivateNowContent({
-    actor, target, title, prompt, timeStr,
-    dispatchId: fullMsg.id, taskId, scopeId, chain: fullMsg.chain,
-  }), 'utf8');
-
-  if (!isSharedTeamTask) return { targetNowPath, sharedNowPath: null, tasksFilePath: null };
-
-  fsMod.mkdirSync(pathMod.dirname(sharedNowPath), { recursive: true });
-  fsMod.writeFileSync(sharedNowPath, buildSharedNowContent({
-    actor, target, title, prompt, timeStr,
-    dispatchId: fullMsg.id, taskId, scopeId, chain: fullMsg.chain,
-  }), 'utf8');
-
-  try {
-    if (!fsMod.existsSync(sharedDir)) fsMod.mkdirSync(sharedDir, { recursive: true });
-    const taskLine = `- [${dateStr}] ${actor.icon} ${actor.name} → ${target.icon} ${target.name}: ${title || prompt.slice(0, 40)}`;
-    let tasksContent = fsMod.existsSync(tasksFilePath)
-      ? fsMod.readFileSync(tasksFilePath, 'utf8')
-      : '# 任务看板\n\n## 🔄 进行中\n\n## ✅ 已完成\n\n## 📅 待开始\n';
-    if (!tasksContent.includes(taskLine)) {
-      const lines = tasksContent.split('\n');
-      const nextLines = [];
-      let inserted = false;
-      let inProgress = false;
-      for (const line of lines) {
-        nextLines.push(line);
-        if (line.includes('## 🔄 进行中')) {
-          inProgress = true;
-          continue;
-        }
-        if (inProgress && line.startsWith('## ')) {
-          nextLines.splice(nextLines.length - 1, 0, taskLine);
-          inserted = true;
-          inProgress = false;
-        }
-      }
-      if (!inserted) nextLines.push(taskLine);
-      tasksContent = nextLines.join('\n');
-      fsMod.writeFileSync(tasksFilePath, tasksContent, 'utf8');
-    }
-  } catch (e) {
-    logWarn(`Failed to update shared task board: ${e.message}`);
-  }
-
-  return { targetNowPath, sharedNowPath, tasksFilePath };
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Prompt enrichment (shared context injection)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Enrich a dispatch prompt with shared context read at send time:
- *   1. now/<target>.md — target private progress handoff
- *   2. now/shared.md   — global team progress whiteboard (only when includeShared=true)
- *   2. agents/<target>_latest.md — target's last output
- *   3. inbox/<target>/ — unread messages (archived to read/ after reading)
+ * Enrich a dispatch prompt with transient inbox messages read at send time.
+ * Task context comes from the structured Task envelope, never Markdown mirrors.
  *
  * This is a push-model pull: caller enriches just before sending.
  *
@@ -251,67 +136,21 @@ function updateDispatchContextFiles({ fs: fsMod = fs, path: pathMod = path, base
  * @param {string} [metameDir] - override METAME_DIR (for testing)
  * @returns {string}
  */
-function buildEnrichedPrompt(target, rawPrompt, metameDir, opts = {}) {
+function buildEnrichedPrompt(target, rawPrompt, metameDir) {
   const base = metameDir || METAME_DIR;
-  const includeShared = !!(opts && opts.includeShared);
-  const rp = resolveReactivePaths(target, base);
   let ctx = '';
 
-  // 1. Target state file (reactive/<target>/state.md)
-  try {
-    if (fs.existsSync(rp.state)) {
-      const content = fs.readFileSync(rp.state, 'utf8').trim();
-      if (content) ctx += `[当前进度 ${target}/state.md]\n${content}\n\n`;
-    }
-  } catch { /* non-critical */ }
-
-  // 2. Shared progress whiteboard for real team tasks only
-  if (includeShared) {
-    try {
-      const nowFile = path.join(base, 'memory', 'now', 'shared.md');
-      if (fs.existsSync(nowFile)) {
-        const content = fs.readFileSync(nowFile, 'utf8').trim();
-        if (content) ctx += `[共享进度 now/shared.md]\n${content}\n\n`;
-      }
-    } catch { /* non-critical */ }
-  }
-
-  // 3+5. Structured memory (L1+L2) OR legacy latest.md fallback
-  //       Single stat — structured memory supersedes raw last output
-  let hasStructuredMemory = false;
-  try {
-    if (fs.existsSync(rp.memory)) {
-      const content = fs.readFileSync(rp.memory, 'utf8').trim();
-      if (content) {
-        ctx += `[Memory Context]\n${content}\n\n`;
-        hasStructuredMemory = true;
-      }
-    }
-  } catch { /* non-critical */ }
-
-  if (!hasStructuredMemory) {
-    // Fallback: raw last output (for non-reactive projects without memory system)
-    try {
-      if (fs.existsSync(rp.latest)) {
-        const content = fs.readFileSync(rp.latest, 'utf8').trim();
-        if (content) ctx += `[${target} 上次产出]\n${content}\n\n`;
-      }
-    } catch { /* non-critical */ }
-  }
-
-  // 4. Inbox unread messages (archive after reading)
+  // Inbox is transport, not knowledge: consume and delete after injection.
   try {
     const inboxDir = path.join(base, 'memory', 'inbox', target);
-    const readDir = path.join(inboxDir, 'read');
     if (fs.existsSync(inboxDir)) {
       const files = fs.readdirSync(inboxDir).filter(f => f.endsWith('.md')).sort();
       if (files.length > 0) {
         ctx += `[📬 Agent Inbox — ${files.length} 条未读消息]\n`;
-        fs.mkdirSync(readDir, { recursive: true });
         for (const f of files) {
           const fp = path.join(inboxDir, f);
           ctx += fs.readFileSync(fp, 'utf8').trim() + '\n---\n';
-          fs.renameSync(fp, path.join(readDir, f));
+          fs.unlinkSync(fp);
         }
         ctx += '\n';
       }
@@ -327,5 +166,4 @@ module.exports = {
   buildTeamRosterHint,
   buildEnrichedPrompt,
   resolveDispatchActor,
-  updateDispatchContextFiles,
 };

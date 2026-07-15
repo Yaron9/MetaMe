@@ -195,14 +195,6 @@ heartbeat:
     # precondition: shell command, empty output → skip (zero tokens)
     # type: "script" → runs command directly instead of claude -p
 
-# Loop Engineering v2 rollout gates. Disabled by default for upgrades.
-# enabled=true records legacy schedules into the new control plane (shadow mode).
-# execute_v2=true additionally lets the v2 coordinator execute non-legacy Goals.
-loop:
-  enabled: false
-  execute_v2: false
-  reactive_v2: false
-
 budget:
   daily_limit: 50000
   warning_threshold: 0.8

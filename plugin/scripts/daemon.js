@@ -33,7 +33,6 @@ process.on('uncaughtException', (err) => {
 });
 
 const fs = require('fs');
-const crypto = require('crypto');
 const path = require('path');
 const os = require('os');
 const { execSync, execFileSync, execFile, spawn } = require('child_process');
@@ -51,7 +50,6 @@ const BRAIN_FILE = path.join(HOME, '.claude_profile.yaml');
 const DISPATCH_DIR = path.join(METAME_DIR, 'dispatch');
 const DISPATCH_LOG = path.join(DISPATCH_DIR, 'dispatch-log.jsonl');
 const { sleepSync, socketPath, needsSocketCleanup } = require('./platform');
-const { handleReactiveOutput } = require('./daemon-reactive-lifecycle');
 const SOCK_PATH = socketPath(METAME_DIR);
 
 // Resolve claude binary path (daemon may not inherit user's full PATH)
@@ -146,14 +144,6 @@ const {
 } = require('./usage-classifier');
 const { createAudit } = require('./core/audit');
 const { createControlDb } = require('./control-db');
-const { createLoopStore } = require('./loop-store');
-const { createLoopTriggerAdapter } = require('./daemon-loop-triggers');
-const { createLoopExecutionStore } = require('./loop-execution-store');
-const { createLoopGovernanceStore } = require('./loop-governance-store');
-const { createLoopCoordinator } = require('./daemon-loop-coordinator');
-const { createLoopReconciler } = require('./daemon-loop-reconciler');
-const { createDeterministicVerifier } = require('./daemon-verifier');
-const { createWorkspaceBroker } = require('./daemon-workspace-broker');
 const { createTaskBoard } = require('./task-board');
 const taskEnvelope = require('./daemon-task-envelope');
 const { createAdminCommandHandler } = require('./daemon-admin-commands');
@@ -165,7 +155,7 @@ const { createSessionStore } = require('./daemon-session-store');
 const { createCheckpointUtils } = require('./daemon-checkpoints');
 const { createWorktreeUtils } = require('./daemon-worktrees');
 const { createBridgeStarter } = require('./daemon-bridges');
-const { buildTeamRosterHint, buildEnrichedPrompt, updateDispatchContextFiles } = require('./daemon-team-dispatch');
+const { buildTeamRosterHint, buildEnrichedPrompt } = require('./daemon-team-dispatch');
 const {
   resolveDispatchTarget,
   buildTeamTaskResumeHint,
@@ -436,10 +426,6 @@ const controlDb = createControlDb({
   logger: (msg) => log('WARN', msg),
 });
 const taskBoard = createTaskBoard({ controlDb, logger: (msg) => log('WARN', msg) });
-const loopStore = createLoopStore({ controlDb });
-const loopTriggerAdapter = createLoopTriggerAdapter({ loopStore });
-const loopExecutionStore = createLoopExecutionStore({ controlDb });
-const loopGovernanceStore = createLoopGovernanceStore({ controlDb });
 
 // ---------------------------------------------------------
 // AGENT DISPATCH — virtual chatId inter-agent communication
@@ -837,8 +823,6 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
     payload,
     callback: message.callback || false,
     new_session: !!message.new_session,
-    reactive: !!message._reactive,
-    reactive_project_key: String(message._reactive_project || '').trim(),
     chain: [...chain, message.from || 'unknown'],
     task_id: envelope ? envelope.task_id : null,
     scope_id: envelope ? envelope.scope_id : null,
@@ -889,22 +873,6 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
   // Write to dispatch log for audit / rate-limiting
   if (!fs.existsSync(DISPATCH_DIR)) fs.mkdirSync(DISPATCH_DIR, { recursive: true });
   fs.appendFileSync(DISPATCH_LOG, JSON.stringify({ ...fullMsg, dispatched_at: new Date().toISOString() }) + '\n', 'utf8');
-
-  // Auto-update scoped dispatch context files; only TeamTask writes shared state.
-  try {
-    updateDispatchContextFiles({
-      fs,
-      path,
-      baseDir: METAME_DIR,
-      fullMsg,
-      targetProject,
-      config,
-      envelope,
-      logger: (msg) => log('WARN', msg),
-    });
-  } catch (e) {
-    log('WARN', `Failed to update dispatch context files: ${e.message}`);
-  }
 
   const rawPrompt = buildDispatchPrompt(targetProject, fullMsg, envelope);
 
@@ -1005,37 +973,6 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
       }, config);
     }
 
-    // ── Reactive lifecycle hook ──
-    try {
-      if (!isFinalOutput) return;
-      handleReactiveOutput(targetProject, outStr, loadConfig(), {
-        log,
-        loadState,
-        saveState,
-        checkBudget,
-        handleDispatchItem: (item, cfg) => {
-          dispatchTask(item.target, {
-            from: item.from || '_reactive',
-            type: 'reactive',
-            priority: 'normal',
-            new_session: !!item.new_session,
-            payload: { title: 'reactive dispatch', prompt: item.prompt },
-          }, cfg, null, null);
-        },
-        notifyUser: (msg) => {
-          try {
-            const cfg = loadConfig();
-            if (cfg.feishu && cfg.feishu.enabled && cfg.feishu.admin_chat_id) {
-              const { sendFeishuText } = require('./daemon-notify');
-              sendFeishuText(cfg.feishu.admin_chat_id, msg, cfg);
-            }
-          } catch (e) { log('WARN', `Reactive notify failed: ${e.message}`); }
-        },
-        metameDir: path.join(os.homedir(), '.metame'),
-      });
-    } catch (e) {
-      log('ERROR', `Reactive lifecycle error for ${targetProject}: ${e.message}`);
-    }
   };
   // If streamOptions provided, use real bot so output appears in target's Feishu channel.
   // Otherwise fall back to nullBot which captures output for replyFn.
@@ -1070,10 +1007,7 @@ function dispatchTask(targetProject, message, config, replyFn, streamOptions = n
     null,
     null,
     dispatchReadOnly,
-    {
-      reactive: !!fullMsg.reactive,
-      reactiveProjectKey: fullMsg.reactive_project_key || '',
-    },
+    {},
   ).catch(e => {
     log('ERROR', `Dispatch handleCommand failed for ${targetProject}: ${e.message}`);
     if (envelope && taskBoard) {
@@ -1604,27 +1538,6 @@ function physiologicalHeartbeat(config) {
     log('WARN', `Dispatch log rotation failed: ${e.message}`);
   }
 
-  // 4. Reconcile perpetual projects — detect stale reactive loops
-  try {
-    const { reconcilePerpetualProjects } = require('./daemon-reactive-lifecycle');
-    reconcilePerpetualProjects(config, {
-      log,
-      loadState,
-      saveState,
-      activeProcesses,
-      notifyUser: (msg) => {
-        try {
-          const cfg = loadConfig();
-          if (cfg.feishu && cfg.feishu.enabled && cfg.feishu.admin_chat_id) {
-            const { sendFeishuText } = require('./daemon-notify');
-            sendFeishuText(cfg.feishu.admin_chat_id, msg, cfg);
-          }
-        } catch (e) { log('WARN', `Reconcile notify failed: ${e.message}`); }
-      },
-    });
-  } catch (e) {
-    log('WARN', `Reconcile check failed: ${e.message}`);
-  }
 }
 
 // ── Timing constants ─────────────────────────────────────────────────────────
@@ -1965,24 +1878,6 @@ const getEngineRuntime = createEngineRuntimeFactory({
   getActiveProviderEnv,
 });
 const backgroundRunner = createBackgroundRunner({ getEngineRuntime });
-const daemonBootId = crypto.randomUUID();
-const loopVerifier = createDeterministicVerifier();
-const loopWorkspaceBroker = createWorkspaceBroker({ worktreeUtils });
-const loopCoordinator = createLoopCoordinator({
-  loopStore,
-  executionStore: loopExecutionStore,
-  governanceStore: loopGovernanceStore,
-  backgroundRunner,
-  verifier: loopVerifier,
-  workspaceBroker: loopWorkspaceBroker,
-  bootId: daemonBootId,
-  pid: process.pid,
-});
-const loopReconciler = createLoopReconciler({
-  executionStore: loopExecutionStore,
-  governanceStore: loopGovernanceStore,
-  worktreeUtils,
-});
 
 let wakeRecoveryHook = null;
 
@@ -2017,7 +1912,6 @@ const {
   getWakeRecoveryHook: () => wakeRecoveryHook,
   skillEvolution,
   backgroundRunner,
-  loopTriggerAdapter,
 });
 
 
@@ -2636,35 +2530,6 @@ async function main() {
 
   // Start heartbeat scheduler
   let heartbeatTimer = startHeartbeat(config, notifyFn, notifyPersonalFn, adminNotifyFn);
-  const loopEnabled = !!(config.loop && config.loop.enabled === true);
-  const loopExecuteV2 = !!(loopEnabled && config.loop.execute_v2 === true);
-  if (loopEnabled) {
-    log('INFO', `Loop v2 enabled (execute_v2=${loopExecuteV2}, reactive_v2=${config.loop.reactive_v2 === true})`);
-    try {
-      controlDb.run(db => db.prepare('SELECT 1 FROM goals LIMIT 1').get());
-      const recoveredRuns = loopReconciler.recoverExecutions(daemonBootId);
-      if (recoveredRuns.length > 0) log('WARN', `Recovered ${recoveredRuns.length} interrupted Loop Run(s)`);
-    } catch (err) {
-      log('ERROR', `Loop recovery failed: ${err.message}`);
-    }
-  }
-  const loopCoordinatorHandle = loopExecuteV2 ? loopCoordinator.start({ log }) : null;
-  const deliverLoopOutbox = message => adminNotifyFn(
-    `🔁 Loop ${message.topic}\n${JSON.stringify(message.payload)}`
-  );
-  const flushLoopOutbox = () => loopReconciler.flushOutbox(deliverLoopOutbox)
-    .catch(err => log('WARN', `Loop outbox flush failed: ${err.message}`));
-  if (loopEnabled) flushLoopOutbox();
-  if (loopEnabled) {
-    try {
-      const removed = loopReconciler.cleanupWorkspaces();
-      if (removed.length > 0) log('INFO', `Cleaned ${removed.length} stale Loop worktree(s)`);
-    } catch (err) {
-      log('WARN', `Loop workspace cleanup failed: ${err.message}`);
-    }
-  }
-  const loopOutboxTimer = loopEnabled ? setInterval(flushLoopOutbox, 15000) : null;
-  if (loopOutboxTimer && typeof loopOutboxTimer.unref === 'function') loopOutboxTimer.unref();
 
   let shuttingDown = false;
   function spawnReplacementDaemon(reason) {
@@ -2769,9 +2634,7 @@ async function main() {
     await notifyActiveUsers('关闭').catch(() => {});
     runtimeWatchers.stop();
     if (heartbeatTimer) clearInterval(heartbeatTimer);
-    if (loopCoordinatorHandle) loopCoordinatorHandle.stop();
     backgroundRunner.shutdown('SIGKILL');
-    if (loopOutboxTimer) clearInterval(loopOutboxTimer);
     if (dispatchSocket) try { dispatchSocket.close(); } catch { }
     try { fs.unlinkSync(SOCK_PATH); } catch { }
     if (telegramBridge) telegramBridge.stop();

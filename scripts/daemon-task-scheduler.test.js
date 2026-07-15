@@ -11,6 +11,10 @@ const {
   nextClockRunAfter,
   buildTaskSchedule,
   computeInitialNextRun,
+  claimScheduledTask,
+  mergeTaskScopedState,
+  recoverInterruptedClaims,
+  finalizeScheduledClaim,
   nextRunAfter,
   resolveTaskEngine,
 } = _private;
@@ -33,6 +37,64 @@ describe('daemon-task-scheduler private helpers', () => {
   });
   it('inherits the daemon engine when a task and project do not override it', () => {
     assert.equal(resolveTaskEngine({ name: 'memory-extract' }, {}, 'codex').engine, 'codex');
+  });
+
+  it('claims each scheduled heartbeat exactly once', () => {
+    const state = { tasks: {} };
+    const now = new Date('2026-07-15T10:00:00.000Z');
+    const first = claimScheduledTask(state, 'wiki-sync', now.getTime(), 'boot-a', now);
+    const duplicate = claimScheduledTask(state, 'wiki-sync', now.getTime(), 'boot-a', now);
+    assert.equal(first.claimed, true);
+    assert.equal(duplicate.claimed, false);
+    assert.equal(state.tasks['wiki-sync'].last_claimed_schedule, now.toISOString());
+  });
+
+  it('does not erase another task claim when an async task completes', () => {
+    const current = { tasks: {
+      first: { status: 'running' },
+      second: { status: 'running', last_claimed_schedule: '2026-07-15T10:00:00.000Z' },
+    } };
+    const staleCompletion = { tasks: { first: { status: 'success', last_run: '2026-07-15T10:01:00.000Z' } } };
+    const merged = mergeTaskScopedState(current, staleCompletion, 'first');
+    assert.equal(merged.tasks.first.status, 'success');
+    assert.equal(merged.tasks.second.last_claimed_schedule, '2026-07-15T10:00:00.000Z');
+  });
+
+  it('marks a previous boot claim interrupted without replaying it', () => {
+    const state = { tasks: { scan: {
+      status: 'running', execution_boot_id: 'boot-old',
+      last_claimed_at: '2026-07-15T09:00:00.000Z',
+    } } };
+    const recovered = recoverInterruptedClaims(
+      state, ['scan'], 'boot-new', new Date('2026-07-15T10:00:00.000Z')
+    );
+    assert.deepEqual(recovered, ['scan']);
+    assert.equal(state.tasks.scan.status, 'interrupted');
+    assert.equal(state.tasks.scan.error, 'daemon_restarted_during_task');
+  });
+
+  it('closes skipped and thrown claims without advancing last_run for a skip', () => {
+    const skipped = { tasks: { scan: { status: 'running', execution_boot_id: 'boot-a', last_run: '2026-07-14T00:00:00.000Z' } } };
+    assert.equal(finalizeScheduledClaim(skipped, 'scan', 'boot-a', {
+      success: false, skipped: true, error: 'budget_exceeded',
+    }, new Date('2026-07-15T10:00:00.000Z')), true);
+    assert.equal(skipped.tasks.scan.status, 'skipped');
+    assert.equal(skipped.tasks.scan.last_run, '2026-07-14T00:00:00.000Z');
+
+    const failed = { tasks: { scan: { status: 'running', execution_boot_id: 'boot-a' } } };
+    finalizeScheduledClaim(failed, 'scan', 'boot-a', { success: false, error: 'boom' }, new Date('2026-07-15T10:00:00.000Z'));
+    assert.equal(failed.tasks.scan.status, 'error');
+    assert.equal(failed.tasks.scan.last_run, '2026-07-15T10:00:00.000Z');
+  });
+
+  it('uses the last claim to preserve cadence after a daemon restart', () => {
+    const now = Date.parse('2026-07-15T10:00:00.000Z');
+    const next = computeInitialNextRun(
+      { name: 'scan' }, { mode: 'interval', intervalSec: 3600 },
+      { tasks: { scan: { last_claimed_at: '2026-07-15T09:30:00.000Z' } } },
+      now, 60, 1,
+    );
+    assert.equal(next, Date.parse('2026-07-15T10:30:00.000Z'));
   });
 
   it('prefers task then project engine over the daemon default', () => {

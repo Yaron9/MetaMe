@@ -36,9 +36,8 @@ irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 
 ---
 
-> ### 🚀 v1.5.10 — Perpetual Task Engine & Agent Soul Layer
+> ### 🚀 v1.5.10 — Agent Soul Layer & Cross-device Dispatch
 >
-> - **Perpetual task engine**: Any project can run as a 24/7 autonomous agent loop with event sourcing, verifier gates, budget/depth control, and reconciliation. Domain-agnostic — works for research, code auditing, documentation, anything. Configure with `reactive: true` and an optional `perpetual.yaml`.
 > - **Cross-device dispatch**: Team members can run on remote machines. Add `peer: windows` to a member and messages route automatically via a Feishu relay chat — HMAC-signed, dedup-protected, zero manual routing.
 > - **`/dispatch peers`**: View remote dispatch config, relay chat, and all remote team members from mobile.
 > - **`dispatch_to peer:project`**: Dispatch tasks to remote peers from CLI, admin commands, or Claude sessions.
@@ -192,47 +191,29 @@ Chain skills into multi-step workflows — research → write → publish — fu
 
 > **Scheduled tasks require the daemon to be running.** On macOS, `metame start` auto-registers with launchd (auto-restart on crash/reboot). On Windows, run `metame daemon install-task-scheduler`. Tasks fire on schedule even with the screen locked — as long as the machine is on.
 
-### 5. Perpetual Task Engine — Agents That Never Stop
+### 5. Long-running Work — Native Goals, Thin Local Scheduling
 
-Any project can run as an autonomous perpetual loop. The daemon drives the cycle: agent acts → verifier gates → event log records → next dispatch. Domain-agnostic — research, code auditing, documentation, anything.
+Codex or Claude Code owns the objective, plan, progress, retries, and completion semantics. MetaMe deliberately does not mirror that state into a second goal engine.
 
-**How it works:**
+MetaMe keeps only the local infrastructure that native sessions do not replace:
 
-```yaml
-# daemon.yaml — register a perpetual project
-scientist:
-  name: Research Director
-  reactive: true          # enables perpetual lifecycle
-  cwd: ~/AGI/AgentScientist
-  team:
-    - key: sci_scout
-      name: Literature Scout
-      cwd: ~/AGI/AgentScientist/team/scout
+- **Heartbeat scheduling** wakes a script or agent at a fixed time or interval.
+- **Session resume** reconnects scheduled work to its native Codex/Claude session.
+- **Task Board** records explicit multi-agent delegation and handoffs.
+- **Memory, Wiki, and graph** retain durable facts, decisions, evidence, and reusable knowledge—not execution traces.
+
+For long-running work, create and inspect the goal in the active coding agent. Use heartbeat only when the machine must wake the work later. This keeps one owner for intent and one small Unix-style component for scheduling.
+
+Upgrading from the retired perpetual/reactive engine is explicit and reversible:
+
+```bash
+metame stop
+metame migrate perpetual --dry-run
+metame migrate perpetual --apply --yes
+metame start
 ```
 
-**What the platform provides (zero project-specific code in MetaMe):**
-- **Event sourcing**: All state changes logged to `~/.metame/events/<key>.jsonl` — single source of truth, daemon-exclusive writes
-- **Budget & depth gates**: Auto-pause when token budget or loop depth exceeded
-- **Verifier hooks**: Project scripts validate phase completion with objective checks (file existence → structure checks → API verification)
-- **Reconciliation**: Heartbeat detects stale projects and notifies you
-- **`/status perpetual`**: See all running projects — phase, depth, mission, last activity
-
-**Convention over configuration**: Drop a `scripts/verifier.js` in your project and it just works. Need custom signals? Add a `perpetual.yaml`:
-
-```yaml
-# perpetual.yaml — optional, override defaults
-completion_signal: RESEARCH_COMPLETE
-verifier: scripts/research-verifier.js
-max_depth: 50
-```
-
-```
-Agent output → daemon parses signals
-  → budget gate → depth gate → verifier gate
-  → event logged → state file regenerated
-  → next dispatch (fresh session) OR mission complete
-  → archive → next mission from queue → repeat
-```
+The migration writes a timestamped backup under `~/.metame/backups/` before removing legacy control records. Restore with `metame migrate perpetual --restore <backup-dir>` while the daemon is stopped.
 
 ### 6. Skills That Evolve Themselves
 

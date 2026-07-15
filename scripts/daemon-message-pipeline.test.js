@@ -98,9 +98,9 @@ async function testPassesMetaToHandleCommand() {
   const bot = createMockBot();
 
   await pipeline.processMessage('chat-meta', 'hello', makeCtx(bot, {
-    meta: { reactive: true, reactiveProjectKey: 'scientist' },
+    meta: { source: 'integration-test' },
   }));
-  assert.deepStrictEqual(capturedMeta, { reactive: true, reactiveProjectKey: 'scientist' });
+  assert.deepStrictEqual(capturedMeta, { source: 'integration-test' });
   console.log('✓ testPassesMetaToHandleCommand');
 }
 

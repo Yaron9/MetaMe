@@ -151,27 +151,96 @@ function nextRunAfter(schedule, fromMs) {
 }
 
 function computeInitialNextRun(task, schedule, state, nowMs, checkIntervalSec, newTaskIndex) {
+  const taskState = state.tasks[task.name] || {};
+  const lastActivity = taskState.last_run || taskState.last_claimed_at;
   if (!schedule || schedule.mode !== 'clock') {
     const intervalSec = schedule && Number.isFinite(schedule.intervalSec)
       ? schedule.intervalSec
       : 3600;
-    const lastRun = state.tasks[task.name] && state.tasks[task.name].last_run;
-    if (lastRun) {
-      const elapsed = (nowMs - new Date(lastRun).getTime()) / 1000;
+    if (lastActivity) {
+      const elapsed = (nowMs - new Date(lastActivity).getTime()) / 1000;
       return nowMs + Math.max(0, (intervalSec - elapsed)) * 1000;
     }
     return nowMs + checkIntervalSec * 1000 * newTaskIndex;
   }
 
-  const lastRun = state.tasks[task.name] && state.tasks[task.name].last_run;
-  if (lastRun) {
-    const lastMs = new Date(lastRun).getTime();
+  if (lastActivity) {
+    const lastMs = new Date(lastActivity).getTime();
     if (Number.isFinite(lastMs) && lastMs > 0) {
       const dueAfterLast = nextClockRunAfter(schedule, lastMs);
       if (dueAfterLast <= nowMs) return nowMs;
     }
   }
   return nextClockRunAfter(schedule, nowMs);
+}
+
+function claimScheduledTask(state, taskName, scheduledTime, bootId, now = new Date()) {
+  if (!state.tasks) state.tasks = {};
+  const current = state.tasks[taskName] || {};
+  const scheduledAt = new Date(scheduledTime).toISOString();
+  if (current.last_claimed_schedule === scheduledAt) {
+    return { claimed: false, scheduledAt, state: current };
+  }
+  const next = {
+    ...current,
+    status: 'running',
+    last_claimed_schedule: scheduledAt,
+    last_claimed_at: now.toISOString(),
+    execution_boot_id: bootId,
+    execution_started_at: now.toISOString(),
+  };
+  state.tasks[taskName] = next;
+  return { claimed: true, scheduledAt, state: next };
+}
+
+function mergeTaskScopedState(current, snapshot, taskName) {
+  return {
+    ...current,
+    ...snapshot,
+    tasks: {
+      ...(current.tasks || {}),
+      [taskName]: snapshot.tasks?.[taskName] || {},
+    },
+  };
+}
+
+function recoverInterruptedClaims(state, taskNames, bootId, now = new Date()) {
+  if (!state.tasks) return [];
+  const recovered = [];
+  for (const taskName of taskNames) {
+    const current = state.tasks[taskName];
+    if (!current || current.status !== 'running' || !current.execution_boot_id
+      || current.execution_boot_id === bootId) continue;
+    state.tasks[taskName] = {
+      ...current,
+      status: 'interrupted',
+      error: 'daemon_restarted_during_task',
+      interrupted_at: now.toISOString(),
+    };
+    recovered.push(taskName);
+  }
+  return recovered;
+}
+
+function finalizeScheduledClaim(state, taskName, bootId, result, now = new Date()) {
+  const current = state.tasks?.[taskName];
+  if (!current || current.status !== 'running' || current.execution_boot_id !== bootId) return false;
+  if (result?.skipped) {
+    state.tasks[taskName] = {
+      ...current,
+      status: 'skipped',
+      skip_reason: result.error || 'precondition_not_met',
+      last_skip_at: now.toISOString(),
+    };
+    return true;
+  }
+  state.tasks[taskName] = {
+    ...current,
+    status: result?.success ? 'success' : 'error',
+    last_run: now.toISOString(),
+    ...(result?.error ? { error: String(result.error).slice(0, 200) } : {}),
+  };
+  return true;
 }
 
 function resolveTaskEnginePolicy(task, config, defaultEngine = 'claude') {
@@ -209,8 +278,8 @@ function createTaskScheduler(deps) {
     getWakeRecoveryHook,
     skillEvolution,
     backgroundRunner,
-    loopTriggerAdapter,
   } = deps;
+  const schedulerBootId = crypto.randomUUID();
 
   // Max characters from precondition context to inject into prompts (prevents token bombs)
   const MAX_PRECONDITION_CHARS = 4000;
@@ -323,6 +392,14 @@ function createTaskScheduler(deps) {
     }
   }
 
+  // Async heartbeat tasks may finish out of order. Merge only this task's
+  // record so one completion cannot erase another task's durable schedule claim.
+  function saveTaskScopedState(snapshot, taskName) {
+    const current = loadState();
+    const merged = mergeTaskScopedState(current, snapshot, taskName);
+    saveState(merged);
+  }
+
   function executeTask(task, config) {
     if (task.enabled === false) {
       log('INFO', `Skipping disabled task: ${task.name}`);
@@ -392,7 +469,7 @@ function createTaskScheduler(deps) {
           status: 'success',
           output_preview: output.slice(0, 200),
         };
-        saveState(state);
+        saveTaskScopedState(state, task.name);
         if (output) log('INFO', `Script task ${task.name} completed (${scriptTokens} tokens): ${output.slice(0, 300)}`);
         else log('INFO', `Script task ${task.name} completed`);
         return { success: true, output, tokens: scriptTokens };
@@ -403,7 +480,7 @@ function createTaskScheduler(deps) {
           status: 'error',
           error: e.message.slice(0, 200),
         };
-        saveState(state);
+        saveTaskScopedState(state, task.name);
         return { success: false, error: e.message, output: '' };
       }
     }
@@ -448,7 +525,7 @@ function createTaskScheduler(deps) {
         createdAtIso = meta.last_run || new Date().toISOString();
         if (!state.tasks[task.name]) state.tasks[task.name] = {};
         state.tasks[task.name].session_created_at = createdAtIso;
-        saveState(state);
+        saveTaskScopedState(state, task.name);
       }
       const createdAtMs = createdAtIso ? new Date(createdAtIso).getTime() : 0;
       const shouldRotate = !!(
@@ -466,7 +543,7 @@ function createTaskScheduler(deps) {
         if (!state.tasks[task.name]) state.tasks[task.name] = {};
         state.tasks[task.name].session_id = newSessionId;
         state.tasks[task.name].session_created_at = new Date().toISOString();
-        saveState(state);
+        saveTaskScopedState(state, task.name);
         if (savedSessionId && shouldRotate) {
           log('INFO', `Executing task: ${task.name} (model: ${model}, rotated session ${savedSessionId.slice(0, 8)} -> ${newSessionId.slice(0, 8)}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''})`);
         } else {
@@ -507,7 +584,7 @@ function createTaskScheduler(deps) {
       if (!result.ok) {
         if (result.errorCode === 'TIMEOUT') {
           state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: `Task silent for ${timeoutMs / 1000}s`, ...sessionFields };
-          saveState(state);
+          saveTaskScopedState(state, task.name);
           return { success: false, error: 'silent_timeout', output: output || '' };
         }
         const errMsg = result.error;
@@ -515,19 +592,19 @@ function createTaskScheduler(deps) {
         if (task.persistent_session && (errMsg.includes('not found') || errMsg.includes('No session'))) {
           log('WARN', `Persistent session for ${task.name} expired, will create new on next run`);
           state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'session_reset', error: 'Session expired' };
-          saveState(state);
+          saveTaskScopedState(state, task.name);
           return { success: false, error: 'session_expired', output: '' };
         }
         log('ERROR', `Task ${task.name} failed: ${errMsg}`);
         state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: errMsg, ...sessionFields };
-        saveState(state);
+        saveTaskScopedState(state, task.name);
         return { success: false, error: errMsg, output: '' };
       }
 
       const estimatedTokens = Math.ceil((fullPrompt.length + output.length) / 4);
       recordTokens(state, estimatedTokens, { category: classifyTaskUsage(task) });
       state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'success', output_preview: output.slice(0, 200), ...sessionFields };
-      saveState(state);
+      saveTaskScopedState(state, task.name);
       maybeSaveTaskMemory(task, output, estimatedTokens, prevSid || '');
       log('INFO', `Task ${task.name} completed (est. ${estimatedTokens} tokens)`);
       return { success: true, output, tokens: estimatedTokens };
@@ -610,7 +687,7 @@ function createTaskScheduler(deps) {
         if (!step.optional) {
           recordTokens(loopState, totalTokens, { category: classifyTaskUsage(task) });
           state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: `Step ${i + 1} failed`, steps_completed: i, steps_total: steps.length };
-          saveState(state);
+          saveTaskScopedState(state, task.name);
           return { success: false, error: `Step ${i + 1} failed`, output: outputs.map(o => `Step ${o.step}: ${o.error ? 'FAILED' : 'OK'}`).join('\n'), tokens: totalTokens };
         }
       }
@@ -618,7 +695,7 @@ function createTaskScheduler(deps) {
     recordTokens(loopState, totalTokens, { category: classifyTaskUsage(task) });
     const lastOk = [...outputs].reverse().find(o => !o.error);
     state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'success', output_preview: (lastOk ? lastOk.output : '').slice(0, 200), steps_completed: outputs.filter(o => !o.error).length, steps_total: steps.length };
-    saveState(state);
+    saveTaskScopedState(state, task.name);
     maybeSaveTaskMemory(task, (lastOk ? lastOk.output : ''), totalTokens, sessionId);
     log('INFO', `Workflow ${task.name} done: ${outputs.filter(o => !o.error).length}/${steps.length} steps (${totalTokens} tokens)`);
     return { success: true, output: outputs.map(o => `Step ${o.step} (${o.skill || 'prompt'}): ${o.error ? 'FAILED' : 'OK'}`).join('\n') + '\n\n' + (lastOk ? lastOk.output : ''), tokens: totalTokens };
@@ -644,9 +721,6 @@ function createTaskScheduler(deps) {
   }
 
   function startHeartbeat(config, notifyFn, notifyPersonalFn, adminNotifyFn) {
-    const activeLoopTriggerAdapter = config.loop && config.loop.enabled === true
-      ? loopTriggerAdapter
-      : null;
     const { all: tasks } = getAllTasks(config);
 
     const enabledTasks = tasks.filter(t => t.enabled !== false);
@@ -682,6 +756,15 @@ function createTaskScheduler(deps) {
     const nextRun = {};
     const now = Date.now();
     const state = loadState();
+    const interrupted = recoverInterruptedClaims(
+      state,
+      runnableTasks.map(task => task.name),
+      schedulerBootId,
+    );
+    if (interrupted.length > 0) {
+      saveState(state);
+      log('WARN', `Recovered ${interrupted.length} interrupted heartbeat task(s) without replay`);
+    }
 
     let newTaskIndex = 0;
     for (const task of runnableTasks) {
@@ -759,28 +842,20 @@ function createTaskScheduler(deps) {
           const { next: nextRunTime, failed: schedFailed } = safeNextRun(task.name, schedule, currentTime);
           nextRun[task.name] = nextRunTime;
           if (schedFailed) continue; // back off, skip execution this cycle
-          let loopContext = null;
-          if (activeLoopTriggerAdapter && typeof activeLoopTriggerAdapter.beginScheduledTask === 'function') {
-            try {
-              loopContext = activeLoopTriggerAdapter.beginScheduledTask(task, schedule, scheduledTime, nextRunTime);
-              if (!loopContext.shouldExecute) {
-                log('INFO', `Task ${task.name} schedule already recorded — skipping duplicate tick`);
-                continue;
-              }
-            } catch (err) {
-              log('WARN', `Task ${task.name} loop trigger recording failed: ${err.message}`);
-            }
+          const claimState = loadState();
+          const claim = claimScheduledTask(claimState, task.name, scheduledTime, schedulerBootId);
+          if (!claim.claimed) {
+            log('INFO', `Task ${task.name} schedule already claimed — skipping duplicate tick`);
+            continue;
           }
+          saveState(claimState);
           runningTasks.add(task.name);
           // executeTask now returns a Promise (async, non-blocking, process-group kill)
           Promise.resolve(executeTask(task, config))
             .then((result) => {
               runningTasks.delete(task.name);
-              if (loopContext && activeLoopTriggerAdapter) {
-                try { activeLoopTriggerAdapter.completeScheduledTask(loopContext, result); } catch (err) {
-                  log('WARN', `Task ${task.name} loop completion recording failed: ${err.message}`);
-                }
-              }
+              const finalState = loadState();
+              if (finalizeScheduledClaim(finalState, task.name, schedulerBootId, result)) saveState(finalState);
               // Budget exceeded: back off until next day instead of retrying every interval
               if (result.error === 'budget_exceeded') {
                 const tomorrow = new Date();
@@ -802,9 +877,11 @@ function createTaskScheduler(deps) {
             })
             .catch((err) => {
               runningTasks.delete(task.name);
-              if (loopContext && activeLoopTriggerAdapter) {
-                try { activeLoopTriggerAdapter.completeScheduledTask(loopContext, { success: false, error: err.message }); } catch { }
-              }
+              const finalState = loadState();
+              if (finalizeScheduledClaim(finalState, task.name, schedulerBootId, {
+                success: false,
+                error: err.message,
+              })) saveState(finalState);
               log('ERROR', `Task ${task.name} threw: ${err.message}`);
             });
         }
@@ -867,6 +944,10 @@ module.exports = {
     nextClockRunAfter,
     buildTaskSchedule,
     computeInitialNextRun,
+    claimScheduledTask,
+    mergeTaskScopedState,
+    recoverInterruptedClaims,
+    finalizeScheduledClaim,
     nextRunAfter,
     resolveTaskEngine: resolveTaskEnginePolicy,
   },

@@ -45,14 +45,6 @@ function createTaskBoard(opts = {}) {
     if (logger) logger(msg);
   }
 
-  function validateLoopLinks(db, safe) {
-    if (!safe.run_id) return;
-    if (!safe.goal_id) throw new Error('task_run_requires_goal');
-    const run = db.prepare('SELECT goal_id FROM runs WHERE run_id = ?').get(safe.run_id);
-    if (!run) throw new Error('task_run_not_found');
-    if (run.goal_id !== safe.goal_id) throw new Error('task_goal_run_mismatch');
-  }
-
   function upsertTask(task) {
     if (!task || !task.task_id) return { ok: false, error: 'task_id_required' };
     const nowIso = new Date().toISOString();
@@ -60,8 +52,6 @@ function createTaskBoard(opts = {}) {
       task_id: sanitizeText(task.task_id, 80),
       scope_id: sanitizeText(task.scope_id, 120) || sanitizeText(task.task_id, 80),
       parent_task_id: sanitizeText(task.parent_task_id, 80) || null,
-      goal_id: sanitizeText(task.goal_id, 120) || null,
-      run_id: sanitizeText(task.run_id, 120) || null,
       from_agent: sanitizeText(task.from_agent, 80) || 'unknown',
       to_agent: sanitizeText(task.to_agent, 80),
       goal: sanitizeText(task.goal, 500),
@@ -84,15 +74,13 @@ function createTaskBoard(opts = {}) {
 
     const sql = `
       INSERT INTO tasks (
-        task_id, scope_id, parent_task_id, goal_id, run_id, from_agent, to_agent, goal, task_kind, participants,
+        task_id, scope_id, parent_task_id, from_agent, to_agent, goal, task_kind, participants,
         definition_of_done, inputs, artifacts, owned_paths, status, priority, summary, last_error,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(task_id) DO UPDATE SET
         scope_id = excluded.scope_id,
         parent_task_id = excluded.parent_task_id,
-        goal_id = excluded.goal_id,
-        run_id = excluded.run_id,
         from_agent = excluded.from_agent,
         to_agent = excluded.to_agent,
         goal = excluded.goal,
@@ -110,13 +98,10 @@ function createTaskBoard(opts = {}) {
     `;
     try {
       controlDb.transaction(db => {
-        validateLoopLinks(db, safe);
         db.prepare(sql).run(
           safe.task_id,
           safe.scope_id,
           safe.parent_task_id,
-          safe.goal_id,
-          safe.run_id,
           safe.from_agent,
           safe.to_agent,
           safe.goal,

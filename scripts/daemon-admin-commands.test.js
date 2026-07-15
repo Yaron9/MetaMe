@@ -81,7 +81,7 @@ describe('daemon-admin-commands /tasks', () => {
 });
 
 describe('daemon-admin-commands /status perpetual', () => {
-  it('renders configured reactive project state', async () => {
+  it('explains the retired control plane and current native boundaries', async () => {
     const sent = [];
     const { handleAdminCommand } = createHandler(() => ({ general: [], project: [] }));
     const projectKey = `reactive_test_${process.pid}`;
@@ -110,10 +110,9 @@ describe('daemon-admin-commands /status perpetual', () => {
 
     assert.equal(res.handled, true);
     assert.equal(sent.length, 1);
-    assert.match(sent[0], /\*\*Perpetual Projects\*\*/);
-    assert.match(sent[0], new RegExp(`🔬 \\*\\*Scientist\\*\\* \\(\`${projectKey}\`\\)`));
-    assert.match(sent[0], /Status: running \| Phase: - \| Depth: 2\/5/);
-    assert.match(sent[0], /Last signal: NEXT_DISPATCH/);
+    assert.match(sent[0], /永续任务控制面已退役/);
+    assert.match(sent[0], /\/goal status/);
+    assert.match(sent[0], /\/tasks/);
   });
 });
 

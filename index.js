@@ -495,6 +495,31 @@ function requestDaemonRestart({
 // IMPORTANT: daemon.yaml is USER CONFIG — never overwrite it. Only daemon-default.yaml (template) is synced.
 const scriptsDir = path.join(__dirname, 'scripts');
 const EXCLUDED_SCRIPTS = new Set(['sync-readme.js', 'test_daemon.js', 'daemon.yaml']);
+const RETIRED_PERPETUAL_ARTIFACTS = [
+  'daemon-loop-coordinator.js',
+  'daemon-loop-reconciler.js',
+  'daemon-loop-triggers.js',
+  'daemon-reactive-lifecycle.js',
+  'daemon-verifier.js',
+  'daemon-workspace-broker.js',
+  'loop-execution-store.js',
+  'loop-governance-store.js',
+  'loop-migration.js',
+  'loop-persistence.js',
+  'loop-store.js',
+  'migrate-reactive-paths.js',
+  'ops-mission-queue.js',
+  'ops-reactive-bootstrap.js',
+  'ops-verifier.js',
+  path.join('core', 'loop-contract.js'),
+  path.join('core', 'loop-policy.js'),
+  path.join('core', 'loop-state.js'),
+  path.join('core', 'loop-verdict.js'),
+  path.join('core', 'reactive-paths.js'),
+  path.join('core', 'reactive-prompt.js'),
+  path.join('core', 'reactive-signal.js'),
+  path.join('hooks', 'intent-perpetual.js'),
+];
 const OBSOLETE_RUNTIME_ARTIFACTS = [
   'memory-migrate-v2.js',
   'test-env-setup.js',
@@ -502,6 +527,8 @@ const OBSOLETE_RUNTIME_ARTIFACTS = [
   path.join('.last-good', 'memory-migrate-v2.js'),
   path.join('.last-good', 'test-env-setup.js'),
   path.join('.last-good', 'verify-reactive-claude-md.js'),
+  ...RETIRED_PERPETUAL_ARTIFACTS,
+  ...RETIRED_PERPETUAL_ARTIFACTS.map(file => path.join('.last-good', file)),
 ];
 const OBSOLETE_RUNTIME_TEST_DIRS = ['', '.last-good', 'core', 'hooks', 'bin'];
 const SCRIPT_DEPLOY_GROUPS = collectDeployGroups(fs, path, scriptsDir, {
@@ -650,21 +677,6 @@ try {
   if (agyPluginUpdated) console.log(`${icon('plug')} agy plugin installed: metame-tools`);
 } catch (e) {
   console.log(`${icon('warn')} agy plugin setup skipped: ${e.message}`);
-}
-
-// Migrate legacy reactive flat paths to per-project directory structure
-try {
-  const { migrate } = require('./scripts/migrate-reactive-paths');
-  const migrationReport = migrate(METAME_DIR);
-  if (migrationReport.migrated.length > 0) {
-    console.log(`${icon("pkg")} Migrated ${migrationReport.migrated.length} reactive file(s) to per-project dirs.`);
-  }
-  if (migrationReport.errors.length > 0) {
-    console.log(`${icon("warn")} Reactive migration had ${migrationReport.errors.length} error(s).`);
-  }
-} catch (e) {
-  // Non-critical: migration failure should not block deploy
-  console.log(`${icon("warn")} Reactive path migration skipped: ${e.message}`);
 }
 
 const daemonCodeUpdated = scriptsUpdated || binUpdated || hooksUpdated || agyPluginUpdated;
@@ -2183,44 +2195,12 @@ const DAEMON_SHORTCUTS = ['start', 'stop', 'restart', 'status', 'logs'];
 if (DAEMON_SHORTCUTS.includes(process.argv[2])) {
   process.argv.splice(2, 0, 'daemon');
 }
-if (process.argv[2] === 'loop') {
-  const subCmd = process.argv[3];
-  const dryRun = process.argv.includes('--dry-run');
-  const apply = process.argv.includes('--apply') && process.argv.includes('--yes');
-  if (subCmd !== 'migrate' || (!dryRun && !apply)) {
-    console.error('Usage: metame loop migrate --dry-run | --apply --yes');
-    process.exit(1);
-  }
+if (process.argv[2] === 'migrate' && process.argv[3] === 'perpetual') {
   try {
-    const yaml = require('js-yaml');
-    const { planLegacyMigration, applyLegacyMigration } = require('./scripts/loop-migration');
-    const config = fs.existsSync(DAEMON_CONFIG_FILE)
-      ? (yaml.load(fs.readFileSync(DAEMON_CONFIG_FILE, 'utf8')) || {})
-      : {};
-    const report = planLegacyMigration(config, {
-      readPerpetual(cwd) {
-        const expanded = String(cwd || '').replace(/^~/, HOME_DIR);
-        const file = path.join(expanded, 'perpetual.yaml');
-        if (!fs.existsSync(file)) return {};
-        return { ...(yaml.load(fs.readFileSync(file, 'utf8')) || {}), _path: file };
-      },
-    });
-    if (dryRun) {
-      console.log(JSON.stringify(report, null, 2));
-    } else {
-      const { createControlDb } = require('./scripts/control-db');
-      const { createLoopStore } = require('./scripts/loop-store');
-      const controlDb = createControlDb();
-      try {
-        const applied = applyLegacyMigration(report, createLoopStore({ controlDb }));
-        console.log(JSON.stringify({ applied, source_plan: report }, null, 2));
-      } finally {
-        controlDb.close();
-      }
-    }
+    require('./scripts/retire-perpetual').main(process.argv.slice(4));
     process.exit(0);
   } catch (err) {
-    console.error(`Loop migration dry-run failed: ${err.message}`);
+    console.error(`Perpetual retirement failed: ${err.message}`);
     process.exit(1);
   }
 }

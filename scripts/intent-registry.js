@@ -17,7 +17,6 @@ const DEFAULTS = Object.freeze({
   weixin_bridge: true,
   memory_recall: true,
   doc_router: true,
-  perpetual: true,
   research: true,
 });
 
@@ -47,10 +46,6 @@ const INTENT_MODULES = Object.freeze({
     detect: detectDocRouter,
     priority: 10,
     fallbackOnly: true,
-  },
-  perpetual: {
-    detect: require('./hooks/intent-perpetual'),
-    priority: 60,
   },
   research: {
     detect: require('./hooks/intent-research'),

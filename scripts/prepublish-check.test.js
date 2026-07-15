@@ -65,7 +65,7 @@ test('prepublish check blocks test, config, metadata, and obsolete files from pa
 test('prepublish check allows current maintenance tools that are tested and explicit', () => {
   assert.deepEqual(inspectPackageFileList([
     'scripts/memory-backfill-chunks.js',
-    'scripts/migrate-reactive-paths.js',
+    'scripts/retire-perpetual.js',
     'scripts/core/wiki-chunks.js',
   ]), []);
 });

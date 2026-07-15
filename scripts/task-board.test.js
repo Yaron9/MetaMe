@@ -9,7 +9,6 @@ const path = require('path');
 
 const { createTaskBoard, _internal } = require('./task-board');
 const { createControlDb } = require('./control-db');
-const { createLoopStore } = require('./loop-store');
 
 function newTmpDbPath() {
   const rand = Math.random().toString(36).slice(2, 8);
@@ -129,28 +128,25 @@ test('task board uses injected control DB without owning its lifecycle', () => {
   try { fs.unlinkSync(`${dbPath}-shm`); } catch {}
 });
 
-test('task board rejects mismatched loop ownership links', () => {
+test('task board persists generic tasks without retired loop ownership links', () => {
   const dbPath = newTmpDbPath();
   const controlDb = createControlDb({ dbPath });
-  let id = 0;
-  const loop = createLoopStore({ controlDb, newId: prefix => `${prefix}_${++id}` });
-  loop.createGoal({ goal_id: 'goal-1', objective: 'first' });
-  loop.createGoal({ goal_id: 'goal-2', objective: 'second' });
-  const run = loop.enqueueWake({ wake_id: 'wake-1', goal_id: 'goal-1' }).run;
   const board = createTaskBoard({ controlDb });
   const result = board.upsertTask({
-    task_id: 't_bad_link',
+    task_id: 't_generic',
     goal_id: 'goal-2',
-    run_id: run.run_id,
+    run_id: 'retired-run',
     from_agent: 'manager',
     to_agent: 'worker',
-    goal: 'must reject mismatched owner',
+    goal: 'generic delegated work',
   });
-  assert.equal(result.ok, false);
-  assert.match(result.error, /task_goal_run_mismatch/);
+  assert.equal(result.ok, true);
+  const columns = controlDb.run(db => db.prepare('PRAGMA table_info(tasks)').all().map(row => row.name));
+  assert.equal(columns.includes('goal_id'), false);
+  assert.equal(columns.includes('run_id'), false);
 
   controlDb.close();
-  for (const suffix of ['', '-wal', '-shm', '.pre-control-v2.bak']) {
+  for (const suffix of ['', '-wal', '-shm', '.pre-control-v3.bak']) {
     try { fs.unlinkSync(`${dbPath}${suffix}`); } catch {}
   }
 });

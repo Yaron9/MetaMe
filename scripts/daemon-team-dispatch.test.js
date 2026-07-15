@@ -6,99 +6,40 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const {
-  buildEnrichedPrompt,
-  resolveDispatchActor,
-  updateDispatchContextFiles,
-} = require('./daemon-team-dispatch');
-const { resolveReactivePaths } = require('./core/reactive-paths');
+const { buildEnrichedPrompt, resolveDispatchActor } = require('./daemon-team-dispatch');
 
 describe('team-dispatch scoped context', () => {
-  it('prefers target-private state file and excludes shared context by default', () => {
+  it('does not pull legacy reactive or Markdown task mirrors into a dispatch', () => {
     const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-team-dispatch-'));
-    const rp = resolveReactivePaths('builder', baseDir);
-    fs.mkdirSync(rp.dir, { recursive: true });
-    fs.writeFileSync(rp.state, 'PRIVATE builder progress', 'utf8');
-    const nowDir = path.join(baseDir, 'memory', 'now');
-    fs.mkdirSync(nowDir, { recursive: true });
-    fs.writeFileSync(path.join(nowDir, 'shared.md'), 'SHARED team progress', 'utf8');
-
-    const text = buildEnrichedPrompt('builder', '实现修复', baseDir);
-
-    assert.match(text, /\[当前进度 builder\/state\.md\]/);
-    assert.match(text, /PRIVATE builder progress/);
-    assert.doesNotMatch(text, /SHARED team progress/);
+    for (const [relative, content] of [
+      ['reactive/builder/state.md', 'LEGACY PRIVATE STATE'],
+      ['memory/now/shared.md', 'LEGACY SHARED STATE'],
+      ['memory/shared/tasks.md', 'LEGACY TASK MIRROR'],
+    ]) {
+      const file = path.join(baseDir, relative);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, content, 'utf8');
+    }
+    assert.equal(buildEnrichedPrompt('builder', '实现修复', baseDir), '实现修复');
+    fs.rmSync(baseDir, { recursive: true, force: true });
   });
 
-  it('includes shared context only when explicitly requested', () => {
+  it('consumes transient inbox messages exactly once', () => {
     const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-team-dispatch-'));
-    const rp = resolveReactivePaths('builder', baseDir);
-    fs.mkdirSync(rp.dir, { recursive: true });
-    fs.writeFileSync(rp.state, 'PRIVATE builder progress', 'utf8');
-    const nowDir = path.join(baseDir, 'memory', 'now');
-    fs.mkdirSync(nowDir, { recursive: true });
-    fs.writeFileSync(path.join(nowDir, 'shared.md'), 'SHARED team progress', 'utf8');
-
-    const text = buildEnrichedPrompt('builder', '实现修复', baseDir, { includeShared: true });
-
-    assert.match(text, /\[当前进度 builder\/state\.md\]/);
-    assert.match(text, /\[共享进度 now\/shared\.md\]/);
-    assert.match(text, /SHARED team progress/);
-  });
-
-  it('writes target-only now context for direct dispatch and shared state only for TeamTask', () => {
-    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-team-dispatch-'));
-    const config = {
-      projects: {
-        builder: { name: 'Builder', icon: '🛠' },
-      },
-    };
-
-    updateDispatchContextFiles({
-      baseDir,
-      fullMsg: {
-        id: 'd_direct_001',
-        from: '_claude_session',
-        payload: { prompt: '直接修一下', title: '直接修一下' },
-      },
-      targetProject: 'builder',
-      config,
-      envelope: null,
-    });
-
-    const rpBuilder = resolveReactivePaths('builder', baseDir);
-    const targetNow = fs.readFileSync(rpBuilder.state, 'utf8');
-    assert.match(targetNow, /更新者.*👤 用户/);
-    assert.equal(fs.existsSync(path.join(baseDir, 'memory', 'now', 'shared.md')), false);
-
-    updateDispatchContextFiles({
-      baseDir,
-      fullMsg: {
-        id: 'd_team_001',
-        source_sender_key: 'user',
-        payload: { prompt: '团队协作修一下', title: '团队协作修一下' },
-      },
-      targetProject: 'builder',
-      config,
-      envelope: {
-        task_id: 't_team_001',
-        scope_id: 'epic_auth',
-        task_kind: 'team',
-      },
-    });
-
-    const sharedNow = fs.readFileSync(path.join(baseDir, 'memory', 'now', 'shared.md'), 'utf8');
-    const tasksBoard = fs.readFileSync(path.join(baseDir, 'memory', 'shared', 'tasks.md'), 'utf8');
-    assert.match(sharedNow, /TeamTask.*t_team_001/);
-    assert.match(tasksBoard, /Builder/);
+    const inbox = path.join(baseDir, 'memory', 'inbox', 'builder');
+    fs.mkdirSync(inbox, { recursive: true });
+    fs.writeFileSync(path.join(inbox, '001.md'), 'review result', 'utf8');
+    const first = buildEnrichedPrompt('builder', '实现修复', baseDir);
+    assert.match(first, /Agent Inbox/);
+    assert.match(first, /review result/);
+    assert.equal(buildEnrichedPrompt('builder', '实现修复', baseDir), '实现修复');
+    assert.deepEqual(fs.readdirSync(inbox), []);
+    fs.rmSync(baseDir, { recursive: true, force: true });
   });
 
   it('normalizes placeholder dispatch sources to user actor', () => {
     assert.deepEqual(resolveDispatchActor('_claude_session', {}), {
-      key: 'user',
-      name: '用户',
-      icon: '👤',
-      isUser: true,
+      key: 'user', name: '用户', icon: '👤', isUser: true,
     });
   });
 });

@@ -34,7 +34,6 @@ daemon 在运行时直接复用同一 registry，Claude / Codex 共用这一条�
 | `weixin_bridge` | `intent-weixin-bridge.js` | "帮我绑定微信/配置微信桥接/开启微信接入/开始微信扫码登录" 等明确桥接语境 | 开启 `weixin.enabled` + `/weixin` 绑定流程提示 |
 | `memory_recall` | `intent-memory-recall.js` | "上次/之前/还记得" 等跨会话回忆语境 | `memory-search.js` CLI 召回提示 |
 | `doc_router` | `intent-doc-router.js` | "代码结构/脚本入口"、"hook/intent 配置" 等文档导向语境 | 统一 doc-router 文档指引 |
-| `perpetual` | `intent-perpetual.js` | 永续/reactive 任务语境 | `dispatch_to` / `/status perpetual` 等永续协议提示 |
 | `research` | `intent-research.js` | `paper_rev` 项目下的研究语境 | 研究方法与文件落点提示 |
 
 注入策略：
