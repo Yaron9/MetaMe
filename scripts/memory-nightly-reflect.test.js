@@ -160,4 +160,20 @@ describe('memory-nightly-reflect Step4', () => {
     assert.equal(facts[0].relation, 'synthesized_insight');
     assert.match(facts[0].entity, /^nightly\.reflect\./);
   });
+
+  it('repairs malformed distillation JSON exactly once', async () => {
+    let calls = 0;
+    const result = await reflect._private.parseJsonWithRepair(
+      '{"decisions": [broken',
+      async prompt => {
+        calls += 1;
+        assert.match(prompt, /Do not add new facts/);
+        return '{"decisions":[],"lessons":[]}';
+      },
+      {},
+    );
+    assert.equal(calls, 1);
+    assert.equal(result.repaired, true);
+    assert.deepEqual(result.parsed, { decisions: [], lessons: [] });
+  });
 });

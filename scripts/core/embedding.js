@@ -12,10 +12,12 @@
  *   bufferToEmbedding(blob)     → Float32Array  (for SQLite BLOB read)
  *   isEmbeddingAvailable()      → boolean
  *
- * Backend selection (automatic):
- *   OPENAI_API_KEY set  → OpenAI (512-dim)
- *   ollama installed    → bge-m3 via localhost:11434 (1024-dim)
- *   neither             → all functions return null gracefully
+ * Backend selection:
+ *   METAME_EMBEDDING_BACKEND=openai|ollama → explicit, fail closed
+ *   auto/unset: OPENAI_API_KEY first, then local Ollama
+ *
+ * Callers must use getBackendInfo() when persisting vectors. MODEL and
+ * DIMENSIONS remain compatibility exports for older consumers only.
  */
 
 const { existsSync } = require('node:fs');
@@ -57,9 +59,30 @@ function isOllamaInstalled() {
   return OLLAMA_BIN_PATHS.some(p => existsSync(p));
 }
 
+function selectBackend(preferred, { openaiAvailable, ollamaAvailable }) {
+  if (preferred === 'openai') return openaiAvailable ? 'openai' : null;
+  if (preferred === 'ollama') return ollamaAvailable ? 'ollama' : null;
+  if (openaiAvailable) return 'openai';
+  if (ollamaAvailable) return 'ollama';
+  return null;
+}
+
 function getBackend() {
-  if (getApiKey()) return 'openai';
-  if (isOllamaInstalled()) return 'ollama';
+  const preferred = String(process.env.METAME_EMBEDDING_BACKEND || 'auto').toLowerCase();
+  return selectBackend(preferred, {
+    openaiAvailable: !!getApiKey(),
+    ollamaAvailable: isOllamaInstalled(),
+  });
+}
+
+function getBackendInfo() {
+  const backend = getBackend();
+  if (backend === 'openai') {
+    return { backend, model: OPENAI_MODEL, dimensions: OPENAI_DIMENSIONS };
+  }
+  if (backend === 'ollama') {
+    return { backend, model: OLLAMA_MODEL, dimensions: OLLAMA_DIMENSIONS };
+  }
   return null;
 }
 
@@ -218,8 +241,10 @@ module.exports = {
   batchEmbed,
   embeddingToBuffer,
   bufferToEmbedding,
+  getBackendInfo,
   isEmbeddingAvailable,
   l2Normalize,
   MODEL,
   DIMENSIONS,
+  _internal: { selectBackend },
 };

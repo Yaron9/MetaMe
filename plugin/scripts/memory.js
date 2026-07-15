@@ -578,12 +578,28 @@ function searchWikiAndFacts(query, { trackSearch = true } = {}) {
  * Hybrid wiki search (FTS5 + vector + RRF fusion).
  * Falls back to pure FTS5 if hybrid-search module is unavailable.
  */
-async function hybridSearchWiki(query, { ftsOnly = false, expand = false, trackSearch = true } = {}) {
+async function hybridSearchWiki(query, {
+  ftsOnly = false,
+  trackSearch = true,
+  excludeSourceTypes = [],
+  observeSourceTypes = [],
+} = {}) {
   try {
     const { hybridSearchWiki: fn } = require('./core/hybrid-search');
-    return await fn(getDb(), query, { ftsOnly, trackSearch });
+    return await fn(getDb(), query, {
+      ftsOnly,
+      trackSearch,
+      excludeSourceTypes,
+      observeSourceTypes,
+    });
   } catch {
-    return searchWikiAndFacts(query, { trackSearch });
+    const fallback = searchWikiAndFacts(query, { trackSearch });
+    const excluded = new Set(excludeSourceTypes);
+    return {
+      ...fallback,
+      wikiPages: fallback.wikiPages.filter(page => !excluded.has(page.source_type)),
+      sourceHitCounts: {},
+    };
   }
 }
 

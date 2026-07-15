@@ -19,6 +19,24 @@ test('applyWikiSchema is idempotent — two calls do not throw', () => {
   db.close();
 });
 
+test('wiki_external_sources tracks a rebuildable page projection', () => {
+  const db = openMemoryDb();
+  applyWikiSchema(db);
+  db.prepare(`
+    INSERT INTO wiki_pages (id, slug, title, content, primary_topic, source_type)
+    VALUES ('wp_external', 'external/openwiki/quickstart', 'Quickstart', 'body', 'metame', 'openwiki')
+  `).run();
+  db.prepare(`
+    INSERT INTO wiki_external_sources
+      (source_key, page_slug, relative_path, content_hash, last_seen_run)
+    VALUES ('openwiki:quickstart.md', 'external/openwiki/quickstart', 'quickstart.md', 'abc', 'run-1')
+  `).run();
+  const row = db.prepare('SELECT * FROM wiki_external_sources').get();
+  assert.equal(row.page_slug, 'external/openwiki/quickstart');
+  assert.equal(row.missing_count, 0);
+  db.close();
+});
+
 test('wiki_pages table exists after applyWikiSchema', () => {
   const db = openMemoryDb();
   applyWikiSchema(db);

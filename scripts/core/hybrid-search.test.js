@@ -3,7 +3,8 @@
 require('../test-support/env-setup');
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { _internal } = require('./hybrid-search');
+const { DatabaseSync } = require('node:sqlite');
+const { hybridSearchWiki, _internal } = require('./hybrid-search');
 const { dotProduct, topK, aggregateChunksToPages, rrfFuse, normalizeScores } = _internal;
 
 describe('hybrid-search internals', () => {
@@ -18,6 +19,13 @@ describe('hybrid-search internals', () => {
       const a = new Float32Array([1, 0, 0]);
       const b = new Float32Array([0, 1, 0]);
       assert.ok(Math.abs(dotProduct(a, b)) < 1e-6);
+    });
+
+    it('rejects vectors with different dimensions', () => {
+      assert.equal(
+        dotProduct(new Float32Array([1, 0]), new Float32Array([1, 0, 0])),
+        null,
+      );
     });
   });
 
@@ -113,5 +121,29 @@ describe('hybrid-search internals', () => {
       assert.equal(results[0].score, 1.0);
       assert.equal(results[1].score, 1.0);
     });
+  });
+
+  it('excludes external sources before the five-page result limit', async () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE wiki_pages (
+        slug TEXT PRIMARY KEY, title TEXT, content TEXT, staleness REAL DEFAULT 0,
+        last_built_at TEXT, source_type TEXT DEFAULT 'memory'
+      );
+      CREATE TABLE wiki_external_sources (page_slug TEXT PRIMARY KEY, missing_count INTEGER DEFAULT 0);
+      CREATE VIRTUAL TABLE wiki_pages_fts USING fts5(slug, title, content, content='wiki_pages', content_rowid='rowid');
+    `);
+    const insert = db.prepare('INSERT INTO wiki_pages (slug,title,content,source_type) VALUES (?,?,?,?)');
+    for (let i = 0; i < 12; i++) insert.run(`external/${i}`, `External ${i}`, 'needle needle needle', 'openwiki');
+    insert.run('memory/sixth', 'Internal memory', 'needle', 'memory');
+    db.exec("INSERT INTO wiki_pages_fts(wiki_pages_fts) VALUES('rebuild')");
+    const result = await hybridSearchWiki(db, 'needle', {
+      ftsOnly: true,
+      excludeSourceTypes: ['openwiki'],
+      observeSourceTypes: ['openwiki'],
+    });
+    assert.deepEqual(result.wikiPages.map(page => page.slug), ['memory/sixth']);
+    assert.equal(result.sourceHitCounts.openwiki, 12);
+    db.close();
   });
 });

@@ -3,7 +3,14 @@
 require('../test-support/env-setup');
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { embeddingToBuffer, bufferToEmbedding, l2Normalize, isEmbeddingAvailable, DIMENSIONS } = require('./embedding');
+const {
+  embeddingToBuffer,
+  bufferToEmbedding,
+  l2Normalize,
+  isEmbeddingAvailable,
+  DIMENSIONS,
+  _internal,
+} = require('./embedding');
 
 describe('embedding utilities', () => {
   it('l2Normalize produces unit vector', () => {
@@ -79,5 +86,27 @@ describe('embedding utilities', () => {
     // This test depends on whether the env var is set in CI
     const result = isEmbeddingAvailable();
     assert.equal(typeof result, 'boolean');
+  });
+
+  it('explicit backend selection fails closed instead of silently switching provider', () => {
+    assert.equal(_internal.selectBackend('ollama', {
+      openaiAvailable: true,
+      ollamaAvailable: false,
+    }), null);
+    assert.equal(_internal.selectBackend('openai', {
+      openaiAvailable: false,
+      ollamaAvailable: true,
+    }), null);
+  });
+
+  it('auto selection preserves compatibility while preferring configured OpenAI', () => {
+    assert.equal(_internal.selectBackend('auto', {
+      openaiAvailable: true,
+      ollamaAvailable: true,
+    }), 'openai');
+    assert.equal(_internal.selectBackend('auto', {
+      openaiAvailable: false,
+      ollamaAvailable: true,
+    }), 'ollama');
   });
 });

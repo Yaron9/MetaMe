@@ -8,17 +8,18 @@
  * Processes pending items in embedding_queue:
  * 1. Reads batch from queue (attempts < 3)
  * 2. Fetches text from content_chunks
- * 3. Calls OpenAI embedding API
+ * 3. Calls the configured embedding backend
  * 4. Writes BLOB + metadata back to content_chunks
  * 5. Deletes completed queue rows; increments attempts on failure
  *
  * Designed to run as heartbeat task (interval: 30min) or post-wiki-reflect trigger.
- * Graceful degradation: no OPENAI_API_KEY → exits immediately, no error.
+ * Graceful degradation: unavailable backend is logged and leaves the queue intact.
  */
 
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const { spawn } = require('child_process');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
@@ -42,9 +43,10 @@ function loadModule(name) {
 async function main() {
   const embedding = loadModule('core/embedding');
   if (!embedding || !embedding.isEmbeddingAvailable()) {
-    // No API key — skip silently
-    return;
+    appendLog({ ts: new Date().toISOString(), status: 'backend_unavailable' });
+    return { status: 'backend_unavailable' };
   }
+  const backendInfo = embedding.getBackendInfo();
 
   // Atomic lock acquisition
   try {
@@ -66,6 +68,11 @@ async function main() {
 
   let db;
   try {
+    if (!(await ensureBackendReady(embedding, backendInfo))) {
+      const result = { status: 'backend_unavailable', backend: backendInfo };
+      appendLog({ ts: new Date().toISOString(), ...result });
+      return result;
+    }
     const { DatabaseSync } = require('node:sqlite');
     db = new DatabaseSync(DB_PATH);
     db.exec('PRAGMA journal_mode = WAL');
@@ -76,6 +83,8 @@ async function main() {
       const { applyWikiSchema } = loadModule('memory-wiki-schema') || {};
       if (applyWikiSchema) applyWikiSchema(db);
     } catch { }
+
+    const reconciled = reconcileEmbeddingQueue(db, backendInfo);
 
     // Fetch pending queue items
     const pending = db.prepare(`
@@ -89,7 +98,10 @@ async function main() {
       LIMIT ?
     `).all(MAX_BATCH);
 
-    if (pending.length === 0) return;
+    if (pending.length === 0) {
+      appendLog({ ts: new Date().toISOString(), status: 'idle', backend: backendInfo, reconciled });
+      return { status: 'idle', backend: backendInfo, reconciled };
+    }
 
     // Batch embed
     const texts = pending.map(p => p.chunk_text);
@@ -127,7 +139,7 @@ async function main() {
         const emb = embeddings[i];
         if (emb) {
           const buf = embedding.embeddingToBuffer(emb);
-          updateChunk.run(buf, embedding.MODEL, embedding.DIMENSIONS, pending[i].item_id);
+          updateChunk.run(buf, backendInfo.model, backendInfo.dimensions, pending[i].item_id);
           deleteQueue.run(pending[i].queue_id);
           success++;
         } else {
@@ -142,11 +154,98 @@ async function main() {
       return;
     }
 
-    appendLog({ ts: new Date().toISOString(), success, failed, batch_size: pending.length });
+    const result = { status: 'ok', backend: backendInfo, reconciled, success, failed, batch_size: pending.length };
+    appendLog({ ts: new Date().toISOString(), ...result });
+    return result;
 
   } finally {
     if (db) try { db.close(); } catch { }
     try { fs.unlinkSync(LOCK_FILE); } catch { }
+  }
+}
+
+function ollamaBaseUrl() {
+  return String(process.env.OLLAMA_HOST || 'http://127.0.0.1:11434').replace(/\/$/, '');
+}
+
+async function probeOllama() {
+  try {
+    const response = await fetch(`${ollamaBaseUrl()}/api/tags`, {
+      signal: globalThis.AbortSignal.timeout(1500),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+function startOllamaService() {
+  if (process.platform === 'darwin' && fs.existsSync('/Applications/Ollama.app')) {
+    const child = spawn('/usr/bin/open', ['-gja', 'Ollama'], { detached: true, stdio: 'ignore' });
+    child.unref();
+    return;
+  }
+  const child = spawn('ollama', ['serve'], { detached: true, stdio: 'ignore' });
+  child.unref();
+}
+
+async function ensureBackendReady(embedding, backendInfo) {
+  if (backendInfo.backend !== 'ollama') return true;
+  if (!(await probeOllama())) {
+    try { startOllamaService(); } catch { return false; }
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      if (await probeOllama()) break;
+    }
+  }
+  if (!(await probeOllama())) return false;
+  try {
+    const warm = await embedding.getEmbedding('MetaMe embedding health check');
+    return !!warm && warm.length === backendInfo.dimensions;
+  } catch {
+    return false;
+  }
+}
+
+function reconcileEmbeddingQueue(db, backendInfo) {
+  const model = backendInfo.model;
+  const dimensions = backendInfo.dimensions;
+  db.prepare('BEGIN').run();
+  try {
+    const orphaned = db.prepare(`
+      DELETE FROM embedding_queue
+      WHERE item_type = 'chunk'
+        AND NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.id = embedding_queue.item_id)
+    `).run().changes;
+    const invalidated = db.prepare(`
+      UPDATE content_chunks
+      SET embedding = NULL, embedding_model = NULL, embedding_dim = NULL
+      WHERE embedding IS NOT NULL
+        AND (embedding_model IS NOT ? OR embedding_dim IS NOT ? OR length(embedding) != ?)
+    `).run(model, dimensions, dimensions * 4).changes;
+
+    const reset = db.prepare(`
+      UPDATE embedding_queue
+      SET model = ?, attempts = 0, last_error = NULL
+      WHERE item_type = 'chunk' AND model IS NOT ?
+    `).run(model, model).changes;
+
+    const enqueued = db.prepare(`
+      INSERT INTO embedding_queue (item_type, item_id, model)
+      SELECT 'chunk', cc.id, ?
+      FROM content_chunks cc
+      WHERE cc.embedding IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM embedding_queue eq
+          WHERE eq.item_type = 'chunk' AND eq.item_id = cc.id
+        )
+    `).run(model).changes;
+
+    db.prepare('COMMIT').run();
+    return { orphaned, invalidated, reset, enqueued };
+  } catch (err) {
+    try { db.prepare('ROLLBACK').run(); } catch { }
+    throw err;
   }
 }
 
@@ -156,7 +255,15 @@ function appendLog(entry) {
   } catch { }
 }
 
-main().catch(err => {
-  appendLog({ ts: new Date().toISOString(), error: err.message });
-  try { fs.unlinkSync(LOCK_FILE); } catch { }
-});
+if (require.main === module) {
+  main().catch(err => {
+    appendLog({ ts: new Date().toISOString(), error: err.message });
+    try { fs.unlinkSync(LOCK_FILE); } catch { }
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  main,
+  _internal: { ensureBackendReady, probeOllama, reconcileEmbeddingQueue },
+};

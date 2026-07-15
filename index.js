@@ -7,7 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path');
 const os = require('os');
-const { spawn, execSync, execFileSync } = require('child_process');
+const { spawn, spawnSync, execSync, execFileSync } = require('child_process');
 const { sleepSync, findProcessesByPattern, killProcessTree, icon } = require('./scripts/platform');
 const {
   collectDeployGroups,
@@ -774,6 +774,26 @@ if (!fs.existsSync(DAEMON_CONFIG_FILE)) {
       fs.copyFileSync(daemonTemplate, DAEMON_CONFIG_FILE);
     }
   }
+}
+
+// Idempotently add required built-ins to older user configs. Existing task
+// schedules and enabled flags always win; only recognized legacy commands are
+// rewritten. Credentials remain in daemon.yaml and are never copied elsewhere.
+try {
+  if (fs.existsSync(DAEMON_CONFIG_FILE)) {
+    const _yaml = require(path.join(__dirname, 'node_modules', 'js-yaml'));
+    const current = _yaml.load(fs.readFileSync(DAEMON_CONFIG_FILE, 'utf8')) || {};
+    const { reconcileDaemonConfig } = require('./scripts/core/config-reconcile');
+    const reconciled = reconcileDaemonConfig(current);
+    if (reconciled.changes.length > 0) {
+      const tmp = `${DAEMON_CONFIG_FILE}.reconcile-${process.pid}.tmp`;
+      fs.writeFileSync(tmp, _yaml.dump(reconciled.config, { lineWidth: -1, noRefs: true }), { mode: 0o600 });
+      fs.renameSync(tmp, DAEMON_CONFIG_FILE);
+      console.log(`${icon('pkg')} Reconciled daemon config: ${reconciled.changes.join(', ')}`);
+    }
+  }
+} catch (e) {
+  console.log(`${icon('warn')} Daemon config reconciliation skipped: ${e.message}`);
 }
 
 if (process.argv[2] === 'deploy') {
@@ -2104,6 +2124,46 @@ if (isProvider) {
 // ---------------------------------------------------------
 // 5.7 DAEMON SUBCOMMANDS
 // ---------------------------------------------------------
+if (process.argv[2] === 'wiki') {
+  const area = process.argv[3];
+  const action = process.argv[4];
+  if (area === 'doctor') {
+    const result = spawnSync(process.execPath, [
+      path.join(__dirname, 'scripts', 'wiki-doctor.js'),
+      ...process.argv.slice(4),
+    ], { stdio: 'inherit', env: process.env });
+    process.exit(result.status ?? 1);
+  }
+  if (area === 'openwiki') {
+    if (action === 'setup') {
+      const result = spawnSync(process.execPath, [path.join(__dirname, 'scripts', 'openwiki-setup.js')], {
+        stdio: 'inherit',
+        env: process.env,
+      });
+      process.exit(result.status ?? 1);
+    }
+    if (action === 'sync') {
+      const result = spawnSync(process.execPath, [
+        path.join(__dirname, 'scripts', 'openwiki-sync.js'),
+        ...process.argv.slice(5),
+      ], { stdio: 'inherit', env: process.env });
+      process.exit(result.status ?? 1);
+    }
+    if (action === 'recall') {
+      try {
+        const { setRecallMode } = require('./scripts/openwiki-setup');
+        console.log(`OpenWiki recall mode: ${setRecallMode(process.argv[5])}`);
+        process.exit(0);
+      } catch (err) {
+        console.error(err.message);
+        process.exit(1);
+      }
+    }
+  }
+  console.error('Usage: metame wiki doctor [--json] | metame wiki openwiki <setup|sync|recall off|shadow|on>');
+  process.exit(1);
+}
+
 // Shorthand aliases: `metame start` → `metame daemon start`, etc.
 const DAEMON_SHORTCUTS = ['start', 'stop', 'restart', 'status', 'logs'];
 if (DAEMON_SHORTCUTS.includes(process.argv[2])) {

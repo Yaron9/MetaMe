@@ -30,6 +30,7 @@ const RECALL_AUDIT_DDL = `
     injected_chars  INTEGER DEFAULT 0,
     truncated       INTEGER DEFAULT 0,
     wiki_dropped    INTEGER DEFAULT 0,
+    external_shadow_hits INTEGER DEFAULT 0,
     outcome         TEXT DEFAULT 'unknown'
                     CHECK (outcome IN ('unknown','planned','injected','used','ignored','corrected','harmful')),
     error_message  TEXT

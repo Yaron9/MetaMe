@@ -284,6 +284,38 @@ test('prepareRecall: assembleRecallContext within timeout → normal inject row'
   });
 });
 
+test('prepareRecall: persists shadow-only external hit telemetry without injection', async () => {
+  await withFreshHomeAndAudit(async (_prepareRecall, _memory, dbPath) => {
+    const memoryRecallPath = require.resolve('../memory-recall');
+    require.cache[memoryRecallPath] = {
+      id: memoryRecallPath, filename: memoryRecallPath, loaded: true, children: [], paths: [],
+      exports: {
+        assembleRecallContext: async () => ({
+          text: '', sources: [], externalShadowHits: 7, wikiDropped: false,
+        }),
+      },
+    };
+    delete require.cache[require.resolve('./recall-prepare')];
+    const { prepareRecall } = require('./recall-prepare');
+    const result = await prepareRecall({
+      prompt: '上次我们讨论过 daemon 的崩溃 scripts/memory.js',
+      runtime: RUNTIME,
+      scope: SCOPE,
+      chatId: 'shadow-chat',
+      enabled: true,
+      assembleTimeoutMs: 100,
+    });
+    assert.equal(result.recallActive, false);
+    assert.equal(result.recallHint, '');
+    assert.deepEqual(result.recallMeta, { externalShadowHits: 7, shadowOnly: true });
+    const rows = readAuditRows(dbPath);
+    const shadow = rows.find(row => row.phase === 'inject');
+    assert.equal(shadow.external_shadow_hits, 7);
+    assert.equal(shadow.injected_chars, 0);
+    assert.equal(shadow.outcome, 'planned');
+  });
+});
+
 test('prepareRecall: invalid assembleTimeoutMs falls back to default 80ms', async () => {
   await withFreshHomeAndAudit(async (prepareRecall, _memory, dbPath) => {
     // Synthetic 200ms facade.

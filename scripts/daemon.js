@@ -257,6 +257,16 @@ function loadConfigStrict() {
     if (!parsed || typeof parsed !== 'object') {
       return { ok: false, error: 'Config must be a YAML mapping/object' };
     }
+    const embeddingBackend = parsed.daemon && parsed.daemon.embedding
+      ? parsed.daemon.embedding.backend
+      : null;
+    if (embeddingBackend === 'openai' || embeddingBackend === 'ollama' || embeddingBackend === 'auto') {
+      process.env.METAME_EMBEDDING_BACKEND = embeddingBackend;
+    }
+    const openwikiMode = parsed.wiki?.external?.openwiki?.recall_mode;
+    if (openwikiMode === 'off' || openwikiMode === 'shadow' || openwikiMode === 'on') {
+      process.env.METAME_OPENWIKI_RECALL_MODE = openwikiMode;
+    }
     return { ok: true, config: parsed };
   } catch (e) {
     return { ok: false, error: `YAML parse error: ${e.message}` };
@@ -2492,7 +2502,7 @@ async function main() {
   }
 
   // Config validation: warn on unknown/suspect fields
-  const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'weixin', 'heartbeat', 'budget', 'projects', 'imessage', 'siri_bridge', 'hooks'];
+  const KNOWN_SECTIONS = ['daemon', 'telegram', 'feishu', 'weixin', 'heartbeat', 'budget', 'projects', 'imessage', 'siri_bridge', 'hooks', 'wiki'];
   const KNOWN_DAEMON = [
     'model',          // legacy (still valid as fallback)
     'models',         // per-engine model map: { claude, codex }
@@ -2509,6 +2519,7 @@ async function main() {
     'enable_nl_mac_control',
     'enable_nl_mac_fallback',
     'wiki_output_dir',       // wiki export path (used by daemon-command-router)
+    'embedding',             // local/cloud embedding backend configuration
     'skill_evolution_notify', // whether to notify on skill evolution (used by daemon-task-scheduler)
     'memory_recall_enabled',
     'memory_recall_max_chars',

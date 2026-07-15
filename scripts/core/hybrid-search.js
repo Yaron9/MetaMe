@@ -17,7 +17,12 @@
  */
 
 const { sanitizeFts5 } = require('./wiki-slug');
-const { bufferToEmbedding, getEmbedding, isEmbeddingAvailable } = require('./embedding');
+const {
+  bufferToEmbedding,
+  getBackendInfo,
+  getEmbedding,
+  isEmbeddingAvailable,
+} = require('./embedding');
 
 const RRF_K = 60;
 const STALE_THRESHOLD = 0.3;
@@ -31,6 +36,7 @@ const MAX_VECTOR_RESULTS = 20;
  * @returns {number}
  */
 function dotProduct(a, b) {
+  if (!a || !b || a.length !== b.length) return null;
   let sum = 0;
   for (let i = 0; i < a.length; i++) sum += a[i] * b[i];
   return sum;
@@ -60,18 +66,31 @@ function topK(items, k) {
  * @param {string} safeQuery — already sanitized
  * @returns {{ slug: string, title: string, staleness: number, excerpt: string, ftsRank: number }[]}
  */
-function ftsSearch(db, safeQuery) {
+function normalizeSourceTypes(values) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map(value => String(value || '').trim())
+    .filter(Boolean))];
+}
+
+function ftsSearch(db, safeQuery, excludedSourceTypes = []) {
+  const excluded = normalizeSourceTypes(excludedSourceTypes);
+  const sourceClause = excluded.length > 0
+    ? `AND wp.source_type NOT IN (${excluded.map(() => '?').join(',')})`
+    : '';
   try {
     return db.prepare(`
-      SELECT wp.slug, wp.title, wp.staleness, wp.last_built_at,
+      SELECT wp.slug, wp.title, wp.staleness, wp.last_built_at, wp.source_type,
              snippet(wiki_pages_fts, 2, '<b>', '</b>', '...', 20) as excerpt,
              rank as ftsRank
       FROM wiki_pages_fts
       JOIN wiki_pages wp ON wiki_pages_fts.rowid = wp.rowid
+      LEFT JOIN wiki_external_sources wes ON wes.page_slug = wp.slug
       WHERE wiki_pages_fts MATCH ?
+        AND (wp.source_type != 'openwiki' OR COALESCE(wes.missing_count, 0) = 0)
+        ${sourceClause}
       ORDER BY rank
       LIMIT ?
-    `).all(safeQuery, MAX_FTS_RESULTS);
+    `).all(safeQuery, ...excluded, MAX_FTS_RESULTS);
   } catch {
     return [];
   }
@@ -85,14 +104,36 @@ function ftsSearch(db, safeQuery) {
  * @param {Float32Array} queryEmbedding
  * @returns {{ page_slug: string, chunk_text: string, score: number }[]}
  */
-function vectorSearch(db, queryEmbedding) {
+function vectorSearch(db, queryEmbedding, backendInfo = null, excludedSourceTypes = []) {
+  const excluded = normalizeSourceTypes(excludedSourceTypes);
+  const sourceClause = excluded.length > 0
+    ? `AND wp.source_type NOT IN (${excluded.map(() => '?').join(',')})`
+    : '';
   let rows;
   try {
-    rows = db.prepare(`
-      SELECT page_slug, chunk_text, embedding
-      FROM content_chunks
-      WHERE embedding IS NOT NULL
-    `).all();
+    if (backendInfo) {
+      rows = db.prepare(`
+        SELECT cc.page_slug, cc.chunk_text, cc.embedding, wp.source_type
+        FROM content_chunks cc
+        JOIN wiki_pages wp ON wp.slug = cc.page_slug
+        LEFT JOIN wiki_external_sources wes ON wes.page_slug = wp.slug
+        WHERE cc.embedding IS NOT NULL
+          AND cc.embedding_model = ?
+          AND cc.embedding_dim = ?
+          AND (wp.source_type != 'openwiki' OR COALESCE(wes.missing_count, 0) = 0)
+          ${sourceClause}
+      `).all(backendInfo.model, backendInfo.dimensions, ...excluded);
+    } else {
+      rows = db.prepare(`
+        SELECT cc.page_slug, cc.chunk_text, cc.embedding, wp.source_type
+        FROM content_chunks cc
+        JOIN wiki_pages wp ON wp.slug = cc.page_slug
+        LEFT JOIN wiki_external_sources wes ON wes.page_slug = wp.slug
+        WHERE cc.embedding IS NOT NULL
+          AND (wp.source_type != 'openwiki' OR COALESCE(wes.missing_count, 0) = 0)
+          ${sourceClause}
+      `).all(...excluded);
+    }
   } catch {
     return [];
   }
@@ -100,21 +141,54 @@ function vectorSearch(db, queryEmbedding) {
   const scored = [];
   for (const row of rows) {
     const emb = bufferToEmbedding(row.embedding);
-    if (!emb) continue;
+    if (!emb || emb.length !== queryEmbedding.length) continue;
     const score = dotProduct(queryEmbedding, emb);
-    scored.push({ page_slug: row.page_slug, chunk_text: row.chunk_text, score });
+    if (!Number.isFinite(score)) continue;
+    scored.push({
+      page_slug: row.page_slug,
+      chunk_text: row.chunk_text,
+      source_type: row.source_type,
+      score,
+    });
   }
 
   return topK(scored, MAX_VECTOR_RESULTS);
+}
+
+function countFtsSourceMatches(db, safeQuery, sourceTypes = []) {
+  const included = normalizeSourceTypes(sourceTypes);
+  if (included.length === 0) return {};
+  try {
+    const rows = db.prepare(`
+      SELECT wp.source_type, COUNT(*) AS count
+      FROM wiki_pages_fts
+      JOIN wiki_pages wp ON wiki_pages_fts.rowid = wp.rowid
+      LEFT JOIN wiki_external_sources wes ON wes.page_slug = wp.slug
+      WHERE wiki_pages_fts MATCH ?
+        AND wp.source_type IN (${included.map(() => '?').join(',')})
+        AND (wp.source_type != 'openwiki' OR COALESCE(wes.missing_count, 0) = 0)
+      GROUP BY wp.source_type
+    `).all(safeQuery, ...included);
+    return Object.fromEntries(rows.map(row => [row.source_type, row.count]));
+  } catch {
+    return {};
+  }
 }
 
 /**
  * Check if any content_chunks have stored embeddings.
  * Avoids wasting OpenAI API calls when no embeddings exist yet.
  */
-function hasStoredEmbeddings(db) {
+function hasStoredEmbeddings(db, backendInfo = null) {
   try {
-    return !!db.prepare('SELECT 1 FROM content_chunks WHERE embedding IS NOT NULL LIMIT 1').get();
+    if (!backendInfo) {
+      return !!db.prepare('SELECT 1 FROM content_chunks WHERE embedding IS NOT NULL LIMIT 1').get();
+    }
+    return !!db.prepare(`
+      SELECT 1 FROM content_chunks
+      WHERE embedding IS NOT NULL AND embedding_model = ? AND embedding_dim = ?
+      LIMIT 1
+    `).get(backendInfo.model, backendInfo.dimensions);
   } catch { return false; }
 }
 
@@ -129,7 +203,11 @@ function aggregateChunksToPages(chunks) {
   for (const c of chunks) {
     const existing = pages.get(c.page_slug);
     if (!existing || c.score > existing.score) {
-      pages.set(c.page_slug, { score: c.score, excerpt: c.chunk_text.slice(0, 200) });
+      pages.set(c.page_slug, {
+        score: c.score,
+        excerpt: c.chunk_text.slice(0, 200),
+        source_type: c.source_type,
+      });
     }
   }
   return pages;
@@ -162,6 +240,7 @@ function rrfFuse(merged) {
       staleness,
       stale: staleness >= STALE_THRESHOLD,
       source,
+      source_type: info.source_type || 'memory',
     });
   }
   results.sort((a, b) => b.score - a.score);
@@ -189,22 +268,29 @@ function normalizeScores(results) {
  * @param {{ ftsOnly?: boolean, trackSearch?: boolean }} [opts]
  * @returns {{ wikiPages: object[], facts: object[] }}
  */
-async function hybridSearchWiki(db, query, { ftsOnly = false, trackSearch = true } = {}) {
+async function hybridSearchWiki(db, query, {
+  ftsOnly = false,
+  trackSearch = true,
+  excludeSourceTypes = [],
+  observeSourceTypes = [],
+} = {}) {
   const safeQuery = sanitizeFts5(query);
   if (!safeQuery) return { wikiPages: [], facts: [] };
 
   // 1. FTS5 search (always)
-  const ftsResults = ftsSearch(db, safeQuery);
+  const ftsResults = ftsSearch(db, safeQuery, excludeSourceTypes);
+  const sourceHitCounts = countFtsSourceMatches(db, safeQuery, observeSourceTypes);
 
   // 2. Vector search (if available and not forced FTS-only)
   let vectorPages = new Map();
-  const hasEmbeddings = !ftsOnly && isEmbeddingAvailable();
+  const backendInfo = !ftsOnly ? getBackendInfo() : null;
+  const hasEmbeddings = !!backendInfo && isEmbeddingAvailable();
 
-  if (hasEmbeddings && hasStoredEmbeddings(db)) {
+  if (hasEmbeddings && hasStoredEmbeddings(db, backendInfo)) {
     try {
       const queryEmb = await getEmbedding(query);
       if (queryEmb) {
-        const chunks = vectorSearch(db, queryEmb);
+        const chunks = vectorSearch(db, queryEmb, backendInfo, excludeSourceTypes);
         vectorPages = aggregateChunksToPages(chunks);
       }
     } catch {
@@ -222,6 +308,7 @@ async function hybridSearchWiki(db, query, { ftsOnly = false, trackSearch = true
       title: r.title,
       excerpt: r.excerpt,
       staleness: r.staleness,
+      source_type: r.source_type,
     });
   }
 
@@ -230,6 +317,7 @@ async function hybridSearchWiki(db, query, { ftsOnly = false, trackSearch = true
     const rank = [...vectorPages.keys()].indexOf(slug) + 1;
     if (existing) {
       existing.vectorRank = rank;
+      if (!existing.source_type) existing.source_type = vInfo.source_type;
       // Prefer vector excerpt if FTS didn't have a good one
       if (vInfo.excerpt && (!existing.excerpt || existing.excerpt.length < 20)) {
         existing.excerpt = vInfo.excerpt;
@@ -238,15 +326,21 @@ async function hybridSearchWiki(db, query, { ftsOnly = false, trackSearch = true
       // Vector-only result — need to fetch page metadata
       let title = slug;
       let staleness = 0;
+      let sourceType = vInfo.source_type || 'memory';
       try {
-        const page = db.prepare('SELECT title, staleness FROM wiki_pages WHERE slug = ?').get(slug);
-        if (page) { title = page.title; staleness = page.staleness || 0; }
+        const page = db.prepare('SELECT title, staleness, source_type FROM wiki_pages WHERE slug = ?').get(slug);
+        if (page) {
+          title = page.title;
+          staleness = page.staleness || 0;
+          sourceType = page.source_type || sourceType;
+        }
       } catch { }
       merged.set(slug, {
         vectorRank: rank,
         title,
         excerpt: vInfo.excerpt,
         staleness,
+        source_type: sourceType,
       });
     }
   }
@@ -287,10 +381,20 @@ async function hybridSearchWiki(db, query, { ftsOnly = false, trackSearch = true
     }
   }
 
-  return { wikiPages: wikiPages.slice(0, 5), facts };
+  return { wikiPages: wikiPages.slice(0, 5), facts, sourceHitCounts };
 }
 
 module.exports = {
   hybridSearchWiki,
-  _internal: { dotProduct, topK, ftsSearch, vectorSearch, aggregateChunksToPages, rrfFuse, normalizeScores, hasStoredEmbeddings },
+  _internal: {
+    dotProduct,
+    topK,
+    ftsSearch,
+    vectorSearch,
+    aggregateChunksToPages,
+    rrfFuse,
+    normalizeScores,
+    hasStoredEmbeddings,
+    countFtsSourceMatches,
+  },
 };

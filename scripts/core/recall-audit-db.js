@@ -48,6 +48,7 @@ function _openDb() {
     db.exec('PRAGMA journal_mode = WAL');
     db.exec('PRAGMA busy_timeout = 3000');
     db.exec(RECALL_AUDIT_DDL);
+    try { db.exec('ALTER TABLE recall_audit ADD COLUMN external_shadow_hits INTEGER DEFAULT 0'); } catch { }
     db.exec(RECALL_AUDIT_STATE_DDL);
     db.prepare(
       `INSERT OR IGNORE INTO recall_audit_state (key, value) VALUES ('dropped_count', 0)`
@@ -115,8 +116,8 @@ function recordAudit(row) {
       `INSERT INTO recall_audit
          (id, phase, chat_id, project, scope, agent_key, engine, session_started,
           should_recall, router_reason, query_hashes, anchor_labels, modes,
-          source_refs, injected_chars, truncated, wiki_dropped, outcome, error_message)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          source_refs, injected_chars, truncated, wiki_dropped, external_shadow_hits, outcome, error_message)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       row.id,
       phase,
@@ -135,6 +136,7 @@ function recordAudit(row) {
       Number.isFinite(row.injected_chars) ? row.injected_chars : 0,
       row.truncated ? 1 : 0,
       row.wiki_dropped ? 1 : 0,
+      Number.isFinite(row.external_shadow_hits) ? row.external_shadow_hits : 0,
       row.outcome || 'unknown',
       row.error_message || null,
     );

@@ -35,15 +35,28 @@ function runNode(home, code, extraEnv = {}) {
 function installFakeClaude(home, body) {
   const bin = path.join(home, 'bin');
   fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(
+    path.join(home, '.metame', 'providers.yaml'),
+    'distill_engine: claude\ndistill_model: haiku\n',
+    'utf8',
+  );
   if (process.platform === 'win32') {
     const cli = path.join(bin, 'claude.cmd');
     fs.writeFileSync(cli, `@echo off\n${body}\n`, 'utf8');
-    return { ...homeEnv(home), PATH: `${bin};${process.env.PATH}` };
+    return {
+      ...homeEnv(home),
+      PATH: `${bin};${process.env.PATH}`,
+      METAME_DISTILL_ENGINE: 'claude',
+    };
   }
   const cli = path.join(bin, 'claude');
   fs.writeFileSync(cli, `#!/bin/sh\n${body}\n`, 'utf8');
   fs.chmodSync(cli, 0o755);
-  return { ...homeEnv(home), PATH: `${bin}:${process.env.PATH}` };
+  return {
+    ...homeEnv(home),
+    PATH: `${bin}:${process.env.PATH}`,
+    METAME_DISTILL_ENGINE: 'claude',
+  };
 }
 
 function sendSignal(home, prompt, extraEnv = {}) {

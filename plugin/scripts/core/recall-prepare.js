@@ -168,8 +168,25 @@ async function prepareRecall({
     return _emptyResult(plan);
   }
 
-  // No usable text → no inject row, recallActive stays false.
+  // Shadow-only hits are deliberately not injected, but remain observable.
   if (!ctx || typeof ctx.text !== 'string' || ctx.text.length === 0) {
+    const externalShadowHits = Number(ctx?.externalShadowHits || 0);
+    if (externalShadowHits > 0) {
+      _writeAudit({
+        id: _newAuditId('ri'),
+        phase: 'inject',
+        ...common,
+        injected_chars: 0,
+        external_shadow_hits: externalShadowHits,
+        outcome: 'planned',
+      });
+      return {
+        plan,
+        recallActive: false,
+        recallHint: '',
+        recallMeta: { externalShadowHits, shadowOnly: true },
+      };
+    }
     return _emptyResult(plan);
   }
 
@@ -189,6 +206,7 @@ async function prepareRecall({
     injected_chars: injectedChars,
     truncated: ctx.truncated ? 1 : 0,
     wiki_dropped: ctx.wikiDropped ? 1 : 0,
+    external_shadow_hits: Number(ctx.externalShadowHits || 0),
   });
 
   return {

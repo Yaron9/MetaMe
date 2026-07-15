@@ -48,6 +48,24 @@ projects:
   #       prompt: "..."
   #       allowedTools: [Read, Write, WebSearch]
 
+wiki:
+  external:
+    openwiki:
+      enabled: false
+      version: 0.1.2
+      recall_mode: shadow
+      output_subdir: external/openwiki
+      binary: ~/.metame/tools/openwiki/node_modules/.bin/openwiki
+      sandbox: required
+      scope_tags: [metame]
+      connectors:
+        git: []
+        web: []
+      retention:
+        raw_days: 90
+        raw_max_gb: 2
+        successful_runs: 3
+
 heartbeat:
   tasks:
     # 认知蒸馏：有偏好信号才触发，4小时冷却，一次处理所有 batch
@@ -191,6 +209,10 @@ budget:
 
 daemon:
   model: sonnet  # sonnet, opus, haiku — model for mobile sessions
+  embedding:
+    backend: ollama
+    model: bge-m3
+    dimensions: 1024
   # Experimental engines are opt-in and project-scoped. agy is never selected
   # globally or for newly created agents.
   experimental_engines:

@@ -248,6 +248,31 @@ function parseJsonFromLlm(raw) {
   try { return JSON.parse(cleaned); } catch { return null; }
 }
 
+async function parseJsonWithRepair(raw, callHaiku, distillEnv) {
+  const parsed = parseJsonFromLlm(raw);
+  if (parsed && typeof parsed === 'object') return { parsed, repaired: false };
+  const repairPrompt = `Repair the following malformed model output into one valid JSON object.
+Preserve only the decisions and lessons arrays and their title/content fields.
+Output JSON only. Do not add new facts.
+
+Malformed output:
+${String(raw || '').slice(0, 12000)}`;
+  let timer;
+  let repairedRaw;
+  try {
+    repairedRaw = await Promise.race([
+      callHaiku(repairPrompt, distillEnv, 45000),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('repair timeout')), 50000);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  const repaired = parseJsonFromLlm(repairedRaw);
+  return { parsed: repaired && typeof repaired === 'object' ? repaired : null, repaired: true };
+}
+
 function writeCapsuleFile(filePath, markdownContent, facts, today, prefix) {
   const frontmatter = `---
 date: ${today}
@@ -387,8 +412,14 @@ Rules:
       return;
     }
 
-    // Parse Haiku response
-    const parsed = parseJsonFromLlm(raw);
+    // Parse once, then make a single bounded repair attempt for malformed JSON.
+    let parsed;
+    let parseRepaired = false;
+    try {
+      ({ parsed, repaired: parseRepaired } = await parseJsonWithRepair(raw, callHaiku, distillEnv));
+    } catch (e) {
+      console.log(`[NIGHTLY-REFLECT] JSON repair failed: ${e.message}`);
+    }
     if (!parsed || typeof parsed !== 'object') {
       console.log('[NIGHTLY-REFLECT] Failed to parse Haiku output.');
       writeReflectLog({ status: 'error', reason: 'parse_failed', facts_found: hotFacts.length });
@@ -647,6 +678,7 @@ ${JSON.stringify(conflictInput, null, 2)}
     writeReflectLog({
       status: 'success',
       facts_analyzed: hotFacts.length,
+      parse_repaired: parseRepaired,
       decisions_written: decisions.length,
       lessons_written: lessons.length,
       synthesized_insights_saved: synthesizedSaved,
@@ -689,6 +721,7 @@ module.exports = {
     collectCapsuleGroups,
     entityPrefix,
     parseJsonFromLlm,
+    parseJsonWithRepair,
     ensureMemoryItemsCompatibility,
     EXCLUDED_RELATIONS,
   },

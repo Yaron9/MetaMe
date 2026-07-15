@@ -13,6 +13,7 @@
  *   wiki_pages_fts   — FTS5 virtual table (content table, trigram tokenizer)
  *   content_chunks   — chunked page content with optional vector embeddings
  *   embedding_queue  — durable async queue for embedding generation
+ *   wiki_external_sources — rebuildable file-to-page projection state
  *
  * Triggers:
  *   wiki_pages_fts_insert / wiki_pages_fts_update / wiki_pages_fts_delete
@@ -202,6 +203,22 @@ function applyWikiSchema(db) {
     )
   `);
 
+  // ── wiki_external_sources ─────────────────────────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS wiki_external_sources (
+      source_key      TEXT PRIMARY KEY,
+      page_slug       TEXT UNIQUE NOT NULL,
+      relative_path   TEXT UNIQUE NOT NULL,
+      content_hash    TEXT NOT NULL,
+      last_seen_run   TEXT NOT NULL,
+      missing_count   INTEGER NOT NULL DEFAULT 0,
+      imported_at     TEXT DEFAULT (datetime('now')),
+      updated_at      TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (page_slug) REFERENCES wiki_pages(slug) ON DELETE CASCADE
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_wiki_external_missing ON wiki_external_sources(missing_count)`);
+
   // ── wiki_pages additions (idempotent ALTER) ───────────────────────────────
   for (const [col, def] of [
     ['source_type',    "TEXT DEFAULT 'memory'"],
@@ -287,6 +304,7 @@ function applyWikiSchema(db) {
   // (single source of truth, §0.5 no-redundancy).
   const { RECALL_AUDIT_DDL, RECALL_AUDIT_INDEXES, RECALL_AUDIT_STATE_DDL } = require('./core/recall-audit-ddl');
   db.exec(RECALL_AUDIT_DDL);
+  try { db.exec('ALTER TABLE recall_audit ADD COLUMN external_shadow_hits INTEGER DEFAULT 0'); } catch { }
   for (const idx of RECALL_AUDIT_INDEXES) db.exec(idx);
   db.exec(RECALL_AUDIT_STATE_DDL);
 

@@ -69,7 +69,11 @@ async function generateWikiContent(prompt, providers, allowedSlugs) {
  * @param {{ docSourceIds?: number[], role?: string }} opts
  * @returns {string[]} inserted chunk ids
  */
-function writeWikiPageWithChunks(db, pageSpec, content, { docSourceIds = [], role } = {}) {
+function writeWikiPageWithChunks(db, pageSpec, content, {
+  docSourceIds = [],
+  role,
+  transaction = true,
+} = {}) {
   const {
     slug,
     title,
@@ -85,7 +89,7 @@ function writeWikiPageWithChunks(db, pageSpec, content, { docSourceIds = [], rol
 
   const wordCount = content.split(/\s+/).filter(Boolean).length;
 
-  db.prepare('BEGIN').run();
+  if (transaction) db.prepare('BEGIN').run();
   try {
     upsertWikiPage(db, {
       slug,
@@ -130,10 +134,12 @@ function writeWikiPageWithChunks(db, pageSpec, content, { docSourceIds = [], rol
       }
     }
 
-    db.prepare('COMMIT').run();
+    if (transaction) db.prepare('COMMIT').run();
     return chunkIds;
   } catch (err) {
-    try { db.prepare('ROLLBACK').run(); } catch { /* ignore */ }
+    if (transaction) {
+      try { db.prepare('ROLLBACK').run(); } catch { /* ignore */ }
+    }
     throw err; // propagate DB errors to caller
   }
 }
