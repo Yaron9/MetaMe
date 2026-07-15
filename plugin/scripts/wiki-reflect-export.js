@@ -554,7 +554,10 @@ function _collectSessionRelated(project, tags, options = {}) {
     const base = path.basename(String(file || ''), '.md');
     const lower = base.toLowerCase();
     if ([...candidates].some(token => token && lower.includes(token.replace(/\s+/g, '-')))) {
-      capsules.push({ path: `capsules/${base}`, label: base });
+      const relative = options.capsulesRoot
+        ? path.relative(options.capsulesRoot, file).replace(/\\/g, '/').replace(/\.md$/i, '')
+        : base;
+      capsules.push({ path: `capsules/${relative}`, label: base });
     }
   }
 
