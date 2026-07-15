@@ -2156,6 +2156,7 @@ if (process.argv[2] === 'wiki') {
     const result = spawnSync(process.execPath, [
       path.join(__dirname, 'scripts', 'wiki-link-maintain.js'),
       ...(action === 'repair' ? ['--repair'] : []),
+      ...process.argv.slice(5),
     ], { stdio: 'inherit', env: process.env });
     process.exit(result.status ?? 1);
   }
@@ -2192,7 +2193,7 @@ if (process.argv[2] === 'wiki') {
     ], { stdio: 'inherit', env: process.env });
     process.exit(result.status ?? 1);
   }
-  console.error('Usage: metame wiki doctor [--json] | metame wiki links <audit|repair> | metame wiki openwiki <setup|sync|recall off|shadow|on> | metame wiki dossier migrate <--dry-run|--stage|--apply>');
+  console.error('Usage: metame wiki doctor [--json] | metame wiki links <audit|repair --confirm-idle> | metame wiki openwiki <setup|sync|recall off|shadow|on> | metame wiki dossier migrate <--dry-run|--stage|--apply>');
   process.exit(1);
 }
 

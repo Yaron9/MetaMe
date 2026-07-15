@@ -4,53 +4,61 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   auditDocuments,
+  auditWorkspaceState,
   extractInternalLinks,
   replaceMissingWorkspaceFiles,
-  stripBrokenLinks,
 } = require('./wiki-link-integrity');
 
-test('auditDocuments resolves canonical paths and unique Obsidian basenames', () => {
+test('auditDocuments resolves canonical paths, attachments, and unique basenames', () => {
   const result = auditDocuments({
-    'sessions/a.md': '[[capsules/metame/daemon|Daemon]] and [[topic]]',
+    'sessions/a.md': 'Summary\n\n## Related Knowledge\n\n- Capsule: [[capsules/metame/daemon|Daemon]]\n![[assets/photo.png]]\n[[topic]]',
     'capsules/metame/daemon.md': '# Daemon',
     'topics/topic.md': '# Topic',
-  });
-  assert.equal(result.links, 2);
+  }, { availableFiles: [
+    'sessions/a.md', 'capsules/metame/daemon.md', 'topics/topic.md', 'assets/photo.png',
+  ] });
+  assert.equal(result.links, 3);
   assert.deepEqual(result.broken, []);
 });
 
-test('auditDocuments separates generated failures from authored concepts', () => {
+test('auditDocuments treats only generated navigation failures as hard', () => {
   const result = auditDocuments({
-    'sessions/a.md': '[[capsules/retired]]',
+    'sessions/a.md': '[[future-note]]\n\n## Related Knowledge\n\n- Capsule: [[capsules/retired]]',
     'capsules/current.md': '[[future-concept]]',
   });
-  assert.equal(result.hardBroken.length, 1);
+  assert.deepEqual(result.hardBroken.map(item => item.target), ['capsules/retired']);
+  assert.deepEqual(result.softBroken.map(item => item.target), ['future-note', 'future-concept']);
+});
+
+test('extractInternalLinks ignores fenced code, inline code, comments, and URLs', () => {
+  const links = extractInternalLinks([
+    '[[local]] [doc](../My%20Page.md)',
+    '```md', '[[example-missing]]', '```',
+    '`[[inline]]` <!-- [[comment]] -->',
+    '[site](https://example.com) [pdf](file.pdf)',
+  ].join('\n'));
+  assert.deepEqual(links.map(({ kind, target }) => ({ kind, target })), [
+    { kind: 'wiki', target: 'local' },
+    { kind: 'markdown', target: '../My Page.md' },
+  ]);
+});
+
+test('path matching remains case-sensitive', () => {
+  const result = auditDocuments({ 'a.md': '[wrong](Foo.md)', 'foo.md': '# lower' });
   assert.equal(result.softBroken.length, 1);
 });
 
-test('extractInternalLinks ignores URLs and non-markdown attachments', () => {
-  const links = extractInternalLinks('[[local]] [site](https://example.com) [pdf](file.pdf) [doc](../a.md)');
-  assert.deepEqual(links, [
-    { kind: 'wiki', target: 'local' },
-    { kind: 'markdown', target: '../a.md' },
-  ]);
-});
-
-test('replaceMissingWorkspaceFiles changes only missing markdown panes', () => {
-  const result = replaceMissingWorkspaceFiles({ leaves: [
-    { state: { file: 'capsules/retired.md' } },
-    { state: { file: 'topics/live.md' } },
-  ] }, new Set(['topics/live.md', 'capsules/_index.md']), 'capsules/_index.md');
-  assert.equal(result.replaced, 1);
-  assert.equal(result.workspace.leaves[0].state.file, 'capsules/_index.md');
-  assert.equal(result.workspace.leaves[1].state.file, 'topics/live.md');
-});
-
-test('stripBrokenLinks degrades unresolved projections to readable text', () => {
-  const result = stripBrokenLinks('**[[future|Future idea]]** and [Old page](old.md)', [
-    { kind: 'wiki', target: 'future' },
-    { kind: 'markdown', target: 'old.md' },
-  ]);
-  assert.equal(result.content, '**Future idea** and Old page');
-  assert.equal(result.stripped, 2);
+test('workspace audit is limited to file-backed leaf views', () => {
+  const workspace = { children: [
+    { type: 'leaf', state: { type: 'markdown', state: { file: 'missing.md' } } },
+    { type: 'leaf', state: { type: 'search', state: { file: 'not-a-view.md' } } },
+    { metadata: { file: 'not-a-leaf.md' } },
+  ] };
+  const audit = auditWorkspaceState(workspace, ['live.md']);
+  assert.deepEqual(audit.missing.map(item => item.file), ['missing.md']);
+  const repaired = replaceMissingWorkspaceFiles(workspace, audit.missing, 'live.md');
+  assert.equal(repaired.replaced, 1);
+  assert.equal(repaired.workspace.children[0].state.state.file, 'live.md');
+  assert.equal(repaired.workspace.children[1].state.state.file, 'not-a-view.md');
+  assert.equal(repaired.workspace.children[2].metadata.file, 'not-a-leaf.md');
 });

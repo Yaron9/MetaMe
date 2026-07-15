@@ -63,10 +63,23 @@ describe('wiki doctor reporting', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-doctor-links-'));
     tempFiles.push(dir);
     fs.mkdirSync(path.join(dir, 'sessions'));
-    fs.writeFileSync(path.join(dir, 'sessions', 'broken.md'), '[[capsules/missing]]\n');
+    fs.writeFileSync(path.join(dir, 'sessions', 'broken.md'), 'Summary\n\n## Related Knowledge\n\n- Capsule: [[capsules/missing]]\n');
     const report = { status: 'ok', checks: [], metrics: {} };
     _internal.inspectWikiLinks(report, dir);
     assert.equal(report.status, 'error');
     assert.equal(report.metrics.wiki_hard_broken_links, 1);
+  });
+
+  it('reports stale workspace file references as errors', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-doctor-workspace-'));
+    tempFiles.push(dir);
+    fs.mkdirSync(path.join(dir, '.obsidian'));
+    fs.writeFileSync(path.join(dir, '.obsidian', 'workspace.json'), JSON.stringify({
+      main: { type: 'leaf', state: { type: 'markdown', state: { file: 'missing.md' } } },
+    }));
+    const report = { status: 'ok', checks: [], metrics: {} };
+    _internal.inspectWikiLinks(report, dir);
+    assert.equal(report.status, 'error');
+    assert.equal(report.metrics.workspace_missing_refs, 1);
   });
 });

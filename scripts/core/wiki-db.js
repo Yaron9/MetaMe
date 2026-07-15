@@ -291,7 +291,7 @@ function listRecentSessionSummaries(db, { limit = 200 } = {}) {
       AND state = 'active'
     ORDER BY created_at DESC
     LIMIT ?
-  `).all(limit);
+  `).all(Number.isInteger(limit) ? limit : 200);
 }
 
 // ── Timeline ──────────────────────────────────────────────────────────────────

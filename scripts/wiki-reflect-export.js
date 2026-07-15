@@ -94,7 +94,9 @@ function rebuildIndex(pages, outputDir, options = {}) {
     `- [[topics/_index|主题知识 Topics]] (${topicHubs.length}) — canonical Hub 导航`,
     `- [[sources/_index|来源资料 Sources]] (${grouped.sources.length}) — 文档与研究资料`,
     `- [[curated/_index|人工精选 Curated]] (${curatedPages.length}) — 人工维护、不会被自动覆盖的页面`,
-    `- [[external/openwiki/quickstart|外部证据 External Evidence]] (${grouped.external.length}) — OpenWiki 外部证据`,
+    ...(fs.existsSync(path.join(outputDir, 'external', 'openwiki', 'quickstart.md'))
+      ? [`- [[external/openwiki/quickstart|外部证据 External Evidence]] (${grouped.external.length}) — OpenWiki 外部证据`]
+      : []),
     `- [[sessions/_index|对话 Sessions]]${sessionCount > 0 ? ` (${sessionCount})` : ''} — 对话过程`,
     `- [[decisions/_index|决策 Decisions]] — 已沉淀决策`,
     `- [[lessons/_index|经验 Lessons]] — 可复用经验`,
@@ -117,8 +119,10 @@ function rebuildIndex(pages, outputDir, options = {}) {
   lines.push('- Start filesystem browsing from this page, then follow collection indexes.');
   lines.push('- Treat files as rebuildable projections; use frontmatter `slug` as stable identity.');
   lines.push('', '## 系统', '');
-  lines.push('- [[_audit|Wiki Audit]]');
-  lines.push('- [[_cleanup-manifest|Cleanup Manifest]]');
+  if (fs.existsSync(path.join(outputDir, '_audit.md'))) lines.push('- [[_audit|Wiki Audit]]');
+  if (fs.existsSync(path.join(outputDir, '_cleanup-manifest.md'))) {
+    lines.push('- [[_cleanup-manifest|Cleanup Manifest]]');
+  }
 
   _writeAtomic(path.join(outputDir, '_index.md'), lines.join('\n') + '\n');
   _rebuildCollectionIndex('topics', topicHubs, outputDir);
@@ -224,7 +228,7 @@ function exportSessionSummary(entry, outputDir, options = {}) {
   const created = String(entry.created_at || '').slice(0, 10);
   const sessionId = String(entry.session_id || entry.id || '');
   const project = String(entry.project || 'unknown');
-  const slug = _sanitizeSlug(`${created || 'session'}-${project}-${sessionId.slice(-8)}`, 'session');
+  const slug = sessionSlug(entry);
   const tags = _safeJsonArray(entry.tags);
   const filePath = path.join(sessionsDir, `${slug}.md`);
   const tmpPath = `${filePath}.tmp`;
@@ -256,6 +260,56 @@ function exportSessionSummary(entry, outputDir, options = {}) {
   return filePath;
 }
 
+function sessionSlug(entry) {
+  const created = String(entry.created_at || '').slice(0, 10);
+  const sessionId = String(entry.session_id || entry.id || '');
+  const project = String(entry.project || 'unknown');
+  return _sanitizeSlug(`${created || 'session'}-${project}-${sessionId.slice(-8)}`, 'session');
+}
+
+function reconcileSessionProjection(entries, outputDir) {
+  outputDir = resolveOutputDir(outputDir);
+  const sessionsDir = path.join(outputDir, 'sessions');
+  _ensureDir(sessionsDir);
+  const manifestPath = path.join(sessionsDir, '.metame-manifest.json');
+  const expected = new Set(entries.map(entry => `${sessionSlug(entry)}.md`));
+  let previous = [];
+  try {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    if (manifest.version === 1 && Array.isArray(manifest.managed)) previous = manifest.managed;
+  } catch {
+    previous = fs.readdirSync(sessionsDir).filter(name => {
+      if (!name.endsWith('.md') || name === '_index.md') return false;
+      try { return /^type:\s*session-summary\s*$/m.test(fs.readFileSync(path.join(sessionsDir, name), 'utf8')); }
+      catch { return false; }
+    });
+  }
+
+  const removed = [];
+  const preserved = [];
+  for (const name of previous) {
+    if (!/^[^/\\]+\.md$/u.test(name) || expected.has(name)) continue;
+    const filePath = path.join(sessionsDir, name);
+    if (!fs.existsSync(filePath)) continue;
+    let managed = false;
+    try { managed = /^type:\s*session-summary\s*$/m.test(fs.readFileSync(filePath, 'utf8')); } catch { }
+    if (!managed) {
+      preserved.push(name);
+      continue;
+    }
+    fs.rmSync(filePath);
+    removed.push(name);
+  }
+
+  const manifest = {
+    version: 1,
+    updated_at: new Date().toISOString(),
+    managed: [...expected].sort(),
+  };
+  _writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+  return { expected: expected.size, removed, preserved };
+}
+
 function rebuildSessionsIndex(entries, outputDir) {
   outputDir = resolveOutputDir(outputDir);
   const sessionsDir = path.join(outputDir, 'sessions');
@@ -284,8 +338,7 @@ function rebuildSessionsIndex(entries, outputDir) {
     lines.push(`## ${project}`, '');
     for (const entry of items) {
       const created = String(entry.created_at || '').slice(0, 10);
-      const sessionId = String(entry.session_id || entry.id || '');
-      const slug = _sanitizeSlug(`${created || 'session'}-${project}-${sessionId.slice(-8)}`, 'session');
+      const slug = sessionSlug(entry);
       const preview = String(entry.content || '').replace(/\s+/g, ' ').slice(0, 100);
       lines.push(`- [[sessions/${slug}|${created} · ${project}]]`);
       if (preview) lines.push(`  ${preview}`);
@@ -471,6 +524,28 @@ function exportDocPages(db, outputDir) {
   return { exported, skipped };
 }
 
+function exportStoredWikiPages(pages, outputDir) {
+  const exportable = new Set(['memory', 'managed_redirect', 'doc', 'topic_cluster']);
+  const exported = [];
+  const skipped = [];
+  for (const page of Array.isArray(pages) ? pages : []) {
+    if (!exportable.has(String(page.source_type || 'memory')) || !String(page.content || '').trim()) continue;
+    try {
+      exportWikiPage(page.slug, {
+        title: page.title || page.slug,
+        tags: _safeJsonArray(page.topic_tags),
+        created: String(page.created_at || '').slice(0, 10),
+        last_built: String(page.last_built_at || '').slice(0, 10),
+        raw_sources: page.raw_source_count || 0,
+        staleness: page.staleness || 0,
+        source_type: page.source_type || 'memory',
+      }, page.content, outputDir);
+      exported.push(page.slug);
+    } catch { skipped.push(page.slug); }
+  }
+  return { exported, skipped };
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function resolveOutputDir(outputDir) {
@@ -538,6 +613,8 @@ function _collectSessionRelated(project, tags, options = {}) {
     String(project || '').trim().toLowerCase(),
     ...tags.map(tag => String(tag || '').trim().toLowerCase()),
   ]);
+  const projectToken = String(project || '').trim().toLowerCase().replace(/[\s_/]+/g, '-');
+  const tagTokens = tags.map(tag => String(tag || '').trim().toLowerCase().replace(/[\s_/]+/g, '-')).filter(Boolean);
 
   const wiki = [];
   for (const page of wikiPages) {
@@ -552,11 +629,15 @@ function _collectSessionRelated(project, tags, options = {}) {
   const capsules = [];
   for (const file of capsuleFiles) {
     const base = path.basename(String(file || ''), '.md');
-    const lower = base.toLowerCase();
-    if ([...candidates].some(token => token && lower.includes(token.replace(/\s+/g, '-')))) {
-      const relative = options.capsulesRoot
-        ? path.relative(options.capsulesRoot, file).replace(/\\/g, '/').replace(/\.md$/i, '')
-        : base;
+    const relative = options.capsulesRoot
+      ? path.relative(options.capsulesRoot, file).replace(/\\/g, '/').replace(/\.md$/i, '')
+      : base;
+    const segments = relative.toLowerCase().split('/').map(value => value.replace(/[\s_]+/g, '-'));
+    const baseToken = segments.at(-1);
+    const projectMatches = segments.length === 1
+      ? (!projectToken || baseToken.includes(projectToken))
+      : (!projectToken || segments[0] === projectToken);
+    if (projectMatches && tagTokens.some(token => baseToken.includes(token))) {
       capsules.push({ path: `capsules/${relative}`, label: base });
     }
   }
@@ -582,10 +663,13 @@ module.exports = {
   organizeWikiProjection,
   rebuildIndex,
   exportSessionSummary,
+  reconcileSessionProjection,
+  sessionSlug,
   rebuildSessionsIndex,
   exportCapsuleFile,
   rebuildCapsulesIndex,
   exportReflectDir,
   rebuildReflectDirIndex,
   exportDocPages,          // new
+  exportStoredWikiPages,
 };

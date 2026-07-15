@@ -10,12 +10,14 @@ const {
   exportWikiPage,
   rebuildIndex,
   exportSessionSummary,
+  reconcileSessionProjection,
   rebuildSessionsIndex,
   exportCapsuleFile,
   rebuildCapsulesIndex,
   exportReflectDir,
   rebuildReflectDirIndex,
   exportDocPages,          // add this
+  exportStoredWikiPages,
   organizeWikiProjection,
 } = require('./wiki-reflect-export');
 
@@ -182,6 +184,8 @@ test('rebuildIndex adds capsules navigation', () => {
 test('rebuildIndex links audit and cleanup reports', () => {
   const dir = makeTmpDir();
   try {
+    fs.writeFileSync(path.join(dir, '_audit.md'), '# Audit\n');
+    fs.writeFileSync(path.join(dir, '_cleanup-manifest.md'), '# Cleanup\n');
     rebuildIndex([], dir);
     const content = fs.readFileSync(path.join(dir, '_index.md'), 'utf8');
     assert.ok(content.includes('[[_audit|Wiki Audit]]'));
@@ -258,6 +262,48 @@ test('exportSessionSummary includes related knowledge links when tags match', ()
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('exportSessionSummary does not broaden project scope into every project capsule', () => {
+  const dir = makeTmpDir();
+  try {
+    const filePath = exportSessionSummary({
+      session_id: 'session-12345678', project: 'MetaMe', content: 'Project work.', tags: '[]',
+      created_at: '2026-04-09 12:00:00',
+    }, dir, {
+      capsuleFiles: ['/tmp/capsules/metame/daemon.md'], capsulesRoot: '/tmp/capsules',
+    });
+    assert.doesNotMatch(fs.readFileSync(filePath, 'utf8'), /capsules\/metame\/daemon/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('reconcileSessionProjection removes only stale managed session files', () => {
+  const dir = makeTmpDir();
+  try {
+    const sessions = path.join(dir, 'sessions');
+    fs.mkdirSync(sessions);
+    fs.writeFileSync(path.join(sessions, 'stale.md'), '---\ntype: session-summary\n---\n');
+    fs.writeFileSync(path.join(sessions, 'notes.md'), '# User notes\n');
+    const entry = { session_id: 'session-12345678', project: 'MetaMe', created_at: '2026-04-09' };
+    exportSessionSummary(entry, dir);
+    const result = reconcileSessionProjection([entry], dir);
+    assert.deepEqual(result.removed, ['stale.md']);
+    assert.ok(fs.existsSync(path.join(sessions, 'notes.md')));
+    assert.equal(JSON.parse(fs.readFileSync(path.join(sessions, '.metame-manifest.json'))).managed.length, 1);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('reconcileSessionProjection preserves a formerly managed file changed into user content', () => {
+  const dir = makeTmpDir();
+  try {
+    const sessions = path.join(dir, 'sessions');
+    fs.mkdirSync(sessions);
+    fs.writeFileSync(path.join(sessions, '.metame-manifest.json'), JSON.stringify({ version: 1, managed: ['old.md'] }));
+    fs.writeFileSync(path.join(sessions, 'old.md'), '# User took ownership\n');
+    const result = reconcileSessionProjection([], dir);
+    assert.deepEqual(result.preserved, ['old.md']);
+    assert.ok(fs.existsSync(path.join(sessions, 'old.md')));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('rebuildSessionsIndex creates sessions/_index.md', () => {
@@ -480,4 +526,16 @@ test('exportDocPages skips pages with empty content', (_t) => {
   assert.strictEqual(exported.length, 0);
   db.close();
   fs.rmSync(tmp, { recursive: true });
+});
+
+test('exportStoredWikiPages restores unchanged memory projections from DB', () => {
+  const dir = makeTmpDir();
+  try {
+    const result = exportStoredWikiPages([{
+      slug: 'model', title: 'Model', content: 'Stored content', source_type: 'memory',
+      topic_tags: '[]', created_at: '2026-01-01', last_built_at: '2026-01-02',
+    }], dir);
+    assert.deepEqual(result.exported, ['model']);
+    assert.ok(fs.existsSync(path.join(dir, 'topics', 'model.md')));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

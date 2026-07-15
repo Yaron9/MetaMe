@@ -357,6 +357,11 @@ function _setupSchema(db) {
       confidence REAL DEFAULT 0.5,
       search_count INTEGER DEFAULT 0,
       relation  TEXT,
+      project   TEXT,
+      scope     TEXT,
+      session_id TEXT,
+      source_type TEXT,
+      source_id TEXT,
       tags      TEXT DEFAULT '[]',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -481,4 +486,90 @@ test('runWikiReflect mirrors decisions dir to vault', async (_t) => {
 
   db.close();
   fs.rmSync(tmp, { recursive: true });
+});
+
+test('runWikiReflect reports stale workspace state without failing data projection', async () => {
+  const db = buildTestDb();
+  const dir = makeTmpDir();
+  try {
+    fs.mkdirSync(path.join(dir, '.obsidian'));
+    fs.writeFileSync(path.join(dir, '.obsidian', 'workspace.json'), JSON.stringify({
+      main: { type: 'leaf', state: { type: 'markdown', state: { file: 'missing.md' } } },
+    }));
+    const result = await runReflect(db, { dir });
+    assert.equal(result.linkHealth.workspace.missing.length, 1);
+    const last = JSON.parse(fs.readFileSync(path.join(dir, 'log.jsonl'), 'utf8').trim());
+    assert.equal(last.link_health.workspace_missing, 1);
+  } finally {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runWikiReflect preserves managed sessions when the session query fails', async () => {
+  const db = buildTestDb();
+  const dir = makeTmpDir();
+  const sessionsDir = path.join(dir, 'sessions');
+  fs.mkdirSync(sessionsDir);
+  const existing = path.join(sessionsDir, 'existing.md');
+  fs.writeFileSync(existing, '---\ntype: session-summary\n---\nExisting\n');
+  fs.writeFileSync(path.join(sessionsDir, '.metame-manifest.json'), JSON.stringify({
+    version: 1, managed: ['existing.md'],
+  }));
+  try {
+    await assert.rejects(runWikiReflect(db, {
+      outputDir: dir,
+      capsulesDir: path.join(dir, 'capsules-src'),
+      decisionsDir: path.join(dir, 'decisions-src'),
+      lessonsDir: path.join(dir, 'lessons-src'),
+      logPath: path.join(dir, 'log.jsonl'),
+      lockFile: path.join(dir, 'reflect.lock'),
+      providers: makeProviders(),
+      wikiReaders: {
+        listWikiPages: () => [],
+        listRecentSessionSummaries: () => { throw new Error('database unavailable'); },
+      },
+    }), /session query failed/);
+    assert.ok(fs.existsSync(existing));
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(sessionsDir, '.metame-manifest.json'))).managed, ['existing.md']);
+  } finally {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runWikiReflect preserves indexes when the wiki page query fails', async () => {
+  const db = buildTestDb();
+  const dir = makeTmpDir();
+  const indexPath = path.join(dir, '_index.md');
+  fs.writeFileSync(indexPath, '# Existing index\n');
+  const { exportSessionSummary } = require('./wiki-reflect-export');
+  const session = {
+    session_id: 'session-12345678', project: 'MetaMe', created_at: '2026-04-09',
+    content: 'Existing summary', tags: '["model"]',
+  };
+  const sessionPath = exportSessionSummary(session, dir, {
+    wikiPages: [{ slug: 'model', title: 'Model', primary_topic: 'model', source_type: 'memory' }],
+  });
+  const sessionBefore = fs.readFileSync(sessionPath, 'utf8');
+  try {
+    await assert.rejects(runWikiReflect(db, {
+      outputDir: dir,
+      capsulesDir: path.join(dir, 'capsules-src'),
+      decisionsDir: path.join(dir, 'decisions-src'),
+      lessonsDir: path.join(dir, 'lessons-src'),
+      logPath: path.join(dir, 'log.jsonl'),
+      lockFile: path.join(dir, 'reflect.lock'),
+      providers: makeProviders(),
+      wikiReaders: {
+        listWikiPages: () => { throw new Error('database unavailable'); },
+        listRecentSessionSummaries: () => [session],
+      },
+    }), /wiki page query failed/);
+    assert.equal(fs.readFileSync(indexPath, 'utf8'), '# Existing index\n');
+    assert.equal(fs.readFileSync(sessionPath, 'utf8'), sessionBefore);
+  } finally {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

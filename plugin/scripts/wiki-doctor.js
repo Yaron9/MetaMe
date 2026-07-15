@@ -237,7 +237,7 @@ function inspectReflection(report, logPath = path.join(METAME_DIR, 'memory_refle
 
 function inspectWikiLinks(report, outputDir) {
   if (!fs.existsSync(outputDir)) {
-    addCheck(report, 'obsidian-links', 'degraded', `wiki output missing: ${outputDir}`);
+    addCheck(report, 'obsidian-links', 'error', `wiki output missing: ${outputDir}`);
     return;
   }
   const audit = auditVault(outputDir);
@@ -245,10 +245,15 @@ function inspectWikiLinks(report, outputDir) {
   report.metrics.wiki_links = audit.links;
   report.metrics.wiki_hard_broken_links = audit.hardBroken.length;
   report.metrics.wiki_soft_broken_links = audit.softBroken.length;
-  if (audit.hardBroken.length > 0) {
+  report.metrics.workspace_missing_refs = audit.workspace.missing.length;
+  if (audit.workspace.error) {
+    addCheck(report, 'obsidian-links', 'error', audit.workspace.error);
+  } else if (audit.workspace.missing.length > 0) {
+    addCheck(report, 'obsidian-links', 'error', `${audit.workspace.missing.length} stale Obsidian workspace refs`, audit.workspace.missing);
+  } else if (audit.hardBroken.length > 0) {
     addCheck(report, 'obsidian-links', 'error', `${audit.hardBroken.length} broken generated links`, audit.hardBroken.slice(0, 20));
   } else if (audit.softBroken.length > 0) {
-    addCheck(report, 'obsidian-links', 'degraded', `generated links healthy; ${audit.softBroken.length} unresolved authored links`, audit.softBroken.slice(0, 20));
+    addCheck(report, 'obsidian-links', 'ok', `generated links healthy; ${audit.softBroken.length} authored links remain intentionally unresolved`, audit.softBroken.slice(0, 20));
   } else addCheck(report, 'obsidian-links', 'ok', `${audit.links} internal links resolve`);
 }
 

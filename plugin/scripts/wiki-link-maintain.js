@@ -5,88 +5,114 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const yaml = require('./resolve-yaml');
-const { auditDocuments, replaceMissingWorkspaceFiles, stripBrokenLinks } = require('./core/wiki-link-integrity');
+const { auditDocuments, auditWorkspaceState, replaceMissingWorkspaceFiles } = require('./core/wiki-link-integrity');
 const { resolveConfiguredWikiOutputDir } = require('./core/wiki-paths');
 
-function listMarkdown(root) {
+const IGNORED_DIRS = new Set(['node_modules', '_review', '_archive', '_revisions']);
+
+function listVaultFiles(root) {
+  if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+    throw new Error(`wiki output directory missing: ${root}`);
+  }
   const files = [];
   function walk(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name.startsWith('.') || entry.name === 'node_modules'
-        || entry.name === '_review' || entry.name === '_archive' || entry.name === '_revisions') continue;
+      if (entry.name.startsWith('.') || IGNORED_DIRS.has(entry.name)) continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.name.endsWith('.md')) files.push(full);
+      else files.push(full);
     }
   }
-  if (fs.existsSync(root)) walk(root);
+  walk(root);
   return files.sort();
 }
 
+function readWorkspace(root, { includeDocument = false, availableFiles } = {}) {
+  const workspacePath = path.join(root, '.obsidian', 'workspace.json');
+  if (!fs.existsSync(workspacePath)) return { path: workspacePath, exists: false, refs: [], missing: [] };
+  const source = fs.readFileSync(workspacePath, 'utf8');
+  let workspace;
+  try { workspace = JSON.parse(source); }
+  catch (error) { return { path: workspacePath, exists: true, error: `invalid workspace.json: ${error.message}`, refs: [], missing: [] }; }
+  const existing = availableFiles || listVaultFiles(root)
+    .map(file => path.relative(root, file).replace(/\\/g, '/'));
+  return {
+    path: workspacePath,
+    exists: true,
+    ...auditWorkspaceState(workspace, existing),
+    ...(includeDocument ? { document: workspace, source } : {}),
+  };
+}
+
 function auditVault(root) {
+  const files = listVaultFiles(root);
+  const availableFiles = files.map(file => path.relative(root, file).replace(/\\/g, '/'));
   const documents = {};
-  for (const file of listMarkdown(root)) {
+  for (const file of files) {
+    if (!file.endsWith('.md')) continue;
     documents[path.relative(root, file).replace(/\\/g, '/')] = fs.readFileSync(file, 'utf8');
   }
-  return auditDocuments(documents);
-}
-
-function repairWorkspace(root, fallback = 'capsules/_index.md') {
-  const workspacePath = path.join(root, '.obsidian', 'workspace.json');
-  if (!fs.existsSync(workspacePath) || !fs.existsSync(path.join(root, fallback))) return { replaced: 0 };
-  const existingFiles = new Set(listMarkdown(root)
-    .map(file => path.relative(root, file).replace(/\\/g, '/').toLowerCase()));
-  let workspace;
-  try { workspace = JSON.parse(fs.readFileSync(workspacePath, 'utf8')); }
-  catch { return { replaced: 0, error: 'invalid workspace.json' }; }
-  const result = replaceMissingWorkspaceFiles(workspace, existingFiles, fallback);
-  if (result.replaced === 0) return { replaced: 0 };
-  const backupPath = `${workspacePath}.metame.bak`;
-  if (!fs.existsSync(backupPath)) fs.copyFileSync(workspacePath, backupPath);
-  const tmpPath = `${workspacePath}.tmp`;
-  fs.writeFileSync(tmpPath, JSON.stringify(result.workspace, null, 2) + '\n', 'utf8');
-  fs.renameSync(tmpPath, workspacePath);
-  return { replaced: result.replaced, backupPath };
-}
-
-function sanitizeAuthoredProjectionLinks(root, brokenLinks) {
-  const grouped = new Map();
-  for (const link of brokenLinks) {
-    if (!grouped.has(link.source)) grouped.set(link.source, []);
-    grouped.get(link.source).push(link);
-  }
-  const changed = [];
-  let stripped = 0;
-  for (const [relative, links] of grouped) {
-    const filePath = path.join(root, relative);
-    if (!fs.existsSync(filePath)) continue;
-    const source = fs.readFileSync(filePath, 'utf8');
-    const result = stripBrokenLinks(source, links);
-    if (result.stripped === 0) continue;
-    const tmpPath = `${filePath}.tmp`;
-    fs.writeFileSync(tmpPath, result.content, 'utf8');
-    fs.renameSync(tmpPath, filePath);
-    stripped += result.stripped;
-    changed.push(relative);
-  }
-  return { stripped, changed };
-}
-
-function maintainWikiLinks(root, { repair = true, reportPath } = {}) {
-  const workspace = repair ? repairWorkspace(root) : { replaced: 0 };
-  const before = auditVault(root);
-  const sanitized = repair
-    ? sanitizeAuthoredProjectionLinks(root, before.softBroken)
-    : { stripped: 0, changed: [] };
-  const audit = sanitized.stripped > 0 ? auditVault(root) : before;
-  const report = {
-    generated_at: new Date().toISOString(), root, workspace, sanitized,
-    softBrokenBefore: before.softBroken.length,
-    ...audit,
+  return {
+    ...auditDocuments(documents, {
+      availableFiles,
+    }),
+    workspace: readWorkspace(root, { availableFiles }),
   };
+}
+
+function publicWorkspaceAudit(audit) {
+  const result = { ...audit };
+  delete result.document;
+  delete result.source;
+  return result;
+}
+
+function repairWorkspace(root, {
+  fallback = 'capsules/_index.md',
+  backupDir = path.join(os.homedir(), '.metame', 'backups', 'obsidian-workspace'),
+  beforeWrite,
+  minStableMs = 2000,
+  confirmIdle = false,
+} = {}) {
+  const audit = readWorkspace(root, { includeDocument: true });
+  if (!audit.exists || audit.error || audit.missing.length === 0) {
+    return { ...publicWorkspaceAudit(audit), replaced: 0 };
+  }
+  if (!confirmIdle) {
+    throw new Error('close Obsidian, then retry workspace repair with --confirm-idle');
+  }
+  if (!fs.existsSync(path.join(root, fallback))) throw new Error(`workspace fallback missing: ${fallback}`);
+  if (minStableMs > 0 && Date.now() - fs.statSync(audit.path).mtimeMs < minStableMs) {
+    throw new Error('workspace.json changed recently; wait for Obsidian to become idle and retry');
+  }
+  const result = replaceMissingWorkspaceFiles(audit.document, audit.missing, fallback);
+  fs.mkdirSync(backupDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupPath = path.join(backupDir, `workspace-${stamp}-${process.pid}.json`);
+  fs.writeFileSync(backupPath, audit.source, 'utf8');
+  const tmpPath = `${audit.path}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(result.workspace, null, 2) + '\n', 'utf8');
+  if (beforeWrite) beforeWrite();
+  if (fs.readFileSync(audit.path, 'utf8') !== audit.source) {
+    fs.rmSync(tmpPath, { force: true });
+    throw new Error('workspace.json changed during repair; retry after Obsidian becomes idle');
+  }
+  fs.renameSync(tmpPath, audit.path);
+  return { ...publicWorkspaceAudit(audit), replaced: result.replaced, backupPath };
+}
+
+function maintainWikiLinks(root, {
+  repairWorkspace: shouldRepair = false,
+  confirmWorkspaceIdle = false,
+  reportPath,
+} = {}) {
+  const before = auditVault(root);
+  const repaired = shouldRepair ? repairWorkspace(root, { confirmIdle: confirmWorkspaceIdle }) : null;
+  const audit = repaired?.replaced ? auditVault(root) : before;
+  const report = { generated_at: new Date().toISOString(), root, repaired, ...audit };
   if (reportPath) {
     fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-    const tmpPath = `${reportPath}.tmp`;
+    const tmpPath = `${reportPath}.${process.pid}.tmp`;
     fs.writeFileSync(tmpPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
     fs.renameSync(tmpPath, reportPath);
   }
@@ -101,19 +127,19 @@ function configuredRoot(home = os.homedir()) {
 }
 
 if (require.main === module) {
-  const root = configuredRoot();
-  const report = maintainWikiLinks(root, {
-    repair: process.argv.includes('--repair'),
-    reportPath: path.join(os.homedir(), '.metame', 'wiki-link-health.json'),
-  });
-  console.log(JSON.stringify(report, null, 2));
-  process.exitCode = report.hardBroken.length > 0 ? 2 : (report.softBroken.length > 0 ? 1 : 0);
+  try {
+    const report = maintainWikiLinks(configuredRoot(), {
+      repairWorkspace: process.argv.includes('--repair'),
+      confirmWorkspaceIdle: process.argv.includes('--confirm-idle'),
+      reportPath: path.join(os.homedir(), '.metame', 'wiki-link-health.json'),
+    });
+    console.log(JSON.stringify(report, null, 2));
+    const workspaceBroken = report.workspace.error || report.workspace.missing.length > 0;
+    process.exitCode = report.hardBroken.length > 0 || workspaceBroken ? 2 : 0;
+  } catch (error) {
+    console.error(`[wiki-links] ${error.message}`);
+    process.exitCode = 2;
+  }
 }
 
-module.exports = {
-  auditVault,
-  maintainWikiLinks,
-  repairWorkspace,
-  sanitizeAuthoredProjectionLinks,
-  configuredRoot,
-};
+module.exports = { auditVault, configuredRoot, maintainWikiLinks, readWorkspace, repairWorkspace };
