@@ -16,6 +16,7 @@ const {
   exportReflectDir,
   rebuildReflectDirIndex,
   exportDocPages,          // add this
+  organizeWikiProjection,
 } = require('./wiki-reflect-export');
 
 function makeTmpDir() {
@@ -100,24 +101,35 @@ test('exportWikiPage creates outputDir if it does not exist', () => {
   }
 });
 
-test('rebuildIndex creates _index.md with table of pages', () => {
+test('rebuildIndex creates a concise home and collection indexes', () => {
   const dir = makeTmpDir();
   const pages = [
-    { slug: 'session-management', title: 'Session Management', primary_topic: 'session',
+    { slug: 'session-management', title: 'Session Management', primary_topic: 'session', source_type: 'memory',
       staleness: 0.1, last_built_at: '2026-04-08T00:00:00', raw_source_count: 10 },
-    { slug: 'model-switching', title: 'Model Switching', primary_topic: 'model',
+    { slug: 'model-switching', title: 'Model Switching', primary_topic: 'model', source_type: 'doc',
       staleness: 0.45, last_built_at: null, raw_source_count: 5 },
+    { slug: 'session-management/projects/metame', title: 'Session · MetaMe', primary_topic: 'session', source_type: 'memory',
+      page_kind: 'project_dossier', project_key: 'metame', staleness: 0, last_built_at: null, raw_source_count: 3 },
   ];
 
   try {
+    fs.mkdirSync(path.join(dir, 'curated'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'curated', 'manual.md'), '---\ntitle: Manual Note\n---\n');
     rebuildIndex(pages, dir);
     const indexPath = path.join(dir, '_index.md');
     assert.ok(fs.existsSync(indexPath), '_index.md should be created');
     const content = fs.readFileSync(indexPath, 'utf8');
     assert.ok(content.includes('Session Management'), 'should contain page title');
     assert.ok(content.includes('session-management'), 'should contain slug');
-    assert.ok(content.includes('2 pages'), 'should show page count');
-    assert.ok(content.includes('45%'), 'should show staleness percentage');
+    assert.ok(content.includes('3 pages'), 'should show page count');
+    assert.ok(content.includes('[[topics/_index|主题知识 Topics]] (1)'));
+    assert.ok(content.includes('[[sources/_index|来源资料 Sources]] (1)'));
+    assert.ok(content.includes('[[curated/_index|人工精选 Curated]] (1)'));
+    const topicsIndex = fs.readFileSync(path.join(dir, 'topics', '_index.md'), 'utf8');
+    assert.ok(topicsIndex.includes('Session Management'));
+    assert.ok(!topicsIndex.includes('Session · MetaMe'), 'top-level topic index lists Hubs only');
+    assert.ok(fs.readFileSync(path.join(dir, 'sources', '_index.md'), 'utf8').includes('Model Switching'));
+    assert.ok(fs.readFileSync(path.join(dir, 'curated', '_index.md'), 'utf8').includes('Manual Note'));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -150,7 +162,7 @@ test('rebuildIndex adds session summaries navigation', () => {
   try {
     rebuildIndex([], dir, { sessionCount: 75 });
     const content = fs.readFileSync(path.join(dir, '_index.md'), 'utf8');
-    assert.ok(content.includes('[[sessions/_index|Session Summaries]] (75)'));
+    assert.ok(content.includes('[[sessions/_index|对话 Sessions]] (75)'));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -161,7 +173,7 @@ test('rebuildIndex adds capsules navigation', () => {
   try {
     rebuildIndex([], dir, { capsuleCount: 2 });
     const content = fs.readFileSync(path.join(dir, '_index.md'), 'utf8');
-    assert.ok(content.includes('[[capsules/_index|Knowledge Capsules]] (2)'));
+    assert.ok(content.includes('[[capsules/_index|行动手册 Capsules]] (2)'));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -174,6 +186,24 @@ test('rebuildIndex links audit and cleanup reports', () => {
     const content = fs.readFileSync(path.join(dir, '_index.md'), 'utf8');
     assert.ok(content.includes('[[_audit|Wiki Audit]]'));
     assert.ok(content.includes('[[_cleanup-manifest|Cleanup Manifest]]'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('organizeWikiProjection migrates legacy flat projections idempotently', () => {
+  const dir = makeTmpDir();
+  try {
+    fs.writeFileSync(path.join(dir, 'memory-topic.md'), '# Memory\n');
+    fs.writeFileSync(path.join(dir, 'paper.md'), '# Paper\n');
+    const pages = [
+      { slug: 'memory-topic', source_type: 'memory' },
+      { slug: 'paper', source_type: 'doc' },
+    ];
+    assert.deepEqual(organizeWikiProjection(pages, dir), { moved: 2, deduplicated: 0, conflicts: [] });
+    assert.ok(fs.existsSync(path.join(dir, 'topics', 'memory-topic.md')));
+    assert.ok(fs.existsSync(path.join(dir, 'sources', 'paper.md')));
+    assert.deepEqual(organizeWikiProjection(pages, dir), { moved: 0, deduplicated: 0, conflicts: [] });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -389,14 +419,15 @@ test('exportDocPages exports doc and cluster pages, skips memory pages', (_t) =>
   const tmp = makeTmpDir();
   const { exported, skipped } = exportDocPages(db, tmp);
 
-  assert.ok(fs.existsSync(path.join(tmp, 'doc-test.md')), 'doc page exported');
-  assert.ok(fs.existsSync(path.join(tmp, 'cluster-test.md')), 'cluster page exported');
+  assert.ok(fs.existsSync(path.join(tmp, 'sources', 'doc-test.md')), 'doc page exported');
+  assert.ok(fs.existsSync(path.join(tmp, 'topics', 'clusters', 'cluster-test.md')), 'cluster page exported');
   assert.ok(!fs.existsSync(path.join(tmp, 'mem-topic.md')), 'memory page not exported');
   assert.strictEqual(exported.length, 2);
   assert.strictEqual(skipped.length, 0);
 
-  const content = fs.readFileSync(path.join(tmp, 'doc-test.md'), 'utf8');
+  const content = fs.readFileSync(path.join(tmp, 'sources', 'doc-test.md'), 'utf8');
   assert.ok(content.includes('slug: doc-test'), 'has slug frontmatter');
+  assert.ok(content.includes('source_type: doc'), 'has projection type frontmatter');
   assert.ok(content.includes('## Content'), 'has body content');
 
   db.close();

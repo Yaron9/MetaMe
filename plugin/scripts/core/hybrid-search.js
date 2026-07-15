@@ -72,14 +72,41 @@ function normalizeSourceTypes(values) {
     .filter(Boolean))];
 }
 
-function ftsSearch(db, safeQuery, excludedSourceTypes = []) {
+function normalizeScopeKeys(values) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map(value => String(value || '').normalize('NFKC').trim().toLowerCase())
+    .filter(Boolean))];
+}
+
+function scopePredicate(alias, values) {
+  const scopes = normalizeScopeKeys(values);
+  if (scopes.length === 0) {
+    return { sql: `AND COALESCE(${alias}.page_kind, 'topic_hub') != 'project_dossier' AND ${alias}.source_type != 'managed_redirect'`, args: [] };
+  }
+  const placeholders = scopes.map(() => '?').join(',');
+  return {
+    sql: `AND ${alias}.source_type != 'managed_redirect' AND (
+      (COALESCE(${alias}.page_kind, 'topic_hub') = 'project_dossier'
+        AND EXISTS (SELECT 1 FROM wiki_page_scopes wps WHERE wps.page_slug=${alias}.slug AND lower(wps.scope_key) IN (${placeholders})))
+      OR
+      (COALESCE(${alias}.page_kind, 'topic_hub') != 'project_dossier' AND (
+        NOT EXISTS (SELECT 1 FROM wiki_page_scopes wps WHERE wps.page_slug=${alias}.slug)
+        OR EXISTS (SELECT 1 FROM wiki_page_scopes wps WHERE wps.page_slug=${alias}.slug AND lower(wps.scope_key) IN (${placeholders}))
+      ))
+    )`,
+    args: [...scopes, ...scopes],
+  };
+}
+
+function ftsSearch(db, safeQuery, excludedSourceTypes = [], scopeKeys = []) {
   const excluded = normalizeSourceTypes(excludedSourceTypes);
   const sourceClause = excluded.length > 0
     ? `AND wp.source_type NOT IN (${excluded.map(() => '?').join(',')})`
     : '';
+  const scope = scopePredicate('wp', scopeKeys);
   try {
     return db.prepare(`
-      SELECT wp.slug, wp.title, wp.staleness, wp.last_built_at, wp.source_type,
+      SELECT wp.slug, wp.title, wp.staleness, wp.last_built_at, wp.source_type, wp.page_kind, wp.project_key,
              snippet(wiki_pages_fts, 2, '<b>', '</b>', '...', 20) as excerpt,
              rank as ftsRank
       FROM wiki_pages_fts
@@ -88,9 +115,10 @@ function ftsSearch(db, safeQuery, excludedSourceTypes = []) {
       WHERE wiki_pages_fts MATCH ?
         AND (wp.source_type != 'openwiki' OR COALESCE(wes.missing_count, 0) = 0)
         ${sourceClause}
+        ${scope.sql}
       ORDER BY rank
       LIMIT ?
-    `).all(safeQuery, ...excluded, MAX_FTS_RESULTS);
+    `).all(safeQuery, ...excluded, ...scope.args, MAX_FTS_RESULTS);
   } catch {
     return [];
   }
@@ -104,16 +132,17 @@ function ftsSearch(db, safeQuery, excludedSourceTypes = []) {
  * @param {Float32Array} queryEmbedding
  * @returns {{ page_slug: string, chunk_text: string, score: number }[]}
  */
-function vectorSearch(db, queryEmbedding, backendInfo = null, excludedSourceTypes = []) {
+function vectorSearch(db, queryEmbedding, backendInfo = null, excludedSourceTypes = [], scopeKeys = []) {
   const excluded = normalizeSourceTypes(excludedSourceTypes);
   const sourceClause = excluded.length > 0
     ? `AND wp.source_type NOT IN (${excluded.map(() => '?').join(',')})`
     : '';
+  const scope = scopePredicate('wp', scopeKeys);
   let rows;
   try {
     if (backendInfo) {
       rows = db.prepare(`
-        SELECT cc.page_slug, cc.chunk_text, cc.embedding, wp.source_type
+        SELECT cc.page_slug, cc.chunk_text, cc.embedding, wp.source_type, wp.page_kind, wp.project_key
         FROM content_chunks cc
         JOIN wiki_pages wp ON wp.slug = cc.page_slug
         LEFT JOIN wiki_external_sources wes ON wes.page_slug = wp.slug
@@ -122,17 +151,19 @@ function vectorSearch(db, queryEmbedding, backendInfo = null, excludedSourceType
           AND cc.embedding_dim = ?
           AND (wp.source_type != 'openwiki' OR COALESCE(wes.missing_count, 0) = 0)
           ${sourceClause}
-      `).all(backendInfo.model, backendInfo.dimensions, ...excluded);
+          ${scope.sql}
+      `).all(backendInfo.model, backendInfo.dimensions, ...excluded, ...scope.args);
     } else {
       rows = db.prepare(`
-        SELECT cc.page_slug, cc.chunk_text, cc.embedding, wp.source_type
+        SELECT cc.page_slug, cc.chunk_text, cc.embedding, wp.source_type, wp.page_kind, wp.project_key
         FROM content_chunks cc
         JOIN wiki_pages wp ON wp.slug = cc.page_slug
         LEFT JOIN wiki_external_sources wes ON wes.page_slug = wp.slug
         WHERE cc.embedding IS NOT NULL
           AND (wp.source_type != 'openwiki' OR COALESCE(wes.missing_count, 0) = 0)
           ${sourceClause}
-      `).all(...excluded);
+          ${scope.sql}
+      `).all(...excluded, ...scope.args);
     }
   } catch {
     return [];
@@ -148,6 +179,8 @@ function vectorSearch(db, queryEmbedding, backendInfo = null, excludedSourceType
       page_slug: row.page_slug,
       chunk_text: row.chunk_text,
       source_type: row.source_type,
+      page_kind: row.page_kind,
+      project_key: row.project_key,
       score,
     });
   }
@@ -155,9 +188,10 @@ function vectorSearch(db, queryEmbedding, backendInfo = null, excludedSourceType
   return topK(scored, MAX_VECTOR_RESULTS);
 }
 
-function countFtsSourceMatches(db, safeQuery, sourceTypes = []) {
+function countFtsSourceMatches(db, safeQuery, sourceTypes = [], scopeKeys = []) {
   const included = normalizeSourceTypes(sourceTypes);
   if (included.length === 0) return {};
+  const scope = scopePredicate('wp', scopeKeys);
   try {
     const rows = db.prepare(`
       SELECT wp.source_type, COUNT(*) AS count
@@ -167,8 +201,9 @@ function countFtsSourceMatches(db, safeQuery, sourceTypes = []) {
       WHERE wiki_pages_fts MATCH ?
         AND wp.source_type IN (${included.map(() => '?').join(',')})
         AND (wp.source_type != 'openwiki' OR COALESCE(wes.missing_count, 0) = 0)
+        ${scope.sql}
       GROUP BY wp.source_type
-    `).all(safeQuery, ...included);
+    `).all(safeQuery, ...included, ...scope.args);
     return Object.fromEntries(rows.map(row => [row.source_type, row.count]));
   } catch {
     return {};
@@ -207,6 +242,8 @@ function aggregateChunksToPages(chunks) {
         score: c.score,
         excerpt: c.chunk_text.slice(0, 200),
         source_type: c.source_type,
+        page_kind: c.page_kind,
+        project_key: c.project_key,
       });
     }
   }
@@ -231,6 +268,7 @@ function rrfFuse(merged) {
       score += 1 / (RRF_K + info.vectorRank);
       source = source ? 'hybrid' : 'vector';
     }
+    if (info.page_kind === 'project_dossier') score *= 1.15;
     const staleness = info.staleness || 0;
     results.push({
       slug,
@@ -241,6 +279,8 @@ function rrfFuse(merged) {
       stale: staleness >= STALE_THRESHOLD,
       source,
       source_type: info.source_type || 'memory',
+      page_kind: info.page_kind || 'topic_hub',
+      project_key: info.project_key || null,
     });
   }
   results.sort((a, b) => b.score - a.score);
@@ -273,13 +313,14 @@ async function hybridSearchWiki(db, query, {
   trackSearch = true,
   excludeSourceTypes = [],
   observeSourceTypes = [],
+  scopeKeys = [],
 } = {}) {
   const safeQuery = sanitizeFts5(query);
   if (!safeQuery) return { wikiPages: [], facts: [] };
 
   // 1. FTS5 search (always)
-  const ftsResults = ftsSearch(db, safeQuery, excludeSourceTypes);
-  const sourceHitCounts = countFtsSourceMatches(db, safeQuery, observeSourceTypes);
+  const ftsResults = ftsSearch(db, safeQuery, excludeSourceTypes, scopeKeys);
+  const sourceHitCounts = countFtsSourceMatches(db, safeQuery, observeSourceTypes, scopeKeys);
 
   // 2. Vector search (if available and not forced FTS-only)
   let vectorPages = new Map();
@@ -290,7 +331,7 @@ async function hybridSearchWiki(db, query, {
     try {
       const queryEmb = await getEmbedding(query);
       if (queryEmb) {
-        const chunks = vectorSearch(db, queryEmb, backendInfo, excludeSourceTypes);
+        const chunks = vectorSearch(db, queryEmb, backendInfo, excludeSourceTypes, scopeKeys);
         vectorPages = aggregateChunksToPages(chunks);
       }
     } catch {
@@ -309,6 +350,8 @@ async function hybridSearchWiki(db, query, {
       excerpt: r.excerpt,
       staleness: r.staleness,
       source_type: r.source_type,
+      page_kind: r.page_kind,
+      project_key: r.project_key,
     });
   }
 
@@ -318,6 +361,8 @@ async function hybridSearchWiki(db, query, {
     if (existing) {
       existing.vectorRank = rank;
       if (!existing.source_type) existing.source_type = vInfo.source_type;
+      if (!existing.page_kind) existing.page_kind = vInfo.page_kind;
+      if (!existing.project_key) existing.project_key = vInfo.project_key;
       // Prefer vector excerpt if FTS didn't have a good one
       if (vInfo.excerpt && (!existing.excerpt || existing.excerpt.length < 20)) {
         existing.excerpt = vInfo.excerpt;
@@ -328,11 +373,13 @@ async function hybridSearchWiki(db, query, {
       let staleness = 0;
       let sourceType = vInfo.source_type || 'memory';
       try {
-        const page = db.prepare('SELECT title, staleness, source_type FROM wiki_pages WHERE slug = ?').get(slug);
+        const page = db.prepare('SELECT title, staleness, source_type, page_kind, project_key FROM wiki_pages WHERE slug = ?').get(slug);
         if (page) {
           title = page.title;
           staleness = page.staleness || 0;
           sourceType = page.source_type || sourceType;
+          vInfo.page_kind = page.page_kind || vInfo.page_kind;
+          vInfo.project_key = page.project_key || vInfo.project_key;
         }
       } catch { }
       merged.set(slug, {
@@ -341,12 +388,14 @@ async function hybridSearchWiki(db, query, {
         excerpt: vInfo.excerpt,
         staleness,
         source_type: sourceType,
+        page_kind: vInfo.page_kind,
+        project_key: vInfo.project_key,
       });
     }
   }
 
   // 4. RRF fusion + normalize
-  const wikiPages = rrfFuse(merged);
+  const wikiPages = filterScopeEligible(db, rrfFuse(merged), scopeKeys);
   normalizeScores(wikiPages);
 
   // 5. Facts search (same as searchWikiAndFacts — FTS5 only)
@@ -382,6 +431,20 @@ async function hybridSearchWiki(db, query, {
   }
 
   return { wikiPages: wikiPages.slice(0, 5), facts, sourceHitCounts };
+}
+
+function filterScopeEligible(db, pages, scopeKeys) {
+  if (pages.length === 0) return pages;
+  const scope = scopePredicate('wp', scopeKeys);
+  const placeholders = pages.map(() => '?').join(',');
+  try {
+    const eligible = new Set(db.prepare(`
+      SELECT wp.slug FROM wiki_pages wp WHERE wp.slug IN (${placeholders}) ${scope.sql}
+    `).all(...pages.map(page => page.slug), ...scope.args).map(row => row.slug));
+    return pages.filter(page => eligible.has(page.slug));
+  } catch {
+    return [];
+  }
 }
 
 module.exports = {

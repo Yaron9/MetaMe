@@ -310,4 +310,82 @@ describe('writeWikiPageWithChunks', () => {
     const link = db.prepare("SELECT * FROM wiki_page_doc_sources WHERE page_slug='link-doc' AND role='primary'").get();
     assert.ok(link, 'should have wiki_page_doc_sources primary link');
   });
+
+  it('commits dossier metadata, scopes, evidence, chunks, and page atomically', () => {
+    const { writeWikiPageWithChunks } = require('./wiki-reflect-build');
+    const db = openTestDb();
+    writeWikiPageWithChunks(db, {
+      slug: 'step3/projects/metame', title: 'Step3 · MetaMe', primary_topic: 'step3',
+      source_type: 'memory', page_kind: 'project_dossier', project_key: 'metame',
+      build_profile: 'local-dossier-v1', source_membership_hash: 'hash-1',
+      raw_source_ids: '["m1","m2","m3"]', raw_source_count: 3,
+    }, 'project grounded content', {
+      scopes: ['metame', 'proj_metame', 'metame'],
+      evidence: [
+        { evidence_type: 'memory_item', evidence_id: 'm1' },
+        { evidence_type: 'memory_item', evidence_id: 'm2' },
+      ],
+    });
+    const page = db.prepare(`SELECT * FROM wiki_pages WHERE slug='step3/projects/metame'`).get();
+    assert.equal(page.page_kind, 'project_dossier');
+    assert.equal(page.project_key, 'metame');
+    assert.equal(page.source_membership_hash, 'hash-1');
+    assert.deepEqual(db.prepare('SELECT scope_key FROM wiki_page_scopes WHERE page_slug=? ORDER BY scope_key').all(page.slug).map(row => row.scope_key), ['metame', 'proj_metame']);
+    assert.deepEqual(db.prepare('SELECT evidence_id FROM wiki_page_evidence WHERE page_slug=? ORDER BY evidence_id').all(page.slug).map(row => row.evidence_id), ['m1', 'm2']);
+  });
+});
+
+describe('Hub and project dossier builders', () => {
+  it('builds a grounded project dossier and deterministic Hub', async () => {
+    const { buildProjectDossier, buildTopicHubPage } = require('./wiki-reflect-build');
+    const db = openTestDb();
+    const topic = { tag: 'Step3', slug: 'step3', label: 'Step3' };
+    const facts = ['1', '2', '3'].map(id => ({
+      id, content: `local fact ${id}`, state: 'active', kind: 'insight',
+      project: 'MetaMe', scope: 'proj_metame', created_at: '2026-01-01',
+    }));
+    const providers = {
+      buildDistillEnv: () => ({}),
+      callHaiku: async () => JSON.stringify({ claims: [{
+        section: 'decisions', text: '采用本地投影', evidenceRefs: ['M:1', 'M:2'],
+      }] }),
+    };
+    const dossier = await buildProjectDossier(db, topic, 'metame', facts, { providers });
+    assert.equal(dossier.slug, 'step3/projects/metame');
+    assert.match(dossier.content, /采用本地投影/);
+    const hub = buildTopicHubPage(db, topic, { dossiers: [{ projectKey: 'metame', facts }], sparse: [] });
+    assert.match(hub.content, /step3\/projects\/metame/);
+    assert.doesNotMatch(hub.content, /local fact/);
+    assert.equal(db.prepare(`SELECT page_kind FROM wiki_pages WHERE slug=?`).get(dossier.slug).page_kind, 'project_dossier');
+  });
+
+  it('preserves the old dossier when structured output is invalid', async () => {
+    const { buildProjectDossier, writeWikiPageWithChunks } = require('./wiki-reflect-build');
+    const db = openTestDb();
+    const slug = 'step3/projects/metame';
+    writeWikiPageWithChunks(db, { slug, title: 'old', primary_topic: 'step3' }, 'old usable content');
+    const result = await buildProjectDossier(db, { tag: 'Step3', slug: 'step3' }, 'metame', [
+      { id: '1', content: 'fact', state: 'active', kind: 'insight', project: 'MetaMe' },
+    ], {
+      providers: { buildDistillEnv: () => ({}), callHaiku: async () => '{"claims":[{"section":"decisions","text":"bad","evidenceRefs":["M:404"]}]}' },
+    });
+    assert.equal(result, null);
+    assert.equal(db.prepare('SELECT content FROM wiki_pages WHERE slug=?').get(slug).content, 'old usable content');
+  });
+
+  it('retries the whole structured response without JSON repair', async () => {
+    const { buildProjectDossier } = require('./wiki-reflect-build');
+    const db = openTestDb();
+    let calls = 0;
+    const result = await buildProjectDossier(db, { tag: 'Step3', slug: 'step3' }, 'metame', [
+      { id: '1', content: 'fact', state: 'active', kind: 'insight', project: 'MetaMe' },
+    ], {
+      providers: {
+        buildDistillEnv: () => ({}),
+        callHaiku: async () => ++calls === 1 ? 'not json' : '{"claims":[{"section":"current_state","text":"ok","evidenceRefs":["M:1"]}]}',
+      },
+    });
+    assert.equal(calls, 2);
+    assert.equal(result.claims[0].text, 'ok');
+  });
 });

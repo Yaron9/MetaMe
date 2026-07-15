@@ -7,7 +7,8 @@ const { DatabaseSync } = require('node:sqlite');
 const fs = require('fs');
 const path = require('path');
 const { applyWikiSchema } = require('./memory-wiki-schema');
-const { queryRawFacts } = require('./wiki-reflect-query');
+const { queryRawFacts, queryRelatedTopics, queryTopicEvidence, queryTopicResearch } = require('./wiki-reflect-query');
+const { upsertDocSource } = require('./core/wiki-db');
 const { mkdtempForTest } = require('./test-support/test-utils');
 
 function buildTestDb() {
@@ -23,6 +24,10 @@ function buildTestDb() {
       confidence REAL DEFAULT 0.5,
       search_count INTEGER DEFAULT 0,
       relation  TEXT,
+      project   TEXT,
+      scope     TEXT,
+      source_type TEXT,
+      source_id TEXT,
       tags      TEXT DEFAULT '[]',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -32,12 +37,60 @@ function buildTestDb() {
   return db;
 }
 
-function insertFact(db, { id, tag, state = 'active', relation = null, searchCount = 0, confidence = 0.5 }) {
+function insertFact(db, { id, tag, state = 'active', relation = null, searchCount = 0, confidence = 0.5, project = null, kind = 'insight' }) {
   db.prepare(`
-    INSERT INTO memory_items (id, kind, state, content, relation, search_count, confidence, tags)
-    VALUES (?, 'insight', ?, 'fact content', ?, ?, ?, ?)
-  `).run(id, state, relation, searchCount, confidence, JSON.stringify([tag]));
+    INSERT INTO memory_items (id, kind, state, content, relation, search_count, confidence, tags, project)
+    VALUES (?, ?, ?, 'fact content', ?, ?, ?, ?, ?)
+  `).run(id, kind, state, relation, searchCount, confidence, JSON.stringify([tag]), project);
 }
+
+test('queryTopicEvidence resolves normalized aliases and retains project semantics', () => {
+  const db = buildTestDb();
+  insertFact(db, { id: 'upper', tag: 'Ｓｔｅｐ３', project: 'MetaMe' });
+  insertFact(db, { id: 'lower', tag: 'step3', project: 'metame' });
+  insertFact(db, { id: 'semantic', tag: 'step3-2', project: 'MetaMe' });
+  insertFact(db, { id: 'episode', tag: 'step3', project: 'MetaMe', kind: 'episode' });
+  const rows = queryTopicEvidence(db, ['Step3']);
+  assert.deepEqual(rows.map(row => row.id).sort(), ['episode', 'lower', 'upper']);
+  assert.equal(rows.find(row => row.id === 'upper').project, 'MetaMe');
+  db.close();
+});
+
+test('queryTopicResearch requires exact aliases across two facts and two documents', () => {
+  const db = buildTestDb();
+  for (const [index, slug] of ['paper-a', 'paper-b'].entries()) {
+    upsertDocSource(db, {
+      filePath: `/tmp/${slug}.md`, fileHash: `h${index}`, mtimeMs: index + 1, sizeBytes: 10,
+      fileType: 'md', extractor: 'direct', extractStatus: 'ok', extractedTextHash: `t${index}`,
+      title: index === 0 ? null : `Paper ${index + 1}`, slug,
+    });
+  }
+  const docs = db.prepare('SELECT id, slug FROM doc_sources ORDER BY slug').all();
+  db.prepare(`INSERT INTO research_entities (id, entity_type, name, aliases) VALUES ('e1','concept','Lithology','["岩性"]')`).run();
+  for (const [index, doc] of docs.entries()) {
+    const factId = `pf${index}`;
+    db.prepare(`INSERT INTO paper_facts (id, doc_source_id, fact_type, evidence_text) VALUES (?,?,'claim',?)`).run(factId, doc.id, `evidence ${index}`);
+    db.prepare(`INSERT INTO fact_entity_links (fact_id, entity_id, role) VALUES (?,'e1','subject')`).run(factId);
+  }
+  const research = queryTopicResearch(db, ['岩性']);
+  assert.equal(research.length, 2);
+  assert.equal(research[0].title, research[0].slug, 'missing document title falls back to slug');
+  assert.deepEqual(queryTopicResearch(db, ['lithologies']), []);
+  db.close();
+});
+
+test('queryRelatedTopics uses same-project active atomic co-occurrence with a two-fact floor', () => {
+  const db = buildTestDb();
+  const { upsertWikiTopic } = require('./core/wiki-db');
+  upsertWikiTopic(db, 'step3', { force: true });
+  upsertWikiTopic(db, 'workflow', { force: true });
+  upsertWikiTopic(db, 'noise', { force: true });
+  for (const [id, tags] of [['r1', ['step3', 'workflow']], ['r2', ['Step3', 'workflow']], ['r3', ['step3', 'noise']]]) {
+    db.prepare(`INSERT INTO memory_items (id,kind,state,content,tags,project) VALUES (?,'insight','active','fact',?,'MetaMe')`).run(id, JSON.stringify(tags));
+  }
+  assert.deepEqual(queryRelatedTopics(db, ['step3']).map(row => row.slug), ['workflow']);
+  db.close();
+});
 
 test('queryRawFacts returns totalCount=0 when no facts exist', () => {
   const db = buildTestDb();

@@ -24,6 +24,16 @@ const { buildComparisonMatrix, buildTimeline, detectContradictions, buildCoverag
 const { upsertWikiPage, resetPageStaleness, appendWikiTimeline } = require('./core/wiki-db');
 const { enqueueContentChunks } = require('./core/wiki-chunks');
 const { membershipHash, findMatchingCluster } = require('./wiki-cluster');
+const {
+  buildDossierPrompt,
+  buildDossierSlug,
+  normalizeProjectKey,
+  parseStructuredClaims,
+  renderDossier,
+  renderTopicHub,
+  selectDossierEvidence,
+  sourceMembershipHash,
+} = require('./core/wiki-topic-model');
 
 const LLM_TIMEOUT_MS = 60000; // Sonnet needs more time than Haiku
 
@@ -73,6 +83,8 @@ function writeWikiPageWithChunks(db, pageSpec, content, {
   docSourceIds = [],
   role,
   transaction = true,
+  evidence,
+  scopes,
 } = {}) {
   const {
     slug,
@@ -85,6 +97,11 @@ function writeWikiPageWithChunks(db, pageSpec, content, {
     topic_tags,
     membership_hash,
     cluster_size,
+    page_kind,
+    project_key,
+    build_profile,
+    source_membership_hash,
+    eligibility_miss_count,
   } = pageSpec;
 
   const wordCount = content.split(/\s+/).filter(Boolean).length;
@@ -105,6 +122,38 @@ function writeWikiPageWithChunks(db, pageSpec, content, {
       membership_hash: membership_hash !== undefined ? membership_hash : null,
       cluster_size: cluster_size !== undefined ? cluster_size : null,
     });
+
+    if ([page_kind, project_key, build_profile, source_membership_hash, eligibility_miss_count].some(value => value !== undefined)) {
+      const current = db.prepare(`
+        SELECT page_kind, project_key, build_profile, source_membership_hash, eligibility_miss_count
+        FROM wiki_pages WHERE slug = ?
+      `).get(slug);
+      db.prepare(`
+        UPDATE wiki_pages
+        SET page_kind=?, project_key=?, build_profile=?, source_membership_hash=?, eligibility_miss_count=?
+        WHERE slug=?
+      `).run(
+        page_kind !== undefined ? page_kind : current.page_kind,
+        project_key !== undefined ? project_key : current.project_key,
+        build_profile !== undefined ? build_profile : current.build_profile,
+        source_membership_hash !== undefined ? source_membership_hash : current.source_membership_hash,
+        eligibility_miss_count !== undefined ? eligibility_miss_count : current.eligibility_miss_count,
+        slug,
+      );
+    }
+
+    if (evidence !== undefined) {
+      db.prepare('DELETE FROM wiki_page_evidence WHERE page_slug = ?').run(slug);
+      const insertEvidence = db.prepare(`
+        INSERT INTO wiki_page_evidence (page_slug, evidence_type, evidence_id) VALUES (?, ?, ?)
+      `);
+      for (const item of evidence) insertEvidence.run(slug, item.evidence_type, String(item.evidence_id));
+    }
+    if (scopes !== undefined) {
+      db.prepare('DELETE FROM wiki_page_scopes WHERE page_slug = ?').run(slug);
+      const insertScope = db.prepare('INSERT INTO wiki_page_scopes (page_slug, scope_key) VALUES (?, ?)');
+      for (const scope of [...new Set(scopes.map(String))]) insertScope.run(slug, scope);
+    }
 
     // Reset staleness counters via canonical helper (staleness=0, last_built_at=now)
     resetPageStaleness(db, slug, raw_source_count);
@@ -185,6 +234,95 @@ async function buildWikiPage(db, topic, queryResult, { allowedSlugs = [], provid
   appendWikiTimeline(db, topic.slug, `基于 ${totalCount} 条 facts 重建 (${rawSourceIds.length} 条直接引用, ${chunkIds.length} chunks)`);
 
   return { slug: topic.slug, content, strippedLinks, rawSourceIds };
+}
+
+async function buildProjectDossier(db, topic, projectKey, facts, { providers, scopes = [], structuredAttempts = 2 }) {
+  const evidence = selectDossierEvidence(facts).map(fact => ({
+    ref: `${fact.state === 'candidate' ? 'C' : 'M'}:${fact.id}`,
+    state: fact.state,
+    kind: fact.kind,
+    relation: fact.relation,
+    created_at: fact.created_at,
+    text: fact._promptText,
+  }));
+  const allowedRefs = evidence.map(item => item.ref);
+  const prompt = buildDossierPrompt({ topic: topic.label || topic.tag, projectKey, evidence });
+  let structured = null;
+  for (let attempt = 0; attempt < Math.max(1, structuredAttempts); attempt++) {
+    try {
+      const env = providers.buildDistillEnv();
+      const raw = await providers.callHaiku(prompt, env, LLM_TIMEOUT_MS, { model: 'sonnet' });
+      structured = parseStructuredClaims(raw, allowedRefs);
+      break;
+    } catch { /* whole-output retry; never repair or partially accept JSON */ }
+  }
+  if (!structured) return null;
+  const slug = buildDossierSlug(topic.slug, projectKey);
+  const content = renderDossier({
+    title: topic.label || topic.tag,
+    projectKey,
+    hubSlug: topic.slug,
+    claims: structured.claims,
+    evidence,
+  });
+  const sourceEvidence = facts.map(fact => ({ evidence_type: 'memory_item', evidence_id: fact.id }));
+  const rawSourceIds = facts.map(fact => fact.id);
+  const effectiveScopes = [projectKey, ...scopes, ...facts.flatMap(fact => [fact.project, fact.scope])]
+    .map(normalizeProjectKey).filter(Boolean);
+  writeWikiPageWithChunks(db, {
+    slug,
+    title: `${topic.label || topic.tag} · ${projectKey}`,
+    primary_topic: topic.tag,
+    source_type: 'memory',
+    page_kind: 'project_dossier',
+    project_key: projectKey,
+    build_profile: 'local-dossier-v1',
+    source_membership_hash: sourceMembershipHash(facts.map(fact => ({ ...fact, evidence_type: 'memory_item', evidence_id: fact.id }))),
+    eligibility_miss_count: 0,
+    raw_source_ids: JSON.stringify(rawSourceIds),
+    raw_source_count: rawSourceIds.length,
+    topic_tags: JSON.stringify([topic.tag]),
+  }, content, { evidence: sourceEvidence, scopes: effectiveScopes });
+  return { slug, content, rawSourceIds, claims: structured.claims };
+}
+
+function buildTopicHubPage(db, topic, { dossiers = [], sparse = [], related = [], research = [] } = {}) {
+  const dossierLinks = dossiers.map(dossier => ({
+    slug: dossier.slug || buildDossierSlug(topic.slug, dossier.projectKey),
+    projectKey: dossier.projectKey,
+    factCount: dossier.factCount ?? dossier.facts?.length ?? 0,
+  }));
+  const content = renderTopicHub({
+    title: topic.label || topic.tag,
+    topicSlug: topic.slug,
+    dossiers: dossierLinks,
+    sparse,
+    related,
+    research,
+  });
+  const localEvidence = sparse.map(fact => ({ evidence_type: 'memory_item', evidence_id: fact.id }));
+  const researchEvidence = research.flatMap(item => (item.factIds || []).map(id => ({ evidence_type: 'paper_fact', evidence_id: id })));
+  const evidence = [...localEvidence, ...researchEvidence];
+  const rawSourceIds = sparse.map(fact => fact.id);
+  const scopes = sparse.flatMap(fact => [fact.project, fact.scope]).map(normalizeProjectKey).filter(Boolean);
+  writeWikiPageWithChunks(db, {
+    slug: topic.slug,
+    title: topic.label || topic.tag,
+    primary_topic: topic.tag,
+    source_type: 'memory',
+    page_kind: 'topic_hub',
+    project_key: null,
+    build_profile: 'local-hub-v1',
+    source_membership_hash: sourceMembershipHash([
+      ...sparse.map(fact => ({ ...fact, evidence_type: 'memory_item', evidence_id: fact.id })),
+      ...researchEvidence,
+    ]),
+    eligibility_miss_count: 0,
+    raw_source_ids: JSON.stringify(rawSourceIds),
+    raw_source_count: rawSourceIds.length,
+    topic_tags: JSON.stringify([topic.tag]),
+  }, content, { evidence, scopes });
+  return { slug: topic.slug, content, rawSourceIds };
 }
 
 function buildFallbackWikiContent(topic, queryResult) {
@@ -433,4 +571,14 @@ Write a concise wiki overview page (150–300 words) that:
 Respond with only the wiki page content.`;
 }
 
-module.exports = { buildWikiPage, buildFallbackWikiContent, generateWikiContent, writeWikiPageWithChunks, buildDocWikiPage, buildTier1Page, buildTopicClusterPage };
+module.exports = {
+  buildWikiPage,
+  buildFallbackWikiContent,
+  generateWikiContent,
+  writeWikiPageWithChunks,
+  buildProjectDossier,
+  buildTopicHubPage,
+  buildDocWikiPage,
+  buildTier1Page,
+  buildTopicClusterPage,
+};

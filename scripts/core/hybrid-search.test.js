@@ -128,8 +128,10 @@ describe('hybrid-search internals', () => {
     db.exec(`
       CREATE TABLE wiki_pages (
         slug TEXT PRIMARY KEY, title TEXT, content TEXT, staleness REAL DEFAULT 0,
-        last_built_at TEXT, source_type TEXT DEFAULT 'memory'
+        last_built_at TEXT, source_type TEXT DEFAULT 'memory',
+        page_kind TEXT DEFAULT 'topic_hub', project_key TEXT
       );
+      CREATE TABLE wiki_page_scopes (page_slug TEXT, scope_key TEXT);
       CREATE TABLE wiki_external_sources (page_slug TEXT PRIMARY KEY, missing_count INTEGER DEFAULT 0);
       CREATE VIRTUAL TABLE wiki_pages_fts USING fts5(slug, title, content, content='wiki_pages', content_rowid='rowid');
     `);
@@ -144,6 +146,36 @@ describe('hybrid-search internals', () => {
     });
     assert.deepEqual(result.wikiPages.map(page => page.slug), ['memory/sixth']);
     assert.equal(result.sourceHitCounts.openwiki, 12);
+    db.close();
+  });
+
+  it('filters wrong-project dossiers before FTS limit and excludes dossiers when unscoped', async () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE wiki_pages (
+        slug TEXT PRIMARY KEY, title TEXT, content TEXT, staleness REAL DEFAULT 0,
+        last_built_at TEXT, source_type TEXT DEFAULT 'memory',
+        page_kind TEXT DEFAULT 'topic_hub', project_key TEXT
+      );
+      CREATE TABLE wiki_page_scopes (page_slug TEXT, scope_key TEXT);
+      CREATE TABLE wiki_external_sources (page_slug TEXT PRIMARY KEY, missing_count INTEGER DEFAULT 0);
+      CREATE VIRTUAL TABLE wiki_pages_fts USING fts5(slug, title, content, content='wiki_pages', content_rowid='rowid');
+    `);
+    const insert = db.prepare('INSERT INTO wiki_pages (slug,title,content,page_kind,project_key) VALUES (?,?,?,?,?)');
+    for (let i = 0; i < 8; i++) {
+      const slug = `topic/projects/wrong-${i}`;
+      insert.run(slug, `Wrong ${i}`, 'needle needle needle', 'project_dossier', `wrong-${i}`);
+      db.prepare('INSERT INTO wiki_page_scopes VALUES (?,?)').run(slug, `wrong-${i}`);
+    }
+    insert.run('topic/projects/metame', 'Correct', 'needle', 'project_dossier', 'metame');
+    db.prepare('INSERT INTO wiki_page_scopes VALUES (?,?)').run('topic/projects/metame', 'metame');
+    insert.run('topic', 'Hub', 'needle', 'topic_hub', null);
+    db.exec("INSERT INTO wiki_pages_fts(wiki_pages_fts) VALUES('rebuild')");
+    const scoped = await hybridSearchWiki(db, 'needle', { ftsOnly: true, scopeKeys: ['metame'] });
+    assert.ok(scoped.wikiPages.some(page => page.slug === 'topic/projects/metame'));
+    assert.ok(scoped.wikiPages.every(page => !page.slug.includes('/wrong-')));
+    const unscoped = await hybridSearchWiki(db, 'needle', { ftsOnly: true });
+    assert.deepEqual(unscoped.wikiPages.map(page => page.slug), ['topic']);
     db.close();
   });
 });

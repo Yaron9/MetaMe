@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { resolveWikiPageRelativePath } = require('./wiki-layout');
 const os = require('os');
 const crypto = require('crypto');
 
@@ -88,7 +89,7 @@ function readFrontmatter(absFile) {
 
 function classifyRel(rel) {
   const first = rel.split(path.sep)[0];
-  if (['brain', 'archive', 'sessions', 'capsules', 'decisions', 'lessons', 'research'].includes(first)) return first;
+  if (['brain', 'archive', 'sessions', 'capsules', 'curated', 'decisions', 'lessons', 'research', 'topics', 'sources', 'external', '_review'].includes(first)) return first;
   if (rel === '_index.md' || rel === 'Home.md' || rel === '_audit.md' || rel === '_cleanup-manifest.md') return 'entrypoint';
   return 'root';
 }
@@ -97,13 +98,14 @@ function isWeirdBasename(base) {
   return base.length < 2 || base === 'undefined' || base === 'null' || /^-\d*$/.test(base);
 }
 
-function shouldCheckDuplicateBasename(kind, base) {
+function shouldCheckDuplicateBasename(kind, base, rel = '') {
   if (base === '_index') return false;
-  return ['root', 'brain', 'archive', 'research'].includes(kind);
+  if (String(rel).split(path.sep).includes('projects')) return false;
+  return ['root', 'brain', 'archive', 'research', 'topics', 'sources'].includes(kind);
 }
 
 function shouldRequireFrontmatterTitle(kind) {
-  return ['root', 'brain', 'archive', 'research'].includes(kind);
+  return ['root', 'brain', 'archive', 'research', 'topics', 'sources'].includes(kind);
 }
 
 function classifyOutputCandidate(label) {
@@ -237,7 +239,7 @@ function scanWikiDir(rootDir) {
     const kind = classifyRel(rel);
     byKind[kind] = (byKind[kind] || 0) + 1;
     const base = path.basename(rel, '.md');
-    if (shouldCheckDuplicateBasename(kind, base)) {
+    if (shouldCheckDuplicateBasename(kind, base, rel)) {
       if (!basenameMap.has(base)) basenameMap.set(base, []);
       basenameMap.get(base).push(rel);
     }
@@ -327,7 +329,8 @@ function scanWikiDb(db, activeOutputDir) {
       emptySlugs.push({ id: row.id || null, title: title || null });
     } else {
       if (isWeirdBasename(slug)) weirdSlugs.push({ id: row.id || null, slug, title: title || null });
-      const exportPath = path.join(activeOutputDir, `${slug}.md`);
+      const relativePath = resolveWikiPageRelativePath(row);
+      const exportPath = path.join(activeOutputDir, ...relativePath.split('/'));
       if (activeOutputDir && !fs.existsSync(exportPath)) {
         missingExportFiles.push({ id: row.id || null, slug, title: title || null });
         scannedRow.exportExists = false;

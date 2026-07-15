@@ -401,7 +401,7 @@ function saveFacts(sessionId, project, facts, { scope = null, source_type = null
   // Wiki integration: update staleness + promote eligible topics (non-fatal)
   if (savedFacts.length > 0) {
     try {
-      const { updateStalenessForTags, checkTopicThreshold, upsertWikiTopic } = require('./core/wiki-db');
+      const { markTopicEvidenceDirty, checkTopicThreshold, upsertWikiTopic } = require('./core/wiki-db');
       const db = getDb();
 
       // Build tag → new-fact count map from saved facts' tags
@@ -416,7 +416,11 @@ function saveFacts(sessionId, project, facts, { scope = null, source_type = null
       }
 
       if (dirtyTagCounts.size > 0) {
-        updateStalenessForTags(db, dirtyTagCounts);
+        markTopicEvidenceDirty(db, [...dirtyTagCounts].map(([rawTag, count]) => ({
+          rawTag,
+          projectKey: savedFacts.find(fact => fact.tags.includes(rawTag))?.project || scope,
+          count,
+        })));
 
         // Promote tags that cross the threshold to wiki topics
         // Use force:true since we already checked the threshold — avoids double-query
@@ -583,6 +587,7 @@ async function hybridSearchWiki(query, {
   trackSearch = true,
   excludeSourceTypes = [],
   observeSourceTypes = [],
+  scopeKeys = [],
 } = {}) {
   try {
     const { hybridSearchWiki: fn } = require('./core/hybrid-search');
@@ -591,6 +596,7 @@ async function hybridSearchWiki(query, {
       trackSearch,
       excludeSourceTypes,
       observeSourceTypes,
+      scopeKeys,
     });
   } catch {
     const fallback = searchWikiAndFacts(query, { trackSearch });
@@ -601,6 +607,21 @@ async function hybridSearchWiki(query, {
       sourceHitCounts: {},
     };
   }
+}
+
+function getWikiPageScopes(slugs) {
+  const out = new Map();
+  if (!Array.isArray(slugs) || slugs.length === 0) return out;
+  try {
+    const db = getDb();
+    const placeholders = slugs.map(() => '?').join(',');
+    const rows = db.prepare(`
+      SELECT page_slug, scope_key FROM wiki_page_scopes WHERE page_slug IN (${placeholders})
+    `).all(...slugs);
+    for (const slug of slugs) out.set(slug, []);
+    for (const row of rows) out.get(row.page_slug).push(row.scope_key);
+  } catch { /* additive schema may not exist on a pre-migration read */ }
+  return out;
 }
 
 /**
@@ -638,6 +659,7 @@ module.exports = {
   // wiki
   searchWikiAndFacts,
   hybridSearchWiki,
+  getWikiPageScopes,
   getWikiTopicTags,
   // compatibility
   saveSession,

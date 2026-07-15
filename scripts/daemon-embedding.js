@@ -23,9 +23,12 @@ const { spawn } = require('child_process');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
-const DB_PATH = path.join(METAME_DIR, 'memory.db');
-const LOCK_FILE = path.join(METAME_DIR, 'daemon-embedding.lock');
-const LOG_FILE = path.join(METAME_DIR, 'embedding_log.jsonl');
+const DB_PATH = process.env.METAME_MEMORY_DB_PATH
+  ? path.resolve(process.env.METAME_MEMORY_DB_PATH) : path.join(METAME_DIR, 'memory.db');
+const LOCK_FILE = process.env.METAME_EMBEDDING_LOCK_PATH
+  ? path.resolve(process.env.METAME_EMBEDDING_LOCK_PATH) : path.join(METAME_DIR, 'daemon-embedding.lock');
+const LOG_FILE = process.env.METAME_EMBEDDING_LOG_PATH
+  ? path.resolve(process.env.METAME_EMBEDDING_LOG_PATH) : path.join(METAME_DIR, 'embedding_log.jsonl');
 const LOCK_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_BATCH = 50;
 

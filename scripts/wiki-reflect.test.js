@@ -31,6 +31,10 @@ function buildTestDb() {
       confidence REAL DEFAULT 0.5,
       search_count INTEGER DEFAULT 0,
       relation  TEXT,
+      project   TEXT,
+      scope     TEXT,
+      source_type TEXT,
+      source_id TEXT,
       tags      TEXT DEFAULT '[]',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -82,6 +86,71 @@ test('runWikiReflect returns empty results when no topics registered', async () 
   db.close();
 });
 
+test('dossier mode canonicalizes aliases and builds Hub plus project dossier', async () => {
+  const db = buildTestDb();
+  upsertWikiTopic(db, 'Step3', { force: true });
+  upsertWikiTopic(db, 'step3', { force: true });
+  for (const id of ['d1', 'd2', 'd3']) {
+    db.prepare(`
+      INSERT INTO memory_items (id, state, kind, content, tags, project, scope)
+      VALUES (?, 'active', 'insight', ?, ?, 'MetaMe', 'proj_metame')
+    `).run(id, `project fact ${id}`, JSON.stringify([id === 'd1' ? 'Step3' : 'step3']));
+  }
+  const dir = makeTmpDir();
+  try {
+    const result = await runWikiReflect(db, {
+      outputDir: dir,
+      capsulesDir: path.join(dir, 'capsules'),
+      logPath: path.join(dir, 'log.jsonl'),
+      dossierMode: true,
+      providers: makeProviders({ response: JSON.stringify({ claims: [{
+        section: 'current_state', text: '项目链路已接通', evidenceRefs: ['M:d1'],
+      }] }) }),
+    });
+    assert.ok(result.built.includes('step3'));
+    assert.ok(result.built.includes('step3/projects/metame'));
+    assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM wiki_pages WHERE page_kind='topic_hub'`).get().n, 1);
+    assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM wiki_pages WHERE page_kind='project_dossier'`).get().n, 1);
+    assert.equal(db.prepare(`SELECT topic_slug FROM wiki_topic_aliases WHERE normalized_alias='step3'`).get().topic_slug, 'step3');
+    assert.ok(fs.existsSync(path.join(dir, 'topics', 'step3.md')));
+    assert.ok(fs.existsSync(path.join(dir, 'topics', 'step3', 'projects', 'metame.md')));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    db.close();
+  }
+});
+
+test('dossier eligibility uses two-miss hysteresis for one or two remaining facts', async () => {
+  const db = buildTestDb();
+  upsertWikiTopic(db, 'skill', { force: true });
+  for (const id of ['s1', 's2']) {
+    db.prepare(`INSERT INTO memory_items (id,state,kind,content,tags,project) VALUES (?,'active','insight','fact','["skill"]','MetaMe')`).run(id);
+  }
+  const { writeWikiPageWithChunks } = require('./wiki-reflect-build');
+  writeWikiPageWithChunks(db, {
+    slug: 'skill/projects/metame', title: 'Skill · metame', primary_topic: 'skill',
+    page_kind: 'project_dossier', project_key: 'metame', build_profile: 'local-dossier-v1',
+  }, 'old dossier', { scopes: ['metame'], evidence: [] });
+  const dir = makeTmpDir();
+  const options = {
+    outputDir: dir, capsulesDir: path.join(dir, 'capsules'), logPath: path.join(dir, 'log.jsonl'),
+    dossierMode: true, providers: makeProviders(),
+  };
+  try {
+    await runWikiReflect(db, options);
+    let page = getWikiPageBySlug(db, 'skill/projects/metame');
+    assert.equal(page.eligibility_miss_count, 1);
+    assert.equal(page.source_type, 'memory');
+    await runWikiReflect(db, options);
+    page = getWikiPageBySlug(db, 'skill/projects/metame');
+    assert.equal(page.build_profile, 'managed-redirect-v1');
+    assert.equal(page.source_type, 'managed_redirect');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    db.close();
+  }
+});
+
 test('runWikiReflect builds a stale page (staleness=1.0 for new topic)', async () => {
   const db = buildTestDb();
   const dir = makeTmpDir();
@@ -97,7 +166,7 @@ test('runWikiReflect builds a stale page (staleness=1.0 for new topic)', async (
     assert.ok(page, 'wiki page should exist in DB');
     assert.equal(page.staleness, 0.0, 'staleness should be 0 after build');
 
-    const mdFile = path.join(dir, 'session.md');
+    const mdFile = path.join(dir, 'topics', 'session.md');
     assert.ok(fs.existsSync(mdFile), 'markdown file should be written');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -361,7 +430,7 @@ test('runWikiReflect exports doc pages from DB to vault', async (_t) => {
   });
 
   assert.ok(
-    fs.existsSync(path.join(outDir, 'doc-paper.md')),
+    fs.existsSync(path.join(outDir, 'sources', 'doc-paper.md')),
     'doc page exported to vault'
   );
   assert.ok(typeof result.docsExported === 'number', 'result.docsExported is a number');

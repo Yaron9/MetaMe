@@ -113,7 +113,7 @@ test('assembleRecallContext: forces trackSearch=false (no search_count bump on f
   });
 });
 
-test('assembleRecallContext: wikiDropped=true when FTS hits but topic_tags do not overlap scope', async () => {
+test('assembleRecallContext: wrong-project dossier is filtered before recall ranking', async () => {
   await withFreshMemoryHome(async (memory, assembleRecallContext) => {
     // Force memory.js to open + apply schema.
     memory.acquire();
@@ -123,28 +123,30 @@ test('assembleRecallContext: wikiDropped=true when FTS hits but topic_tags do no
     const dbPath = path.join(process.env.HOME, '.metame', 'memory.db');
     const aux = new DatabaseSync(dbPath);
     aux.prepare(
-      `INSERT INTO wiki_pages (id, slug, title, content, primary_topic, topic_tags) VALUES ('wp_recall_1','recall-test','saveFacts behavior','saveFacts and other helpers live in scripts','testing','["unrelated-tag","other-tag"]')`
+      `INSERT INTO wiki_pages (id, slug, title, content, primary_topic, page_kind, project_key) VALUES ('wp_recall_1','recall-test','saveFacts behavior','saveFacts and other helpers live in scripts','testing','project_dossier','other')`
     ).run();
+    aux.prepare(`INSERT INTO wiki_page_scopes (page_slug, scope_key) VALUES ('recall-test','other')`).run();
     aux.close();
 
     const result = await assembleRecallContext({
       plan: TRUE_PLAN({ anchors: ['fn:saveFacts'], modes: ['wiki'] }),
       scope: SCOPE,
     });
-    // FTS finds the page; topic_tags don't overlap scope → wikiDropped=true.
-    assert.equal(result.wikiDropped, true);
+    assert.equal(result.text, '');
+    assert.equal(result.wikiDropped, false);
   });
 });
 
-test('assembleRecallContext: wiki tier kept when topic_tags overlap', async () => {
+test('assembleRecallContext: matching project dossier is kept', async () => {
   await withFreshMemoryHome(async (memory, assembleRecallContext) => {
     memory.acquire();
     const { DatabaseSync } = require('node:sqlite');
     const dbPath = path.join(process.env.HOME, '.metame', 'memory.db');
     const aux = new DatabaseSync(dbPath);
     aux.prepare(
-      `INSERT INTO wiki_pages (id, slug, title, content, primary_topic, topic_tags) VALUES ('wp_recall_2','recall-test-2','saveFacts location','saveFacts is in memory.js','testing','["metame","jarvis"]')`
+      `INSERT INTO wiki_pages (id, slug, title, content, primary_topic, page_kind, project_key) VALUES ('wp_recall_2','recall-test-2','saveFacts location','saveFacts is in memory.js','testing','project_dossier','metame')`
     ).run();
+    aux.prepare(`INSERT INTO wiki_page_scopes (page_slug, scope_key) VALUES ('recall-test-2','metame')`).run();
     aux.close();
 
     const result = await assembleRecallContext({

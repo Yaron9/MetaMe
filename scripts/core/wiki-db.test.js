@@ -17,7 +17,30 @@ const {
   listWikiTopics,
   searchWikiAndFacts,
   updateStalenessForTags,
+  markTopicEvidenceDirty,
 } = require('./wiki-db');
+
+it('marks only canonical Hub and matching project dossier dirty', () => {
+  const db = openTestDb();
+  upsertWikiTopic(db, 'Step3', { force: true });
+  upsertWikiTopic(db, 'step3', { force: true });
+  for (const [slug, kind, project] of [
+    ['step3', 'topic_hub', null],
+    ['step3/projects/metame', 'project_dossier', 'metame'],
+    ['step3/projects/other', 'project_dossier', 'other'],
+  ]) {
+    upsertWikiPage(db, { slug, primary_topic: 'Step3', title: slug, content: 'content' });
+    db.prepare('UPDATE wiki_pages SET page_kind=?, project_key=?, raw_source_count=10 WHERE slug=?').run(kind, project, slug);
+  }
+  markTopicEvidenceDirty(db, [{ rawTag: 'step3', projectKey: 'MetaMe', count: 2 }]);
+  const rows = db.prepare('SELECT slug, new_facts_since_build FROM wiki_pages ORDER BY slug').all();
+  assert.deepEqual(rows.map(row => [row.slug, row.new_facts_since_build]), [
+    ['step3', 2],
+    ['step3/projects/metame', 2],
+    ['step3/projects/other', 0],
+  ]);
+  db.close();
+});
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 

@@ -92,6 +92,7 @@ function projectMarkdown({ relativePath, markdown, scopeTags = ['metame'] }) {
       raw_source_ids: [sourceKey],
       raw_source_count: 1,
       topic_tags: topicTags,
+      scope_keys: [...new Set(scopeTags.map(String).map(tag => tag.normalize('NFKC').trim().toLowerCase()).filter(Boolean))],
     },
   };
 }

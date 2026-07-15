@@ -62,6 +62,10 @@ function inspectDatabase(report, config, { dbPath = DB_PATH, Database = Database
     const chunkColumns = tableColumns(db, 'content_chunks');
     const queueColumns = tableColumns(db, 'embedding_queue');
     const externalSchemaReady = wikiColumns.has('source_type') && tableExists(db, 'wiki_external_sources');
+    const dossierSchemaReady = wikiColumns.has('page_kind')
+      && tableExists(db, 'wiki_topic_aliases')
+      && tableExists(db, 'wiki_page_scopes')
+      && tableExists(db, 'wiki_page_evidence');
     const metrics = {
       memory_items: countRows(db, 'memory_items'),
       wiki_pages: countRows(db, 'wiki_pages'),
@@ -74,6 +78,8 @@ function inspectDatabase(report, config, { dbPath = DB_PATH, Database = Database
         ? countRows(db, 'embedding_queue', 'attempts < 3') : 0,
       queue_dead: queueColumns.has('attempts')
         ? countRows(db, 'embedding_queue', 'attempts >= 3') : 0,
+      topic_hubs: dossierSchemaReady ? countRows(db, 'wiki_pages', "page_kind='topic_hub' AND source_type='memory'") : 0,
+      project_dossiers: dossierSchemaReady ? countRows(db, 'wiki_pages', "page_kind='project_dossier' AND source_type='memory'") : 0,
     };
     report.metrics = { ...report.metrics, ...metrics };
     const models = chunkColumns.has('embedding_model') && chunkColumns.has('embedding_dim')
@@ -86,6 +92,28 @@ function inspectDatabase(report, config, { dbPath = DB_PATH, Database = Database
     if (metrics.queue_dead > 0) addCheck(report, 'embedding-queue', 'error', `${metrics.queue_dead} dead embedding jobs`);
     else if (metrics.queue_pending > 0) addCheck(report, 'embedding-queue', 'degraded', `${metrics.queue_pending} embedding jobs pending`);
     else addCheck(report, 'embedding-queue', 'ok', 'embedding queue empty');
+
+    if (!dossierSchemaReady) {
+      addCheck(report, 'dossier-schema', 'degraded', 'schema upgrade required before dossier diagnostics');
+    } else {
+      const orphanEvidence = db.prepare(`
+        SELECT COUNT(*) AS n FROM wiki_page_evidence wpe
+        LEFT JOIN memory_items mi ON wpe.evidence_type='memory_item' AND mi.id=wpe.evidence_id
+        LEFT JOIN paper_facts pf ON wpe.evidence_type='paper_fact' AND pf.id=wpe.evidence_id
+        WHERE (wpe.evidence_type='memory_item' AND mi.id IS NULL)
+           OR (wpe.evidence_type='paper_fact' AND pf.id IS NULL)
+      `).get().n;
+      const orphanAliases = db.prepare(`
+        SELECT COUNT(*) AS n FROM wiki_topic_aliases wta
+        LEFT JOIN wiki_pages wp ON wp.slug=wta.topic_slug WHERE wp.slug IS NULL
+      `).get().n;
+      report.metrics.orphan_wiki_evidence = orphanEvidence;
+      report.metrics.orphan_topic_aliases = orphanAliases;
+      addCheck(report, 'dossier-evidence', orphanEvidence + orphanAliases === 0 ? 'ok' : 'error',
+        orphanEvidence + orphanAliases === 0
+          ? 'evidence and aliases are referentially complete'
+          : `${orphanEvidence} orphan evidence, ${orphanAliases} orphan aliases`);
+    }
 
     if (!externalSchemaReady) {
       addCheck(report, 'openwiki-schema', 'degraded', 'schema upgrade required before projection diagnostics');

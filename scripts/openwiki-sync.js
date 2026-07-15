@@ -235,7 +235,15 @@ function applyProjection(db, pages, runId, { dryRun = false } = {}) {
         deleteExternalPage(db, previous.page_slug);
       }
       if (changed) {
-        writeWikiPageWithChunks(db, page.pageSpec, page.content, { transaction: false });
+        writeWikiPageWithChunks(db, page.pageSpec, page.content, {
+          transaction: false,
+          scopes: page.pageSpec.scope_keys,
+        });
+      }
+      if (!changed) {
+        db.prepare('DELETE FROM wiki_page_scopes WHERE page_slug = ?').run(page.pageSpec.slug);
+        const insertScope = db.prepare('INSERT INTO wiki_page_scopes (page_slug, scope_key) VALUES (?, ?)');
+        for (const scopeKey of page.pageSpec.scope_keys) insertScope.run(page.pageSpec.slug, scopeKey);
       }
       upsertSource.run(
         page.sourceKey,

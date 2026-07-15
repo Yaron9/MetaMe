@@ -30,6 +30,7 @@
 
 const { assertValidWikiSlug, toSlug, sanitizeFts5 } = require('./wiki-slug');
 const { calcStaleness } = require('./wiki-staleness');
+const { normalizeProjectKey, normalizeTopicKey } = require('./wiki-topic-model');
 
 // ── wiki_pages CRUD ────────────────────────────────────────────────────────────
 
@@ -398,11 +399,23 @@ function _trackSearch(db, ids) {
  * @param {Map<string, number>} dirtyTagCounts
  */
 function updateStalenessForTags(db, dirtyTagCounts) {
-  for (const [tag, newCount] of dirtyTagCounts) {
-    if (newCount <= 0) continue;
+  markTopicEvidenceDirty(db, [...dirtyTagCounts].map(([rawTag, count]) => ({ rawTag, count })));
+}
 
-    // Match via wiki_topics.tag (canonical registry) → wiki_pages.slug
-    db.prepare(`
+function markTopicEvidenceDirty(db, changes) {
+  const topics = db.prepare('SELECT tag, slug FROM wiki_topics').all();
+  const canonicalByKey = new Map();
+  for (const topic of topics) {
+    const key = normalizeTopicKey(topic.tag);
+    const preferred = canonicalByKey.get(key);
+    if (!preferred || topic.slug === toSlug(key)) canonicalByKey.set(key, topic.slug);
+  }
+  try {
+    for (const row of db.prepare('SELECT normalized_alias, topic_slug FROM wiki_topic_aliases').all()) {
+      canonicalByKey.set(row.normalized_alias, row.topic_slug);
+    }
+  } catch { /* additive schema not applied yet */ }
+  const update = db.prepare(`
       UPDATE wiki_pages
       SET new_facts_since_build = new_facts_since_build + ?,
           staleness = MIN(1.0,
@@ -410,10 +423,17 @@ function updateStalenessForTags(db, dirtyTagCounts) {
             / NULLIF(raw_source_count + new_facts_since_build + ?, 0)
           ),
           updated_at = datetime('now')
-      WHERE slug IN (
-        SELECT slug FROM wiki_topics WHERE lower(trim(tag)) = lower(trim(?))
+      WHERE slug = ? OR (
+        page_kind = 'project_dossier' AND project_key = ? AND slug LIKE ?
       )
-    `).run(newCount, newCount, newCount, tag);
+    `);
+  for (const change of changes || []) {
+    const newCount = Number(change.count || 0);
+    if (newCount <= 0) continue;
+    const hubSlug = canonicalByKey.get(normalizeTopicKey(change.rawTag));
+    if (!hubSlug) continue;
+    const projectKey = normalizeProjectKey(change.projectKey);
+    update.run(newCount, newCount, newCount, hubSlug, projectKey, `${hubSlug}/projects/%`);
   }
 }
 
@@ -533,6 +553,7 @@ module.exports = {
   searchWikiAndFacts,
   // staleness
   updateStalenessForTags,
+  markTopicEvidenceDirty,
   // doc_sources CRUD
   upsertDocSource,
   getDocSourceByPath,

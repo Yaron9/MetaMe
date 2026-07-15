@@ -139,6 +139,12 @@ function writeFacts(db, docSourceId, facts) {
   const tx = db.prepare('BEGIN');
   const commit = db.prepare('COMMIT');
   const rollback = db.prepare('ROLLBACK');
+  const entityState = _prepareEntityState(db);
+  const insertLink = db.prepare(`
+    INSERT INTO fact_entity_links (fact_id, entity_id, role) VALUES (?, ?, ?)
+    ON CONFLICT(fact_id, entity_id) DO UPDATE SET role =
+      CASE WHEN fact_entity_links.role = excluded.role THEN excluded.role ELSE 'subject_object' END
+  `);
   tx.run();
   try {
     for (const f of facts) {
@@ -149,16 +155,58 @@ function writeFacts(db, docSourceId, facts) {
       const id = 'pf_' + crypto.createHash('sha256').update(idSeed).digest('hex').slice(0, 16);
       insert.run(
         id, docSourceId, factType,
-        f.subject, f.predicate, f.object,
-        f.value, f.unit, f.context,
-        f.evidence_text, f.section, f.confidence,
+        f.subject ?? null, f.predicate ?? null, f.object ?? null,
+        f.value ?? null, f.unit ?? null, f.context ?? null,
+        f.evidence_text, f.section ?? null, f.confidence ?? 0.7,
       );
+      _linkFactEntities(f, id, entityState, insertLink);
     }
     commit.run();
   } catch (err) {
     try { rollback.run(); } catch { /* ignore */ }
     throw err;
   }
+}
+
+function normalizeEntityName(value) {
+  return String(value || '').normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase();
+}
+
+function _prepareEntityState(db) {
+  const byName = new Map();
+  for (const row of db.prepare('SELECT id, name FROM research_entities ORDER BY created_at, id').all()) {
+    const key = normalizeEntityName(row.name);
+    if (key && !byName.has(key)) byName.set(key, row.id);
+  }
+  return {
+    db,
+    byName,
+    insert: db.prepare('INSERT OR IGNORE INTO research_entities (id, entity_type, name) VALUES (?, ?, ?)'),
+  };
+}
+
+function _ensureEntity(name, state) {
+  const displayName = String(name || '').normalize('NFKC').trim().replace(/\s+/gu, ' ');
+  const key = normalizeEntityName(displayName);
+  if (key.length < 2 || displayName.length > 100) return null;
+  const existing = state.byName.get(key);
+  if (existing) return existing;
+  const id = `ent_${crypto.createHash('sha256').update(key).digest('hex').slice(0, 12)}`;
+  state.insert.run(id, inferEntityType(displayName), displayName);
+  const row = state.db.prepare('SELECT id FROM research_entities WHERE id=? OR name=? ORDER BY id LIMIT 1').get(id, displayName);
+  if (!row) return null;
+  state.byName.set(key, row.id);
+  return row.id;
+}
+
+function _linkFactEntities(fact, factId, state, insertLink) {
+  const roles = new Map();
+  for (const [role, name] of [['subject', fact.subject], ['object', fact.object]]) {
+    const entityId = _ensureEntity(name, state);
+    if (!entityId) continue;
+    roles.set(entityId, roles.has(entityId) && roles.get(entityId) !== role ? 'subject_object' : role);
+  }
+  for (const [entityId, role] of roles) insertLink.run(factId, entityId, role);
 }
 
 // Simple entity_type inference from fact fields
@@ -182,37 +230,42 @@ function inferEntityType(text) {
  * INSERT OR IGNORE — safe to call multiple times.
  */
 function registerEntities(db, facts) {
-  const seen = new Set();
-  const candidates = [];
-  for (const f of facts) {
-    for (const field of [f.subject, f.object]) {
-      if (field && field.length >= 2 && field.length <= 100 && !seen.has(field)) {
-        seen.add(field);
-        candidates.push(field);
-      }
-    }
-  }
-  if (candidates.length === 0) return;
-
-  const insert = db.prepare(`
-    INSERT OR IGNORE INTO research_entities (id, entity_type, name)
-    VALUES (?, ?, ?)
-  `);
+  const state = _prepareEntityState(db);
   const tx = db.prepare('BEGIN');
   const commit = db.prepare('COMMIT');
   const rollback = db.prepare('ROLLBACK');
   tx.run();
   try {
-    for (const name of candidates) {
-      const id = 'ent_' + crypto.randomBytes(6).toString('hex');
-      const entity_type = inferEntityType(name);
-      insert.run(id, entity_type, name);
+    for (const fact of facts) {
+      _ensureEntity(fact.subject, state);
+      _ensureEntity(fact.object, state);
     }
     commit.run();
   } catch (err) {
     try { rollback.run(); } catch { /* ignore */ }
     throw err;
   }
+}
+
+function backfillFactEntityLinks(db) {
+  const facts = db.prepare('SELECT id, subject, object FROM paper_facts ORDER BY id').all();
+  const state = _prepareEntityState(db);
+  const insertLink = db.prepare(`
+    INSERT INTO fact_entity_links (fact_id, entity_id, role) VALUES (?, ?, ?)
+    ON CONFLICT(fact_id, entity_id) DO UPDATE SET role =
+      CASE WHEN fact_entity_links.role = excluded.role THEN excluded.role ELSE 'subject_object' END
+  `);
+  const before = db.prepare('SELECT COUNT(*) AS n FROM fact_entity_links').get().n;
+  db.prepare('BEGIN').run();
+  try {
+    for (const fact of facts) _linkFactEntities(fact, fact.id, state, insertLink);
+    db.prepare('COMMIT').run();
+  } catch (error) {
+    try { db.prepare('ROLLBACK').run(); } catch { /* ignore */ }
+    throw error;
+  }
+  const after = db.prepare('SELECT COUNT(*) AS n FROM fact_entity_links').get().n;
+  return { facts: facts.length, links: after, inserted: after - before };
 }
 
 // ── Main extraction entry point ───────────────────────────────────────────────
@@ -265,7 +318,6 @@ async function extractPaperFacts(db, docSource, sections, providers, { concurren
 
   // Write to DB in one shot (after all LLM calls complete)
   writeFacts(db, docSource.id, allFacts);
-  registerEntities(db, allFacts);
 
   return allFacts;
 }
@@ -348,4 +400,4 @@ Rules:
 - Respond with only the wiki page content`;
 }
 
-module.exports = { extractPaperFacts, writeFacts, registerEntities, buildTier1Prompt };
+module.exports = { backfillFactEntityLinks, extractPaperFacts, writeFacts, registerEntities, buildTier1Prompt, normalizeEntityName };

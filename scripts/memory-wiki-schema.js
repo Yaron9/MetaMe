@@ -47,6 +47,12 @@ function applyWikiSchema(db) {
 
   // Migration: add timeline column for Compiled Truth + Timeline model (existing DBs)
   try { db.exec("ALTER TABLE wiki_pages ADD COLUMN timeline TEXT DEFAULT ''"); } catch { /* column already exists */ }
+  try { db.exec("ALTER TABLE wiki_pages ADD COLUMN page_kind TEXT DEFAULT 'topic_hub'"); } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE wiki_pages ADD COLUMN project_key TEXT'); } catch { /* already exists */ }
+  try { db.exec("ALTER TABLE wiki_pages ADD COLUMN build_profile TEXT DEFAULT 'legacy-v1'"); } catch { /* already exists */ }
+  try { db.exec("ALTER TABLE wiki_pages ADD COLUMN source_membership_hash TEXT DEFAULT ''"); } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE wiki_pages ADD COLUMN eligibility_miss_count INTEGER DEFAULT 0'); } catch { /* already exists */ }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_wiki_pages_kind_project ON wiki_pages(page_kind, project_key)');
 
   // ── wiki_topics ─────────────────────────────────────────────────────────────
   db.exec(`
@@ -58,6 +64,42 @@ function applyWikiSchema(db) {
       created_at TEXT DEFAULT (datetime('now'))
     )
   `);
+
+  // Canonical topic identity. Raw tags remain unchanged on memory_items; aliases
+  // are the deterministic boundary between source vocabulary and generated pages.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS wiki_topic_aliases (
+      normalized_alias TEXT PRIMARY KEY,
+      raw_alias        TEXT NOT NULL,
+      topic_slug       TEXT NOT NULL,
+      created_at       TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (topic_slug) REFERENCES wiki_pages(slug) ON DELETE CASCADE
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_wiki_topic_aliases_slug ON wiki_topic_aliases(topic_slug)');
+
+  // Scope is a recall relevance gate, not an authorization boundary.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS wiki_page_scopes (
+      page_slug TEXT NOT NULL,
+      scope_key TEXT NOT NULL,
+      PRIMARY KEY (page_slug, scope_key),
+      FOREIGN KEY (page_slug) REFERENCES wiki_pages(slug) ON DELETE CASCADE
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_wiki_page_scopes_scope ON wiki_page_scopes(scope_key, page_slug)');
+
+  // Minimal polymorphic evidence relation. Metadata stays in the source tables.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS wiki_page_evidence (
+      page_slug    TEXT NOT NULL,
+      evidence_type TEXT NOT NULL CHECK (evidence_type IN ('memory_item','paper_fact')),
+      evidence_id  TEXT NOT NULL,
+      PRIMARY KEY (page_slug, evidence_type, evidence_id),
+      FOREIGN KEY (page_slug) REFERENCES wiki_pages(slug) ON DELETE CASCADE
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_wiki_page_evidence_source ON wiki_page_evidence(evidence_type, evidence_id)');
 
   // ── wiki_pages_fts (FTS5 content table) ─────────────────────────────────────
   try {

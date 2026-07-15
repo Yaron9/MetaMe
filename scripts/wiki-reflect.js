@@ -20,8 +20,16 @@ const path = require('path');
 const os = require('os');
 
 const { listWikiTopics, getWikiPageBySlug, listWikiPages, listRecentSessionSummaries } = require('./core/wiki-db');
-const { queryRawFacts } = require('./wiki-reflect-query');
-const { buildWikiPage } = require('./wiki-reflect-build');
+const { queryRawFacts, queryRelatedTopics, queryTopicEvidence, queryTopicResearch } = require('./wiki-reflect-query');
+const { buildWikiPage, buildProjectDossier, buildTopicHubPage, writeWikiPageWithChunks } = require('./wiki-reflect-build');
+const {
+  buildDossierSlug,
+  groupTopicEvidence,
+  isAtomicMemoryFact,
+  normalizeTopicKey,
+  planCanonicalTopics,
+  sourceMembershipHash,
+} = require('./core/wiki-topic-model');
 const {
   exportWikiPage,
   rebuildIndex,
@@ -32,6 +40,7 @@ const {
   exportReflectDir,
   rebuildReflectDirIndex,
   exportDocPages,
+  organizeWikiProjection,
 } = require('./wiki-reflect-export');
 const {
   defaultWikiOutputDir,
@@ -72,11 +81,15 @@ async function runWikiReflect(db, {
   logPath = DEFAULT_LOG_PATH,
   providers,
   threshold = STALENESS_THRESHOLD,
+  dossierMode = false,
+  topicSlugs = null,
+  lockFile = LOCK_FILE,
+  dossierConcurrency = 4,
 } = {}) {
   const startMs = Date.now();
 
   // 1. Acquire lock
-  if (!_acquireLock(LOCK_FILE)) {
+  if (!_acquireLock(lockFile)) {
     throw new Error('wiki-reflect: another instance is running (lock file exists and is recent)');
   }
 
@@ -92,11 +105,25 @@ async function runWikiReflect(db, {
     const failedSlugsMap = _loadFailedSlugs(logPath);
 
     // 3. Get all registered topics and their allowed slugs (for wikilink whitelist)
-    const topics = listWikiTopics(db);
+    const registeredTopics = listWikiTopics(db);
+    const plannedTopics = dossierMode ? planCanonicalTopics(registeredTopics) : registeredTopics;
+    const selectedSlugs = Array.isArray(topicSlugs) ? new Set(topicSlugs) : null;
+    const topics = selectedSlugs ? plannedTopics.filter(topic => selectedSlugs.has(topic.slug)) : plannedTopics;
     const allowedSlugs = topics.map(t => t.slug);
 
-    // 4. Process each topic
-    for (const topic of topics) {
+    if (dossierMode) {
+      const results = await _mapWithConcurrency(topics, dossierConcurrency,
+        topic => _reflectDossierTopic(db, topic, { outputDir, providers, threshold }));
+      for (const result of results) {
+        built.push(...result.built);
+        failed.push(...result.failed);
+        exportFailed.push(...result.exportFailed);
+      }
+    }
+
+    // 4. Process each legacy topic. Dossier mode is handled concurrently above;
+    // DB writes remain synchronous and each page writer owns its transaction.
+    for (const topic of dossierMode ? [] : topics) {
       const slug = topic.slug;
 
       // Determine if this page should be rebuilt
@@ -149,6 +176,7 @@ async function runWikiReflect(db, {
           last_built: (updatedPage.last_built_at || '').slice(0, 10),
           raw_sources: updatedPage.raw_source_count,
           staleness: updatedPage.staleness,
+          source_type: updatedPage.source_type || 'memory',
         };
 
         try {
@@ -179,6 +207,14 @@ async function runWikiReflect(db, {
     try { sessions = listRecentSessionSummaries(db, { limit: 200 }); } catch { /* non-fatal */ }
     const capsuleFiles = _listCapsuleFiles(capsulesDir);
 
+    // Export rebuildable document projections before indexes, then reconcile
+    // legacy flat files into their stable collection directories.
+    try {
+      const { exported } = exportDocPages(db, outputDir);
+      docsExported = exported.length;
+    } catch { /* non-fatal */ }
+    try { organizeWikiProjection(allPages, outputDir); } catch { /* non-fatal */ }
+
     try {
       rebuildIndex(allPages, outputDir, { sessionCount: sessions.length, capsuleCount: capsuleFiles.length });
     } catch { /* non-fatal — _index.md not updated */ }
@@ -195,13 +231,7 @@ async function runWikiReflect(db, {
     }
     try { rebuildCapsulesIndex(capsuleFiles, outputDir); } catch { /* non-fatal */ }
 
-    // Step 6: Export doc/cluster pages from DB
-    try {
-      const { exported } = exportDocPages(db, outputDir);
-      docsExported = exported.length;
-    } catch { /* non-fatal */ }
-
-    // Step 7: Mirror decisions and lessons to vault
+    // Step 6: Mirror decisions and lessons to vault
     try {
       const decWritten = exportReflectDir(decisionsDir, 'decisions', outputDir);
       const lesWritten = exportReflectDir(lessonsDir, 'lessons', outputDir);
@@ -219,7 +249,7 @@ async function runWikiReflect(db, {
 
   } finally {
     // 6. Release lock
-    _releaseLock(LOCK_FILE);
+    _releaseLock(lockFile);
 
     // 7. Write audit log
     const entry = {
@@ -240,6 +270,155 @@ async function runWikiReflect(db, {
   return { built, failed, exportFailed, docsExported, reflectExported };
 }
 
+async function _mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await mapper(items[index]);
+    }
+  }
+  const count = Math.max(1, Math.min(Number(limit) || 1, items.length || 1));
+  await Promise.all(Array.from({ length: count }, () => worker()));
+  return results;
+}
+
+async function _reflectDossierTopic(db, topic, { outputDir, providers, threshold }) {
+  const built = [];
+  const failed = [];
+  const exportFailed = [];
+  const evidenceRows = queryTopicEvidence(db, topic.aliases || [topic.tag]);
+  const grouped = groupTopicEvidence(evidenceRows);
+  const research = queryTopicResearch(db, topic.aliases || [topic.tag]);
+  const related = queryRelatedTopics(db, topic.aliases || [topic.tag]);
+  let dossierChanged = false;
+  const dossierLinks = [];
+  const plannedDossierSlugs = new Map(grouped.dossiers.map(item => [
+    item.projectKey,
+    buildDossierSlug(topic.slug, item.projectKey),
+  ]));
+
+  for (const dossier of grouped.dossiers) {
+    const slug = buildDossierSlug(topic.slug, dossier.projectKey);
+    const evidence = dossier.facts.map(fact => ({ evidence_type: 'memory_item', evidence_id: fact.id }));
+    const membership = sourceMembershipHash(dossier.facts.map(fact => ({ ...fact, evidence_type: 'memory_item', evidence_id: fact.id })));
+    const existing = getWikiPageBySlug(db, slug);
+    const needsBuild = !existing
+      || existing.build_profile !== 'local-dossier-v1'
+      || existing.source_membership_hash !== membership
+      || Number(existing.staleness || 0) >= threshold;
+    if (needsBuild) {
+      const result = await buildProjectDossier(db, topic, dossier.projectKey, dossier.facts, { providers });
+      if (!result) {
+        failed.push(_failedBuild(slug));
+        if (existing) dossierLinks.push({ slug, projectKey: dossier.projectKey, factCount: dossier.facts.length });
+        continue;
+      }
+      dossierChanged = true;
+      _recordExport(db, slug, result.content, outputDir, built, exportFailed);
+    }
+    dossierLinks.push({ slug, projectKey: dossier.projectKey, factCount: dossier.facts.length });
+  }
+
+  const desiredSlugs = new Set(dossierLinks.map(item => item.slug));
+  const existingDossiers = db.prepare(`
+    SELECT * FROM wiki_pages
+    WHERE page_kind='project_dossier' AND build_profile!='managed-redirect-v1' AND slug LIKE ?
+  `).all(`${topic.slug}/projects/%`);
+  for (const existing of existingDossiers) {
+    if (desiredSlugs.has(existing.slug)) continue;
+    const count = evidenceRows.filter(fact => isAtomicMemoryFact(fact)
+      && normalizeTopicKey(fact.project || fact.scope) === normalizeTopicKey(existing.project_key)).length;
+    const desiredReplacement = plannedDossierSlugs.get(existing.project_key);
+    const replacement = desiredReplacement && desiredReplacement !== existing.slug
+      ? getWikiPageBySlug(db, desiredReplacement) : null;
+    if (count >= 3 && (!replacement || replacement.build_profile !== 'local-dossier-v1')) {
+      dossierLinks.push({ slug: existing.slug, projectKey: existing.project_key, factCount: count });
+      continue;
+    }
+    const misses = count === 0 || count >= 3 ? 2 : Number(existing.eligibility_miss_count || 0) + 1;
+    if (misses < 2) {
+      db.prepare('UPDATE wiki_pages SET eligibility_miss_count=? WHERE slug=?').run(misses, existing.slug);
+      dossierLinks.push({ slug: existing.slug, projectKey: existing.project_key, factCount: count });
+      continue;
+    }
+    const redirect = `# ${existing.title}\n\n项目证据已低于维护门槛，请返回 [[topics/${topic.slug}|${topic.label || topic.tag}]]。\n`;
+    writeWikiPageWithChunks(db, {
+      slug: existing.slug, title: existing.title, primary_topic: topic.tag,
+      source_type: 'managed_redirect', page_kind: 'project_dossier', project_key: existing.project_key,
+      build_profile: 'managed-redirect-v1', eligibility_miss_count: misses,
+      source_membership_hash: '', raw_source_ids: '[]', raw_source_count: 0, topic_tags: '[]',
+    }, redirect, { evidence: [], scopes: [] });
+    dossierChanged = true;
+    _recordExport(db, existing.slug, redirect, outputDir, built, exportFailed);
+  }
+
+  const hubEvidence = grouped.sparse.map(fact => ({ ...fact, evidence_type: 'memory_item', evidence_id: fact.id }));
+  const hubMembership = sourceMembershipHash([
+    ...hubEvidence,
+    ...research.flatMap(item => item.factIds.map(id => ({ evidence_type: 'paper_fact', evidence_id: id }))),
+    ...related.map(item => ({ evidence_type: 'related_topic', evidence_id: `${item.slug}:${item.shared}` })),
+    ...dossierLinks.map(item => ({ evidence_type: 'dossier', evidence_id: `${item.slug}:${item.factCount}` })),
+  ]);
+  const existingHub = getWikiPageBySlug(db, topic.slug);
+  const needsHub = dossierChanged || !existingHub
+    || existingHub.build_profile !== 'local-hub-v1'
+    || existingHub.source_membership_hash !== hubMembership
+    || Number(existingHub.staleness || 0) >= threshold;
+  if (needsHub) {
+    const hub = buildTopicHubPage(db, topic, { dossiers: dossierLinks, sparse: grouped.sparse, research, related });
+    db.prepare('UPDATE wiki_pages SET source_membership_hash=? WHERE slug=?').run(hubMembership, topic.slug);
+    _recordExport(db, topic.slug, hub.content, outputDir, built, exportFailed);
+  }
+
+  db.prepare(`
+    INSERT INTO wiki_topic_aliases (normalized_alias, raw_alias, topic_slug)
+    VALUES (?, ?, ?)
+    ON CONFLICT(normalized_alias) DO UPDATE SET raw_alias=excluded.raw_alias, topic_slug=excluded.topic_slug
+  `).run(topic.normalizedKey || normalizeTopicKey(topic.tag), (topic.aliases || [topic.tag])[0], topic.slug);
+
+  for (const legacySlug of topic.legacySlugs || []) {
+    const content = `# 已合并：${topic.label || topic.tag}\n\n此主题已规范化合并到 [[topics/${topic.slug}|${topic.label || topic.tag}]]。\n`;
+    const legacy = getWikiPageBySlug(db, legacySlug);
+    if (!legacy || legacy.build_profile !== 'managed-redirect-v1') {
+      writeWikiPageWithChunks(db, {
+        slug: legacySlug, title: `${topic.label || topic.tag}（已合并）`, primary_topic: topic.tag,
+        source_type: 'managed_redirect', page_kind: 'managed_redirect', build_profile: 'managed-redirect-v1',
+        source_membership_hash: '', raw_source_ids: '[]', raw_source_count: 0, topic_tags: '[]',
+      }, content, { evidence: [], scopes: [] });
+      _recordExport(db, legacySlug, content, outputDir, built, exportFailed);
+    }
+  }
+  return { built, failed, exportFailed };
+}
+
+function _failedBuild(slug) {
+  return { slug, retries: 1, next_retry: _nextRetryISO(1), permanent_error: false };
+}
+
+function _recordExport(db, slug, content, outputDir, built, exportFailed) {
+  const page = getWikiPageBySlug(db, slug);
+  const frontmatter = {
+    title: page.title,
+    slug,
+    tags: _parseTags(page.topic_tags),
+    created: (page.created_at || '').slice(0, 10),
+    last_built: (page.last_built_at || '').slice(0, 10),
+    raw_sources: page.raw_source_count,
+    staleness: page.staleness,
+    source_type: page.source_type || 'memory',
+    page_kind: page.page_kind,
+    project_key: page.project_key,
+  };
+  try {
+    exportWikiPage(slug, frontmatter, content, outputDir);
+    built.push(slug);
+  } catch {
+    exportFailed.push(slug);
+  }
+}
+
 async function runConfiguredWikiReflect({
   home = os.homedir(),
   configPath = path.join(home, '.metame', 'daemon.yaml'),
@@ -255,6 +434,7 @@ async function runConfiguredWikiReflect({
     return await runWikiReflect(db, {
       providers,
       outputDir: resolveConfiguredOutputDir(config, home),
+      dossierMode: true,
     });
   } finally {
     db.close();

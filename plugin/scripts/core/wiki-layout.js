@@ -1,0 +1,57 @@
+'use strict';
+
+const path = require('path');
+
+const WIKI_COLLECTIONS = Object.freeze({
+  topics: Object.freeze({ title: '主题知识 Topics', description: '从长期记忆持续提炼的主题知识。' }),
+  sources: Object.freeze({ title: '来源资料 Sources', description: '导入文档与研究资料形成的来源页。' }),
+});
+
+function normalizeSlug(slug) {
+  const value = String(slug || '').trim().replaceAll('\\', '/');
+  if (!value || value.startsWith('/') || value.split('/').some(part => !part || part === '.' || part === '..')) {
+    throw new Error(`invalid wiki slug: ${slug}`);
+  }
+  return value;
+}
+
+function wikiPageCollection(page = {}) {
+  const sourceType = String(page.source_type || '').trim();
+  if (sourceType === 'doc') return 'sources';
+  if (sourceType === 'topic_cluster') return 'topics/clusters';
+  if (sourceType === 'memory') return 'topics';
+  if (sourceType === 'managed_redirect') return 'topics';
+  return null;
+}
+
+function resolveWikiPageRelativePath(page = {}) {
+  const slug = normalizeSlug(page.slug);
+  const collection = wikiPageCollection(page);
+  return collection ? path.posix.join(collection, `${slug}.md`) : `${slug}.md`;
+}
+
+function wikiPageLink(page = {}) {
+  return resolveWikiPageRelativePath(page).replace(/\.md$/, '');
+}
+
+function partitionWikiPages(pages = []) {
+  const result = { topics: [], sources: [], external: [], other: [] };
+  for (const page of Array.isArray(pages) ? pages : []) {
+    const collection = wikiPageCollection(page);
+    if (collection && collection.startsWith('topics')) result.topics.push(page);
+    else if (collection === 'sources') result.sources.push(page);
+    else if (String(page.source_type || '') === 'openwiki' || String(page.slug || '').startsWith('external/')) {
+      result.external.push(page);
+    } else result.other.push(page);
+  }
+  return result;
+}
+
+module.exports = {
+  WIKI_COLLECTIONS,
+  normalizeSlug,
+  partitionWikiPages,
+  resolveWikiPageRelativePath,
+  wikiPageCollection,
+  wikiPageLink,
+};

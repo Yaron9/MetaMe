@@ -18,6 +18,12 @@
 const fs = require('fs');
 const path = require('path');
 const { defaultWikiOutputDir } = require('./core/wiki-paths');
+const {
+  WIKI_COLLECTIONS,
+  partitionWikiPages,
+  resolveWikiPageRelativePath,
+  wikiPageLink,
+} = require('./core/wiki-layout');
 
 /**
  * Write a wiki page as a Markdown file (atomic: write .tmp → rename).
@@ -30,12 +36,14 @@ const { defaultWikiOutputDir } = require('./core/wiki-paths');
  */
 function exportWikiPage(slug, frontmatter, content, outputDir) {
   outputDir = resolveOutputDir(outputDir);
-  _ensureDir(outputDir);
+  const page = { ...frontmatter, slug };
+  const relativePath = resolveWikiPageRelativePath(page);
+  const filePath = path.join(outputDir, ...relativePath.split('/'));
+  _ensureDir(path.dirname(filePath));
 
   // Ensure slug in frontmatter matches the positional slug argument
-  const yaml = _buildFrontmatter({ ...frontmatter, slug });
+  const yaml = _buildFrontmatter(page);
   const fileContent = `${yaml}\n${content}\n`;
-  const filePath = path.join(outputDir, `${slug}.md`);
   const tmpPath = `${filePath}.tmp`;
 
   // Remove stale .tmp if present (previous interrupted write)
@@ -43,6 +51,10 @@ function exportWikiPage(slug, frontmatter, content, outputDir) {
 
   fs.writeFileSync(tmpPath, fileContent, 'utf8');
   fs.renameSync(tmpPath, filePath);
+
+  const legacyPath = path.join(outputDir, `${slug}.md`);
+  if (legacyPath !== filePath && fs.existsSync(legacyPath)) fs.rmSync(legacyPath, { force: true });
+  return filePath;
 }
 
 /**
@@ -59,6 +71,12 @@ function rebuildIndex(pages, outputDir, options = {}) {
   _ensureDir(outputDir);
   const sessionCount = Number(options.sessionCount) || 0;
   const capsuleCount = Number(options.capsuleCount) || 0;
+  const grouped = partitionWikiPages(pages);
+  const hasCanonicalHubs = grouped.topics.some(page => page.build_profile === 'local-hub-v1');
+  const topicHubs = grouped.topics.filter(page => page.source_type === 'memory'
+    && (page.page_kind || 'topic_hub') === 'topic_hub'
+    && (!hasCanonicalHubs || page.build_profile === 'local-hub-v1'));
+  const curatedPages = _listCuratedPages(outputDir);
 
   const now = new Date().toISOString().slice(0, 10);
   const lines = [
@@ -69,30 +87,130 @@ function rebuildIndex(pages, outputDir, options = {}) {
     '',
     '# MetaMe Knowledge Wiki',
     '',
-    `> ${pages.length} pages · 自动生成，勿手动编辑`,
+    `> ${pages.length} pages · 自动生成的可重建投影，数据库仍是事实源`,
     '',
-    '| 页面 | 主题标签 | 来源数 | 陈旧度 | 最后更新 |',
-    '|------|---------|--------|--------|---------|',
+    '## 从这里开始',
+    '',
+    `- [[topics/_index|主题知识 Topics]] (${topicHubs.length}) — canonical Hub 导航`,
+    `- [[sources/_index|来源资料 Sources]] (${grouped.sources.length}) — 文档与研究资料`,
+    `- [[curated/_index|人工精选 Curated]] (${curatedPages.length}) — 人工维护、不会被自动覆盖的页面`,
+    `- [[external/openwiki/quickstart|外部证据 External Evidence]] (${grouped.external.length}) — OpenWiki 外部证据`,
+    `- [[sessions/_index|对话 Sessions]]${sessionCount > 0 ? ` (${sessionCount})` : ''} — 对话过程`,
+    `- [[decisions/_index|决策 Decisions]] — 已沉淀决策`,
+    `- [[lessons/_index|经验 Lessons]] — 可复用经验`,
+    `- [[capsules/_index|行动手册 Capsules]]${capsuleCount > 0 ? ` (${capsuleCount})` : ''} — 可执行知识`,
+    '',
+    '## 最近更新',
+    '',
   ];
 
-  for (const p of pages) {
-    const stalePct = Math.round((p.staleness || 0) * 100);
+  for (const p of [...pages]
+    .filter(page => page.last_built_at)
+    .sort((a, b) => String(b.last_built_at).localeCompare(String(a.last_built_at)))
+    .slice(0, 12)) {
     const built = p.last_built_at ? p.last_built_at.slice(0, 10) : '—';
-    lines.push(
-      `| [[${p.slug}\\|${p.title}]] | \`${p.primary_topic}\` | ${p.raw_source_count || 0} | ${stalePct}% | ${built} |`
-    );
+    lines.push(`- [[${wikiPageLink(p)}|${p.title}]] · ${built}`);
   }
 
-  lines.push('', '## Navigation', '');
+  lines.push('', '## Agent 查阅', '');
+  lines.push('- Search canonical memory: `node ~/.metame/memory-search.js "query"`');
+  lines.push('- Start filesystem browsing from this page, then follow collection indexes.');
+  lines.push('- Treat files as rebuildable projections; use frontmatter `slug` as stable identity.');
+  lines.push('', '## 系统', '');
   lines.push('- [[_audit|Wiki Audit]]');
   lines.push('- [[_cleanup-manifest|Cleanup Manifest]]');
-  lines.push(`- [[sessions/_index|Session Summaries]]${sessionCount > 0 ? ` (${sessionCount})` : ''}`);
-  lines.push(`- [[capsules/_index|Knowledge Capsules]]${capsuleCount > 0 ? ` (${capsuleCount})` : ''}`);
 
-  const content = lines.join('\n') + '\n';
-  const filePath = path.join(outputDir, '_index.md');
+  _writeAtomic(path.join(outputDir, '_index.md'), lines.join('\n') + '\n');
+  _rebuildCollectionIndex('topics', topicHubs, outputDir);
+  _rebuildCollectionIndex('sources', grouped.sources, outputDir);
+  _rebuildCuratedIndex(curatedPages, outputDir);
+}
+
+function organizeWikiProjection(pages, outputDir) {
+  outputDir = resolveOutputDir(outputDir);
+  const result = { moved: 0, deduplicated: 0, conflicts: [] };
+  for (const page of Array.isArray(pages) ? pages : []) {
+    const relativePath = resolveWikiPageRelativePath(page);
+    if (!relativePath.includes('/')) continue;
+    const source = path.join(outputDir, `${page.slug}.md`);
+    const target = path.join(outputDir, ...relativePath.split('/'));
+    if (!fs.existsSync(source) || source === target) continue;
+    _ensureDir(path.dirname(target));
+    if (fs.existsSync(target)) {
+      if (fs.readFileSync(source).equals(fs.readFileSync(target))) {
+        fs.rmSync(source, { force: true });
+        result.deduplicated++;
+      } else result.conflicts.push(page.slug);
+      continue;
+    }
+    fs.renameSync(source, target);
+    result.moved++;
+  }
+  return result;
+}
+
+function _rebuildCollectionIndex(collection, pages, outputDir) {
+  const metadata = WIKI_COLLECTIONS[collection];
+  const dir = path.join(outputDir, collection);
+  _ensureDir(dir);
+  const lines = [
+    '---',
+    `title: ${metadata.title}`,
+    `updated: ${new Date().toISOString().slice(0, 10)}`,
+    `type: ${collection}-index`,
+    '---',
+    '',
+    `# ${metadata.title}`,
+    '',
+    `> ${metadata.description} ${pages.length} pages.`,
+    '',
+    '| Page | Type / Topic | Sources | Updated |',
+    '|------|--------------|---------|---------|',
+  ];
+  for (const page of [...pages].sort((a, b) => String(a.title || a.slug).localeCompare(String(b.title || b.slug)))) {
+    const built = page.last_built_at ? String(page.last_built_at).slice(0, 10) : '—';
+    const type = page.source_type === 'topic_cluster' ? 'cluster' : (page.primary_topic || page.source_type || '—');
+    lines.push(`| [[${wikiPageLink(page)}|${page.title || page.slug}]] | \`${type}\` | ${page.raw_source_count || 0} | ${built} |`);
+  }
+  _writeAtomic(path.join(dir, '_index.md'), lines.join('\n') + '\n');
+}
+
+function _listCuratedPages(outputDir) {
+  const dir = path.join(outputDir, 'curated');
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter(entry => entry.isFile() && entry.name.endsWith('.md') && entry.name !== '_index.md')
+    .map(entry => {
+      const slug = entry.name.slice(0, -3);
+      const content = fs.readFileSync(path.join(dir, entry.name), 'utf8');
+      const title = content.match(/^title:\s*["']?(.+?)["']?\s*$/m)?.[1] || slug;
+      return { slug, title };
+    })
+    .sort((a, b) => a.title.localeCompare(b.title));
+}
+
+function _rebuildCuratedIndex(pages, outputDir) {
+  const dir = path.join(outputDir, 'curated');
+  _ensureDir(dir);
+  const lines = [
+    '---',
+    'title: 人工精选 Curated',
+    `updated: ${new Date().toISOString().slice(0, 10)}`,
+    'type: curated-index',
+    '---',
+    '',
+    '# 人工精选 Curated',
+    '',
+    '> 人工维护的兼容层；自动整理只更新本索引，不覆盖正文。',
+    '',
+    ...pages.map(page => `- [[curated/${page.slug}|${page.title}]]`),
+  ];
+  _writeAtomic(path.join(dir, '_index.md'), lines.join('\n') + '\n');
+}
+
+function _writeAtomic(filePath, content) {
+  _ensureDir(path.dirname(filePath));
   const tmpPath = `${filePath}.tmp`;
-
   try { fs.unlinkSync(tmpPath); } catch { /* not present */ }
   fs.writeFileSync(tmpPath, content, 'utf8');
   fs.renameSync(tmpPath, filePath);
@@ -337,7 +455,7 @@ function exportDocPages(db, outputDir) {
         raw_sources: row.raw_source_count || 0,
         staleness: row.staleness || 0,
       };
-      exportWikiPage(row.slug, frontmatter, row.content, outputDir);
+      exportWikiPage(row.slug, { ...frontmatter, source_type: row.source_type }, row.content, outputDir);
       exported.push(row.slug);
     } catch {
       skipped.push(row.slug);
@@ -362,10 +480,10 @@ function _ensureDir(dir) {
 /**
  * Serialize frontmatter object to YAML block string.
  */
-function _buildFrontmatter({ title, slug, tags = [], created, last_built, raw_sources, staleness }) {
+function _buildFrontmatter({ title, slug, tags = [], created, last_built, raw_sources, staleness, source_type }) {
   const tagsYaml = JSON.stringify(tags); // compact array
   const stalePct = typeof staleness === 'number' ? staleness.toFixed(2) : '0.00';
-  return [
+  const lines = [
     '---',
     `title: ${_yamlStr(title)}`,
     `slug: ${slug}`,
@@ -374,8 +492,10 @@ function _buildFrontmatter({ title, slug, tags = [], created, last_built, raw_so
     `last_built: ${last_built || ''}`,
     `raw_sources: ${raw_sources || 0}`,
     `staleness: ${stalePct}`,
-    '---',
-  ].join('\n');
+  ];
+  if (source_type) lines.push(`source_type: ${_yamlStr(source_type)}`);
+  lines.push('---');
+  return lines.join('\n');
 }
 
 /**
@@ -419,7 +539,7 @@ function _collectSessionRelated(project, tags, options = {}) {
     const topic = String(page.primary_topic || '').trim().toLowerCase();
     if (!slug) continue;
     if (candidates.has(slug.toLowerCase()) || candidates.has(topic)) {
-      wiki.push({ path: slug, label: page.title || slug });
+      wiki.push({ path: wikiPageLink(page), label: page.title || slug });
     }
   }
 
@@ -450,6 +570,7 @@ function _dedupeRelated(items) {
 
 module.exports = {
   exportWikiPage,
+  organizeWikiProjection,
   rebuildIndex,
   exportSessionSummary,
   rebuildSessionsIndex,

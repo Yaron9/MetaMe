@@ -225,6 +225,7 @@ function createWikiCommandHandler(deps) {
         providers,
         outputDir,
         threshold: STALENESS_THRESHOLD,
+        dossierMode: true,
       });
 
       const lines = ['✅ Wiki 重建完成'];

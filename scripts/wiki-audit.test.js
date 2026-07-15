@@ -75,6 +75,9 @@ test('classifyRel separates curated, archive, and legacy root files', () => {
   assert.equal(classifyRel('archive/sessions/one.md'), 'archive');
   assert.equal(classifyRel('sessions/one.md'), 'sessions');
   assert.equal(classifyRel('capsules/a.md'), 'capsules');
+  assert.equal(classifyRel('topics/memory.md'), 'topics');
+  assert.equal(classifyRel('sources/paper.md'), 'sources');
+  assert.equal(classifyRel('curated/manual.md'), 'curated');
   assert.equal(classifyRel('Home.md'), 'entrypoint');
   assert.equal(classifyRel('daemon.md'), 'root');
 });

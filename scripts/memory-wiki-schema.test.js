@@ -19,6 +19,31 @@ test('applyWikiSchema is idempotent — two calls do not throw', () => {
   db.close();
 });
 
+test('canonical topic, scope, and evidence schema is additive and relational', () => {
+  const db = openMemoryDb();
+  db.exec('PRAGMA foreign_keys = ON');
+  applyWikiSchema(db);
+  db.prepare(`
+    INSERT INTO wiki_pages
+      (id, slug, title, content, primary_topic, page_kind, project_key, build_profile)
+    VALUES ('hub', 'step3', 'Step3', 'hub', 'step3', 'topic_hub', NULL, 'hub-v1')
+  `).run();
+  db.prepare(`
+    INSERT INTO wiki_topic_aliases (normalized_alias, raw_alias, topic_slug)
+    VALUES ('step3', 'Step3', 'step3')
+  `).run();
+  db.prepare(`INSERT INTO wiki_page_scopes (page_slug, scope_key) VALUES ('step3', 'metame')`).run();
+  db.prepare(`
+    INSERT INTO wiki_page_evidence (page_slug, evidence_type, evidence_id)
+    VALUES ('step3', 'memory_item', 'mem-1')
+  `).run();
+  assert.equal(db.prepare('SELECT topic_slug FROM wiki_topic_aliases WHERE normalized_alias=?').get('step3').topic_slug, 'step3');
+  assert.equal(db.prepare('SELECT scope_key FROM wiki_page_scopes WHERE page_slug=?').get('step3').scope_key, 'metame');
+  assert.equal(db.prepare('SELECT evidence_id FROM wiki_page_evidence WHERE page_slug=?').get('step3').evidence_id, 'mem-1');
+  assert.throws(() => db.prepare(`INSERT INTO wiki_page_evidence VALUES ('step3','episode','bad')`).run());
+  db.close();
+});
+
 test('wiki_external_sources tracks a rebuildable page projection', () => {
   const db = openMemoryDb();
   applyWikiSchema(db);

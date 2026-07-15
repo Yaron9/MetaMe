@@ -2160,7 +2160,14 @@ if (process.argv[2] === 'wiki') {
       }
     }
   }
-  console.error('Usage: metame wiki doctor [--json] | metame wiki openwiki <setup|sync|recall off|shadow|on>');
+  if (area === 'dossier' && action === 'migrate') {
+    const result = spawnSync(process.execPath, [
+      path.join(__dirname, 'scripts', 'wiki-dossier-migrate.js'),
+      ...process.argv.slice(5),
+    ], { stdio: 'inherit', env: process.env });
+    process.exit(result.status ?? 1);
+  }
+  console.error('Usage: metame wiki doctor [--json] | metame wiki openwiki <setup|sync|recall off|shadow|on> | metame wiki dossier migrate <--dry-run|--stage|--apply>');
   process.exit(1);
 }
 
