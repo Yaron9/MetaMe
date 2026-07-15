@@ -1719,9 +1719,9 @@ if (AUTO_UPDATE.enabled) {
   // Mark as offered NOW — so crash/ctrl-c won't re-ask
   try { fs.writeFileSync(QMD_OFFERED_FILE, new Date().toISOString(), 'utf8'); } catch { }
 
-  // Check bun availability
-  let bunAvailable = false;
-  try { execSync(`${whichCmd} bun`, { stdio: 'pipe', timeout: 2000 }); bunAvailable = true; } catch { }
+  // QMD's stable package requires Node >= 22 and is installed through npm.
+  let npmAvailable = false;
+  try { execSync(`${whichCmd} npm`, { stdio: 'pipe', timeout: 2000 }); npmAvailable = true; } catch { }
 
   console.log('');
   console.log(`┌─ ${icon("search")} 记忆搜索增强（可选，免费）`);
@@ -1729,11 +1729,10 @@ if (AUTO_UPDATE.enabled) {
   console.log('│  当前模式：基础全文搜索（FTS5）');
   console.log('│  安装 QMD 后：BM25 + 向量语义 + 重排序 混合搜索');
   console.log('│  效果：召回质量约 5x，模糊描述也能精准命中历史记忆');
-  if (!bunAvailable) {
+  if (!npmAvailable) {
     console.log('│');
-    console.log(`│  ${icon("warn")}  未检测到 bun，无法自动安装。`);
-    console.log('│  手动安装：curl -fsSL https://bun.sh/install | bash');
-    console.log('│             bun install -g github:tobi/qmd');
+    console.log(`│  ${icon("warn")}  未检测到 npm，无法自动安装。`);
+    console.log('│  安装 Node.js 22+ 后运行：npm install -g @tobilu/qmd');
     console.log('└────────────────────────────────────────────────');
     console.log('');
     return;
@@ -1752,13 +1751,13 @@ if (AUTO_UPDATE.enabled) {
     if (answer === 'y' || answer === 'yes') {
       console.log(`   ${icon("down")}  正在安装 QMD...`);
       try {
-        execSync('bun install -g github:tobi/qmd', { stdio: 'inherit', timeout: 120000 });
+        execSync('npm install -g @tobilu/qmd', { stdio: 'inherit', timeout: 120000 });
         console.log(`   ${icon("ok")} QMD 已安装，下次记忆搜索自动启用向量模式。`);
       } catch {
-        console.log(`   ${icon("warn")}  安装失败，可手动执行：bun install -g github:tobi/qmd`);
+        console.log(`   ${icon("warn")}  安装失败，可手动执行：npm install -g @tobilu/qmd`);
       }
     } else {
-      console.log('   跳过。如需日后安装：bun install -g github:tobi/qmd');
+      console.log('   跳过。如需日后安装：npm install -g @tobilu/qmd');
     }
     console.log('');
   } catch {

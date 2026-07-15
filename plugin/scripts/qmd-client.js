@@ -4,11 +4,11 @@
  * qmd-client.js — QMD (Hybrid Search Engine) integration for MetaMe
  *
  * Optional dependency: https://github.com/tobi/qmd
- * Install: bun install -g github:tobi/qmd
+ * Install: npm install -g @tobilu/qmd
  *
  * When QMD is present:
  *   - Facts are written as markdown files to ~/.metame/facts-docs/
- *   - searchFacts() uses qmd_deep_search (BM25 + vector + rerank)
+ *   - searchFacts() uses QMD's `query` MCP tool (BM25 + vector + rerank)
  *   - QMD HTTP daemon stays running for fast model reuse
  *
  * When QMD is absent: all calls are no-ops; caller falls back to FTS5.
@@ -26,6 +26,10 @@ const FACTS_DOCS_DIR = path.join(HOME, '.metame', 'facts-docs');
 const QMD_URL = 'http://localhost:8181';
 const COLLECTION = 'metame-facts';
 const { AbortSignal } = globalThis;
+const MCP_HEADERS = {
+  'Content-Type': 'application/json',
+  'Accept': 'application/json, text/event-stream',
+};
 
 // ── Availability ───────────────────────────────────────────────────────────
 
@@ -63,6 +67,7 @@ async function startDaemon() {
   if (!isAvailable()) return false;
   if (await isDaemonRunning()) return true;
   try {
+    resetMcpSession();
     execSync('qmd mcp --http --daemon', { stdio: 'ignore', timeout: 8000 });
     // Give it a moment to bind
     await new Promise(r => setTimeout(r, 1000));
@@ -77,6 +82,7 @@ async function startDaemon() {
  */
 function stopDaemon() {
   if (!isAvailable()) return;
+  resetMcpSession();
   try {
     execSync('qmd mcp stop', { stdio: 'ignore', timeout: 3000 });
   } catch { /* ignore */ }
@@ -145,32 +151,105 @@ function upsertFacts(facts) {
 
 // ── Search ─────────────────────────────────────────────────────────────────
 
+let _mcpSessionId = null;
+let _mcpSessionPromise = null;
+
+function resetMcpSession() {
+  _mcpSessionId = null;
+  _mcpSessionPromise = null;
+}
+
+async function initializeMcpSession() {
+  const response = await fetch(`${QMD_URL}/mcp`, {
+    method: 'POST',
+    headers: MCP_HEADERS,
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 0,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-03-26',
+        capabilities: {},
+        clientInfo: { name: 'metame', version: '1.0.0' },
+      },
+    }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) return null;
+
+  const sessionId = response.headers.get('mcp-session-id');
+  if (!sessionId) return null;
+  const ready = await fetch(`${QMD_URL}/mcp`, {
+    method: 'POST',
+    headers: { ...MCP_HEADERS, 'mcp-session-id': sessionId },
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!ready.ok) return null;
+  _mcpSessionId = sessionId;
+  return sessionId;
+}
+
+async function getMcpSessionId() {
+  if (_mcpSessionId) return _mcpSessionId;
+  if (!_mcpSessionPromise) {
+    _mcpSessionPromise = initializeMcpSession().finally(() => {
+      _mcpSessionPromise = null;
+    });
+  }
+  return _mcpSessionPromise;
+}
+
+async function callMcpTool(payload, retry = true) {
+  const sessionId = await getMcpSessionId();
+  if (!sessionId) return null;
+  const response = await fetch(`${QMD_URL}/mcp`, {
+    method: 'POST',
+    headers: { ...MCP_HEADERS, 'mcp-session-id': sessionId },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(30000),
+  });
+  if (retry && (response.status === 400 || response.status === 404)) {
+    resetMcpSession();
+    return callMcpTool(payload, false);
+  }
+  return response;
+}
+
 /**
  * Search via QMD HTTP daemon (MCP JSON-RPC).
  * Returns array of fact IDs, or null if unavailable.
  */
 async function searchViaHttp(query, limit) {
   try {
-    const res = await fetch(`${QMD_URL}/mcp`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/call',
-        params: {
-          name: 'qmd_deep_search',
-          arguments: { query, limit, min_score: 0.3 },
-        },
-      }),
-      signal: AbortSignal.timeout(3000),
+    const res = await callMcpTool({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'query',
+        arguments: buildSearchArguments(query, limit),
+      },
     });
-    if (!res.ok) return null;
+    if (!res?.ok) return null;
     const data = await res.json();
-    return parseSearchResult(data?.result?.content);
+    return parseSearchResult(data?.result);
   } catch {
     return null;
   }
+}
+
+function buildSearchArguments(query, limit) {
+  return {
+    searches: [
+      { type: 'lex', query },
+      { type: 'vec', query },
+    ],
+    collections: [COLLECTION],
+    intent: 'Find MetaMe remembered facts relevant to the user request.',
+    limit,
+    minScore: 0.3,
+  };
 }
 
 /**
@@ -206,29 +285,41 @@ function searchViaCli(query, limit) {
  * CLI output format: [{"docid": "#abc123", "score": 0.85, "file": "path/to/f-xxx.md"}, ...]
  * MCP HTTP format: wrapped in data.result.content as stringified JSON
  */
-function parseSearchResult(raw) {
+function extractSearchItems(raw) {
   if (!raw) return null;
-  try {
-    // CLI outputs valid JSON directly; MCP may wrap it
-    const text = typeof raw === 'string' ? raw.trim() : JSON.stringify(raw);
-
-    // Try direct parse first
-    let items;
-    try {
-      const parsed = JSON.parse(text);
-      items = Array.isArray(parsed) ? parsed
-        : Array.isArray(parsed?.result) ? parsed.result
-        : null;
-    } catch {
-      // MCP content may embed JSON inside a string — find the last [...] block
-      // Use lastIndexOf to avoid stopping at ] inside titles like "[bug_lesson]"
-      const start = text.lastIndexOf('[');
-      const end = text.lastIndexOf(']');
-      if (start === -1 || end <= start) return null;
-      items = JSON.parse(text.slice(start, end + 1));
+  if (Array.isArray(raw)) {
+    if (raw.every(item => item && typeof item === 'object' && ('file' in item || 'path' in item))) {
+      return raw;
     }
+    for (const item of raw) {
+      const nested = extractSearchItems(item?.text ?? item);
+      if (nested) return nested;
+    }
+    return null;
+  }
+  if (typeof raw === 'object') {
+    return extractSearchItems(raw.results)
+      || extractSearchItems(raw.structuredContent)
+      || extractSearchItems(raw.result)
+      || extractSearchItems(raw.content);
+  }
+  if (typeof raw !== 'string') return null;
 
-    if (!Array.isArray(items) || items.length === 0) return null;
+  const text = raw.trim();
+  try {
+    return extractSearchItems(JSON.parse(text));
+  } catch {
+    const start = text.lastIndexOf('[');
+    const end = text.lastIndexOf(']');
+    if (start === -1 || end <= start) return null;
+    return extractSearchItems(JSON.parse(text.slice(start, end + 1)));
+  }
+}
+
+function parseSearchResult(raw) {
+  try {
+    const items = extractSearchItems(raw);
+    if (!items?.length) return null;
 
     const ids = [];
     for (const item of items) {
@@ -274,4 +365,10 @@ module.exports = {
   ensureCollection,
   upsertFacts,
   search,
+  _internal: {
+    buildSearchArguments,
+    parseSearchResult,
+    resetMcpSession,
+    searchViaHttp,
+  },
 };

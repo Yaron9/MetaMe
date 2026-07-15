@@ -1,6 +1,6 @@
 node_modules
 .DS_Store
-# Local QMD development install (users install globally via bun install -g github:tobi/qmd)
+# Local QMD development checkout (users install the stable package globally)
 qmd/
 CLAUDE.md
 .claude_profile.yaml
