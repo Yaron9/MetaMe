@@ -26,13 +26,14 @@ function nextDayOfWeek(base, day) {
 }
 
 describe('daemon-task-scheduler private helpers', () => {
-  it('allows explicit agy only for enabled scoped project tasks', () => {
+  it('allows explicit agy for enabled scoped project and background tasks', () => {
     const task = { engine: 'agy', _project: { key: 'munger' } };
     const enabled = {
       daemon: { experimental_engines: { agy: { enabled: true, allowed_projects: ['munger'] } } },
       projects: { munger: { fallback_engine: 'codex' } },
     };
     assert.equal(resolveTaskEngine(task, enabled).engine, 'agy');
+    assert.equal(resolveTaskEngine({ engine: 'agy' }, enabled).engine, 'agy');
     assert.equal(resolveTaskEngine(task, { projects: enabled.projects }).engine, 'codex');
   });
   it('inherits the daemon engine when a task and project do not override it', () => {
@@ -234,7 +235,28 @@ describe('background runtime integration', () => {
 
     assert.equal(result.success, true);
     assert.equal(calls[0].env.METAME_ENGINE, 'codex');
+    assert.equal(calls[0].env.METAME_DISTILL_ENGINE, 'codex');
     assert.equal(calls[0].env.METAME_INTERNAL_PROMPT, '1');
+  });
+
+  it('routes unscoped script tasks through the configured agy distill engine', () => {
+    const calls = [];
+    const state = { tasks: {} };
+    const scheduler = createTaskScheduler({
+      fs: require('fs'), path: require('path'), HOME: '/tmp/test-home', parseInterval: () => 60,
+      execSync: (cmd, options) => { calls.push({ cmd, env: options.env }); return ''; },
+      loadState: () => state, saveState: () => {}, checkBudget: () => true,
+      recordTokens: () => {}, log: () => {}, getDefaultEngine: () => 'codex',
+      getDistillEngine: () => 'agy',
+    });
+
+    const result = scheduler.executeTask({
+      name: 'wiki-sync', type: 'script', command: 'node ~/.metame/wiki-reflect.js',
+    }, { daemon: { experimental_engines: { agy: { enabled: true, allowed_projects: [] } } } });
+
+    assert.equal(result.success, true);
+    assert.equal(calls[0].env.METAME_ENGINE, 'agy');
+    assert.equal(calls[0].env.METAME_DISTILL_ENGINE, 'agy');
   });
 
   it('uses the agy default model instead of mapping the distill Claude model', async () => {
@@ -257,6 +279,29 @@ describe('background runtime integration', () => {
     assert.equal(completed.success, true);
     assert.equal(calls[0].engine, 'agy');
     assert.equal(calls[0].model, 'Gemini 3.5 Flash (Medium)');
+  });
+
+  it('maps a legacy Claude task model to an agy-supported label', async () => {
+    const calls = [];
+    const state = { tasks: {} };
+    const scheduler = createTaskScheduler({
+      fs: require('fs'), path: require('path'), HOME: require('os').homedir(),
+      execSync: () => '', parseInterval: () => 60, loadState: () => state, saveState: () => {},
+      checkBudget: () => true, recordTokens: () => {}, buildProfilePreamble: () => '',
+      getDistillModel: () => 'haiku', log: () => {},
+      backgroundRunner: { startTurn: async options => { calls.push(options); return { ok: true, output: 'done' }; } },
+    });
+    const config = {
+      daemon: { experimental_engines: { agy: { enabled: true, allowed_projects: ['munger'] } } },
+      projects: { munger: { engine: 'agy', fallback_engine: 'claude' } },
+    };
+
+    const completed = await scheduler.executeTask({
+      name: 'morning-market-brief', prompt: 'brief', engine: 'agy', model: 'claude-sonnet-4-6', _project: { key: 'munger' },
+    }, config);
+
+    assert.equal(completed.success, true);
+    assert.equal(calls[0].model, 'Claude Sonnet 4.6 (Thinking)');
   });
 
   it('routes a Codex heartbeat task through the shared background runner', async () => {

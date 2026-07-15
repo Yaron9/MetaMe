@@ -18,6 +18,7 @@ const {
   isLockStale,
   collectDescendantPids,
 } = require('../core/agy-state');
+const { normalizeAgyModel } = require('../core/agy-model');
 
 const AGY_HOME = path.join(os.homedir(), '.gemini', 'antigravity-cli');
 const CACHE_FILE = path.join(AGY_HOME, 'cache', 'last_conversations.json');
@@ -25,7 +26,6 @@ const LOCK_DIR = path.join(os.homedir(), '.metame', 'runtime', 'agy-locks');
 const MAX_PROMPT_BYTES = 512 * 1024;
 const FINAL_POLL_INTERVAL_MS = 500;
 const AUTH_REFRESH_RETRY_DELAY_MS = 1500;
-const AGY_AUTO_MODEL = 'Gemini 3.5 Flash (Medium)';
 const NONINTERACTIVE_AUTH_PATTERNS = [
   /starting oauth authentication flow/i,
   /authentication required/i,
@@ -235,7 +235,7 @@ function buildAgyArgs(options, prompt, agyBin) {
   if (options.logFile) args.push('--log-file', options.logFile);
   if (!options.readOnly) args.push('--dangerously-skip-permissions');
   if (options.sessionId) args.push('--conversation', options.sessionId);
-  args.push('--model', options.model && options.model !== 'auto' ? options.model : AGY_AUTO_MODEL);
+  args.push('--model', normalizeAgyModel(options.model));
   args.push('-p', prompt);
   return args;
 }

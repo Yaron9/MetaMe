@@ -50,6 +50,12 @@ describe('providers distill model config', () => {
     assert.equal(providersReloaded.getDistillModel(), 'gpt-5.1-codex-mini');
   });
 
+  it('accepts model labels returned by agy models', () => {
+    const providers = loadProvidersWithHome(tmpHome);
+    providers.setDistillModel('Gemini 3.5 Flash (High)');
+    assert.equal(providers.getDistillModel(), 'Gemini 3.5 Flash (High)');
+  });
+
   it('reloads distill model after external providers.yaml change', () => {
     const providers = loadProvidersWithHome(tmpHome);
     providers.setDistillModel('haiku');
@@ -76,11 +82,23 @@ describe('providers distill model config', () => {
     assert.equal(providers.getDistillModel(), 'haiku');
   });
 
-  it('maps legacy per-call model overrides to auto for agy execution', () => {
+  it('maps legacy per-call model overrides to agy-supported models', () => {
     const providers = loadProvidersWithHome(tmpHome);
-    assert.equal(providers._internal.resolveDistillModelForEngine({}, 'agy', 'sonnet'), 'auto');
+    assert.equal(providers._internal.resolveDistillModelForEngine({}, 'agy', 'sonnet'), 'Claude Sonnet 4.6 (Thinking)');
     assert.equal(providers._internal.resolveDistillModelForEngine({}, 'agy', 'gpt-5.1-codex-mini'), 'auto');
     assert.equal(providers._internal.resolveDistillModelForEngine({}, 'codex', 'gpt-5.1-codex-mini'), 'gpt-5.1-codex-mini');
+  });
+
+  it('honors scheduler engine overrides before persisted distill config', () => {
+    const providers = loadProvidersWithHome(tmpHome);
+    const oldEngine = process.env.METAME_ENGINE;
+    try {
+      process.env.METAME_ENGINE = 'agy';
+      assert.equal(providers._internal.resolveDistillEngine({ distill_engine: 'codex' }), 'agy');
+    } finally {
+      if (oldEngine === undefined) delete process.env.METAME_ENGINE;
+      else process.env.METAME_ENGINE = oldEngine;
+    }
   });
 
   it('rejects malformed model name', () => {

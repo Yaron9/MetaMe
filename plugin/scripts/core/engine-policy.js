@@ -8,12 +8,21 @@ function normalizeFallback(project, defaultEngine) {
   return candidate === 'agy' ? 'claude' : candidate;
 }
 
-function resolveScopedEngine({ requestedEngine, projectKey = '', project = null, daemonCfg = {}, defaultEngine = 'claude' } = {}) {
+function resolveScopedEngine({
+  requestedEngine,
+  projectKey = '',
+  project = null,
+  daemonCfg = {},
+  defaultEngine = 'claude',
+  scope = 'project',
+} = {}) {
   const requested = normalizeEngineName(requestedEngine, defaultEngine);
   if (requested !== 'agy') return { engine: requested, requested, fallback: false, reason: '' };
   const agyCfg = daemonCfg.experimental_engines && daemonCfg.experimental_engines.agy;
   const allowed = new Set(Array.isArray(agyCfg && agyCfg.allowed_projects) ? agyCfg.allowed_projects.map(String) : []);
-  if (agyCfg && agyCfg.enabled === true && projectKey && allowed.has(String(projectKey))) {
+  const allowedBackground = scope === 'background';
+  const allowedProject = projectKey && allowed.has(String(projectKey));
+  if (agyCfg && agyCfg.enabled === true && (allowedBackground || allowedProject)) {
     return { engine: 'agy', requested, fallback: false, reason: '' };
   }
   return {

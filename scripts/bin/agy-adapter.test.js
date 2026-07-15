@@ -32,6 +32,11 @@ describe('agy-adapter invocation', () => {
     assert.deepEqual(args.slice(-2), ['-p', 'hello']);
   });
 
+  it('maps legacy MetaMe model ids to labels agy recognizes locally', () => {
+    const args = adapter.buildAgyArgs({ model: 'claude-sonnet-4-6', sessionId: '', timeoutMs: 1000, readOnly: true }, 'hello', 'agy');
+    assert.equal(args[args.indexOf('--model') + 1], 'Claude Sonnet 4.6 (Thinking)');
+  });
+
   it('classifies authentication and PTY failures without Codex instructions', () => {
     assert.equal(adapter.classifyFailure({ output: 'please login with OAuth' }).code, 'AGY_AUTH_REQUIRED');
     const pty = adapter.classifyFailure({ spawnError: { code: 'ENOENT', message: 'missing' } });

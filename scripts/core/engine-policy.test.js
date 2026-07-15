@@ -19,6 +19,12 @@ describe('scoped engine policy', () => {
     assert.deepEqual({ engine: denied.engine, reason: denied.reason }, { engine: 'codex', reason: 'project_not_allowlisted' });
   });
 
+  it('allows enabled agy for trusted background tasks without a project binding', () => {
+    const resolved = resolveScopedEngine({ requestedEngine: 'agy', scope: 'background', daemonCfg: enabled });
+    assert.equal(resolved.engine, 'agy');
+    assert.equal(resolved.fallback, false);
+  });
+
   it('falls back deterministically when disabled or unavailable', () => {
     const disabled = resolveScopedEngine({
       requestedEngine: 'agy', projectKey: 'digital_me', project: { fallback_engine: 'claude' }, daemonCfg: {},

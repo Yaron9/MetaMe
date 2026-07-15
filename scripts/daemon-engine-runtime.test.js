@@ -234,6 +234,12 @@ describe('daemon-engine-runtime model resolution', () => {
     assert.equal(resolveEngineModel('agy', { models: { agy: 'gemini-custom' } }), 'gemini-custom');
   });
 
+  it('normalizes explicit task model overrides before launching agy', () => {
+    assert.equal(resolveEngineModel('agy', {}, 'claude-sonnet-4-6'), 'Claude Sonnet 4.6 (Thinking)');
+    assert.equal(resolveEngineModel('agy', {}, 'gpt-5.4'), 'Gemini 3.5 Flash (Medium)');
+    assert.equal(resolveEngineModel('agy', {}, 'Gemini 3.5 Flash (High)'), 'Gemini 3.5 Flash (High)');
+  });
+
   it('normalizes legacy custom claude model ids back to canonical slots', () => {
     assert.equal(resolveEngineModel('claude', { model: 'MiniMax-M2.1' }), 'sonnet');
     assert.equal(resolveEngineModel('claude', { model: 'claude-opus-4-6' }), 'opus');

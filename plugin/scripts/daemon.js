@@ -198,6 +198,11 @@ function getDistillModel() {
   try { return providerMod.getDistillModel(); } catch { return 'haiku'; }
 }
 
+function getDistillEngine() {
+  if (!providerMod || typeof providerMod.getDistillEngine !== 'function') return getDefaultEngine();
+  try { return providerMod.getDistillEngine(); } catch { return getDefaultEngine(); }
+}
+
 function getActiveProviderEnv() {
   if (!providerMod) return {};
   try { return providerMod.buildActiveEnv(); } catch { return {}; }
@@ -1903,6 +1908,7 @@ const {
   buildProfilePreamble,
   getDaemonProviderEnv,
   getDistillModel,
+  getDistillEngine,
   getDefaultEngine,
   log,
   physiologicalHeartbeat,

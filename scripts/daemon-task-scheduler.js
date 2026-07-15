@@ -252,6 +252,7 @@ function resolveTaskEnginePolicy(task, config, defaultEngine = 'claude') {
     project,
     daemonCfg: (config && config.daemon) || {},
     defaultEngine,
+    scope: projectKey ? 'project' : 'background',
   });
 }
 
@@ -269,6 +270,7 @@ function createTaskScheduler(deps) {
     buildProfilePreamble,
     getDaemonProviderEnv,
     getDistillModel,
+    getDistillEngine = () => getDefaultEngine(),
     getDefaultEngine = () => 'claude',
     log,
     physiologicalHeartbeat,
@@ -284,8 +286,8 @@ function createTaskScheduler(deps) {
   // Max characters from precondition context to inject into prompts (prevents token bombs)
   const MAX_PRECONDITION_CHARS = 4000;
 
-  function resolveTaskEngine(task, config) {
-    return resolveTaskEnginePolicy(task, config, getDefaultEngine());
+  function resolveTaskEngine(task, config, defaultEngine = getDefaultEngine()) {
+    return resolveTaskEnginePolicy(task, config, defaultEngine);
   }
   function checkPrecondition(task) {
     if (!task.precondition) return { pass: true, context: '' };
@@ -430,8 +432,8 @@ function createTaskScheduler(deps) {
     // Script tasks: run a local script directly (e.g. distill.js), no claude -p
     if (task.type === 'script') {
       const scriptCmd = task.command.replace(/^~|(?<=\s)~/g, HOME);
-      const enginePolicy = resolveTaskEngine(task, config);
-      const engine = enginePolicy.engine === 'codex' ? 'codex' : 'claude';
+      const enginePolicy = resolveTaskEngine(task, config, getDistillEngine());
+      const engine = enginePolicy.engine;
       log('INFO', `Executing script task: ${task.name} [${engine}] → ${scriptCmd}`);
       try {
         const scriptEnv = {
@@ -439,6 +441,7 @@ function createTaskScheduler(deps) {
           METAME_ROOT: process.env.METAME_ROOT || '',
           METAME_INTERNAL_PROMPT: '1',
           METAME_ENGINE: engine,
+          METAME_DISTILL_ENGINE: engine,
         };
         delete scriptEnv.CLAUDECODE;
         const output = execSync(scriptCmd, {
@@ -627,8 +630,7 @@ function createTaskScheduler(deps) {
     const enginePolicy = resolveTaskEngine(task, config);
     const engine = enginePolicy.engine;
     if (enginePolicy.fallback) log('WARN', `Workflow ${task.name} engine fallback: agy -> ${engine} (${enginePolicy.reason})`);
-    const sessionModel = resolveEngineModel(engine, (config && config.daemon) || {});
-    const model = engine === 'codex' ? (task.model || sessionModel) : normalizeModel(task.model || sessionModel);
+    const model = resolveEngineModel(engine, (config && config.daemon) || {}, task.model);
     const cwd = task.cwd ? task.cwd.replace(/^~/, HOME) : HOME;
     let sessionId = crypto.randomUUID();
     const outputs = [];

@@ -1044,7 +1044,7 @@ function needsBootstrap() {
   } catch { return true; }
 }
 
-function spawnDistillBackground(engine) {
+function spawnDistillBackground() {
   const distillPath = path.join(METAME_DIR, 'distill.js');
   if (!fs.existsSync(distillPath)) return;
 
@@ -1084,10 +1084,10 @@ function spawnDistillBackground(engine) {
 
 
   // Spawn as detached background process — won't block session launch
-  // Remove CLAUDECODE env var so distill.js can call the engine without nested-session rejection
+  // Remove CLAUDECODE so distill.js can launch the configured background engine.
+  // providers.yaml distill_engine is authoritative; the foreground CLI must not override it.
   const distillEnvClean = { ...process.env };
   delete distillEnvClean.CLAUDECODE;
-  if (engine) distillEnvClean.METAME_ENGINE = engine;
   const bg = spawn('node', [distillPath], {
     detached: true,
     stdio: 'ignore',
@@ -2908,7 +2908,7 @@ if (isCodex) {
     console.error("   Please install: npm install -g @openai/codex");
   });
   child.on('close', (code) => process.exit(launchError ? 127 : (code || 0)));
-  spawnDistillBackground('codex');
+  spawnDistillBackground();
   return;
 }
 

@@ -23,6 +23,7 @@ const os = require('os');
 
 const yaml = require('./resolve-yaml');
 const { buildCodexArgs } = require('./daemon-engine-runtime');
+const { normalizeAgyModel } = require('./core/agy-model');
 
 const DEFAULT_DISTILL_ENGINE = 'codex';
 const DEFAULT_DISTILL_MODEL = 'auto';
@@ -59,7 +60,7 @@ function normalizeDistillModel(model, { allowEmpty = false } = {}) {
   }
   const alias = DISTILL_MODEL_ALIASES.get(canonicalizeAliasKey(raw));
   const normalized = (alias || raw).trim();
-  if (!/^[a-zA-Z0-9._-]{2,80}$/.test(normalized)) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._() -]{1,79}$/.test(normalized)) {
     throw new Error(`无效蒸馏模型: ${raw}`);
   }
   return normalized;
@@ -75,16 +76,20 @@ function resolveDistillModel(config, overrideModel) {
 }
 
 function resolveDistillEngine(config, overrideEngine) {
-  const raw = String(overrideEngine || (config && config.distill_engine) || process.env.METAME_DISTILL_ENGINE || DEFAULT_DISTILL_ENGINE).trim().toLowerCase();
+  const raw = String(
+    overrideEngine
+    || process.env.METAME_DISTILL_ENGINE
+    || process.env.METAME_ENGINE
+    || (config && config.distill_engine)
+    || DEFAULT_DISTILL_ENGINE
+  ).trim().toLowerCase();
   if (raw === 'agy' || raw === 'codex' || raw === 'claude') return raw;
   return DEFAULT_DISTILL_ENGINE;
 }
 
 function resolveDistillModelForEngine(config, engine, overrideModel) {
   const model = resolveDistillModel(config, overrideModel);
-  if (engine === 'agy' && LEGACY_NON_AGY_DISTILL_MODELS.has(String(model || '').toLowerCase())) {
-    return DEFAULT_DISTILL_MODEL;
-  }
+  if (engine === 'agy') return normalizeAgyModel(model, DEFAULT_DISTILL_MODEL);
   return model;
 }
 

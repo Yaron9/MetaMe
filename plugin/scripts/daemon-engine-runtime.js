@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 const { normalizeEngineName } = require('./daemon-utils');
+const { AGY_DEFAULT_MODEL, normalizeAgyModel } = require('./core/agy-model');
 
 const CODEX_TOOL_MAP = Object.freeze({
   command_execution: 'Bash',
@@ -16,7 +17,7 @@ const CODEX_TOOL_MAP = Object.freeze({
 });
 
 const CODEX_AUTO_MODEL = 'auto';
-const AGY_AUTO_MODEL = 'Gemini 3.5 Flash (Medium)';
+const AGY_AUTO_MODEL = AGY_DEFAULT_MODEL;
 
 const ENGINE_TIMEOUT_DEFAULTS = Object.freeze({
   codex: Object.freeze({
@@ -166,14 +167,18 @@ function resolveEngineModel(engineName, daemonCfg = {}, overrideModel = '') {
   if (explicitModel) {
     return engine === 'claude'
       ? normalizeClaudeModel(explicitModel, engineCfg.main)
-      : explicitModel;
+      : engine === 'agy'
+        ? normalizeAgyModel(explicitModel, engineCfg.main)
+        : explicitModel;
   }
 
   const perEngineModel = String(engineModels[engine] || '').trim();
   if (perEngineModel) {
     return engine === 'claude'
       ? normalizeClaudeModel(perEngineModel, engineCfg.main)
-      : perEngineModel;
+      : engine === 'agy'
+        ? normalizeAgyModel(perEngineModel, engineCfg.main)
+        : perEngineModel;
   }
 
   const legacyModel = String((daemonCfg && daemonCfg.model) || '').trim();
@@ -638,6 +643,7 @@ module.exports = {
   resolveEngineModel,
   buildCodexArgs,
   normalizeClaudeModel,
+  normalizeAgyModel,
   ENGINE_MODEL_CONFIG,
   ENGINE_DISTILL_MAP,
   ENGINE_DEFAULT_MODEL,
@@ -656,6 +662,7 @@ module.exports = {
     resolveCodexPermissionProfile,
     BUILTIN_CLAUDE_MODEL_VALUES,
     normalizeClaudeModel,
+    normalizeAgyModel,
     looksLikeCodexModel,
     resolveEngineTimeouts,
     classifyAgyError,
