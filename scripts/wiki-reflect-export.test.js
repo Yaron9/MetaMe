@@ -223,7 +223,8 @@ test('exportSessionSummary writes session markdown under sessions/', () => {
       created_at: '2026-04-09 12:00:00',
     }, dir, {
       wikiPages: [{ slug: 'daemon', title: 'Daemon', primary_topic: 'daemon' }],
-      capsuleFiles: ['/tmp/metame-daemon-playbook.md'],
+      capsuleFiles: ['/tmp/capsules/metame/daemon.md'],
+      capsulesRoot: '/tmp/capsules',
     });
     assert.ok(fs.existsSync(filePath), 'session summary file should exist');
     const content = fs.readFileSync(filePath, 'utf8');
@@ -247,12 +248,13 @@ test('exportSessionSummary includes related knowledge links when tags match', ()
       created_at: '2026-04-09 12:00:00',
     }, dir, {
       wikiPages: [{ slug: 'daemon', title: 'Daemon', primary_topic: 'daemon' }],
-      capsuleFiles: ['/tmp/metame-daemon-playbook.md'],
+      capsuleFiles: ['/tmp/capsules/metame/daemon.md'],
+      capsulesRoot: '/tmp/capsules',
     });
     const content = fs.readFileSync(filePath, 'utf8');
     assert.ok(content.includes('## Related Knowledge'));
     assert.ok(content.includes('[[daemon|Daemon]]'));
-    assert.ok(content.includes('[[capsules/metame-daemon-playbook|metame-daemon-playbook]]'));
+    assert.ok(content.includes('[[capsules/metame/daemon|daemon]]'));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

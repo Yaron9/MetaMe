@@ -100,6 +100,7 @@ async function runWikiReflect(db, {
   let docsExported = 0;
   let reflectExported = 0;
   let artifactProjection = { ok: true, projected: [], retired: [], errors: [] };
+  let linkHealth = null;
 
   try {
     // 2. Load previous failed_slugs for retry logic
@@ -214,7 +215,7 @@ async function runWikiReflect(db, {
     let allPages = [];
     let sessions = [];
     try { allPages = listWikiPages(db, { limit: 1000, orderBy: 'title' }); } catch { /* non-fatal */ }
-    try { sessions = listRecentSessionSummaries(db, { limit: 200 }); } catch { /* non-fatal */ }
+    try { sessions = listRecentSessionSummaries(db, { limit: 10000 }); } catch { /* non-fatal */ }
     const capsuleFiles = _listCapsuleFiles(capsulesDir);
 
     // Export rebuildable document projections before indexes, then reconcile
@@ -230,7 +231,7 @@ async function runWikiReflect(db, {
     } catch { /* non-fatal — _index.md not updated */ }
 
     for (const entry of sessions) {
-      try { exportSessionSummary(entry, outputDir, { wikiPages: allPages, capsuleFiles }); }
+      try { exportSessionSummary(entry, outputDir, { wikiPages: allPages, capsuleFiles, capsulesRoot: capsulesDir }); }
       catch { /* non-fatal — skip this session */ }
     }
     try { rebuildSessionsIndex(sessions, outputDir); } catch { /* non-fatal */ }
@@ -249,9 +250,20 @@ async function runWikiReflect(db, {
 
       const decFiles = decWritten.map(file => path.basename(file));
       const lesFiles = lesWritten.map(file => path.basename(file));
-      if (decFiles.length > 0) rebuildReflectDirIndex(decFiles, 'decisions', outputDir);
-      if (lesFiles.length > 0) rebuildReflectDirIndex(lesFiles, 'lessons', outputDir);
+      rebuildReflectDirIndex(decFiles, 'decisions', outputDir);
+      rebuildReflectDirIndex(lesFiles, 'lessons', outputDir);
     } catch { /* non-fatal */ }
+
+    // Generated links are rebuilt from source-of-truth above. Audit the full
+    // vault and repair only stale Obsidian workspace file references.
+    try {
+      const { maintainWikiLinks } = require('./wiki-link-maintain');
+      linkHealth = maintainWikiLinks(outputDir, {
+        repair: true,
+      });
+    } catch (error) {
+      linkHealth = { error: error.message, hardBroken: [], softBroken: [] };
+    }
 
   } finally {
     // 6. Release lock
@@ -267,6 +279,14 @@ async function runWikiReflect(db, {
       docs_exported: docsExported,
       reflect_exported: reflectExported,
       artifact_projection: artifactProjection,
+      link_health: linkHealth && {
+        files: linkHealth.files,
+        links: linkHealth.links,
+        hard_broken: linkHealth.hardBroken?.length || 0,
+        soft_broken: linkHealth.softBroken?.length || 0,
+        workspace_repaired: linkHealth.workspace?.replaced || 0,
+        error: linkHealth.error,
+      },
       duration_ms: Date.now() - startMs,
     };
     try {
@@ -274,7 +294,7 @@ async function runWikiReflect(db, {
     } catch { /* non-fatal */ }
   }
 
-  return { built, failed, exportFailed, docsExported, reflectExported, artifactProjection };
+  return { built, failed, exportFailed, docsExported, reflectExported, artifactProjection, linkHealth };
 }
 
 async function _mapWithConcurrency(items, limit, mapper) {

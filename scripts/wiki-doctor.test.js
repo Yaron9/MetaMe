@@ -58,4 +58,15 @@ describe('wiki doctor reporting', () => {
     assert.equal(report.checks[0].level, 'degraded');
     assert.match(report.checks[0].message, /failed/);
   });
+
+  it('reports generated broken links as errors', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-doctor-links-'));
+    tempFiles.push(dir);
+    fs.mkdirSync(path.join(dir, 'sessions'));
+    fs.writeFileSync(path.join(dir, 'sessions', 'broken.md'), '[[capsules/missing]]\n');
+    const report = { status: 'ok', checks: [], metrics: {} };
+    _internal.inspectWikiLinks(report, dir);
+    assert.equal(report.status, 'error');
+    assert.equal(report.metrics.wiki_hard_broken_links, 1);
+  });
 });

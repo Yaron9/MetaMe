@@ -9,6 +9,8 @@ const yaml = require('js-yaml');
 const { DatabaseSync } = require('node:sqlite');
 const embedding = require('./core/embedding');
 const { loadOpenWikiConfig, preparePages } = require('./openwiki-sync')._internal;
+const { resolveConfiguredWikiOutputDir } = require('./core/wiki-paths');
+const { auditVault } = require('./wiki-link-maintain');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
@@ -233,6 +235,23 @@ function inspectReflection(report, logPath = path.join(METAME_DIR, 'memory_refle
   addCheck(report, 'nightly-reflect', failed ? 'degraded' : 'ok', failed ? 'latest reflection failed' : 'latest reflection healthy');
 }
 
+function inspectWikiLinks(report, outputDir) {
+  if (!fs.existsSync(outputDir)) {
+    addCheck(report, 'obsidian-links', 'degraded', `wiki output missing: ${outputDir}`);
+    return;
+  }
+  const audit = auditVault(outputDir);
+  report.metrics.wiki_files = audit.files;
+  report.metrics.wiki_links = audit.links;
+  report.metrics.wiki_hard_broken_links = audit.hardBroken.length;
+  report.metrics.wiki_soft_broken_links = audit.softBroken.length;
+  if (audit.hardBroken.length > 0) {
+    addCheck(report, 'obsidian-links', 'error', `${audit.hardBroken.length} broken generated links`, audit.hardBroken.slice(0, 20));
+  } else if (audit.softBroken.length > 0) {
+    addCheck(report, 'obsidian-links', 'degraded', `generated links healthy; ${audit.softBroken.length} unresolved authored links`, audit.softBroken.slice(0, 20));
+  } else addCheck(report, 'obsidian-links', 'ok', `${audit.links} internal links resolve`);
+}
+
 function runDoctor() {
   const report = { status: 'ok', generated_at: new Date().toISOString(), checks: [], metrics: {} };
   const raw = yaml.load(fs.readFileSync(CONFIG_PATH, 'utf8')) || {};
@@ -249,6 +268,7 @@ function runDoctor() {
   inspectOpenWiki(report, config);
   inspectDatabase(report, config);
   inspectReflection(report);
+  inspectWikiLinks(report, resolveConfiguredWikiOutputDir(raw, { home: HOME }));
   return report;
 }
 
@@ -277,6 +297,7 @@ module.exports = {
     ageHours,
     inspectDatabase,
     inspectReflection,
+    inspectWikiLinks,
     lastJsonLine,
     renderHuman,
     tableColumns,
