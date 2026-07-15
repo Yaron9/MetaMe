@@ -53,6 +53,24 @@ test('assembleRecallContext: shouldRecall=false → empty result', async () => {
   });
 });
 
+test('memory hybrid wrapper forwards artifact kind and scope', async () => {
+  await withFreshMemoryHome(async memory => {
+    memory.searchMemoryItems('initialize');
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(memory.DB_PATH);
+    db.prepare(`INSERT INTO wiki_pages
+      (id,slug,title,content,primary_topic,source_type,page_kind,project_key,artifact_status)
+      VALUES ('a1','artifact/playbook/a1','Deploy','deploy safely','deploy','knowledge_artifact','playbook','metame','active')`).run();
+    db.prepare("INSERT INTO wiki_page_scopes(page_slug,scope_key) VALUES ('artifact/playbook/a1','metame')").run();
+    db.exec("INSERT INTO wiki_pages_fts(wiki_pages_fts) VALUES('rebuild')");
+    db.close();
+    const result = await memory.hybridSearchWiki('deploy', {
+      ftsOnly: true, scopeKeys: ['metame'], artifactKinds: ['playbook'], trackSearch: false,
+    });
+    assert.deepEqual(result.wikiPages.map(page => page.slug), ['artifact/playbook/a1']);
+  });
+});
+
 test('assembleRecallContext: missing plan → empty result', async () => {
   await withFreshMemoryHome(async (memory, assembleRecallContext) => {
     const result = await assembleRecallContext({});

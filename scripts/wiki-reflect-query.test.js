@@ -160,7 +160,7 @@ test('queryRawFacts returns capsuleExcerpts as empty string when dir missing', (
   db.close();
 });
 
-test('queryRawFacts reads capsule files matching tag', () => {
+test('queryRawFacts never folds capsule Markdown back into evidence', () => {
   const db = buildTestDb();
   const tmpDir = mkdtempForTest('wiki-test-');
 
@@ -171,16 +171,14 @@ test('queryRawFacts reads capsule files matching tag', () => {
       'Model switching content.');
 
     const { capsuleExcerpts } = queryRawFacts(db, 'session', { capsulesDir: tmpDir });
-    assert.ok(capsuleExcerpts.includes('session-management.md'), 'should include matching capsule filename');
-    assert.ok(capsuleExcerpts.includes('Sessions are managed'), 'should include capsule content');
-    assert.ok(!capsuleExcerpts.includes('model-switching'), 'should not include non-matching capsule');
+    assert.equal(capsuleExcerpts, '');
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
   db.close();
 });
 
-test('queryRawFacts strips frontmatter from capsule excerpts', () => {
+test('queryRawFacts ignores capsule frontmatter and body', () => {
   const db = buildTestDb();
   const tmpDir = mkdtempForTest('wiki-test-');
 
@@ -189,8 +187,7 @@ test('queryRawFacts strips frontmatter from capsule excerpts', () => {
       '---\ntitle: Session\ntype: capsule\n---\nActual body content here.');
 
     const { capsuleExcerpts } = queryRawFacts(db, 'session', { capsulesDir: tmpDir });
-    assert.ok(!capsuleExcerpts.includes('---'), 'frontmatter should be stripped');
-    assert.ok(capsuleExcerpts.includes('Actual body content'), 'body should be included');
+    assert.equal(capsuleExcerpts, '');
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

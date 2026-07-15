@@ -3,21 +3,13 @@
 /**
  * wiki-reflect-query.js — DB read layer for wiki-reflect
  *
- * Fetches raw facts and capsule excerpts for a topic.
- * No DB writes, no LLM calls. File reads (capsule excerpts) are intentional and non-fatal.
+ * Fetches primary raw facts for a topic. Derived Markdown is never read here.
  *
  * Exports:
- *   queryRawFacts(db, tag, { capsulesDir }) → { totalCount, facts, capsuleExcerpts }
+ *   queryRawFacts(db, tag) → { totalCount, facts, capsuleExcerpts }
  */
 
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-
-const DERIVED_RELATIONS = ['synthesized_insight', 'knowledge_capsule'];
-const DEFAULT_CAPSULES_DIR = path.join(os.homedir(), '.metame', 'memory', 'capsules');
-const CAPSULE_EXCERPT_CHARS = 200;
-const CAPSULE_MAX = 3;
+const { primarySqlForDb } = require('./core/knowledge-eligibility');
 const FACTS_LIMIT = 30;
 const DOSSIER_FACTS_LIMIT = 40;
 const {
@@ -40,8 +32,8 @@ const {
  * @param {{ capsulesDir?: string }} opts
  * @returns {{ totalCount: number, facts: object[], capsuleExcerpts: string }}
  */
-function queryRawFacts(db, tag, { capsulesDir = DEFAULT_CAPSULES_DIR } = {}) {
-  const placeholders = DERIVED_RELATIONS.map(() => '?').join(', ');
+function queryRawFacts(db, tag) {
+  const eligibility = primarySqlForDb(db, 'mi');
 
   // Step 1: total count (staleness denominator, no LIMIT)
   // Include 'candidate' so topics promoted via saveFacts aren't skipped on first build.
@@ -50,8 +42,8 @@ function queryRawFacts(db, tag, { capsulesDir = DEFAULT_CAPSULES_DIR } = {}) {
     FROM memory_items mi
     JOIN json_each(mi.tags) jt ON lower(trim(jt.value)) = lower(trim(?))
     WHERE mi.state IN ('active', 'candidate')
-      AND (mi.relation NOT IN (${placeholders}) OR mi.relation IS NULL)
-  `).get(tag, ...DERIVED_RELATIONS);
+      AND ${eligibility.sql}
+  `).get(tag);
 
   const totalCount = countRow ? countRow.cnt : 0;
 
@@ -62,13 +54,14 @@ function queryRawFacts(db, tag, { capsulesDir = DEFAULT_CAPSULES_DIR } = {}) {
     FROM memory_items mi
     JOIN json_each(mi.tags) jt ON lower(trim(jt.value)) = lower(trim(?))
     WHERE mi.state IN ('active', 'candidate')
-      AND (mi.relation NOT IN (${placeholders}) OR mi.relation IS NULL)
+      AND ${eligibility.sql}
     ORDER BY mi.state ASC, mi.search_count DESC, mi.confidence DESC
     LIMIT ?
-  `).all(tag, ...DERIVED_RELATIONS, FACTS_LIMIT);
+  `).all(tag, FACTS_LIMIT);
 
-  // Capsule excerpts: read files from capsulesDir whose name contains the tag
-  const capsuleExcerpts = _loadCapsuleExcerpts(tag, capsulesDir);
+  // Derived Markdown is never evidence. Canonical playbooks are projected and
+  // recalled through the artifact path, not folded back into topic synthesis.
+  const capsuleExcerpts = '';
 
   return { totalCount, facts, capsuleExcerpts };
 }
@@ -81,12 +74,15 @@ function queryRawFacts(db, tag, { capsulesDir = DEFAULT_CAPSULES_DIR } = {}) {
 function queryTopicEvidence(db, aliases, { limitPerProject = DOSSIER_FACTS_LIMIT } = {}) {
   const wanted = new Set((Array.isArray(aliases) ? aliases : [aliases]).map(normalizeTopicKey).filter(Boolean));
   if (wanted.size === 0) return [];
+  const eligibility = primarySqlForDb(db, 'memory_items');
   const rows = db.prepare(`
     SELECT id, title, content, confidence, search_count, created_at, tags,
-           project, scope, state, kind, relation, source_type, source_id
+           project, scope, state, kind, relation, source_type, source_id,
+           ${_optionalColumn(db, 'memory_items', 'origin_class')},
+           ${_optionalColumn(db, 'memory_items', 'provenance_root_id')}
     FROM memory_items
     WHERE state IN ('active', 'candidate')
-      AND (relation NOT IN ('synthesized_insight', 'knowledge_capsule') OR relation IS NULL)
+      AND ${eligibility.sql}
     ORDER BY state ASC, search_count DESC, confidence DESC, created_at DESC
   `).all();
   const perProject = new Map();
@@ -100,6 +96,11 @@ function queryTopicEvidence(db, aliases, { limitPerProject = DOSSIER_FACTS_LIMIT
     perProject.set(key, count + 1);
     return true;
   });
+}
+
+function _optionalColumn(db, table, column) {
+  const exists = db.prepare(`PRAGMA table_info(${table})`).all().some(row => row.name === column);
+  return exists ? column : `NULL AS ${column}`;
 }
 
 function queryTopicResearch(db, aliases) {
@@ -142,8 +143,13 @@ function queryTopicResearch(db, aliases) {
 function queryRelatedTopics(db, aliases) {
   const current = new Set((Array.isArray(aliases) ? aliases : [aliases]).map(normalizeTopicKey).filter(Boolean));
   if (current.size === 0) return [];
+  const memoryColumns = new Set(db.prepare('PRAGMA table_info(memory_items)').all().map(row => row.name));
+  const provenanceColumns = [
+    memoryColumns.has('source_id') ? 'source_id' : "NULL AS source_id",
+    memoryColumns.has('origin_class') ? 'origin_class' : "NULL AS origin_class",
+  ].join(', ');
   const rows = db.prepare(`
-    SELECT id, project, scope, state, kind, relation, tags FROM memory_items
+    SELECT id, project, scope, state, kind, relation, ${provenanceColumns}, tags FROM memory_items
     WHERE state='active' AND kind IN ('insight','convention')
   `).all().map(row => {
     let tags = [];
@@ -171,47 +177,6 @@ function queryRelatedTopics(db, aliases) {
     scored.push({ slug: topic.slug, label: topic.label || topic.tag, shared: sharedIds.size, leftTotal: leftRows.length, rightTotal });
   }
   return relatedTopics(scored);
-}
-
-/**
- * Load capsule excerpts for the given tag.
- * Reads up to CAPSULE_MAX capsule files whose filename contains the tag slug.
- *
- * @param {string} tag
- * @param {string} capsulesDir
- * @returns {string} Concatenated excerpts, may be empty
- */
-function _loadCapsuleExcerpts(tag, capsulesDir) {
-  if (!fs.existsSync(capsulesDir)) return '';
-
-  let files;
-  try {
-    files = fs.readdirSync(capsulesDir).filter(f => f.endsWith('.md'));
-  } catch {
-    return '';
-  }
-
-  // Match files whose name contains tag (lowercased, spaces→hyphens)
-  const needle = tag.toLowerCase().replace(/\s+/g, '-');
-  const matched = files
-    .filter(f => f.toLowerCase().includes(needle))
-    .slice(0, CAPSULE_MAX);
-
-  if (matched.length === 0) return '';
-
-  const parts = [];
-  for (const filename of matched) {
-    try {
-      const text = fs.readFileSync(path.join(capsulesDir, filename), 'utf8');
-      // Strip frontmatter (--- ... ---) before excerpting
-      const body = text.replace(/^---[\s\S]*?---\n?/, '').trim();
-      if (body) {
-        parts.push(`[${filename}]\n${body.slice(0, CAPSULE_EXCERPT_CHARS)}`);
-      }
-    } catch { /* skip unreadable file */ }
-  }
-
-  return parts.join('\n\n');
 }
 
 module.exports = { queryRawFacts, queryRelatedTopics, queryTopicEvidence, queryTopicResearch };

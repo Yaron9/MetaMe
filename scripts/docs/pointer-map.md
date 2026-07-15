@@ -148,7 +148,17 @@
   - `scripts/distill.js`：`competence_signals` 合并、significant session postmortem 产出、`bug_lesson` 回写
   - `scripts/memory-extract.js`：消费 `saveFacts().savedFacts`，写入 `fact_labels`
   - `scripts/memory.js`：`saveFactLabels()` 原子写入 API
-  - `scripts/memory-nightly-reflect.js`：`synthesized_insight` 回写、知识胶囊聚合与 `knowledge_capsule` 回写
+  - `scripts/memory-nightly-reflect.js`：只产出 `artifact-candidates/*.json`；禁止把模型总结回写为事实或直接改活跃 Playbook
+
+## Knowledge Artifact 权威链路
+
+- 资格判定：`scripts/core/knowledge-eligibility.js`（recall / wiki evidence / profile distill / graph / skill evidence 共用）
+- Markdown 契约：`scripts/core/knowledge-artifact.js`；Decision 与 Playbook 文件是权威源
+- SQLite 投影：`scripts/memory-artifact-projector.js` → `knowledge_artifact_registry`、`knowledge_lineage`、`wiki_pages`
+- 历史迁移：`metame memory artifacts migrate --dry-run|--stage|--apply`；中断恢复/回滚：`--recover --backup-root <目录>`
+- 召回：`scripts/core/knowledge-intent.js` + `scripts/core/hybrid-search.js`，仅注入同 scope、active、意图匹配的产物
+- 健康检查：`metame wiki doctor` 检查 derived evidence、血缘缺失与自循环
+- 技能演化：L1 仅写 evidence metadata；L2/L3 保持 inert proposal，`shadow/canary` 目前是治理状态而非流量执行器
 
 ## 运行时数据位置
 
@@ -156,8 +166,9 @@
 - 记忆数据库：`~/.metame/memory.db`
 - 会话标签：`~/.metame/session_tags.json`
 - 进程 PID 记录：`~/.metame/active_agent_pids.json`
-- 夜间反思文档：`~/.metame/memory/decisions/`、`~/.metame/memory/lessons/`
-- 知识胶囊：`~/.metame/memory/capsules/`
+- 历史反思归档：`~/.metame/memory/decisions/`、`~/.metame/memory/lessons/`（保留原路径，不参与召回）
+- 权威 Playbook：`~/.metame/memory/capsules/<project>/<capability>.md`
+- 待晋级产物：`~/.metame/memory/artifact-candidates/`
 - 复盘文档：`~/.metame/memory/postmortems/`
 - Dispatch 队列：`~/.metame/dispatch/pending.jsonl`（本地 socket 降级）
 - 远端 Dispatch 队列：`~/.metame/dispatch/remote-pending.jsonl`（跨设备中继）

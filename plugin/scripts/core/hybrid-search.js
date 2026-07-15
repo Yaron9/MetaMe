@@ -26,7 +26,7 @@ const {
 
 const RRF_K = 60;
 const STALE_THRESHOLD = 0.3;
-const MAX_FTS_RESULTS = 10;
+const MAX_FTS_RESULTS = 30;
 const MAX_VECTOR_RESULTS = 20;
 
 /**
@@ -78,10 +78,32 @@ function normalizeScopeKeys(values) {
     .filter(Boolean))];
 }
 
+function normalizeArtifactKinds(values) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map(value => String(value || '').trim())
+    .filter(value => value === 'decision' || value === 'playbook'))];
+}
+
+function artifactPredicate(alias, artifactKinds = []) {
+  const kinds = normalizeArtifactKinds(artifactKinds);
+  if (kinds.length === 0) {
+    return { sql: `AND COALESCE(${alias}.page_kind, '') NOT IN ('decision','playbook')`, args: [] };
+  }
+  const placeholders = kinds.map(() => '?').join(',');
+  return {
+    sql: `AND (COALESCE(${alias}.page_kind, '') NOT IN ('decision','playbook')
+      OR (${alias}.page_kind IN (${placeholders}) AND ${alias}.artifact_status='active'))`,
+    args: kinds,
+  };
+}
+
 function scopePredicate(alias, values) {
   const scopes = normalizeScopeKeys(values);
   if (scopes.length === 0) {
-    return { sql: `AND COALESCE(${alias}.page_kind, 'topic_hub') != 'project_dossier' AND ${alias}.source_type != 'managed_redirect'`, args: [] };
+    return { sql: `AND COALESCE(${alias}.page_kind, 'topic_hub') != 'project_dossier'
+      AND ${alias}.source_type != 'managed_redirect'
+      AND (COALESCE(${alias}.page_kind, '') NOT IN ('decision','playbook')
+        OR NOT EXISTS (SELECT 1 FROM wiki_page_scopes wps WHERE wps.page_slug=${alias}.slug))`, args: [] };
   }
   const placeholders = scopes.map(() => '?').join(',');
   return {
@@ -98,12 +120,13 @@ function scopePredicate(alias, values) {
   };
 }
 
-function ftsSearch(db, safeQuery, excludedSourceTypes = [], scopeKeys = []) {
+function ftsSearch(db, safeQuery, excludedSourceTypes = [], scopeKeys = [], artifactKinds = []) {
   const excluded = normalizeSourceTypes(excludedSourceTypes);
   const sourceClause = excluded.length > 0
     ? `AND wp.source_type NOT IN (${excluded.map(() => '?').join(',')})`
     : '';
   const scope = scopePredicate('wp', scopeKeys);
+  const artifacts = artifactPredicate('wp', artifactKinds);
   try {
     return db.prepare(`
       SELECT wp.slug, wp.title, wp.staleness, wp.last_built_at, wp.source_type, wp.page_kind, wp.project_key,
@@ -116,9 +139,10 @@ function ftsSearch(db, safeQuery, excludedSourceTypes = [], scopeKeys = []) {
         AND (wp.source_type != 'openwiki' OR COALESCE(wes.missing_count, 0) = 0)
         ${sourceClause}
         ${scope.sql}
+        ${artifacts.sql}
       ORDER BY rank
       LIMIT ?
-    `).all(safeQuery, ...excluded, ...scope.args, MAX_FTS_RESULTS);
+    `).all(safeQuery, ...excluded, ...scope.args, ...artifacts.args, MAX_FTS_RESULTS);
   } catch {
     return [];
   }
@@ -132,12 +156,13 @@ function ftsSearch(db, safeQuery, excludedSourceTypes = [], scopeKeys = []) {
  * @param {Float32Array} queryEmbedding
  * @returns {{ page_slug: string, chunk_text: string, score: number }[]}
  */
-function vectorSearch(db, queryEmbedding, backendInfo = null, excludedSourceTypes = [], scopeKeys = []) {
+function vectorSearch(db, queryEmbedding, backendInfo = null, excludedSourceTypes = [], scopeKeys = [], artifactKinds = []) {
   const excluded = normalizeSourceTypes(excludedSourceTypes);
   const sourceClause = excluded.length > 0
     ? `AND wp.source_type NOT IN (${excluded.map(() => '?').join(',')})`
     : '';
   const scope = scopePredicate('wp', scopeKeys);
+  const artifacts = artifactPredicate('wp', artifactKinds);
   let rows;
   try {
     if (backendInfo) {
@@ -152,7 +177,8 @@ function vectorSearch(db, queryEmbedding, backendInfo = null, excludedSourceType
           AND (wp.source_type != 'openwiki' OR COALESCE(wes.missing_count, 0) = 0)
           ${sourceClause}
           ${scope.sql}
-      `).all(backendInfo.model, backendInfo.dimensions, ...excluded, ...scope.args);
+          ${artifacts.sql}
+      `).all(backendInfo.model, backendInfo.dimensions, ...excluded, ...scope.args, ...artifacts.args);
     } else {
       rows = db.prepare(`
         SELECT cc.page_slug, cc.chunk_text, cc.embedding, wp.source_type, wp.page_kind, wp.project_key
@@ -163,7 +189,8 @@ function vectorSearch(db, queryEmbedding, backendInfo = null, excludedSourceType
           AND (wp.source_type != 'openwiki' OR COALESCE(wes.missing_count, 0) = 0)
           ${sourceClause}
           ${scope.sql}
-      `).all(...excluded, ...scope.args);
+          ${artifacts.sql}
+      `).all(...excluded, ...scope.args, ...artifacts.args);
     }
   } catch {
     return [];
@@ -188,10 +215,11 @@ function vectorSearch(db, queryEmbedding, backendInfo = null, excludedSourceType
   return topK(scored, MAX_VECTOR_RESULTS);
 }
 
-function countFtsSourceMatches(db, safeQuery, sourceTypes = [], scopeKeys = []) {
+function countFtsSourceMatches(db, safeQuery, sourceTypes = [], scopeKeys = [], artifactKinds = []) {
   const included = normalizeSourceTypes(sourceTypes);
   if (included.length === 0) return {};
   const scope = scopePredicate('wp', scopeKeys);
+  const artifacts = artifactPredicate('wp', artifactKinds);
   try {
     const rows = db.prepare(`
       SELECT wp.source_type, COUNT(*) AS count
@@ -202,8 +230,9 @@ function countFtsSourceMatches(db, safeQuery, sourceTypes = [], scopeKeys = []) 
         AND wp.source_type IN (${included.map(() => '?').join(',')})
         AND (wp.source_type != 'openwiki' OR COALESCE(wes.missing_count, 0) = 0)
         ${scope.sql}
+        ${artifacts.sql}
       GROUP BY wp.source_type
-    `).all(safeQuery, ...included, ...scope.args);
+    `).all(safeQuery, ...included, ...scope.args, ...artifacts.args);
     return Object.fromEntries(rows.map(row => [row.source_type, row.count]));
   } catch {
     return {};
@@ -314,13 +343,14 @@ async function hybridSearchWiki(db, query, {
   excludeSourceTypes = [],
   observeSourceTypes = [],
   scopeKeys = [],
+  artifactKinds = [],
 } = {}) {
   const safeQuery = sanitizeFts5(query);
   if (!safeQuery) return { wikiPages: [], facts: [] };
 
   // 1. FTS5 search (always)
-  const ftsResults = ftsSearch(db, safeQuery, excludeSourceTypes, scopeKeys);
-  const sourceHitCounts = countFtsSourceMatches(db, safeQuery, observeSourceTypes, scopeKeys);
+  const ftsResults = ftsSearch(db, safeQuery, excludeSourceTypes, scopeKeys, artifactKinds);
+  const sourceHitCounts = countFtsSourceMatches(db, safeQuery, observeSourceTypes, scopeKeys, artifactKinds);
 
   // 2. Vector search (if available and not forced FTS-only)
   let vectorPages = new Map();
@@ -331,7 +361,7 @@ async function hybridSearchWiki(db, query, {
     try {
       const queryEmb = await getEmbedding(query);
       if (queryEmb) {
-        const chunks = vectorSearch(db, queryEmb, backendInfo, excludeSourceTypes, scopeKeys);
+        const chunks = vectorSearch(db, queryEmb, backendInfo, excludeSourceTypes, scopeKeys, artifactKinds);
         vectorPages = aggregateChunksToPages(chunks);
       }
     } catch {
@@ -397,10 +427,19 @@ async function hybridSearchWiki(db, query, {
   // 4. RRF fusion + normalize
   const wikiPages = filterScopeEligible(db, rrfFuse(merged), scopeKeys);
   normalizeScores(wikiPages);
+  const requestedArtifactKinds = new Set(normalizeArtifactKinds(artifactKinds));
+  if (requestedArtifactKinds.size > 0) {
+    wikiPages.sort((a, b) => {
+      const artifactDelta = Number(requestedArtifactKinds.has(b.page_kind)) - Number(requestedArtifactKinds.has(a.page_kind));
+      return artifactDelta || b.score - a.score;
+    });
+  }
 
   // 5. Facts search (same as searchWikiAndFacts — FTS5 only)
   let facts = [];
   try {
+    const { primarySqlForDb } = require('./knowledge-eligibility');
+    const eligibility = primarySqlForDb(db, 'mi');
     facts = db.prepare(`
       SELECT mi.id, mi.title, mi.content, mi.kind, mi.confidence,
              snippet(memory_items_fts, 1, '<b>', '</b>', '...', 20) as excerpt,
@@ -409,6 +448,7 @@ async function hybridSearchWiki(db, query, {
       JOIN memory_items mi ON memory_items_fts.rowid = mi.rowid
       WHERE memory_items_fts MATCH ?
         AND mi.state = 'active'
+        AND ${eligibility.sql}
       ORDER BY rank
       LIMIT 10
     `).all(safeQuery);

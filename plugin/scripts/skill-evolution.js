@@ -20,10 +20,9 @@
  *                    → checkHotEvolution() → evolution_queue.yaml
  *                    → [distill.js] distillSkills() → evolution.json → SKILL.md
  *
- * SELF-EVOLUTION:
- *   All thresholds, rules, and even the Haiku prompt live in evolution_policy.yaml.
- *   The cold path periodically evaluates its own effectiveness and rewrites the policy.
- *   Nothing is hardcoded that can't be changed by the system itself.
+ * GOVERNED EVOLUTION:
+ *   Thresholds and prompts live in evolution_policy.yaml. Periodic self-review
+ *   may propose policy changes, but never rewrites the live policy by itself.
  */
 
 'use strict';
@@ -32,6 +31,11 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { appendChange } = require('./skill-changelog');
+const {
+  classifyEvolutionTier,
+  evolutionFingerprint,
+  initialEvolutionStage,
+} = require('./core/skill-evolution-policy');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
@@ -676,11 +680,27 @@ async function distillSkills() {
     const updates = Array.isArray(evolution.updates) ? evolution.updates : [];
     const missingSkills = Array.isArray(evolution.missing_skills) ? evolution.missing_skills : [];
 
-    // Apply updates to skill evolution.json files
+    // L1 may update evidence metadata, but never a live SKILL.md. L2/L3 become
+    // durable proposals. Behavioral activation remains explicitly governed.
+    const proposalQueue = loadEvolutionQueue(yaml);
     for (const update of updates) {
       if (!update.skill_name || !update.insight) continue;
       const skillDir = findSkillDir(update.skill_name);
       if (!skillDir) continue;
+
+      const tier = classifyEvolutionTier(update);
+      if (tier > 1) {
+        addToQueue(proposalQueue, {
+          type: 'skill_update',
+          skill_name: update.skill_name,
+          category: update.category,
+          insight: update.insight,
+          reason: `Cold-path proposal: ${update.insight}`,
+          evidence_count: update.evidence_count || policy.min_evidence_for_update,
+          requires_approval: tier === 3,
+        });
+        continue;
+      }
 
       const evoData = {};
       const key = update.category === 'fix' ? 'fixes'
@@ -689,8 +709,8 @@ async function distillSkills() {
       evoData[key] = [update.insight];
 
       mergeEvolution(skillDir, evoData);
-      smartStitch(skillDir);
     }
+    saveEvolutionQueue(yaml, proposalQueue);
 
     // Queue missing skills for user notification
     if (missingSkills.length > 0) {
@@ -761,9 +781,7 @@ function logEvolutionRun(yaml, policy, signalCount, updateCount, gapCount) {
 }
 
 /**
- * Self-evaluation: Haiku reviews the evolution_log and current policy,
- * then rewrites evolution_policy.yaml if improvements are warranted.
- * This is how the system optimizes its own parameters.
+ * Self-evaluation reviews effectiveness and queues a governed policy proposal.
  */
 async function selfEvaluatePolicy(yaml, policy, distillEnv) {
   try {
@@ -838,8 +856,17 @@ RULES:
       console.log('🧬 Policy self-eval: patch produced no effective change.');
       return;
     }
-    savePolicy(yaml, newPolicy);
-    console.log(`🧬 Policy self-evolved: v${policy.version} → v${newPolicy.version}`);
+    const proposalQueue = loadEvolutionQueue(yaml);
+    addToQueue(proposalQueue, {
+      type: 'policy_change',
+      skill_name: 'skill-evolution',
+      reason: `Policy v${policy.version} → v${newPolicy.version}`,
+      insight: yaml.dump(newPolicy, { lineWidth: 120 }),
+      evidence_count: 1,
+      requires_approval: true,
+    });
+    saveEvolutionQueue(yaml, proposalQueue);
+    console.log(`🧬 Policy self-eval queued v${newPolicy.version}; live policy unchanged.`);
 
   } catch (err) {
     try { console.log(`⚠️ Policy self-eval failed (non-fatal): ${err.message}`); } catch {}
@@ -1046,7 +1073,27 @@ function loadEvolutionQueue(yaml) {
         item.id = `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
         changed = true;
       }
+      if (!item.fingerprint) { item.fingerprint = evolutionFingerprint(item); changed = true; }
+      if (!item.evolution_tier) { item.evolution_tier = classifyEvolutionTier(item); changed = true; }
+      if (!item.stage) { item.stage = initialEvolutionStage(item.evolution_tier); changed = true; }
     }
+    const open = new Map();
+    const compacted = [];
+    for (const item of queue.items) {
+      const isOpen = ['pending', 'notified', 'shadow', 'canary', 'approval_required'].includes(item.status);
+      const prior = isOpen ? open.get(item.fingerprint) : null;
+      if (!prior) {
+        compacted.push(item);
+        if (isOpen) open.set(item.fingerprint, item);
+        continue;
+      }
+      prior.evidence_count = (prior.evidence_count || 1) + (item.evidence_count || 1);
+      prior.signal_ids = [...new Set([...(prior.signal_ids || []), ...(item.signal_ids || [])])];
+      prior.first_seen = [prior.first_seen || prior.detected, item.first_seen || item.detected].filter(Boolean).sort()[0];
+      prior.last_seen = [prior.last_seen, item.last_seen].filter(Boolean).sort().at(-1);
+      changed = true;
+    }
+    queue.items = compacted;
     if (changed) saveEvolutionQueue(yaml, queue);
     return queue;
   } catch {
@@ -1060,21 +1107,11 @@ function saveEvolutionQueue(yaml, queue) {
   } catch {}
 }
 
-// Per-type dedup field: type → function(queueItem, newEntry) → bool
-// Add a new entry here whenever a new queue type with its own dedup key is introduced.
-const QUEUE_DEDUP_MATCH = {
-  skill_gap:         (i, e) => (i.search_hint || '') === (e.search_hint || ''),
-  workflow_proposal: (i, e) => (i.workflow_sketch_id || '') === (e.workflow_sketch_id || ''),
-};
-
 function addToQueue(queue, entry) {
-  // Dedup pending entries by core key, with per-type extra field matching.
-  const dedupFn = QUEUE_DEDUP_MATCH[entry.type];
+  const fingerprint = evolutionFingerprint(entry);
   const existing = queue.items.find(i =>
-    i.type === entry.type &&
-    i.skill_name === entry.skill_name &&
-    i.status === 'pending' &&
-    (!dedupFn || dedupFn(i, entry))
+    ['pending', 'notified', 'shadow', 'canary', 'approval_required'].includes(i.status)
+    && (i.fingerprint || evolutionFingerprint(i)) === fingerprint
   );
 
   if (existing) {
@@ -1082,21 +1119,24 @@ function addToQueue(queue, entry) {
     existing.last_seen = new Date().toISOString();
     if (entry.reason) existing.reason = entry.reason;
     if (entry.search_hint) existing.search_hint = entry.search_hint;
+    existing.signal_ids = [...new Set([...(existing.signal_ids || []), ...(entry.signal_ids || [])])];
     return;
   }
 
   queue.items.push({
     id: `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     ...entry,
+    fingerprint,
+    evolution_tier: classifyEvolutionTier(entry),
+    stage: initialEvolutionStage(classifyEvolutionTier(entry)),
+    first_seen: new Date().toISOString(),
     detected: new Date().toISOString(),
     last_seen: new Date().toISOString(),
     status: 'pending',
   });
 
-  // Keep queue manageable
-  if (queue.items.length > 50) {
-    queue.items = queue.items.slice(-50);
-  }
+  // Pending evidence is never truncated. Resolved entries are aged out by
+  // checkEvolutionQueue, so queue pressure cannot silently lose proposals.
 }
 
 /**
@@ -1364,6 +1404,7 @@ module.exports = {
   smartStitch,
   trackInsightOutcome,
   listInstalledSkills,
+  _internal: { addToQueue, loadEvolutionQueue, saveEvolutionQueue },
 };
 
 if (require.main === module) {

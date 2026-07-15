@@ -99,6 +99,7 @@ async function runWikiReflect(db, {
   const strippedLinksMap = {};
   let docsExported = 0;
   let reflectExported = 0;
+  let artifactProjection = { ok: true, projected: [], retired: [], errors: [] };
 
   try {
     // 2. Load previous failed_slugs for retry logic
@@ -200,6 +201,15 @@ async function runWikiReflect(db, {
       }
     }
 
+    // Project Markdown-authoritative ADR/Playbook files before rebuilding indexes.
+    // Validation is fail-closed: malformed siblings preserve the previous live index.
+    try {
+      const { projectArtifacts, scanArtifacts } = require('./memory-artifact-projector');
+      artifactProjection = projectArtifacts(db, scanArtifacts({ decisionsDir, capsulesDir }));
+    } catch (error) {
+      artifactProjection = { ok: false, projected: [], retired: [], errors: [{ error: error.message }] };
+    }
+
     // 5. Rebuild index — per-operation try/catch so one failure doesn't suppress the rest
     let allPages = [];
     let sessions = [];
@@ -226,10 +236,10 @@ async function runWikiReflect(db, {
     try { rebuildSessionsIndex(sessions, outputDir); } catch { /* non-fatal */ }
 
     for (const capsuleFile of capsuleFiles) {
-      try { exportCapsuleFile(capsuleFile, outputDir); }
+      try { exportCapsuleFile(capsuleFile, outputDir, capsulesDir); }
       catch { /* non-fatal — skip this capsule */ }
     }
-    try { rebuildCapsulesIndex(capsuleFiles, outputDir); } catch { /* non-fatal */ }
+    try { rebuildCapsulesIndex(capsuleFiles, outputDir, capsulesDir); } catch { /* non-fatal */ }
 
     // Step 6: Mirror decisions and lessons to vault
     try {
@@ -237,12 +247,8 @@ async function runWikiReflect(db, {
       const lesWritten = exportReflectDir(lessonsDir, 'lessons', outputDir);
       reflectExported = decWritten.length + lesWritten.length;
 
-      const decFiles = fs.existsSync(decisionsDir) && fs.statSync(decisionsDir).isDirectory()
-        ? fs.readdirSync(decisionsDir).filter(f => f.endsWith('.md'))
-        : [];
-      const lesFiles = fs.existsSync(lessonsDir) && fs.statSync(lessonsDir).isDirectory()
-        ? fs.readdirSync(lessonsDir).filter(f => f.endsWith('.md'))
-        : [];
+      const decFiles = decWritten.map(file => path.basename(file));
+      const lesFiles = lesWritten.map(file => path.basename(file));
       if (decFiles.length > 0) rebuildReflectDirIndex(decFiles, 'decisions', outputDir);
       if (lesFiles.length > 0) rebuildReflectDirIndex(lesFiles, 'lessons', outputDir);
     } catch { /* non-fatal */ }
@@ -260,6 +266,7 @@ async function runWikiReflect(db, {
       stripped_links: strippedLinksMap,
       docs_exported: docsExported,
       reflect_exported: reflectExported,
+      artifact_projection: artifactProjection,
       duration_ms: Date.now() - startMs,
     };
     try {
@@ -267,7 +274,7 @@ async function runWikiReflect(db, {
     } catch { /* non-fatal */ }
   }
 
-  return { built, failed, exportFailed, docsExported, reflectExported };
+  return { built, failed, exportFailed, docsExported, reflectExported, artifactProjection };
 }
 
 async function _mapWithConcurrency(items, limit, mapper) {
@@ -471,9 +478,20 @@ function _releaseLock(lockFile) {
 function _listCapsuleFiles(capsulesDir) {
   try {
     if (!fs.existsSync(capsulesDir)) return [];
-    return fs.readdirSync(capsulesDir)
-      .filter(name => name.endsWith('.md'))
-      .map(name => path.join(capsulesDir, name));
+    const files = [];
+    const walk = dir => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name.startsWith('.') || entry.name === '_archive' || entry.name === '_revisions') continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith('.md') && entry.name !== '_index.md') {
+          const source = fs.readFileSync(full, 'utf8');
+          if (!/^type:\s*managed_redirect\s*$/m.test(source) && !/^archive:\s*true\s*$/m.test(source)) files.push(full);
+        }
+      }
+    };
+    walk(capsulesDir);
+    return files.sort();
   } catch {
     return [];
   }

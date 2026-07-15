@@ -1639,59 +1639,10 @@ function createClaudeEngine(deps) {
           const factQuery = buildFactSearchQuery(prompt, projectKey);
           const facts = await Promise.resolve(searchFn(factQuery, { limit: 3, project: projectKey || undefined }));
           if (facts.length > 0) {
-            // Separate capsule facts from regular facts
-            const capsuleFacts = facts.filter(f => f.relation === 'knowledge_capsule');
-            const regularFacts = facts.filter(f => f.relation !== 'knowledge_capsule');
-
-            // Inject regular facts as before
-            if (regularFacts.length > 0) {
-              const factItems = regularFacts.map(f => `- [${f.relation}] ${f.value}`).join('\n');
-              memoryHint += `\n\n[Relevant facts:\n${factItems}]`;
-            }
-
-            // Capsule facts: derive file path from entity and inject as direct "must read" hint
-            // Entity pattern: capsule.metame_daemon_dispatch → capsules/metame-daemon-dispatch-playbook.md
-            if (capsuleFacts.length > 0) {
-              const capsulePaths = capsuleFacts.map(f => {
-                const slug = f.entity.replace(/^capsule\./, '').replace(/_/g, '-');
-                return path.join(HOME, '.metame', 'memory', 'capsules', `${slug}-playbook.md`);
-              }).filter(p => fs.existsSync(p));
-              if (capsulePaths.length > 0) {
-                // Inject file paths only (no shell commands) — works cross-platform and with all engines.
-                // Claude Code reads via Read tool; Codex/Gemini parse the path directly.
-                memoryHint += `\n\n[Relevant playbook detected — read before answering:\n${capsulePaths.map(p => `  ${p}`).join('\n')}]`;
-              }
-            }
-
-            log('INFO', `[MEMORY] Injected ${regularFacts.length} facts, ${capsuleFacts.length} capsule(s) (query_len=${factQuery.length})`);
+            const factItems = facts.map(f => `- [${f.relation}] ${f.value}`).join('\n');
+            memoryHint += `\n\n[Relevant facts:\n${factItems}]`;
+            log('INFO', `[MEMORY] Injected ${facts.length} primary facts (query_len=${factQuery.length})`);
           }
-        }
-
-        // Inject latest nightly insight (decisions/lessons) — one-liner per file, ~100 tokens
-        if (!session.started) {
-          try {
-            const reflectDirs = [
-              path.join(HOME, '.metame', 'memory', 'decisions'),
-              path.join(HOME, '.metame', 'memory', 'lessons'),
-            ];
-            const reflectItems = [];
-            for (const dir of reflectDirs) {
-              if (!fs.existsSync(dir)) continue;
-              const files = fs.readdirSync(dir).filter(f => f.endsWith('.md')).sort();
-              const latest = files[files.length - 1];
-              if (!latest) continue;
-              const content = fs.readFileSync(path.join(dir, latest), 'utf8');
-              // Extract ## headings as one-line summaries (skip frontmatter)
-              const headings = content.match(/^## .+$/gm);
-              if (headings && headings.length > 0) {
-                const type = dir.endsWith('decisions') ? 'decision' : 'lesson';
-                reflectItems.push(...headings.slice(0, 2).map(h => `- [${type}] ${h.replace(/^## /, '')}`));
-              }
-            }
-            if (reflectItems.length > 0) {
-              memoryHint += `\n\n[Recent insights:\n${reflectItems.join('\n')}]`;
-            }
-          } catch { /* non-critical */ }
         }
 
         memory.close();

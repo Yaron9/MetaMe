@@ -178,4 +178,57 @@ describe('hybrid-search internals', () => {
     assert.deepEqual(unscoped.wikiPages.map(page => page.slug), ['topic']);
     db.close();
   });
+
+  it('recalls only active intent-matched artifacts in the current project', async () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE wiki_pages (
+        slug TEXT PRIMARY KEY, title TEXT, content TEXT, staleness REAL DEFAULT 0,
+        last_built_at TEXT, source_type TEXT DEFAULT 'memory', page_kind TEXT,
+        project_key TEXT, artifact_status TEXT
+      );
+      CREATE TABLE wiki_page_scopes (page_slug TEXT, scope_key TEXT);
+      CREATE TABLE wiki_external_sources (page_slug TEXT PRIMARY KEY, missing_count INTEGER DEFAULT 0);
+      CREATE VIRTUAL TABLE wiki_pages_fts USING fts5(slug, title, content, content='wiki_pages', content_rowid='rowid');
+    `);
+    const insert = db.prepare('INSERT INTO wiki_pages (slug,title,content,page_kind,project_key,artifact_status) VALUES (?,?,?,?,?,?)');
+    insert.run('playbook/metame', 'Deploy playbook', 'deploy needle', 'playbook', 'metame', 'active');
+    insert.run('decision/metame', 'Deploy decision', 'deploy needle', 'decision', 'metame', 'active');
+    insert.run('playbook/other', 'Other playbook', 'deploy needle', 'playbook', 'other', 'active');
+    insert.run('playbook/draft', 'Draft playbook', 'deploy needle', 'playbook', 'metame', 'draft');
+    insert.run('topic/global', 'Global topic', 'deploy', 'topic_hub', null, null);
+    for (const slug of ['playbook/metame', 'decision/metame', 'playbook/draft']) db.prepare('INSERT INTO wiki_page_scopes VALUES (?,?)').run(slug, 'metame');
+    db.prepare('INSERT INTO wiki_page_scopes VALUES (?,?)').run('playbook/other', 'other');
+    db.exec("INSERT INTO wiki_pages_fts(wiki_pages_fts) VALUES('rebuild')");
+    const normal = await hybridSearchWiki(db, 'deploy', { ftsOnly: true, scopeKeys: ['metame'] });
+    assert.deepEqual(normal.wikiPages.map(page => page.slug), ['topic/global']);
+    const how = await hybridSearchWiki(db, 'deploy', { ftsOnly: true, scopeKeys: ['metame'], artifactKinds: ['playbook'] });
+    assert.ok(how.wikiPages.some(page => page.slug === 'playbook/metame'));
+    assert.ok(how.wikiPages.every(page => !['decision/metame', 'playbook/other', 'playbook/draft'].includes(page.slug)));
+    const why = await hybridSearchWiki(db, 'deploy', { ftsOnly: true, scopeKeys: ['metame'], artifactKinds: ['decision'] });
+    assert.ok(why.wikiPages.some(page => page.slug === 'decision/metame'));
+    assert.ok(why.wikiPages.every(page => !page.slug.startsWith('playbook/')));
+    const unscoped = await hybridSearchWiki(db, 'deploy', { ftsOnly: true, artifactKinds: ['playbook'] });
+    assert.deepEqual(unscoped.wikiPages.map(page => page.slug), ['topic/global']);
+    db.close();
+  });
+
+  it('never returns derived facts through the hybrid FTS side channel', async () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE wiki_pages (slug TEXT PRIMARY KEY,title TEXT,content TEXT,staleness REAL,last_built_at TEXT,source_type TEXT,page_kind TEXT,project_key TEXT);
+      CREATE TABLE wiki_page_scopes (page_slug TEXT,scope_key TEXT);
+      CREATE TABLE wiki_external_sources (page_slug TEXT PRIMARY KEY,missing_count INTEGER);
+      CREATE TABLE memory_items (id TEXT PRIMARY KEY,title TEXT,content TEXT,kind TEXT,confidence REAL,state TEXT,origin_class TEXT,relation TEXT,source_id TEXT,search_count INTEGER DEFAULT 0);
+      CREATE VIRTUAL TABLE wiki_pages_fts USING fts5(slug,title,content,content='wiki_pages',content_rowid='rowid');
+      CREATE VIRTUAL TABLE memory_items_fts USING fts5(title,content,content='memory_items',content_rowid='rowid');
+      INSERT INTO memory_items VALUES ('primary','fact','needle primary','insight',0.9,'active','primary','observed','s1',0);
+      INSERT INTO memory_items VALUES ('derived','fact','needle derived','insight',0.9,'active','derived','synthesized_insight','nightly-reflect-x',0);
+      INSERT INTO memory_items_fts(memory_items_fts) VALUES('rebuild');
+    `);
+    const result = await hybridSearchWiki(db, 'needle', { ftsOnly: true, trackSearch: true });
+    assert.deepEqual(result.facts.map(fact => fact.id), ['primary']);
+    assert.equal(db.prepare("SELECT search_count FROM memory_items WHERE id='derived'").get().search_count, 0);
+    db.close();
+  });
 });

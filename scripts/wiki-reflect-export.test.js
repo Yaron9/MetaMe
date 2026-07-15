@@ -313,6 +313,19 @@ test('rebuildCapsulesIndex creates capsules/_index.md', () => {
   }
 });
 
+test('capsule export preserves canonical project/capability paths', () => {
+  const dir = mkdtempForTest('wiki-capsule-nested-');
+  const sourceRoot = path.join(dir, 'source');
+  const sourcePath = path.join(sourceRoot, 'metame', 'deploy.md');
+  fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+  fs.writeFileSync(sourcePath, '# Deploy\n');
+  const output = path.join(dir, 'vault');
+  assert.equal(exportCapsuleFile(sourcePath, output, sourceRoot), path.join(output, 'capsules', 'metame', 'deploy.md'));
+  rebuildCapsulesIndex([sourcePath], output, sourceRoot);
+  assert.match(fs.readFileSync(path.join(output, 'capsules', '_index.md'), 'utf8'), /capsules\/metame\/deploy/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 // ── exportReflectDir ────────────────────────────────────────────
 test('exportReflectDir copies .md files to outputDir/subdir', (_t) => {
   const tmp = makeTmpDir();
@@ -382,6 +395,17 @@ test('rebuildReflectDirIndex uses "Operational Lessons" label for lessons subdir
   const content = fs.readFileSync(path.join(tmp, 'lessons', '_index.md'), 'utf8');
   assert.ok(content.includes('Operational Lessons'));
   fs.rmSync(tmp, { recursive: true });
+});
+
+test('exportReflectDir hides archived historical files', () => {
+  const dir = mkdtempForTest('wiki-reflect-archive-');
+  const source = path.join(dir, 'source');
+  fs.mkdirSync(source);
+  fs.writeFileSync(path.join(source, 'old.md'), '---\narchive: true\n---\n# Old\n');
+  fs.writeFileSync(path.join(source, 'current.md'), '# Current\n');
+  const written = exportReflectDir(source, 'decisions', path.join(dir, 'vault'));
+  assert.deepEqual(written.map(file => path.basename(file)), ['current.md']);
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 // ── exportDocPages ────────────────────────────────────────────

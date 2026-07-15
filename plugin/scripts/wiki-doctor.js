@@ -59,6 +59,7 @@ function inspectDatabase(report, config, { dbPath = DB_PATH, Database = Database
     const integrity = db.prepare('PRAGMA quick_check').get().quick_check;
     addCheck(report, 'database', integrity === 'ok' ? 'ok' : 'error', `quick_check=${integrity}`);
     const wikiColumns = tableColumns(db, 'wiki_pages');
+    const memoryColumns = tableColumns(db, 'memory_items');
     const chunkColumns = tableColumns(db, 'content_chunks');
     const queueColumns = tableColumns(db, 'embedding_queue');
     const externalSchemaReady = wikiColumns.has('source_type') && tableExists(db, 'wiki_external_sources');
@@ -66,6 +67,9 @@ function inspectDatabase(report, config, { dbPath = DB_PATH, Database = Database
       && tableExists(db, 'wiki_topic_aliases')
       && tableExists(db, 'wiki_page_scopes')
       && tableExists(db, 'wiki_page_evidence');
+    const provenanceReady = memoryColumns.has('origin_class') && memoryColumns.has('provenance_root_id');
+    const artifactSchemaReady = tableExists(db, 'knowledge_artifact_registry')
+      && tableExists(db, 'knowledge_lineage') && wikiColumns.has('artifact_status');
     const metrics = {
       memory_items: countRows(db, 'memory_items'),
       wiki_pages: countRows(db, 'wiki_pages'),
@@ -80,6 +84,11 @@ function inspectDatabase(report, config, { dbPath = DB_PATH, Database = Database
         ? countRows(db, 'embedding_queue', 'attempts >= 3') : 0,
       topic_hubs: dossierSchemaReady ? countRows(db, 'wiki_pages', "page_kind='topic_hub' AND source_type='memory'") : 0,
       project_dossiers: dossierSchemaReady ? countRows(db, 'wiki_pages', "page_kind='project_dossier' AND source_type='memory'") : 0,
+      primary_active: provenanceReady ? countRows(db, 'memory_items', "state='active' AND origin_class='primary'") : null,
+      derived_active: provenanceReady ? countRows(db, 'memory_items', "state='active' AND origin_class='derived'") : null,
+      artifacts_active: artifactSchemaReady ? countRows(db, 'knowledge_artifact_registry', "status='active'") : 0,
+      artifacts_draft: artifactSchemaReady ? countRows(db, 'knowledge_artifact_registry', "status='draft'") : 0,
+      lineage_edges: artifactSchemaReady ? countRows(db, 'knowledge_lineage') : 0,
     };
     report.metrics = { ...report.metrics, ...metrics };
     const models = chunkColumns.has('embedding_model') && chunkColumns.has('embedding_dim')
@@ -89,6 +98,45 @@ function inspectDatabase(report, config, { dbPath = DB_PATH, Database = Database
       FROM content_chunks GROUP BY embedding_model, embedding_dim ORDER BY count DESC
     `).all().map(row => ({ ...row })) : [];
     report.metrics.embedding_models = models;
+    if (!provenanceReady) {
+      addCheck(report, 'knowledge-provenance', 'degraded', 'schema upgrade required before eligibility diagnostics');
+    } else {
+      const derivedEvidence = dossierSchemaReady ? db.prepare(`
+        SELECT COUNT(*) AS n FROM wiki_page_evidence e
+        JOIN memory_items mi ON e.evidence_type='memory_item' AND mi.id=e.evidence_id
+        WHERE mi.origin_class='derived'
+      `).get().n : 0;
+      report.metrics.derived_wiki_evidence = derivedEvidence;
+      addCheck(report, 'knowledge-provenance', derivedEvidence === 0 ? 'ok' : 'error',
+        derivedEvidence === 0 ? 'derived memories are isolated from evidence' : `${derivedEvidence} derived evidence links remain`);
+    }
+    if (!artifactSchemaReady) {
+      addCheck(report, 'knowledge-artifacts', 'degraded', 'artifact projection schema not installed');
+    } else {
+      const missingLineage = db.prepare(`
+        SELECT COUNT(*) AS n FROM knowledge_artifact_registry a
+        WHERE a.status='active' AND NOT EXISTS (
+          SELECT 1 FROM knowledge_lineage l
+          WHERE l.child_kind='knowledge_artifact' AND l.child_id=a.artifact_id
+        )
+      `).get().n;
+      const derivedLineage = db.prepare(`
+        SELECT COUNT(*) AS n FROM knowledge_lineage l
+        JOIN memory_items mi ON l.parent_kind='memory_item' AND mi.id=l.parent_id
+        WHERE mi.origin_class='derived'
+      `).get().n;
+      const cycles = db.prepare(`
+        SELECT COUNT(*) AS n FROM knowledge_lineage
+        WHERE child_kind=parent_kind AND child_id=parent_id
+      `).get().n;
+      report.metrics.artifacts_missing_lineage = missingLineage;
+      report.metrics.derived_lineage_edges = derivedLineage;
+      report.metrics.lineage_self_cycles = cycles;
+      const invalid = missingLineage + derivedLineage + cycles;
+      addCheck(report, 'knowledge-artifacts', invalid === 0 ? 'ok' : 'error', invalid === 0
+        ? `${metrics.artifacts_active} active artifacts have primary lineage`
+        : `${missingLineage} missing lineage, ${derivedLineage} derived parents, ${cycles} cycles`);
+    }
     if (metrics.queue_dead > 0) addCheck(report, 'embedding-queue', 'error', `${metrics.queue_dead} dead embedding jobs`);
     else if (metrics.queue_pending > 0) addCheck(report, 'embedding-queue', 'degraded', `${metrics.queue_pending} embedding jobs pending`);
     else addCheck(report, 'embedding-queue', 'ok', 'embedding queue empty');

@@ -366,6 +366,88 @@ function applyWikiSchema(db) {
   // ── memory_items.archive_reason (v4.1 §P1.9): tracks why item was archived ─
   // NULL = legacy archive (reason unknown); positive-match queries only.
   try { db.exec('ALTER TABLE memory_items ADD COLUMN archive_reason TEXT'); } catch { /* already exists */ }
+
+  // Explicit provenance contract. Backfill is deterministic and deliberately
+  // recognizes only known generator fingerprints; relation=NULL alone is never
+  // treated as derived. applyWikiSchema is also used by projection-only test DBs,
+  // so the memory migration remains conditional on the source table existing.
+  const hasMemoryItems = !!db.prepare(
+    "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='memory_items'"
+  ).get();
+  if (hasMemoryItems) {
+    try { db.exec('ALTER TABLE memory_items ADD COLUMN relation TEXT'); } catch { /* already exists */ }
+    try { db.exec('ALTER TABLE memory_items ADD COLUMN source_id TEXT'); } catch { /* already exists */ }
+    try { db.exec('ALTER TABLE memory_items ADD COLUMN session_id TEXT'); } catch { /* already exists */ }
+    try { db.exec('ALTER TABLE memory_items ADD COLUMN task_key TEXT'); } catch { /* already exists */ }
+    try { db.exec("ALTER TABLE memory_items ADD COLUMN origin_class TEXT DEFAULT 'primary'"); } catch { /* already exists */ }
+    try { db.exec('ALTER TABLE memory_items ADD COLUMN provenance_root_id TEXT'); } catch { /* already exists */ }
+    db.exec(`
+      UPDATE memory_items
+         SET origin_class = CASE
+           WHEN relation IN ('synthesized_insight','knowledge_capsule')
+             OR lower(COALESCE(source_id, '')) LIKE 'nightly-reflect-%'
+             OR lower(COALESCE(source_id, '')) LIKE 'capsule-%'
+           THEN 'derived' ELSE 'primary' END
+       WHERE origin_class IS NULL
+          OR origin_class NOT IN ('primary','derived')
+          OR (origin_class='primary' AND (
+            relation IN ('synthesized_insight','knowledge_capsule')
+            OR lower(COALESCE(source_id, '')) LIKE 'nightly-reflect-%'
+            OR lower(COALESCE(source_id, '')) LIKE 'capsule-%'))
+    `);
+    db.exec(`
+      UPDATE memory_items
+         SET provenance_root_id = CASE
+           WHEN COALESCE(source_id, '') != '' THEN 'source:' || source_id
+           WHEN COALESCE(session_id, '') != '' THEN 'session:' || session_id
+           WHEN COALESCE(task_key, '') != '' THEN 'task:' || task_key
+           ELSE NULL END
+       WHERE provenance_root_id IS NULL OR provenance_root_id = ''
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_mi_origin_state ON memory_items(origin_class, state)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_mi_provenance_root ON memory_items(provenance_root_id)');
+  }
+
+  // Markdown-authoritative knowledge artifacts. This registry is a disposable
+  // projection and must always be rebuildable from canonical files.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS knowledge_artifact_registry (
+      artifact_id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('decision','playbook')),
+      canonical_key TEXT NOT NULL UNIQUE,
+      project_key TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('draft','active','stale','superseded','retired')),
+      revision INTEGER NOT NULL,
+      source_path TEXT NOT NULL UNIQUE,
+      page_slug TEXT,
+      content_hash TEXT NOT NULL,
+      evidence_membership_hash TEXT NOT NULL,
+      previous_hash TEXT,
+      generator_version TEXT NOT NULL,
+      projected_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_artifact_kind_scope_status ON knowledge_artifact_registry(kind, project_key, status)');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS knowledge_lineage (
+      child_kind TEXT NOT NULL,
+      child_id TEXT NOT NULL,
+      parent_kind TEXT NOT NULL,
+      parent_id TEXT NOT NULL,
+      run_id TEXT,
+      transform TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'evidence',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (child_kind, child_id, parent_kind, parent_id, role)
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_lineage_parent ON knowledge_lineage(parent_kind, parent_id)');
+  try { db.exec('ALTER TABLE wiki_pages ADD COLUMN artifact_id TEXT'); } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE wiki_pages ADD COLUMN artifact_status TEXT'); } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE wiki_pages ADD COLUMN artifact_revision INTEGER'); } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE wiki_pages ADD COLUMN canonical_key TEXT'); } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE wiki_pages ADD COLUMN source_path TEXT'); } catch { /* already exists */ }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_wiki_artifact_lookup ON wiki_pages(page_kind, artifact_status, project_key)');
 }
 
 module.exports = { applyWikiSchema };

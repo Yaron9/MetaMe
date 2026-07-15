@@ -300,7 +300,7 @@ function rebuildSessionsIndex(entries, outputDir) {
   fs.renameSync(tmpPath, filePath);
 }
 
-function exportCapsuleFile(sourcePath, outputDir) {
+function exportCapsuleFile(sourcePath, outputDir, sourceRoot = path.dirname(String(sourcePath || ''))) {
   outputDir = resolveOutputDir(outputDir);
   const capsulesDir = path.join(outputDir, 'capsules');
   _ensureDir(capsulesDir);
@@ -309,7 +309,10 @@ function exportCapsuleFile(sourcePath, outputDir) {
   const base = path.basename(source);
   if (!source || !base.endsWith('.md') || !fs.existsSync(source)) return null;
 
-  const targetPath = path.join(capsulesDir, base);
+  const relative = path.relative(sourceRoot, source);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return null;
+  const targetPath = path.join(capsulesDir, relative);
+  _ensureDir(path.dirname(targetPath));
   const tmpPath = `${targetPath}.tmp`;
   const content = fs.readFileSync(source, 'utf8');
 
@@ -319,7 +322,7 @@ function exportCapsuleFile(sourcePath, outputDir) {
   return targetPath;
 }
 
-function rebuildCapsulesIndex(capsuleFiles, outputDir) {
+function rebuildCapsulesIndex(capsuleFiles, outputDir, sourceRoot = null) {
   outputDir = resolveOutputDir(outputDir);
   const capsulesDir = path.join(outputDir, 'capsules');
   _ensureDir(capsulesDir);
@@ -338,9 +341,11 @@ function rebuildCapsulesIndex(capsuleFiles, outputDir) {
   ];
 
   for (const sourcePath of capsuleFiles) {
-    const base = path.basename(String(sourcePath || ''), '.md');
-    if (!base) continue;
-    lines.push(`- [[capsules/${base}|${base}]]`);
+    const source = String(sourcePath || '');
+    const relative = sourceRoot ? path.relative(sourceRoot, source) : path.basename(source);
+    if (!relative || relative.startsWith('..')) continue;
+    const link = relative.slice(0, -3).split(path.sep).join('/');
+    lines.push(`- [[capsules/${link}|${path.basename(link)}]]`);
   }
 
   const filePath = path.join(capsulesDir, '_index.md');
@@ -373,6 +378,7 @@ function exportReflectDir(srcDir, subdir, outputDir) {
     const tmp = `${dest}.tmp`;
     try {
       const content = fs.readFileSync(src, 'utf8');
+      if (/^archive:\s*true\s*$/m.test(content) || /^status:\s*archived\s*$/m.test(content)) continue;
       try { fs.unlinkSync(tmp); } catch { /* not present */ }
       fs.writeFileSync(tmp, content.endsWith('\n') ? content : `${content}\n`, 'utf8');
       fs.renameSync(tmp, dest);

@@ -3,10 +3,27 @@
 require('./test-support/env-setup');
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const reflect = require('./memory-nightly-reflect');
 
 describe('memory-nightly-reflect Step4', () => {
+  it('writes inert candidate manifests with explicit evidence', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nightly-candidate-'));
+    const file = path.join(dir, 'candidate.json');
+    reflect._private.writeArtifactCandidates(file, {
+      today: '2026-07-15', decisions: [{ title: 'Why', content: 'Because', evidence_ids: ['a', 'wrong'] }],
+      lessons: [{ title: 'How', content: 'Verify', evidence_ids: ['b'] }], evidenceIds: ['b', 'a', 'a'],
+    });
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.equal(data.status, 'candidate');
+    assert.deepEqual(data.decisions[0].evidence_ids, ['a']);
+    assert.deepEqual(data.playbooks[0].evidence_ids, ['b']);
+    assert.equal(data.playbooks.length, 1);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
   it('queryHotFacts excludes derived relations but keeps extracted fact relations', () => {
     const db = new DatabaseSync(':memory:');
     db.exec(`

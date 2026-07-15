@@ -17,6 +17,8 @@ function normalizeSlug(slug) {
 
 function wikiPageCollection(page = {}) {
   const sourceType = String(page.source_type || '').trim();
+  if (sourceType === 'knowledge_artifact' && page.page_kind === 'decision') return 'decisions';
+  if (sourceType === 'knowledge_artifact' && page.page_kind === 'playbook') return 'capsules';
   if (sourceType === 'doc') return 'sources';
   if (sourceType === 'topic_cluster') return 'topics/clusters';
   if (sourceType === 'memory') return 'topics';
@@ -25,6 +27,13 @@ function wikiPageCollection(page = {}) {
 }
 
 function resolveWikiPageRelativePath(page = {}) {
+  if (String(page.source_type || '') === 'knowledge_artifact' && page.source_path) {
+    const sourcePath = String(page.source_path).replaceAll('\\', '/');
+    if (sourcePath.startsWith('/') || sourcePath.split('/').some(part => !part || part === '.' || part === '..')) {
+      throw new Error(`invalid artifact source path: ${page.source_path}`);
+    }
+    return sourcePath;
+  }
   const slug = normalizeSlug(page.slug);
   const collection = wikiPageCollection(page);
   return collection ? path.posix.join(collection, `${slug}.md`) : `${slug}.md`;

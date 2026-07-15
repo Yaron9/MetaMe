@@ -28,6 +28,7 @@ const MEMORY_DIR = path.join(HOME, '.metame', 'memory');
 const DECISIONS_DIR = path.join(MEMORY_DIR, 'decisions');
 const LESSONS_DIR = path.join(MEMORY_DIR, 'lessons');
 const CAPSULES_DIR = path.join(MEMORY_DIR, 'capsules');
+const CANDIDATES_DIR = path.join(MEMORY_DIR, 'artifact-candidates');
 
 // Hot zone thresholds
 const MIN_SEARCH_COUNT = 3;
@@ -37,7 +38,24 @@ const LOCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 const EXCLUDED_RELATIONS = ['synthesized_insight', 'knowledge_capsule'];
 
 // Ensure output directories exist at startup
-[MEMORY_DIR, DECISIONS_DIR, LESSONS_DIR, CAPSULES_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
+[MEMORY_DIR, DECISIONS_DIR, LESSONS_DIR, CAPSULES_DIR, CANDIDATES_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
+
+function writeArtifactCandidates(file, { today, decisions, lessons, evidenceIds }) {
+  const allowed = new Set(evidenceIds);
+  const attachEvidence = item => ({
+    ...item,
+    evidence_ids: [...new Set((item.evidence_ids || []).filter(id => allowed.has(id)))].sort(),
+  });
+  const payload = {
+    schema_version: 1,
+    run_id: `nightly-reflect-${today}`,
+    status: 'candidate',
+    generated_at: new Date().toISOString(),
+    decisions: decisions.map(attachEvidence),
+    playbooks: lessons.map(attachEvidence),
+  };
+  fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`, { flag: 'wx' });
+}
 
 /**
  * Load callHaiku + buildDistillEnv from deployed path, fallback to scripts dir.
@@ -110,9 +128,12 @@ function writeReflectLog(record) {
  * Returns array of plain objects.
  */
 function queryHotFacts(db, windowDays = WINDOW_DAYS) {
-  const relationPlaceholders = EXCLUDED_RELATIONS.map(() => '?').join(', ');
+  const { primarySqlForDb } = require('./core/knowledge-eligibility');
+  const eligibility = primarySqlForDb(db, 'memory_items');
+  const columns = new Set(db.prepare('PRAGMA table_info(memory_items)').all().map(row => row.name));
+  const provenance = columns.has('provenance_root_id') ? 'provenance_root_id' : 'NULL AS provenance_root_id';
   const stmt = db.prepare(`
-    SELECT id, title, kind, relation, content, confidence, search_count, created_at, state
+    SELECT id, title, kind, relation, content, confidence, search_count, created_at, state, ${provenance}
     FROM memory_items
     WHERE (
         search_count >= ${MIN_SEARCH_COUNT}
@@ -121,11 +142,11 @@ function queryHotFacts(db, windowDays = WINDOW_DAYS) {
       AND created_at >= datetime('now', '-${windowDays} days')
       AND state IN ('active', 'candidate')
       AND kind IN ('insight', 'convention', 'episode')
-      AND COALESCE(relation, '') NOT IN (${relationPlaceholders})
+      AND ${eligibility.sql}
     ORDER BY search_count DESC, created_at DESC
     LIMIT ${MAX_FACTS}
   `);
-  return stmt.all(...EXCLUDED_RELATIONS);
+  return stmt.all();
 }
 
 // Old databases stored durable fact relations (arch_convention/bug_lesson/...) directly
@@ -324,9 +345,10 @@ async function run() {
   const today = new Date().toISOString().slice(0, 10);
   const decisionFile = path.join(DECISIONS_DIR, `${today}-nightly-reflect.md`);
   const lessonFile = path.join(LESSONS_DIR, `${today}-nightly-reflect.md`);
+  const candidateFile = path.join(CANDIDATES_DIR, `${today}-nightly-reflect.json`);
 
   // Prevent duplicate runs for the same day
-  if (fs.existsSync(decisionFile) || fs.existsSync(lessonFile)) {
+  if (fs.existsSync(candidateFile) || fs.existsSync(decisionFile) || fs.existsSync(lessonFile)) {
     console.log('[NIGHTLY-REFLECT] Already ran today, skipping.');
     releaseLock();
     return;
@@ -370,6 +392,8 @@ async function run() {
 
     const factsJson = JSON.stringify(
       hotFacts.map(f => ({
+        id: f.id,
+        provenance_root_id: f.provenance_root_id || f.id,
         title: f.title,
         kind: f.kind,
         content: f.content,
@@ -387,14 +411,15 @@ ${factsJson}
 
 Analyze and output a JSON object:
 {
-  "decisions": [{"title": "中文标题", "content": "## 背景\\n...\\n## 结论\\n..."}],
-  "lessons": [{"title": "中文标题", "content": "## 问题\\n...\\n## 操作手册\\n1. ..."}]
+  "decisions": [{"title": "中文标题", "content": "## 背景\\n...\\n## 结论\\n...", "evidence_ids": ["原始事实ID"]}],
+  "lessons": [{"title": "中文标题", "content": "## 问题\\n...\\n## 操作手册\\n1. ...", "evidence_ids": ["原始事实ID"]}]
 }
 
 Rules:
 - decisions: strategic/architectural insights (why we chose X over Y)
 - lessons: operational SOPs (how to do X correctly)
 - Each array can be empty if no pattern found
+- evidence_ids must include only directly supporting input IDs, never the whole batch
 - content in 中文, 100-250 chars each
 - Output ONLY the JSON object`;
 
@@ -432,17 +457,12 @@ Rules:
 
     console.log(`[NIGHTLY-REFLECT] Distilled: ${decisions.length} decision(s), ${lessons.length} lesson(s).`);
 
-    // Write decisions file (even if empty array — record the run)
-    if (decisions.length > 0) {
-      writeReflectFile(decisionFile, decisions, hotFacts.length, 'decisions');
-      console.log(`[NIGHTLY-REFLECT] Decisions written: ${decisionFile}`);
-    }
-
-    // Write lessons file
-    if (lessons.length > 0) {
-      writeReflectFile(lessonFile, lessons, hotFacts.length, 'lessons');
-      console.log(`[NIGHTLY-REFLECT] Lessons written: ${lessonFile}`);
-    }
+    // Distillation produces inert candidates only. Promotion to canonical
+    // decision/playbook Markdown is a separate evidence/user-gated operation.
+    writeArtifactCandidates(candidateFile, {
+      today, decisions, lessons, evidenceIds: hotFacts.map(fact => fact.id),
+    });
+    console.log(`[NIGHTLY-REFLECT] Artifact candidates written: ${candidateFile}`);
 
     let synthesizedSaved = 0;
     let capsulesWritten = 0;
@@ -451,19 +471,12 @@ Rules:
     try {
       try { memory = require('./memory'); } catch { /* optional */ }
 
-      // 3B: write distilled insights back into memory.db for closed-loop retrieval.
-      if (memory && typeof memory.saveFacts === 'function') {
-        const synthesizedFacts = buildSynthesizedFacts(today, decisions, lessons);
-        if (synthesizedFacts.length > 0) {
-          const writeRes = memory.saveFacts(`nightly-reflect-${today}`, '*', synthesizedFacts, { scope: '*' });
-          synthesizedSaved = Number(writeRes && writeRes.saved) || 0;
-        }
-      }
+      // Distilled output must never re-enter primary memory as evidence.
 
       // 3C: knowledge capsule aggregation by entity prefix.
       // Cold start uses full hotFacts (7 days); incremental uses recentFacts (1 day)
       // to prevent the same facts from being re-distilled every night.
-      const capsuleGroups = collectCapsuleGroups(hotFacts, 3).slice(0, 3);
+      const capsuleGroups = []; // Legacy generator disabled: canonical artifacts are promotion-only.
       for (const group of capsuleGroups) {
         const capsuleSlug = sanitizeSlug(group.prefix.replace(/\./g, '-'), 'capsule');
         const capsuleFile = path.join(CAPSULES_DIR, `${capsuleSlug}-playbook.md`);
@@ -679,14 +692,16 @@ ${JSON.stringify(conflictInput, null, 2)}
       status: 'success',
       facts_analyzed: hotFacts.length,
       parse_repaired: parseRepaired,
-      decisions_written: decisions.length,
-      lessons_written: lessons.length,
+      decisions_written: 0,
+      lessons_written: 0,
+      artifact_candidates: decisions.length + lessons.length,
       synthesized_insights_saved: synthesizedSaved,
       conflicts_resolved: conflictsResolved,
       capsules_written: capsulesWritten,
       capsule_facts_saved: capsuleFactsSaved,
-      decision_file: decisions.length > 0 ? decisionFile : null,
-      lesson_file: lessons.length > 0 ? lessonFile : null,
+      candidate_file: candidateFile,
+      decision_file: null,
+      lesson_file: null,
     });
 
     console.log('[NIGHTLY-REFLECT] Run complete.');
@@ -723,6 +738,7 @@ module.exports = {
     parseJsonFromLlm,
     parseJsonWithRepair,
     ensureMemoryItemsCompatibility,
+    writeArtifactCandidates,
     EXCLUDED_RELATIONS,
   },
 };

@@ -2124,6 +2124,13 @@ if (isProvider) {
 // ---------------------------------------------------------
 // 5.7 DAEMON SUBCOMMANDS
 // ---------------------------------------------------------
+if (process.argv[2] === 'memory' && process.argv[3] === 'artifacts' && process.argv[4] === 'migrate') {
+  const result = spawnSync(process.execPath, [
+    path.join(__dirname, 'scripts', 'memory-artifact-migrate.js'),
+    ...process.argv.slice(5),
+  ], { stdio: 'inherit', env: process.env });
+  process.exit(result.status ?? 1);
+}
 if (process.argv[2] === 'wiki') {
   const area = process.argv[3];
   const action = process.argv[4];

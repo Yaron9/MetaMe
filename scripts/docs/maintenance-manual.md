@@ -89,6 +89,14 @@ feishu:
 - 旧版兼容仍扫描 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`。
 - 去重标记使用 analytics state DB 的 `codex_facts:<session_id>`，不会和 Claude session 标记碰撞。
 
+## 4.2 自维护知识链路
+
+- 原始会话与提取事实是证据源；LLM 总结统一标记为 derived，不能反向成为 recall、Wiki、画像、图谱或技能演化证据。
+- Decision / Playbook 以带 schema v1 frontmatter 的 Markdown 为权威源；SQLite 仅保存可重建的索引、证据和血缘投影。
+- 夜间任务只写 `artifact-candidates/*.json`。Decision 需验证/用户门，Playbook 需结果证据门；历史 nightly 文档 archive-hidden。
+- 技能演化分三级：L1 只可自动记录 evidence metadata，不改 live `SKILL.md`；L2 是持久 proposal；L3 权限、凭证、shell、网络、发布和自修改必须明确批准。`shadow/canary` 字段当前仅是治理状态，不宣称已有流量实验执行器。
+- 迁移顺序固定为 `--dry-run` → `--stage` → `--apply`；stage/apply 强制 drain embedding 至 0 pending/0 missing。apply 以 publish journal 记录阶段，并在 `~/.metame/backups/` 保存 SQLite、Markdown 与 Vault 可回滚副本；异常中断用 `--recover --backup-root <目录>` 恢复。
+
 ## 5. Agent Soul 身份层
 
 - 集中存储：`~/.metame/agents/<agent_id>/`（soul.md、memory-snapshot.md、agent.yaml）

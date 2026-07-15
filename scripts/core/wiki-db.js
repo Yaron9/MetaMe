@@ -237,8 +237,8 @@ function upsertWikiTopic(db, tag, { label, pinned = 0, force = false } = {}) {
  * @returns {boolean}
  */
 function checkTopicThreshold(db, tag) {
-  const DERIVED = ['synthesized_insight', 'knowledge_capsule'];
-  const placeholders = DERIVED.map(() => '?').join(', ');
+  const { primarySqlForDb } = require('./knowledge-eligibility');
+  const eligibility = primarySqlForDb(db, 'mi');
 
   // Condition 1: lifetime count >= 5 (active or candidate)
   const row1 = db.prepare(`
@@ -246,8 +246,8 @@ function checkTopicThreshold(db, tag) {
     FROM memory_items mi
     JOIN json_each(mi.tags) jt ON lower(trim(jt.value)) = lower(trim(?))
     WHERE mi.state IN ('active', 'candidate')
-      AND (mi.relation NOT IN (${placeholders}) OR mi.relation IS NULL)
-  `).get(tag, ...DERIVED);
+      AND ${eligibility.sql}
+  `).get(tag);
 
   if (!row1 || row1.cnt < 5) return false;
 
@@ -257,9 +257,9 @@ function checkTopicThreshold(db, tag) {
     FROM memory_items mi
     JOIN json_each(mi.tags) jt ON lower(trim(jt.value)) = lower(trim(?))
     WHERE mi.state IN ('active', 'candidate')
-      AND (mi.relation NOT IN (${placeholders}) OR mi.relation IS NULL)
+      AND ${eligibility.sql}
       AND mi.created_at >= datetime('now', '-30 days')
-  `).get(tag, ...DERIVED);
+  `).get(tag);
 
   if (!row2 || row2.cnt < 1) return false;
 
@@ -347,6 +347,8 @@ function searchWikiAndFacts(db, query, { trackSearch = true } = {}) {
   // 2. FTS5 search memory_items_fts — graceful fallback if table doesn't exist
   let facts = [];
   try {
+    const { primarySqlForDb } = require('./knowledge-eligibility');
+    const eligibility = primarySqlForDb(db, 'mi');
     facts = db.prepare(`
       SELECT mi.id, mi.title, mi.content, mi.kind, mi.confidence,
              snippet(memory_items_fts, 1, '<b>', '</b>', '...', 20) as excerpt,
@@ -355,6 +357,7 @@ function searchWikiAndFacts(db, query, { trackSearch = true } = {}) {
       JOIN memory_items mi ON memory_items_fts.rowid = mi.rowid
       WHERE memory_items_fts MATCH ?
         AND mi.state = 'active'
+        AND ${eligibility.sql}
       ORDER BY rank
       LIMIT 10
     `).all(safeQuery);

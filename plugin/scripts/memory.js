@@ -32,11 +32,13 @@ const fs = require('fs');
 const DB_PATH = path.join(os.homedir(), '.metame', 'memory.db');
 const METAME_DIR = path.join(os.homedir(), '.metame');
 const WORKING_MEMORY_DIR = path.join(METAME_DIR, 'memory', 'now');
+const MAINTENANCE_LOCK_FILE = path.join(METAME_DIR, 'memory-maintenance.lock');
 
 let _db = null;
 let _refCount = 0;
 
 function getDb() {
+  if (fs.existsSync(MAINTENANCE_LOCK_FILE)) throw new Error('memory maintenance in progress');
   if (_db) return _db;
 
   const dir = path.dirname(DB_PATH);
@@ -66,6 +68,8 @@ function getDb() {
       supersedes_id   TEXT,
       source_type     TEXT,
       source_id       TEXT,
+      origin_class    TEXT NOT NULL DEFAULT 'primary',
+      provenance_root_id TEXT,
       search_count    INTEGER DEFAULT 0,
       last_searched_at TEXT,
       tags            TEXT DEFAULT '[]',
@@ -138,19 +142,24 @@ function saveMemoryItem(item) {
   if (!item || !item.content) throw new Error('saveMemoryItem requires content');
   const db = getDb();
   const id = item.id || generateMemoryId();
+  const { classifyOrigin, deriveProvenanceRootId } = require('./core/knowledge-eligibility');
+  const originClass = classifyOrigin(item);
+  const provenanceRootId = deriveProvenanceRootId(item);
   const stmt = db.prepare(`
     INSERT INTO memory_items (id, kind, state, title, content, summary, confidence,
       project, scope, task_key, session_id, agent_key, supersedes_id,
-      source_type, source_id, relation, search_count, last_searched_at, tags,
+      source_type, source_id, origin_class, provenance_root_id, relation, search_count, last_searched_at, tags,
       created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
     ON CONFLICT(id) DO UPDATE SET
       kind=excluded.kind, state=excluded.state, title=excluded.title,
       content=excluded.content, summary=excluded.summary, confidence=excluded.confidence,
       project=excluded.project, scope=excluded.scope, task_key=excluded.task_key,
       session_id=excluded.session_id, agent_key=excluded.agent_key,
       supersedes_id=excluded.supersedes_id, source_type=excluded.source_type,
-      source_id=excluded.source_id, relation=excluded.relation, tags=excluded.tags,
+      source_id=excluded.source_id, origin_class=excluded.origin_class,
+      provenance_root_id=excluded.provenance_root_id,
+      relation=excluded.relation, tags=excluded.tags,
       updated_at=datetime('now')
   `);
   stmt.run(
@@ -169,6 +178,8 @@ function saveMemoryItem(item) {
     item.supersedes_id || null,
     item.source_type || null,
     item.source_id || null,
+    originClass,
+    provenanceRootId,
     item.relation || null,
     item.search_count || 0,
     item.last_searched_at || null,
@@ -182,13 +193,21 @@ function saveSessionSource(source) {
   return upsertSessionSource(getDb(), source);
 }
 
-function searchMemoryItems(query, { kind = null, scope = null, project = null, state = 'active', limit = 20, trackSearch = true } = {}) {
+function searchMemoryItems(query, {
+  kind = null, scope = null, project = null, state = 'active', limit = 20,
+  trackSearch = true, eligibilityChannel = null,
+} = {}) {
   const db = getDb();
   const conditions = [];
   const params = [];
 
   if (state) { conditions.push('mi.state = ?'); params.push(state); }
   if (kind) { conditions.push('mi.kind = ?'); params.push(kind); }
+  if (eligibilityChannel) {
+    const { PRIMARY_ONLY_CHANNELS, primarySql } = require('./core/knowledge-eligibility');
+    if (!PRIMARY_ONLY_CHANNELS.has(eligibilityChannel)) throw new Error(`unknown knowledge eligibility channel: ${eligibilityChannel}`);
+    conditions.push(primarySql('mi').sql);
+  }
   if (project && scope) {
     conditions.push(`((mi.scope = ? OR mi.scope = '*') OR (mi.scope IS NULL AND (mi.project = ? OR mi.project = '*')))`);
     params.push(scope, project);
@@ -306,6 +325,7 @@ function assembleContext({ query, scope = {}, budget } = {}) {
     project: scope.project,
     scope: scope.workspace,
     limit: 50,
+    eligibilityChannel: 'fact_recall',
   });
   const working = readWorkingMemory(scope.agent);
   const ranked = memoryModel.rankMemoryItems(items, query, {
@@ -450,6 +470,7 @@ function searchFacts(query, { limit = 5, project = null, scope = null, trackSear
     scope: scope || null,
     limit,
     trackSearch,
+    eligibilityChannel: 'fact_recall',
   }).filter(r => r.kind === 'insight' || r.kind === 'convention');
 
   return rows.map(r => ({
@@ -588,6 +609,7 @@ async function hybridSearchWiki(query, {
   excludeSourceTypes = [],
   observeSourceTypes = [],
   scopeKeys = [],
+  artifactKinds = [],
 } = {}) {
   try {
     const { hybridSearchWiki: fn } = require('./core/hybrid-search');
@@ -597,13 +619,15 @@ async function hybridSearchWiki(query, {
       excludeSourceTypes,
       observeSourceTypes,
       scopeKeys,
+      artifactKinds,
     });
   } catch {
     const fallback = searchWikiAndFacts(query, { trackSearch });
     const excluded = new Set(excludeSourceTypes);
     return {
       ...fallback,
-      wikiPages: fallback.wikiPages.filter(page => !excluded.has(page.source_type)),
+      wikiPages: scopeKeys.length > 0 || artifactKinds.length > 0 ? []
+        : fallback.wikiPages.filter(page => !excluded.has(page.source_type)),
       sourceHitCounts: {},
     };
   }

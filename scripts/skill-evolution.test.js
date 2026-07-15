@@ -47,6 +47,18 @@ test('captures missing-skill failures into skill_gap queue', () => {
   assert.ok(queue.items[0].id);
 });
 
+test('queue never truncates unresolved proposals and merges stable fingerprints', () => {
+  const { addToQueue } = require('./skill-evolution')._internal;
+  const queue = { items: [] };
+  for (let i = 0; i < 60; i++) addToQueue(queue, { type: 'skill_gap', search_hint: `capability-${i}` });
+  assert.equal(queue.items.length, 60);
+  addToQueue(queue, { type: 'skill_gap', search_hint: 'Skills docs', evidence_count: 2 });
+  addToQueue(queue, { type: 'skill_gap', search_hint: 'skill-docs', evidence_count: 3 });
+  const merged = queue.items.filter(item => item.search_hint === 'skill-docs' || item.search_hint === 'Skills docs');
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].evidence_count, 5);
+});
+
 test('resolves queue item by id', () => {
   const home = mkHome();
   runWithHome(home, `

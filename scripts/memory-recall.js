@@ -145,6 +145,8 @@ async function _searchWiki(query, scope, search) {
   const externalMode = process.env.METAME_OPENWIKI_RECALL_MODE || 'off';
   const normalizeScope = value => String(value || '').normalize('NFKC').trim().toLowerCase();
   const desired = new Set([scope.project, scope.workspaceScope, scope.agentKey].map(normalizeScope).filter(Boolean));
+  const { classifyKnowledgeIntent } = require('./core/knowledge-intent');
+  const intent = classifyKnowledgeIntent(query);
   let wikiPages = [];
   let sourceHitCounts = {};
   try {
@@ -154,6 +156,7 @@ async function _searchWiki(query, scope, search) {
       excludeSourceTypes: externalMode === 'on' ? [] : ['openwiki'],
       observeSourceTypes: externalMode === 'shadow' ? ['openwiki'] : [],
       scopeKeys: [...desired],
+      artifactKinds: intent.artifactKinds,
     });
     wikiPages = (result && Array.isArray(result.wikiPages)) ? result.wikiPages : [];
     sourceHitCounts = result?.sourceHitCounts || {};
