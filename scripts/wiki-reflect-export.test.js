@@ -16,6 +16,7 @@ const {
   rebuildCapsulesIndex,
   exportReflectDir,
   rebuildReflectDirIndex,
+  rebuildProjectedCollectionIndex,
   exportDocPages,          // add this
   exportStoredWikiPages,
   organizeWikiProjection,
@@ -176,6 +177,18 @@ test('rebuildIndex adds capsules navigation', () => {
     rebuildIndex([], dir, { capsuleCount: 2 });
     const content = fs.readFileSync(path.join(dir, '_index.md'), 'utf8');
     assert.ok(content.includes('[[capsules/_index|行动手册 Capsules]] (2)'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rebuildIndex only links non-empty decision and lesson collections', () => {
+  const dir = makeTmpDir();
+  try {
+    rebuildIndex([], dir, { decisionCount: 2, lessonCount: 0 });
+    const content = fs.readFileSync(path.join(dir, '_index.md'), 'utf8');
+    assert.ok(content.includes('[[decisions/_index|决策 Decisions]] (2)'));
+    assert.ok(!content.includes('lessons/_index'));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -443,6 +456,29 @@ test('rebuildReflectDirIndex uses "Operational Lessons" label for lessons subdir
   const content = fs.readFileSync(path.join(tmp, 'lessons', '_index.md'), 'utf8');
   assert.ok(content.includes('Operational Lessons'));
   fs.rmSync(tmp, { recursive: true });
+});
+
+test('rebuildProjectedCollectionIndex indexes nested canonical artifacts', () => {
+  const tmp = makeTmpDir();
+  fs.mkdirSync(path.join(tmp, 'decisions', 'metame'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'decisions', 'metame', 'routing.md'), '# Routing\n');
+  fs.writeFileSync(path.join(tmp, 'decisions', 'top-level.md'), '# Top\n');
+  const result = rebuildProjectedCollectionIndex('decisions', tmp);
+  const content = fs.readFileSync(path.join(tmp, 'decisions', '_index.md'), 'utf8');
+  assert.equal(result.count, 2);
+  assert.ok(content.includes('[[decisions/metame/routing|routing]]'));
+  assert.ok(content.includes('[[decisions/top-level|top-level]]'));
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('rebuildProjectedCollectionIndex removes an empty collection shell', () => {
+  const tmp = makeTmpDir();
+  fs.mkdirSync(path.join(tmp, 'lessons', 'empty'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'lessons', '_index.md'), '# Stale\n');
+  const result = rebuildProjectedCollectionIndex('lessons', tmp);
+  assert.equal(result.count, 0);
+  assert.equal(fs.existsSync(path.join(tmp, 'lessons')), false);
+  fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 test('exportReflectDir hides archived historical files', () => {

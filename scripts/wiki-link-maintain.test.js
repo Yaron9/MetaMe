@@ -56,6 +56,27 @@ test('workspace repair is explicit, backed up, and leaves Markdown untouched', (
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test('workspace repair removes stale recent files and retired titles', () => {
+  const root = vault();
+  const backupDir = path.join(root, 'backups');
+  try {
+    const document = {
+      main: { type: 'leaf', state: {
+        type: 'markdown', title: 'Backlinks for nightly-reflect-playbook',
+        state: { file: 'capsules/_index.md' },
+      } },
+      lastOpenFiles: ['missing.md', 'capsules/_index.md'],
+    };
+    fs.writeFileSync(path.join(root, '.obsidian', 'workspace.json'), JSON.stringify(document));
+    const result = repairWorkspace(root, { backupDir, minStableMs: 0, confirmIdle: true });
+    const repaired = JSON.parse(fs.readFileSync(path.join(root, '.obsidian', 'workspace.json')));
+    assert.equal(result.recentFilesRemoved, 1);
+    assert.equal(result.titlesCleared, 1);
+    assert.deepEqual(repaired.lastOpenFiles, ['capsules/_index.md']);
+    assert.equal(Object.hasOwn(repaired.main.state, 'title'), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('workspace repair requires an explicit Obsidian-idle confirmation', () => {
   const root = vault();
   try {

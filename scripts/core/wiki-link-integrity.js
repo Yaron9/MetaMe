@@ -121,7 +121,9 @@ function collectWorkspaceFileRefs(workspace) {
     if (!node || typeof node !== 'object') return;
     if (node.type === 'leaf' && WORKSPACE_FILE_VIEWS.has(node.state?.type)) {
       const file = node.state?.state?.file;
-      if (typeof file === 'string' && file.endsWith('.md')) refs.push({ file: normalizeRelative(file), trail });
+      if (typeof file === 'string' && file.endsWith('.md')) {
+        refs.push({ file: normalizeRelative(file), title: node.state?.title, trail });
+      }
     }
     for (const [key, child] of Object.entries(node)) visit(child, trail.concat(key));
   }
@@ -132,27 +134,74 @@ function collectWorkspaceFileRefs(workspace) {
 function auditWorkspaceState(workspace, existingFiles) {
   const refs = collectWorkspaceFileRefs(workspace);
   const existing = new Set([...existingFiles].map(normalizeRelative));
-  return { refs, missing: refs.filter(ref => !existing.has(ref.file)) };
+  const recentFiles = Array.isArray(workspace?.lastOpenFiles)
+    ? workspace.lastOpenFiles
+      .map((file, index) => ({ file: normalizeRelative(file), index }))
+      .filter(ref => ref.file.endsWith('.md'))
+    : [];
+  const staleTitles = refs.filter(ref => {
+    const title = String(ref.title || '').toLowerCase().replace(/[_ ]+/g, '-');
+    const file = ref.file.toLowerCase();
+    return (title.includes('nightly-reflect') && !file.includes('nightly-reflect'))
+      || (title.includes('playbook') && !file.includes('playbook'));
+  });
+  return {
+    refs,
+    missing: refs.filter(ref => !existing.has(ref.file)),
+    recentFiles,
+    missingRecent: recentFiles.filter(ref => !existing.has(ref.file)),
+    staleTitles,
+  };
 }
 
-function replaceMissingWorkspaceFiles(workspace, missingRefs, fallback) {
-  const missingTrails = new Set(missingRefs.map(ref => ref.trail.join('\0')));
-  let replaced = 0;
+function repairWorkspaceState(workspace, {
+  missing = [], missingRecent = [], staleTitles = [], fallback,
+} = {}) {
+  const missingTrails = new Set(missing.map(ref => ref.trail.join('\0')));
+  const staleTitleTrails = new Set(staleTitles.map(ref => ref.trail.join('\0')));
+  const missingRecentFiles = new Set(missingRecent.map(ref => ref.file));
+  let viewRefsReplaced = 0;
+  let titlesCleared = 0;
   function visit(node, trail = []) {
     if (Array.isArray(node)) return node.map((item, index) => visit(item, trail.concat(index)));
     if (!node || typeof node !== 'object') return node;
-    const copy = { ...node };
-    if (node.type === 'leaf' && missingTrails.has(trail.join('\0'))
-      && WORKSPACE_FILE_VIEWS.has(node.state?.type)) {
-      copy.state = { ...node.state, state: { ...node.state.state, file: fallback } };
-      replaced++;
-    }
-    for (const [key, child] of Object.entries(copy)) {
-      if (key !== 'state' || copy.state === node.state) copy[key] = visit(child, trail.concat(key));
+    const copy = Object.fromEntries(Object.entries(node)
+      .map(([key, child]) => [key, visit(child, trail.concat(key))]));
+    const trailKey = trail.join('\0');
+    if (node.type === 'leaf' && WORKSPACE_FILE_VIEWS.has(node.state?.type)) {
+      if (missingTrails.has(trailKey)) {
+        copy.state = { ...copy.state, state: { ...copy.state.state, file: fallback } };
+        viewRefsReplaced++;
+      }
+      if ((missingTrails.has(trailKey) || staleTitleTrails.has(trailKey))
+        && Object.hasOwn(copy.state || {}, 'title')) {
+        copy.state = { ...copy.state };
+        delete copy.state.title;
+        titlesCleared++;
+      }
     }
     return copy;
   }
-  return { workspace: visit(workspace), replaced };
+  const repaired = visit(workspace);
+  let recentFilesRemoved = 0;
+  if (Array.isArray(repaired.lastOpenFiles)) {
+    repaired.lastOpenFiles = repaired.lastOpenFiles.filter((file) => {
+      const remove = missingRecentFiles.has(normalizeRelative(file));
+      if (remove) recentFilesRemoved++;
+      return !remove;
+    });
+  }
+  return {
+    workspace: repaired,
+    replaced: viewRefsReplaced + recentFilesRemoved + titlesCleared,
+    viewRefsReplaced,
+    recentFilesRemoved,
+    titlesCleared,
+  };
+}
+
+function replaceMissingWorkspaceFiles(workspace, missingRefs, fallback) {
+  return repairWorkspaceState(workspace, { missing: missingRefs, fallback });
 }
 
 module.exports = {
@@ -160,5 +209,6 @@ module.exports = {
   auditWorkspaceState,
   collectWorkspaceFileRefs,
   extractInternalLinks,
+  repairWorkspaceState,
   replaceMissingWorkspaceFiles,
 };

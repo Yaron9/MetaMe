@@ -245,11 +245,20 @@ function inspectWikiLinks(report, outputDir) {
   report.metrics.wiki_links = audit.links;
   report.metrics.wiki_hard_broken_links = audit.hardBroken.length;
   report.metrics.wiki_soft_broken_links = audit.softBroken.length;
+  const workspaceIssues = audit.workspace.missing.length
+    + audit.workspace.missingRecent.length
+    + audit.workspace.staleTitles.length;
   report.metrics.workspace_missing_refs = audit.workspace.missing.length;
+  report.metrics.workspace_missing_recent = audit.workspace.missingRecent.length;
+  report.metrics.workspace_stale_titles = audit.workspace.staleTitles.length;
   if (audit.workspace.error) {
     addCheck(report, 'obsidian-links', 'error', audit.workspace.error);
-  } else if (audit.workspace.missing.length > 0) {
-    addCheck(report, 'obsidian-links', 'error', `${audit.workspace.missing.length} stale Obsidian workspace refs`, audit.workspace.missing);
+  } else if (workspaceIssues > 0) {
+    addCheck(report, 'obsidian-links', 'error', `${workspaceIssues} stale Obsidian workspace entries`, {
+      views: audit.workspace.missing,
+      recent: audit.workspace.missingRecent,
+      titles: audit.workspace.staleTitles,
+    });
   } else if (audit.hardBroken.length > 0) {
     addCheck(report, 'obsidian-links', 'error', `${audit.hardBroken.length} broken generated links`, audit.hardBroken.slice(0, 20));
   } else if (audit.softBroken.length > 0) {

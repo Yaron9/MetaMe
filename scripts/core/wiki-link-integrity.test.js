@@ -6,6 +6,7 @@ const {
   auditDocuments,
   auditWorkspaceState,
   extractInternalLinks,
+  repairWorkspaceState,
   replaceMissingWorkspaceFiles,
 } = require('./wiki-link-integrity');
 
@@ -19,6 +20,30 @@ test('auditDocuments resolves canonical paths, attachments, and unique basenames
   ] });
   assert.equal(result.links, 3);
   assert.deepEqual(result.broken, []);
+});
+
+test('workspace audit detects stale recent files and retired projection titles', () => {
+  const workspace = {
+    main: { type: 'leaf', state: {
+      type: 'markdown', title: 'nightly-reflect-playbook', state: { file: 'capsules/metame/daemon.md' },
+    } },
+    lastOpenFiles: ['missing.md', 'capsules/metame/daemon.md'],
+  };
+  const audit = auditWorkspaceState(workspace, ['capsules/metame/daemon.md']);
+  assert.deepEqual(audit.missingRecent.map(item => item.file), ['missing.md']);
+  assert.deepEqual(audit.staleTitles.map(item => item.title), ['nightly-reflect-playbook']);
+
+  const repaired = repairWorkspaceState(workspace, {
+    missing: audit.missing,
+    missingRecent: audit.missingRecent,
+    staleTitles: audit.staleTitles,
+    fallback: 'capsules/_index.md',
+  });
+  assert.deepEqual(repaired.workspace.lastOpenFiles, ['capsules/metame/daemon.md']);
+  assert.equal(Object.hasOwn(repaired.workspace.main.state, 'title'), false);
+  assert.equal(repaired.recentFilesRemoved, 1);
+  assert.equal(repaired.titlesCleared, 1);
+  assert.equal(repaired.viewRefsReplaced, 0);
 });
 
 test('auditDocuments treats only generated navigation failures as hard', () => {

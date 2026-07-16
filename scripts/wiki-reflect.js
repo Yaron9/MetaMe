@@ -39,7 +39,7 @@ const {
   exportCapsuleFile,
   rebuildCapsulesIndex,
   exportReflectDir,
-  rebuildReflectDirIndex,
+  rebuildProjectedCollectionIndex,
   exportStoredWikiPages,
   organizeWikiProjection,
 } = require('./wiki-reflect-export');
@@ -242,10 +242,6 @@ async function runWikiReflect(db, {
     } catch (error) { maintenanceErrors.push(`stored page export failed: ${error.message}`); }
     if (allPagesLoaded) try { organizeWikiProjection(allPages, outputDir); } catch { /* non-fatal */ }
 
-    if (allPagesLoaded && sessionsLoaded) try {
-      rebuildIndex(allPages, outputDir, { sessionCount: sessions.length, capsuleCount: capsuleFiles.length });
-    } catch { /* non-fatal — _index.md not updated */ }
-
     if (allPagesLoaded && sessionsLoaded) {
       for (const entry of sessions) {
         try { exportSessionSummary(entry, outputDir, { wikiPages: allPages, capsuleFiles, capsulesRoot: capsulesDir }); }
@@ -263,16 +259,26 @@ async function runWikiReflect(db, {
     try { rebuildCapsulesIndex(capsuleFiles, outputDir, capsulesDir); } catch { /* non-fatal */ }
 
     // Step 6: Mirror decisions and lessons to vault
+    let decisionCount = 0;
+    let lessonCount = 0;
     try {
       const decWritten = exportReflectDir(decisionsDir, 'decisions', outputDir);
       const lesWritten = exportReflectDir(lessonsDir, 'lessons', outputDir);
       reflectExported = decWritten.length + lesWritten.length;
-
-      const decFiles = decWritten.map(file => path.basename(file));
-      const lesFiles = lesWritten.map(file => path.basename(file));
-      rebuildReflectDirIndex(decFiles, 'decisions', outputDir);
-      rebuildReflectDirIndex(lesFiles, 'lessons', outputDir);
     } catch { /* non-fatal */ }
+    try { decisionCount = rebuildProjectedCollectionIndex('decisions', outputDir).count; }
+    catch (error) { maintenanceErrors.push(`decision index rebuild failed: ${error.message}`); }
+    try { lessonCount = rebuildProjectedCollectionIndex('lessons', outputDir).count; }
+    catch (error) { maintenanceErrors.push(`lesson index rebuild failed: ${error.message}`); }
+
+    if (allPagesLoaded && sessionsLoaded) try {
+      rebuildIndex(allPages, outputDir, {
+        sessionCount: sessions.length,
+        capsuleCount: capsuleFiles.length,
+        decisionCount,
+        lessonCount,
+      });
+    } catch (error) { maintenanceErrors.push(`root index rebuild failed: ${error.message}`); }
 
     // Audit is deliberately read-only. Generated files are repaired only by
     // their owning exporters; user-authored Markdown is never rewritten here.
@@ -304,7 +310,9 @@ async function runWikiReflect(db, {
         links: linkHealth.links,
         hard_broken: Array.isArray(linkHealth.hardBroken) ? linkHealth.hardBroken.length : null,
         soft_broken: Array.isArray(linkHealth.softBroken) ? linkHealth.softBroken.length : null,
-        workspace_missing: linkHealth.workspace?.missing?.length || 0,
+        workspace_missing: (linkHealth.workspace?.missing?.length || 0)
+          + (linkHealth.workspace?.missingRecent?.length || 0)
+          + (linkHealth.workspace?.staleTitles?.length || 0),
         error: linkHealth.error,
       },
       duration_ms: Date.now() - startMs,

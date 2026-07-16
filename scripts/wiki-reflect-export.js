@@ -71,6 +71,8 @@ function rebuildIndex(pages, outputDir, options = {}) {
   _ensureDir(outputDir);
   const sessionCount = Number(options.sessionCount) || 0;
   const capsuleCount = Number(options.capsuleCount) || 0;
+  const decisionCount = Number(options.decisionCount) || 0;
+  const lessonCount = Number(options.lessonCount) || 0;
   const grouped = partitionWikiPages(pages);
   const hasCanonicalHubs = grouped.topics.some(page => page.build_profile === 'local-hub-v1');
   const topicHubs = grouped.topics.filter(page => page.source_type === 'memory'
@@ -98,8 +100,8 @@ function rebuildIndex(pages, outputDir, options = {}) {
       ? [`- [[external/openwiki/quickstart|外部证据 External Evidence]] (${grouped.external.length}) — OpenWiki 外部证据`]
       : []),
     `- [[sessions/_index|对话 Sessions]]${sessionCount > 0 ? ` (${sessionCount})` : ''} — 对话过程`,
-    `- [[decisions/_index|决策 Decisions]] — 已沉淀决策`,
-    `- [[lessons/_index|经验 Lessons]] — 可复用经验`,
+    ...(decisionCount > 0 ? [`- [[decisions/_index|决策 Decisions]] (${decisionCount}) — 已沉淀决策`] : []),
+    ...(lessonCount > 0 ? [`- [[lessons/_index|经验 Lessons]] (${lessonCount}) — 可复用经验`] : []),
     `- [[capsules/_index|行动手册 Capsules]]${capsuleCount > 0 ? ` (${capsuleCount})` : ''} — 可执行知识`,
     '',
     '## 最近更新',
@@ -479,6 +481,58 @@ function rebuildReflectDirIndex(fileNames, subdir, outputDir) {
   fs.renameSync(tmpPath, filePath);
 }
 
+function rebuildProjectedCollectionIndex(subdir, outputDir) {
+  outputDir = resolveOutputDir(outputDir);
+  const destDir = path.join(outputDir, subdir);
+  const files = [];
+  function walk(dir) {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith('.') || entry.name === '_archive' || entry.name === '_revisions') continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith('.md') && entry.name !== '_index.md') files.push(full);
+    }
+  }
+  walk(destDir);
+
+  const indexPath = path.join(destDir, '_index.md');
+  if (files.length === 0) {
+    fs.rmSync(indexPath, { force: true });
+    _pruneEmptyDirectories(destDir, outputDir);
+    return { count: 0, files: [] };
+  }
+
+  const label = subdir === 'decisions' ? 'Architecture Decisions' : 'Operational Lessons';
+  const relativeFiles = files.map(file => path.relative(outputDir, file).split(path.sep).join('/')).sort();
+  const lines = [
+    '---',
+    `title: ${label}`,
+    `updated: ${new Date().toISOString().slice(0, 10)}`,
+    'type: collection-index',
+    '---',
+    '',
+    `# ${label}`,
+    '',
+    `> ${relativeFiles.length} entries · 自动生成，勿手动编辑`,
+    '',
+    ...relativeFiles.map(relative => {
+      const link = relative.replace(/\.md$/i, '');
+      return `- [[${link}|${path.posix.basename(link)}]]`;
+    }),
+  ];
+  _writeAtomic(indexPath, lines.join('\n') + '\n');
+  return { count: relativeFiles.length, files: relativeFiles };
+}
+
+function _pruneEmptyDirectories(dir, stopDir) {
+  if (!fs.existsSync(dir) || path.resolve(dir) === path.resolve(stopDir)) return;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) _pruneEmptyDirectories(path.join(dir, entry.name), stopDir);
+  }
+  if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+}
+
 /**
  * Export all doc/cluster wiki pages from DB to Obsidian vault.
  * Called by runWikiReflect after the memory-topic loop.
@@ -670,6 +724,7 @@ module.exports = {
   rebuildCapsulesIndex,
   exportReflectDir,
   rebuildReflectDirIndex,
+  rebuildProjectedCollectionIndex,
   exportDocPages,          // new
   exportStoredWikiPages,
 };

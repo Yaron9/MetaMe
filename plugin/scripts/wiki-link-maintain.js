@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const yaml = require('./resolve-yaml');
-const { auditDocuments, auditWorkspaceState, replaceMissingWorkspaceFiles } = require('./core/wiki-link-integrity');
+const { auditDocuments, auditWorkspaceState, repairWorkspaceState } = require('./core/wiki-link-integrity');
 const { resolveConfiguredWikiOutputDir } = require('./core/wiki-paths');
 
 const IGNORED_DIRS = new Set(['node_modules', '_review', '_archive', '_revisions']);
@@ -29,11 +29,18 @@ function listVaultFiles(root) {
 
 function readWorkspace(root, { includeDocument = false, availableFiles } = {}) {
   const workspacePath = path.join(root, '.obsidian', 'workspace.json');
-  if (!fs.existsSync(workspacePath)) return { path: workspacePath, exists: false, refs: [], missing: [] };
+  if (!fs.existsSync(workspacePath)) return {
+    path: workspacePath, exists: false, refs: [], missing: [], recentFiles: [], missingRecent: [], staleTitles: [],
+  };
   const source = fs.readFileSync(workspacePath, 'utf8');
   let workspace;
   try { workspace = JSON.parse(source); }
-  catch (error) { return { path: workspacePath, exists: true, error: `invalid workspace.json: ${error.message}`, refs: [], missing: [] }; }
+  catch (error) {
+    return {
+      path: workspacePath, exists: true, error: `invalid workspace.json: ${error.message}`,
+      refs: [], missing: [], recentFiles: [], missingRecent: [], staleTitles: [],
+    };
+  }
   const existing = availableFiles || listVaultFiles(root)
     .map(file => path.relative(root, file).replace(/\\/g, '/'));
   return {
@@ -75,7 +82,8 @@ function repairWorkspace(root, {
   confirmIdle = false,
 } = {}) {
   const audit = readWorkspace(root, { includeDocument: true });
-  if (!audit.exists || audit.error || audit.missing.length === 0) {
+  const repairCount = audit.missing.length + audit.missingRecent.length + audit.staleTitles.length;
+  if (!audit.exists || audit.error || repairCount === 0) {
     return { ...publicWorkspaceAudit(audit), replaced: 0 };
   }
   if (!confirmIdle) {
@@ -85,7 +93,12 @@ function repairWorkspace(root, {
   if (minStableMs > 0 && Date.now() - fs.statSync(audit.path).mtimeMs < minStableMs) {
     throw new Error('workspace.json changed recently; wait for Obsidian to become idle and retry');
   }
-  const result = replaceMissingWorkspaceFiles(audit.document, audit.missing, fallback);
+  const result = repairWorkspaceState(audit.document, {
+    missing: audit.missing,
+    missingRecent: audit.missingRecent,
+    staleTitles: audit.staleTitles,
+    fallback,
+  });
   fs.mkdirSync(backupDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const backupPath = path.join(backupDir, `workspace-${stamp}-${process.pid}.json`);
@@ -98,7 +111,14 @@ function repairWorkspace(root, {
     throw new Error('workspace.json changed during repair; retry after Obsidian becomes idle');
   }
   fs.renameSync(tmpPath, audit.path);
-  return { ...publicWorkspaceAudit(audit), replaced: result.replaced, backupPath };
+  return {
+    ...publicWorkspaceAudit(audit),
+    replaced: result.replaced,
+    viewRefsReplaced: result.viewRefsReplaced,
+    recentFilesRemoved: result.recentFilesRemoved,
+    titlesCleared: result.titlesCleared,
+    backupPath,
+  };
 }
 
 function maintainWikiLinks(root, {
@@ -134,7 +154,10 @@ if (require.main === module) {
       reportPath: path.join(os.homedir(), '.metame', 'wiki-link-health.json'),
     });
     console.log(JSON.stringify(report, null, 2));
-    const workspaceBroken = report.workspace.error || report.workspace.missing.length > 0;
+    const workspaceBroken = report.workspace.error
+      || report.workspace.missing.length > 0
+      || report.workspace.missingRecent.length > 0
+      || report.workspace.staleTitles.length > 0;
     process.exitCode = report.hardBroken.length > 0 || workspaceBroken ? 2 : 0;
   } catch (error) {
     console.error(`[wiki-links] ${error.message}`);
