@@ -94,6 +94,7 @@ function createClaudeEngine(deps) {
     writeSessionName,
     markSessionStarted,
     stripThinkingSignatures,
+    takePendingNotice,
     isEngineSessionValid,
     getCodexSessionSandboxProfile,
     getCodexSessionPermissionMode,
@@ -1858,6 +1859,14 @@ function createClaudeEngine(deps) {
         suppressKeys: _askState.recallActive ? ['memory_recall'] : undefined,
       });
 
+      // One-shot rollback notice set by /undo — consumed here so it rides the
+      // dynamic hint channel (survives warm reuse, injected exactly once).
+      let rollbackHint = '';
+      try {
+        const _notice = typeof takePendingNotice === 'function' ? takePendingNotice(sessionChatId) : '';
+        if (_notice) rollbackHint = `\n\n[系统提示] ${_notice}`;
+      } catch { /* non-fatal */ }
+
       // For warm process reuse: static context (daemonHint, memoryHint, etc.) is already
       // in the persistent process — skip those to save tokens. intentHint is dynamic
       // (varies per prompt), so include it even on warm reuse. recallHint is also
@@ -1865,7 +1874,7 @@ function createClaudeEngine(deps) {
       const fullPrompt = composePrompt({
         routedPrompt,
         warmEntry: _warmEntry,
-        intentHint,
+        intentHint: intentHint + rollbackHint,
         daemonHint,
         agentHint,
         macAutomationHint,
@@ -1896,10 +1905,11 @@ function createClaudeEngine(deps) {
         permissionProfile: runtime.name === 'codex' ? requestedCodexPermissionProfile : null,
       });
 
-      // Codex: write/refresh AGENTS.md = CLAUDE.md + SOUL.md on every fresh execution thread.
+      // Projection strategy 'agents-md-merge' (see core/engine-descriptors.js):
+      // write/refresh AGENTS.md = CLAUDE.md + SOUL.md on every fresh execution thread.
       // This must happen after any permission-triggered fallback decision so the spawned process uses
       // the final session object and fresh exec args rather than stale resume args.
-      if (engineName === 'codex' && session.cwd && !session.started) {
+      if (runtime.descriptor && runtime.descriptor.contextProjection === 'agents-md-merge' && session.cwd && !session.started) {
         try {
           const agentsMd = path.join(session.cwd, 'AGENTS.md');
           // Refresh AGENTS.md only when we KNOW it is a regular file (or absent).

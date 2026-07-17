@@ -528,3 +528,12 @@ These are implementation gates, not design ambiguities:
 6. Confirm whether the CLI cache update is atomic; retain torn-read handling regardless.
 
 Failure of items 3 or 4 blocks 3D publication rollout but does not block the Munger runtime foundation.
+
+## Format sentinel (2026-07, plan P2.3)
+
+The adapter now runs `assessTranscriptFormat` (core/agy-state.js) before any
+recovery round: a transcript whose records match zero known types (USER_INPUT /
+PLANNER_RESPONSE / tool types / GENERIC / ERROR_MESSAGE) is treated as an
+Antigravity schema change and fails fast with `AGY_TRANSCRIPT_FORMAT_DRIFT`
+instead of degrading into silent empty replies. When this fires, update the
+known-type set and normalization in core/agy-state.js against the new schema.

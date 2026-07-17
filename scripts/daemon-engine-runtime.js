@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 const { normalizeEngineName } = require('./daemon-utils');
+const { getEngineDescriptor } = require('./core/engine-descriptors');
 const { AGY_DEFAULT_MODEL, normalizeAgyModel } = require('./core/agy-model');
 
 const CODEX_TOOL_MAP = Object.freeze({
@@ -559,6 +560,7 @@ function createEngineRuntimeFactory(deps = {}) {
       const agyPluginConfig = path.join(home, '.gemini', 'config', 'plugins', 'metame-tools', 'mcp_config.json');
       return {
         name: 'agy',
+        descriptor: getEngineDescriptor('agy'),
         binary: process.execPath,
         nativeBinary: agyBin,
         isReady: () => agyBin !== 'agy' && fs.existsSync(agyPluginConfig),
@@ -593,6 +595,7 @@ function createEngineRuntimeFactory(deps = {}) {
     if (engine === 'codex') {
       return {
         name: 'codex',
+        descriptor: getEngineDescriptor('codex'),
         binary: codexBin,
         defaultModel: ENGINE_MODEL_CONFIG.codex.main,
         stdinBehavior: 'write-and-close',
@@ -609,6 +612,7 @@ function createEngineRuntimeFactory(deps = {}) {
     }
     return {
       name: 'claude',
+      descriptor: getEngineDescriptor('claude'),
       binary: claudeBin,
       defaultModel: ENGINE_MODEL_CONFIG.claude.main,
       stdinBehavior: 'write-and-close',

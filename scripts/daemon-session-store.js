@@ -173,65 +173,32 @@ function createSessionStore(deps) {
     _codexRolloutCache.delete(sessionId);
   }
 
-  function truncateSessionLastTurn(sessionId) {
-    try {
-      const sessionFile = findSessionFile(sessionId);
-      if (!sessionFile) return 0;
-      const fileContent = fs.readFileSync(sessionFile, 'utf8');
-      const lines = fileContent.split('\n').filter(l => l.trim());
-      let cutIdx = -1;
-      for (let i = lines.length - 1; i >= 0; i--) {
-        try {
-          const obj = JSON.parse(lines[i]);
-          if (obj.type === 'user') { cutIdx = i; break; }
-        } catch { /* skip malformed lines */ }
-      }
-      if (cutIdx <= 0) return 0;
-      const kept = lines.slice(0, cutIdx);
-      fs.writeFileSync(sessionFile, kept.join('\n') + '\n', 'utf8');
-      _sessionFileCache.delete(sessionId);
-      const removed = lines.length - kept.length;
-      log('INFO', `truncateSessionLastTurn: removed ${removed} lines from ${path.basename(sessionFile)}`);
-      return removed;
-    } catch (e) {
-      log('WARN', `truncateSessionLastTurn failed: ${e.message}`);
-      return 0;
-    }
+  /**
+   * Rollback context notice: after /undo, the conversation transcript is no
+   * longer rewritten (that coupled us to Claude's private JSONL format).
+   * Instead the notice persists on the session record (daemon_state.json —
+   * survives restarts) and is injected into the next prompt exactly once.
+   */
+  function setPendingNotice(chatId, text) {
+    const notice = String(text || '').trim().slice(0, 2000);
+    if (!chatId || !notice) return false;
+    const state = loadState();
+    const record = state.sessions && state.sessions[String(chatId)];
+    if (!record) return false;
+    record.pendingNotice = notice;
+    saveState(state);
+    return true;
   }
 
-  function truncateSessionToCheckpoint(sessionId, checkpointMessage) {
-    try {
-      const cpTs = typeof cpExtractTimestamp === 'function' ? cpExtractTimestamp(checkpointMessage) : null;
-      const cpTime = cpTs ? new Date(cpTs).getTime() : 0;
-      if (!cpTime) return truncateSessionLastTurn(sessionId);
-
-      const sessionFile = findSessionFile(sessionId);
-      if (!sessionFile) return 0;
-      const fileContent = fs.readFileSync(sessionFile, 'utf8');
-      const lines = fileContent.split('\n').filter(l => l.trim());
-
-      let cutIdx = -1;
-      for (let i = 0; i < lines.length; i++) {
-        try {
-          const obj = JSON.parse(lines[i]);
-          if (obj.type === 'user' && obj.timestamp) {
-            const msgTime = new Date(obj.timestamp).getTime();
-            if (msgTime && msgTime >= cpTime) { cutIdx = i; break; }
-          }
-        } catch { /* skip malformed lines */ }
-      }
-      if (cutIdx <= 0) return truncateSessionLastTurn(sessionId);
-
-      const kept = lines.slice(0, cutIdx);
-      fs.writeFileSync(sessionFile, kept.join('\n') + '\n', 'utf8');
-      _sessionFileCache.delete(sessionId);
-      const removed = lines.length - kept.length;
-      log('INFO', `truncateSessionToCheckpoint: removed ${removed} lines from ${path.basename(sessionFile)}`);
-      return removed;
-    } catch (e) {
-      log('WARN', `truncateSessionToCheckpoint failed: ${e.message}`);
-      return truncateSessionLastTurn(sessionId);
-    }
+  function takePendingNotice(chatId) {
+    if (!chatId) return '';
+    const state = loadState();
+    const record = state.sessions && state.sessions[String(chatId)];
+    if (!record || !record.pendingNotice) return '';
+    const notice = record.pendingNotice;
+    delete record.pendingNotice;
+    saveState(state);
+    return notice;
   }
 
   /**
@@ -239,6 +206,12 @@ function createSessionStore(deps) {
    * This allows resuming sessions after switching models (e.g. MiniMax → Claude)
    * without hitting "Invalid signature in thinking block" errors.
    * Returns the number of signatures stripped, or 0 if nothing changed.
+   *
+   * Reviewed 2026-07 (plan P2.2): this is the ONLY remaining write into
+   * Claude's private session format. It stays because it is a resume-repair
+   * path — removing it would downgrade signature errors from "context
+   * preserved" to "new session, context lost" — and it already degrades
+   * safely (returns 0, caller creates a fresh session).
    */
   function stripThinkingSignatures(sessionId) {
     try {
@@ -1477,7 +1450,8 @@ function createSessionStore(deps) {
     findSessionFile,
     findCodexSessionFile,
     clearSessionFileCache,
-    truncateSessionToCheckpoint,
+    setPendingNotice,
+    takePendingNotice,
     stripThinkingSignatures,
     watchSessionFiles,
     stopWatchingSessionFiles,

@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const { execFileSync, spawn } = require('child_process');
 const {
+  assessTranscriptFormat,
   canonicalizeCwd,
   parseConversationCache,
   getCachedConversationId,
@@ -628,6 +629,20 @@ async function run(options, prompt, deps = {}) {
     const records = recordsAfterLatestUser(newRecords);
     const text = selectFinalResponse(records);
     if (!text) {
+      // Format sentinel: records exist but none are of a known type — the
+      // Antigravity transcript schema has drifted. Fail loudly; a recovery
+      // round on an unreadable transcript would just loop into silence.
+      const health = assessTranscriptFormat(records);
+      if (health.formatDrift) {
+        return {
+          error: {
+            code: 'AGY_TRANSCRIPT_FORMAT_DRIFT',
+            message: `agy transcript 格式无法识别（${health.unknown} 条未知记录，0 条已知）。Antigravity 可能已更新内部格式，需要升级 MetaMe 的 agy adapter；期间请切换 codex/claude。`,
+          },
+          sessionId,
+          records,
+        };
+      }
       const finalizationPrompt = buildFinalizationPrompt(prompt, records);
       if (!finalizationPrompt) return { error: classifyFailure(result), sessionId, records };
 

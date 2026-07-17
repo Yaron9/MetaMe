@@ -18,9 +18,8 @@ function createOpsCommandHandler(deps) {
     getSessionForEngine,
     listCheckpoints,
     cpDisplayLabel,
-    truncateSessionToCheckpoint,
+    setPendingNotice,
     findSessionFile,
-    clearSessionFileCache,
     cpExtractTimestamp,
     gitCheckpoint,
     cleanupCheckpoints,
@@ -98,12 +97,15 @@ function createOpsCommandHandler(deps) {
           if (changedFiles.length > 0) {
             execFileSync('git', ['checkout', match.hash, '--', ...changedFiles], { cwd, stdio: 'ignore', timeout: 10000 });
           }
-          // Truncate context to checkpoint time (covers multi-turn rollback)
-          truncateSessionToCheckpoint(session.id, match.message);
+          // Conversation context is NOT rewritten (Claude private format);
+          // a one-shot notice on the next prompt tells the model to ignore
+          // everything after the checkpoint instead.
+          setPendingNotice(chatId, `工作区已回滚至 checkpoint「${cpDisplayLabel(match.message)}」，此后的代码改动已全部撤销。忽略此前对话中与这些已撤销改动相关的内容，以当前工作区实际状态为准。`);
           const fileList = changedFiles.map(f => path.basename(f)).join(', ');
           const fileCount = changedFiles.length;
           let msg = `⏪ 已回退到 ${cpDisplayLabel(match.message)}`;
           if (fileCount > 0) msg += `\n📁 ${fileCount} 个文件恢复: ${fileList}`;
+          msg += '\n🧠 AI 将在下轮对话忽略已撤销的改动';
           log('INFO', `/undo <hash> executed for ${chatId}: reset to ${match.hash.slice(0, 8)}, files=${fileCount}`);
           await bot.sendMessage(chatId, msg);
           cleanupCheckpoints(cwd);
@@ -251,15 +253,12 @@ function createOpsCommandHandler(deps) {
           }
         }
 
-        // Truncate JSONL after git reset succeeds
-        const kept2 = lines2.slice(0, idx);
-        fs.writeFileSync(sessionFile2, kept2.length ? kept2.join('\n') + '\n' : '', 'utf8');
-        clearSessionFileCache(session2.id);
-        const removed2 = lines2.length - kept2.length;
-
+        // Conversation context is NOT rewritten; inject a one-shot rollback
+        // notice into the next prompt instead.
         const preview = targetMsg.replace(/\n/g, ' ').slice(0, 30) || `行 ${idx}`;
-        log('INFO', `/undo_to ${idx} for ${chatId}: removed=${removed2} lines${gitMsg2 ? ', ' + gitMsg2.trim() : ''}`);
-        await bot.sendMessage(chatId, `⏪ 已回退到「${preview}」之前\n🧠 上下文回滚 ${removed2} 行${gitMsg2}`);
+        setPendingNotice(chatId, `会话已回退到消息「${preview}」之前的状态，该消息及其之后的讨论与改动已全部撤销${gitMsg2 ? '（相关文件已恢复）' : ''}。忽略此前对话中与这些已撤销内容相关的部分，以当前工作区实际状态为准。`);
+        log('INFO', `/undo_to ${idx} for ${chatId}: rollback notice set${gitMsg2 ? ', ' + gitMsg2.trim() : ''}`);
+        await bot.sendMessage(chatId, `⏪ 已回退到「${preview}」之前${gitMsg2}\n🧠 AI 将在下轮对话忽略已撤销的内容`);
       } catch (e) {
         await bot.sendMessage(chatId, `❌ 回退失败: ${e.message}`);
       }

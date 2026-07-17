@@ -129,3 +129,22 @@ describe('agy-state safety decisions', () => {
     assert.deepEqual(agy.collectDescendantPids(rows, 10), [12, 11, 13]);
   });
 });
+
+describe('agy-state transcript format sentinel', () => {
+  it('flags schema drift only when no record is recognizable', () => {
+    const { assessTranscriptFormat } = require('./agy-state');
+    assert.deepEqual(assessTranscriptFormat([]), { known: 0, unknown: 0, formatDrift: false });
+    const healthy = assessTranscriptFormat([
+      { type: 'USER_INPUT', source: 'USER_EXPLICIT' },
+      { type: 'PLANNER_RESPONSE', status: 'DONE', content: 'ok' },
+      { type: 'SOME_NEW_TYPE' },
+    ]);
+    assert.equal(healthy.formatDrift, false);
+    assert.equal(healthy.unknown, 1);
+    const drifted = assessTranscriptFormat([
+      { type: 'V2_TURN' },
+      { type: 'V2_BLOCK' },
+    ]);
+    assert.deepEqual(drifted, { known: 0, unknown: 2, formatDrift: true });
+  });
+});

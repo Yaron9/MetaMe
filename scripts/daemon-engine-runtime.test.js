@@ -315,6 +315,21 @@ describe('daemon-engine-runtime error classification', () => {
 });
 
 describe('daemon-engine-runtime factory', () => {
+  it('attaches the registry descriptor to every runtime', () => {
+    const { ENGINE_NAMES, getEngineDescriptor } = require('./core/engine-descriptors');
+    const getRuntime = createEngineRuntimeFactory({
+      CLAUDE_BIN: 'claude',
+      CODEX_BIN: 'codex',
+      AGY_BIN: '/tmp/agy',
+      AGY_ADAPTER: '/tmp/agy-adapter.js',
+      getActiveProviderEnv: () => ({}),
+    });
+    for (const name of ENGINE_NAMES) {
+      const runtime = getRuntime(name);
+      assert.equal(runtime.descriptor, getEngineDescriptor(name), `${name} runtime must carry its descriptor`);
+    }
+  });
+
   it('creates codex runtime with expected defaults', () => {
     const getRuntime = createEngineRuntimeFactory({
       CLAUDE_BIN: 'claude',

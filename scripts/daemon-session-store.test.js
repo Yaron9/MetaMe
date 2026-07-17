@@ -971,6 +971,30 @@ describe('daemon-session-store codex metadata', () => {
     assert.equal(logs.some(entry => entry.message.includes('scanCodexSessions') && entry.message.includes('state_5.sqlite')), true);
   });
 
+  it('pendingNotice persists on the session record and is consumed exactly once', () => {
+    const state = { sessions: { 'chat-1': { cwd: '/tmp/p', engines: {}, last_active: 1 } } };
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));
+    let saved = 0;
+    const store = createSessionStore({
+      fs, path, HOME: tempHome,
+      loadState: () => state,
+      saveState: () => { saved++; },
+      log: () => {},
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+
+    assert.equal(store.setPendingNotice('chat-1', '工作区已回滚至 checkpoint X'), true);
+    assert.equal(state.sessions['chat-1'].pendingNotice, '工作区已回滚至 checkpoint X');
+    assert.equal(store.setPendingNotice('no-such-chat', 'x'), false, 'unknown chat must not create records');
+    assert.equal(store.setPendingNotice('chat-1', ''), false, 'empty notice rejected');
+
+    assert.equal(store.takePendingNotice('chat-1'), '工作区已回滚至 checkpoint X');
+    assert.equal(state.sessions['chat-1'].pendingNotice, undefined, 'consumed notice is cleared');
+    assert.equal(store.takePendingNotice('chat-1'), '', 'second take returns empty');
+    assert.ok(saved >= 2, 'both set and take persist state');
+  });
+
   it('stripThinkingSignatures removes signature from thinking blocks', () => {
     const state = { sessions: {} };
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));

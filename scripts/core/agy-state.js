@@ -64,6 +64,29 @@ function toolInputFromCall(call = {}) {
   try { return JSON.parse(value); } catch { return { input: value }; }
 }
 
+// Record types this integration understands. If Antigravity ships a schema
+// change, transcripts stop matching and MetaMe must fail loudly instead of
+// degrading into silent empty replies and recovery loops.
+const AGY_KNOWN_RECORD_TYPES = new Set([
+  'USER_INPUT',
+  'PLANNER_RESPONSE',
+  ...Object.keys(AGY_TOOL_TYPES),
+  'GENERIC',
+  'ERROR_MESSAGE',
+]);
+
+function assessTranscriptFormat(records) {
+  const list = Array.isArray(records) ? records : [];
+  let known = 0;
+  let unknown = 0;
+  for (const record of list) {
+    const type = String((record && record.type) || '').toUpperCase();
+    if (AGY_KNOWN_RECORD_TYPES.has(type)) known += 1;
+    else unknown += 1;
+  }
+  return { known, unknown, formatDrift: list.length > 0 && known === 0 };
+}
+
 function normalizeTranscriptRecord(record) {
   if (!record || typeof record !== 'object') return [];
   const out = [];
@@ -222,6 +245,7 @@ function collectDescendantPids(rows, rootPid) {
 
 module.exports = {
   AGY_TOOL_TYPES,
+  assessTranscriptFormat,
   canonicalizeCwd,
   parseConversationCache,
   getCachedConversationId,

@@ -1,6 +1,7 @@
 'use strict';
 
 const { normalizeEngineName } = require('./daemon-engine-runtime');
+const { getEngineDescriptor } = require('./core/engine-descriptors');
 const { buildIntentHintBlock } = require('./intent-registry');
 
 function adaptDaemonHintForEngine(daemonHint, engineName) {
@@ -27,8 +28,11 @@ function buildAgentHint({
       engineName,
       HOME,
     ).hint || '';
-    if (normalizeEngineName(engineName) !== 'agy') return memoryHint;
-    return `${memoryHint}\n\n[agy workspace bootstrap (internal): Before acting, read and follow AGENTS.md and SOUL.md in the current workspace when present. Project-local skills remain at .claude/skills/<name>/SKILL.md; read the selected skill before executing it.]`;
+    // Projection strategy 'prompt-bootstrap' (see core/engine-descriptors.js):
+    // no workspace file is written — a bootstrap line tells the engine to read them.
+    const descriptor = getEngineDescriptor(normalizeEngineName(engineName));
+    if (!descriptor || descriptor.contextProjection !== 'prompt-bootstrap') return memoryHint;
+    return `${memoryHint}\n\n[workspace bootstrap (internal): Before acting, read and follow AGENTS.md and SOUL.md in the current workspace when present. Project-local skills remain at .claude/skills/<name>/SKILL.md; read the selected skill before executing it.]`;
   } catch (e) {
     if (typeof log === 'function') log('WARN', `Agent context injection failed: ${e.message}`);
     return '';

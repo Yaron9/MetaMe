@@ -1,6 +1,8 @@
 'use strict';
 
-const ENGINE_NAMES = Object.freeze(['claude', 'codex', 'agy']);
+// Engine identity lives in core/engine-descriptors.js (single source of
+// truth); this module keeps the normalization helpers built on top of it.
+const { ENGINE_NAMES } = require('./core/engine-descriptors');
 const ENGINE_NAME_SET = new Set(ENGINE_NAMES);
 
 /**
