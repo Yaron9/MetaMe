@@ -235,6 +235,9 @@ function buildAgyArgs(options, prompt, agyBin) {
   if (options.logFile) args.push('--log-file', options.logFile);
   if (!options.readOnly) args.push('--dangerously-skip-permissions');
   if (options.sessionId) args.push('--conversation', options.sessionId);
+  // agy executes tools from its own scratch directory. Register the MetaMe
+  // project explicitly so file tools can resolve and access the requested cwd.
+  if (options.cwd) args.push('--add-dir', options.cwd);
   args.push('--model', normalizeAgyModel(options.model));
   args.push('-p', prompt);
   return args;

@@ -20,6 +20,7 @@ describe('agy-adapter invocation', () => {
     }, 'prompt with spaces; $(not-shell)', '/tmp/agy');
     assert.deepEqual(args.slice(0, 3), ['-q', '/dev/null', '/tmp/agy']);
     assert.equal(args[args.indexOf('--conversation') + 1], 'conversation-id');
+    assert.equal(args[args.indexOf('--add-dir') + 1], '/tmp/project');
     assert.equal(args[args.indexOf('--model') + 1], 'gemini-test');
     assert.equal(args.at(-2), '-p');
     assert.equal(args.at(-1), 'prompt with spaces; $(not-shell)');
@@ -28,6 +29,7 @@ describe('agy-adapter invocation', () => {
   it('omits permission and model flags in read-only auto mode', () => {
     const args = adapter.buildAgyArgs({ model: 'auto', sessionId: '', timeoutMs: 1000, readOnly: true }, 'hello', 'agy');
     assert.equal(args.includes('--dangerously-skip-permissions'), false);
+    assert.equal(args.includes('--add-dir'), false);
     assert.equal(args[args.indexOf('--model') + 1], 'Gemini 3.5 Flash (Medium)');
     assert.deepEqual(args.slice(-2), ['-p', 'hello']);
   });
