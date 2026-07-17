@@ -17,7 +17,7 @@ const { redactSecretsAndPii } = require('./recall-redact');
 
 // Trigger phrases. Each entry has a reason tag for audit attribution.
 const TRIGGER_PATTERNS = [
-  { reason: 'explicit-history', re: /(?:上次|前几天|上周|前阵子).{0,6}(?:说|讨论|聊|提到|做|改|写|搞|弄|处理|商量|决定)/ },
+  { reason: 'explicit-history', re: /(?:上次|上回|前几天|上周|前阵子).{0,6}(?:说|讨论|聊|提到|做|改|写|搞|弄|处理|商量|决定)/ },
   { reason: 'explicit-history', re: /之前.{0,4}(?:说过|讨论过|聊过|提到过|商量过|做过|做的|的决定|的方案|修过|改过|实现过|做的时候)/ },
   { reason: 'explicit-history', re: /(?:还记得|记不记得|记得吗|记得当时)/ },
   { reason: 'explicit-history', re: /\b(?:last time|previously|remember when|do you remember|earlier we|as discussed earlier|what did we do before|how did we handle this before)\b/i },
@@ -85,7 +85,10 @@ function planRecall({ text, runtime, scope } = {}) {
 
   // Recall fires if either an explicit phrase fired, OR multiple anchors were found
   // (anchor-only mode handles "查 daemon-claude-engine.js 的 archiveItem" style asks).
-  const shouldRecall = reasons.length > 0 || anchors.length >= 2;
+  // A single file/errcode anchor is precise enough to recall on its own;
+  // fn/config/env-var anchors are noisier and keep the 2-anchor bar.
+  const hasStrongAnchor = anchors.some(a => /^(?:file|errcode):/.test(a));
+  const shouldRecall = reasons.length > 0 || anchors.length >= 2 || hasStrongAnchor;
   if (!shouldRecall) return _emptyPlan();
 
   const reason = reasons[0] || 'anchor-match';

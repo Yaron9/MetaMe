@@ -795,6 +795,7 @@ Do NOT repeat existing unchanged values.`;
       }
 
       await writeBrainFileSafe(restored, BRAIN_FILE);
+      try { mirrorProfileToMemory(merged); } catch { /* yaml remains authoritative */ }
 
       // Mark session as analyzed after successful distill
       if (skeleton && sessionAnalytics) {
@@ -1452,12 +1453,51 @@ One word per session, in order. Chinese only. Be honest and precise.`;
 }
 
 // Export for use in index.js
+/**
+ * Mirror the merged profile into memory.db so memory_items is the single
+ * external query surface. One row per top-level section, keyed by a stable
+ * id — re-runs upsert in place. ~/.claude_profile.yaml stays authoritative.
+ */
+function mirrorProfileToMemory(profile, memoryModule = null) {
+  if (!profile || typeof profile !== 'object') return 0;
+  let memory = memoryModule;
+  if (!memory) {
+    try { memory = require('./memory'); } catch { return 0; }
+  }
+  const yaml = require('js-yaml');
+  let mirrored = 0;
+  for (const [section, value] of Object.entries(profile)) {
+    if (value == null) continue;
+    let content;
+    try { content = yaml.dump({ [section]: value }, { lineWidth: -1 }).trim(); } catch { continue; }
+    if (!content) continue;
+    try {
+      memory.saveMemoryItem({
+        id: `profile:${section}`,
+        kind: 'profile',
+        state: 'active',
+        title: `user_profile.${section}`,
+        content,
+        // >= 0.9 keeps profile rows under GC protection (core/memory-model.js)
+        confidence: 0.9,
+        project: '*',
+        relation: 'user_profile',
+        source_type: 'distill',
+        tags: ['profile', section],
+      });
+      mirrored++;
+    } catch { /* non-fatal: yaml remains authoritative */ }
+  }
+  return mirrored;
+}
+
 module.exports = {
   distill,
   writeSessionLog,
   bootstrapSessionLog,
   detectPatterns,
   fillSessionReflections,
+  mirrorProfileToMemory,
   _private: {
     mergeCompetenceMap,
     normalizeCompetenceLevel,

@@ -1084,7 +1084,7 @@ function createTaskScheduler(deps) {
             } else if (item.type === 'user_complaint') {
               msg = `⚠️ *技能反馈*\n技能 \`${item.skill_name}\` 收到用户反馈\n${item.reason}`;
             }
-            if (msg && item.id && item.type === 'workflow_proposal') {
+            if (msg && item.id && (item.type === 'workflow_proposal' || item.type === 'skill_gap')) {
               msg += `${idHint}\n处理: \`/skill-evo approve ${item.id}\` 或 \`/skill-evo dismiss ${item.id}\``;
             } else if (msg && item.id) {
               msg += `${idHint}\n处理: \`/skill-evo done ${item.id}\` 或 \`/skill-evo dismiss ${item.id}\``;

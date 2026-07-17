@@ -176,10 +176,22 @@ test('recall-plan: anchor-only triggers when phrase missing but ≥2 anchors', (
   assert.ok(p.anchors.length >= 2);
 });
 
-test('recall-plan: single anchor + no phrase does NOT trigger', () => {
-  const text = 'open scripts/memory.js for me';
-  const p = planRecall({ text, runtime: RUNTIME, scope: SCOPE });
-  assert.equal(p.shouldRecall, false);
+test('recall-plan: single strong anchor (file/errcode) triggers, weak anchor alone does not', () => {
+  const strong = planRecall({ text: 'open scripts/memory.js for me', runtime: RUNTIME, scope: SCOPE });
+  assert.equal(strong.shouldRecall, true);
+  assert.equal(strong.reason, 'anchor-match');
+
+  const err = planRecall({ text: 'why am I seeing SQLITE_BUSY here', runtime: RUNTIME, scope: SCOPE });
+  assert.equal(err.shouldRecall, true);
+
+  const weak = planRecall({ text: '帮我看看 saveMemoryItem( 的逻辑', runtime: RUNTIME, scope: SCOPE });
+  assert.equal(weak.shouldRecall, false);
+});
+
+test('recall-plan: 上回 phrase triggers explicit-history', () => {
+  const p = planRecall({ text: '上回处理的那个部署问题现在怎么样了', runtime: RUNTIME, scope: SCOPE });
+  assert.equal(p.shouldRecall, true);
+  assert.equal(p.reason, 'explicit-history');
 });
 
 test('recall-plan: anchors are emitted as redacted labels', () => {

@@ -266,7 +266,29 @@ function parseJsonFromLlm(raw) {
   const text = String(raw || '');
   const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
   if (!cleaned) return null;
-  try { return JSON.parse(cleaned); } catch { return null; }
+  try { return JSON.parse(cleaned); } catch { /* fall through to extraction */ }
+  // Chatty output (preamble/epilogue around the object): extract the outermost literal.
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start === -1 || end <= start) return null;
+  const candidate = cleaned.slice(start, end + 1);
+  try { return JSON.parse(candidate); } catch { /* fall through to trailing-comma repair */ }
+  try { return JSON.parse(candidate.replace(/,\s*([}\]])/g, '$1')); } catch { return null; }
+}
+
+// Preserved model output for post-mortem when parsing fails; capped so a
+// runaway transcript cannot fill the disk.
+const RAW_DUMP_MAX_BYTES = 64 * 1024;
+
+function dumpRawOutput(today, raw, dir = path.join(METAME_DIR, 'logs')) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `reflect-raw-${today}.txt`);
+    fs.writeFileSync(file, String(raw || '').slice(0, RAW_DUMP_MAX_BYTES), 'utf8');
+    return file;
+  } catch {
+    return null;
+  }
 }
 
 async function parseJsonWithRepair(raw, callHaiku, distillEnv) {
@@ -444,8 +466,16 @@ Rules:
       console.log(`[NIGHTLY-REFLECT] JSON repair failed: ${e.message}`);
     }
     if (!parsed || typeof parsed !== 'object') {
-      console.log('[NIGHTLY-REFLECT] Failed to parse Haiku output.');
-      writeReflectLog({ status: 'error', reason: 'parse_failed', facts_found: hotFacts.length });
+      const rawDump = dumpRawOutput(today, raw);
+      const reason = String(raw || '').trim() ? 'parse_failed' : 'empty_output';
+      console.log(`[NIGHTLY-REFLECT] Failed to parse model output (${reason})${rawDump ? `, raw saved to ${rawDump}` : ''}.`);
+      writeReflectLog({
+        status: 'error',
+        reason,
+        facts_found: hotFacts.length,
+        raw_bytes: String(raw || '').length,
+        raw_dump: rawDump,
+      });
       throw new Error('background_inference_invalid_output');
     }
 
@@ -738,6 +768,7 @@ module.exports = {
     entityPrefix,
     parseJsonFromLlm,
     parseJsonWithRepair,
+    dumpRawOutput,
     ensureMemoryItemsCompatibility,
     writeArtifactCandidates,
     EXCLUDED_RELATIONS,

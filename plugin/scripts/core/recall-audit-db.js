@@ -160,6 +160,37 @@ function getDroppedCount() {
   return _droppedCount;
 }
 
+/**
+ * Aggregate the audit trail for diagnostics (recall-report CLI).
+ * Read-only; returns null when the DB is unavailable.
+ */
+function summarizeAudit({ days = 30 } = {}) {
+  const db = _openDb();
+  if (!db) return null;
+  const since = `-${Math.max(1, Math.floor(days))} days`;
+  const get = (sql) => { try { return db.prepare(sql).get(since) || {}; } catch { return {}; } };
+  const all = (sql) => { try { return db.prepare(sql).all(since); } catch { return []; } };
+  const totals = get(
+    `SELECT COUNT(*) AS turns,
+       COALESCE(SUM(should_recall), 0) AS triggered,
+       COALESCE(SUM(CASE WHEN phase = 'inject' THEN 1 ELSE 0 END), 0) AS injected,
+       COALESCE(SUM(truncated), 0) AS truncated,
+       CAST(COALESCE(AVG(CASE WHEN injected_chars > 0 THEN injected_chars END), 0) AS INTEGER) AS avg_injected_chars
+     FROM recall_audit WHERE ts >= datetime('now', ?)`
+  );
+  const reasons = all(
+    `SELECT COALESCE(router_reason, '(none)') AS reason, COUNT(*) AS n
+     FROM recall_audit WHERE ts >= datetime('now', ?) AND should_recall = 1
+     GROUP BY router_reason ORDER BY n DESC`
+  );
+  const outcomes = all(
+    `SELECT outcome, COUNT(*) AS n
+     FROM recall_audit WHERE ts >= datetime('now', ?) AND phase = 'inject'
+     GROUP BY outcome ORDER BY n DESC`
+  );
+  return { days, totals, reasons, outcomes, dropped: getDroppedCount() };
+}
+
 function _resetForTesting() {
   _droppedCount = 0;
   if (_db) {
@@ -172,4 +203,4 @@ function _getDbForTesting() {
   return _db;
 }
 
-module.exports = { recordAudit, getDroppedCount, _resetForTesting, _getDbForTesting };
+module.exports = { recordAudit, getDroppedCount, summarizeAudit, _resetForTesting, _getDbForTesting };

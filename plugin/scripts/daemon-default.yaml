@@ -141,14 +141,15 @@ heartbeat:
       notify: false
       enabled: false  # set to true after verifying wiki_output_dir is correct
 
-    # 记忆索引：每天 01:30 更新 ~/.metame/memory/INDEX.md
+    # 记忆索引：已废弃 — 静态 INDEX.md 的职责由 hybrid-search 检索取代
+    # （停更 4 个月无消费者，2026-07 摘出调度；memory-index.js 文件留档）
     - name: memory-index
       type: script
       command: node ~/.metame/memory-index.js
       at: "01:30"
       require_idle: true
       notify: false
-      enabled: true
+      enabled: false
 
     # Embedding 索引：消费 embedding_queue，生成向量嵌入，30 分钟冷却
     - name: embedding-index

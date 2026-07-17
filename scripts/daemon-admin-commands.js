@@ -571,27 +571,35 @@ function createAdminCommandHandler(deps) {
         return { handled: true, config };
       }
 
-      // /skill-evo approve <id> — approve a workflow_proposal and dispatch skill creation
+      // /skill-evo approve <id> — approve a workflow_proposal or skill_gap and dispatch skill creation
       const approveMatch = arg.match(/^approve\s+(\S+)$/i);
       if (approveMatch) {
         const id = approveMatch[1];
         // Find the queue item (search both pending and notified states)
         const item = skillEvolution.listQueueItems({ status: ['pending', 'notified'], limit: 200 })
-          .find(i => i.id === id && i.type === 'workflow_proposal');
+          .find(i => i.id === id && (i.type === 'workflow_proposal' || i.type === 'skill_gap'));
         if (!item) {
-          await bot.sendMessage(chatId, `❌ 未找到 workflow_proposal: ${id}`);
+          await bot.sendMessage(chatId, `❌ 未找到可生成的提案 (workflow_proposal/skill_gap): ${id}`);
           return { handled: true, config };
         }
         // Build skill-creator prefilled prompt
         const toolsSig = (item.tools_signature || []).join(', ');
-        const prefilledPrompt = [
-          '/skill-creator',
-          `创建一个新技能，自动化以下工作流：`,
-          `工作流模式: ${item.search_hint || item.reason}`,
-          toolsSig ? `常用工具: ${toolsSig}` : '',
-          item.example_prompt ? `用户示例: "${item.example_prompt}"` : '',
-          `该技能应封装这个多步工作流为单一可调用技能。`,
-        ].filter(Boolean).join('\n');
+        const prefilledPrompt = item.type === 'skill_gap'
+          ? [
+            '/skill-creator',
+            `检测到能力缺口，请先检查现有技能是否已覆盖；已覆盖则完善现有技能，未覆盖则创建新技能：`,
+            `缺口描述: ${item.reason || item.search_hint}`,
+            item.search_hint && item.search_hint !== item.reason ? `原始请求: "${item.search_hint}"` : '',
+            `产出后总结该技能的能力边界与触发条件。`,
+          ].filter(Boolean).join('\n')
+          : [
+            '/skill-creator',
+            `创建一个新技能，自动化以下工作流：`,
+            `工作流模式: ${item.search_hint || item.reason}`,
+            toolsSig ? `常用工具: ${toolsSig}` : '',
+            item.example_prompt ? `用户示例: "${item.example_prompt}"` : '',
+            `该技能应封装这个多步工作流为单一可调用技能。`,
+          ].filter(Boolean).join('\n');
         // Dispatch to metame agent for skill creation (async — must not block event loop)
         try {
           const HOME = require('os').homedir();
@@ -606,7 +614,7 @@ function createAdminCommandHandler(deps) {
           await execFileAsync(cmd, cmdArgs, { encoding: 'utf8', timeout: 15000 });
           // Mark installed only after successful dispatch
           skillEvolution.resolveQueueItemById(id, 'installed');
-          await bot.sendMessage(chatId, `✅ 已派发给 Jarvis 创建技能，完成后会通知你\n工作流: ${item.search_hint || item.reason}`);
+          await bot.sendMessage(chatId, `✅ 已派发给 Jarvis 创建技能，完成后会通知你\n${item.type === 'skill_gap' ? '缺口' : '工作流'}: ${item.search_hint || item.reason}`);
         } catch (e) {
           // Dispatch failed — don't mark installed, keep in queue
           await bot.sendMessage(chatId, `⚠️ 自动派发失败: ${e.message}\n提案仍在队列中，可重试: /skill-evo approve ${id}`);

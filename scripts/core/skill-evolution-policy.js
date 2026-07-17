@@ -29,6 +29,15 @@ function initialEvolutionStage(tier) {
   return tier === 1 ? 'auto' : 'proposal';
 }
 
+// A pending item that never reached the evidence bar stops being actionable;
+// aging it out keeps the queue from accumulating one-off complaints forever.
+function isStalePending(item, minEvidence, staleDays, now = Date.now()) {
+  if (!item || item.status !== 'pending') return false;
+  if ((item.evidence_count || 1) >= minEvidence) return false;
+  const seen = new Date(item.last_seen || item.detected || 0).getTime();
+  return Number.isFinite(seen) && seen > 0 && now - seen > staleDays * 86400000;
+}
+
 module.exports = {
-  classifyEvolutionTier, evolutionFingerprint, initialEvolutionStage, normalizeSignal,
+  classifyEvolutionTier, evolutionFingerprint, initialEvolutionStage, isStalePending, normalizeSignal,
 };

@@ -178,6 +178,26 @@ describe('memory-nightly-reflect Step4', () => {
     assert.match(facts[0].entity, /^nightly\.reflect\./);
   });
 
+  it('parseJsonFromLlm extracts JSON from chatty output and repairs trailing commas', () => {
+    const parse = reflect._private.parseJsonFromLlm;
+    assert.deepEqual(parse('```json\n{"a":1}\n```'), { a: 1 });
+    assert.deepEqual(
+      parse('好的，以下是提炼结果：\n{"decisions":[],"lessons":[]}\n希望对你有帮助。'),
+      { decisions: [], lessons: [] }
+    );
+    assert.deepEqual(parse('{"a": [1, 2,], "b": {"c": 1,},}'), { a: [1, 2], b: { c: 1 } });
+    assert.equal(parse(''), null);
+    assert.equal(parse('模型没有返回任何结构化内容。'), null);
+  });
+
+  it('dumpRawOutput writes capped raw output for post-mortem', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reflect-raw-'));
+    const file = reflect._private.dumpRawOutput('2099-01-01', 'x'.repeat(100000), dir);
+    assert.ok(file && file.endsWith('reflect-raw-2099-01-01.txt'));
+    assert.equal(fs.statSync(file).size, 64 * 1024);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('repairs malformed distillation JSON exactly once', async () => {
     let calls = 0;
     const result = await reflect._private.parseJsonWithRepair(

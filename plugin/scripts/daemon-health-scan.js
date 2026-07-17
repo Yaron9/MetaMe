@@ -151,11 +151,45 @@ function formatReport(analysis, totalCount, uniqueTypes) {
   ].join('\n');
 }
 
+/**
+ * Skills live physically in ~/.claude/skills; other engines reach them via
+ * symlinks. The master dir has gone missing before (2026-07-17), silently
+ * degrading skill routing — report breakage early, never auto-fix here.
+ */
+function checkSkillsLinks(home = os.homedir()) {
+  const issues = [];
+  const master = path.join(home, '.claude', 'skills');
+  let masterOk = false;
+  try { masterOk = fs.statSync(master).isDirectory(); } catch { /* missing */ }
+  if (!masterOk) issues.push(`skills 主目录缺失: ${master}（运行 node index.js 重新部署可恢复）`);
+
+  const danglingCheck = (p) => {
+    try {
+      if (!fs.lstatSync(p).isSymbolicLink()) return;
+      try { fs.statSync(p); } catch { issues.push(`悬空符号链接: ${p}`); }
+    } catch { /* absent is fine — engine may not be installed */ }
+  };
+
+  danglingCheck(path.join(home, '.codex', 'skills'));
+  danglingCheck(path.join(home, '.agents', 'skills'));
+  try {
+    for (const entry of fs.readdirSync(path.join(home, '.opencode', 'skills'))) {
+      danglingCheck(path.join(home, '.opencode', 'skills', entry));
+    }
+  } catch { /* dir absent is fine */ }
+  return issues;
+}
+
 async function run() {
+  const linkIssues = checkSkillsLinks();
+  if (linkIssues.length > 0) {
+    console.log(['⚠️ Skills 链接自检：', ...linkIssues.map(i => `• ${i}`)].join('\n'));
+  }
+
   const errorLines = readRecentErrors(LOG_FILE, WINDOW_MS);
 
   if (errorLines.length === 0) {
-    console.log('✅ Daemon 健康正常 · 过去24小时无错误/警告');
+    if (linkIssues.length === 0) console.log('✅ Daemon 健康正常 · 过去24小时无错误/警告');
     return;
   }
 
@@ -194,4 +228,5 @@ module.exports = {
   readRecentErrors,
   groupErrors,
   formatReport,
+  checkSkillsLinks,
 };

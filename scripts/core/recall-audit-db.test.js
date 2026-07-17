@@ -427,3 +427,21 @@ test('recall-audit-db', async (t) => {
     assert.doesNotMatch(code, /require\s*\(\s*['"]\.\.\/memory-wiki-schema['"]\s*\)/, 'must not require ../memory-wiki-schema');
   });
 });
+
+test('summarizeAudit aggregates trigger/inject stats', () => {
+  withTempDb((audit) => {
+    audit.recordAudit({ id: 's1', phase: 'observe', should_recall: 0 });
+    audit.recordAudit({ id: 's2', phase: 'observe', should_recall: 1, router_reason: 'anchor-match' });
+    audit.recordAudit({ id: 's3', phase: 'inject', should_recall: 1, router_reason: 'explicit-history', injected_chars: 1200, outcome: 'injected' });
+    const summary = audit.summarizeAudit({ days: 7 });
+    assert.equal(summary.totals.turns, 3);
+    assert.equal(summary.totals.triggered, 2);
+    assert.equal(summary.totals.injected, 1);
+    assert.equal(summary.totals.avg_injected_chars, 1200);
+    assert.deepEqual(
+      summary.reasons.map(r => r.reason).sort(),
+      ['anchor-match', 'explicit-history']
+    );
+    assert.equal(summary.outcomes[0].outcome, 'injected');
+  });
+});
