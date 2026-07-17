@@ -27,7 +27,7 @@
         "sync:plugin": "node scripts/sync-plugin.js",
         "sync:readme": "node scripts/sync-readme.js",
         "restart:daemon": "node index.js stop 2>/dev/null; sleep 1; node index.js start 2>/dev/null || echo '鈿狅笍  Daemon not running or restart failed'",
-        "prepublishOnly": "node scripts/prepublish-check.js",
+        "prepublishOnly": "npm run sync:plugin && node scripts/prepublish-check.js",
         "precommit": "npm run sync:plugin && npm run restart:daemon"
     },
     "keywords": [
