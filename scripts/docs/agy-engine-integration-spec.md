@@ -1,12 +1,19 @@
 # MetaMe scoped agy engine integration spec
 
-> Status: Proposed
-> Scope: daemon-bound `digital_me`（3D）and `munger`（芒格）only
-> Last reviewed: 2026-06-24
+> Status: Implemented
+> Scope: scoped foreground AGY plus isolated background subconscious inference
+> Last reviewed: 2026-07-17
 
 ## 1. Decision
 
 MetaMe will add `agy` as a scoped daemon engine without changing the default engine, desktop CLI entrypoints, or the behavior of existing Claude/Codex sessions.
+
+Foreground and background are deliberately separate boundaries:
+
+- Existing `digital_me`（3D）and `munger`（芒格）bindings keep their configured foreground AGY sessions and tool permissions.
+- Model-backed maintenance uses the configured distill engine (`agy/auto` by default) in an isolated cwd, read-only, with tools and MCP disabled.
+- Deterministic maintenance such as memory GC/indexing, embeddings, and OpenWiki projection does not receive AGY engine labels or environment variables.
+- A model-backed scheduled task gets at most three attempts (initial run, then 1-minute and 5-minute retries). Retry state is durable across daemon restarts. Only terminal success or terminal failure is sent through the existing admin notification channel.
 
 The integration follows a Unix adapter model:
 
@@ -24,7 +31,7 @@ Antigravity-specific behavior stays at the process boundary. Core handoff code c
 ## 2. Goals
 
 1. Allow the `digital_me` and `munger` projects to select `engine: agy` for daemon-driven chat turns.
-2. Allow explicitly selected Munger heartbeat tasks to run on `agy`.
+2. Route model-backed wiki, distillation, memory, reflection, skill-evolution, and health-analysis maintenance through the shared background inference interface.
 3. Preserve conversation continuity through agy's durable conversation IDs.
 4. Reuse each workspace's existing instructions, skills, MCP configuration, credentials, and output files without copying credentials into MetaMe.
 5. Provide a deterministic rollback to the current engines:

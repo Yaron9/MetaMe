@@ -683,7 +683,7 @@ For day-2 operations and troubleshooting (engine routing, codex login/rate-limit
 | Session summary (per session) | ~400–900 tokens input + ≤250 tokens output (distill model configurable) |
 | Mobile commands (`/stop`, `/list`, `/undo`) | 0 tokens |
 
-> Memory consolidation and session summarization run in the background through `agy` with the configured distill model (`/distill-model`, default `auto`). Input is capped by code: skeleton text ≤ 3,000 chars, summary output ≤ 500 chars. Neither runs per-message — memory consolidation follows heartbeat schedule with idle/precondition guards, and summaries trigger once per idle session on sleep-mode transitions.
+> Model-backed maintenance (wiki, distillation, memory extraction/organization, reflection, skill evolution, and health analysis) runs through the isolated background inference interface using `agy` and the configured distill model (`/distill-model`, default `auto`). Background inference is read-only with tools/MCP disabled. Scheduled model tasks retry twice (after 1 minute and 5 minutes), persist retry state across daemon restarts, and report terminal success or failure through the daemon admin notification group. Deterministic GC/index/embedding/projection tasks remain engine-free.
 
 ## Plugin
 

@@ -109,8 +109,9 @@ severity 判断：high=影响功能/数据/重复崩溃，medium=有异常但仍
       throw new Error('invalid structure');
     }
     return parsed;
-  } catch {
-    // Fallback: no LLM
+  } catch (error) {
+    // Preserve a local fallback report, but mark the model failure so the
+    // scheduler can retry and must not report a false success.
     return {
       summary: `发现 ${totalCount} 条错误/警告`,
       severity: 'medium',
@@ -121,6 +122,7 @@ severity 判断：high=影响功能/数据/重复崩溃，medium=有异常但仍
         fix: '手动检查 daemon.log',
       })),
       action: '手动检查 ~/.metame/daemon.log',
+      model_error: error.message || String(error),
     };
   }
 }
@@ -176,6 +178,9 @@ async function run() {
   }
 
   console.log(formatReport(analysis, errorLines.length, grouped.length));
+  if (analysis.model_error) {
+    throw new Error(`background_inference_failed: ${analysis.model_error}`);
+  }
 }
 
 if (require.main === module) {

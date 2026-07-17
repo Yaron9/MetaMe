@@ -18,6 +18,20 @@ test('wiki-sync resolves its output directory from daemon config', () => {
   );
 });
 
+test('wiki-sync bypasses page-level day backoff during scheduler retries', () => {
+  const previous = process.env.METAME_TASK_ATTEMPT;
+  try {
+    const failed = { retries: 1, next_retry: '2099-01-01T00:00:00.000Z' };
+    process.env.METAME_TASK_ATTEMPT = '1';
+    assert.equal(_internal.shouldBuild(1, failed, 0.7), false);
+    process.env.METAME_TASK_ATTEMPT = '2';
+    assert.equal(_internal.shouldBuild(1, failed, 0.7), true);
+  } finally {
+    if (previous === undefined) delete process.env.METAME_TASK_ATTEMPT;
+    else process.env.METAME_TASK_ATTEMPT = previous;
+  }
+});
+
 function buildTestDb() {
   const db = new DatabaseSync(':memory:');
   db.exec('PRAGMA journal_mode = WAL');

@@ -13,6 +13,7 @@ const {
   captureConversationId,
   normalizeTranscriptRecord,
   selectFinalResponse,
+  advanceTranscriptCursor,
   recordsAfterLatestUser,
   buildFinalizationPrompt,
   isLockStale,
@@ -186,6 +187,45 @@ function getBaselineRecordCount(baselineRecordCounts, sessionId, fallback = 0) {
   return Math.max(explicit, Number.isFinite(value) ? value : 0);
 }
 
+function createTranscriptEventState() {
+  return { cursors: {}, sessionId: '' };
+}
+
+function emitTranscriptDelta(sessionId, records, baseline, deps = {}) {
+  if (typeof deps.onEvent !== 'function') return;
+  const state = deps.eventState || createTranscriptEventState();
+  const id = String(sessionId || '').trim();
+  if (!id) return;
+  if (state.sessionId !== id) {
+    state.sessionId = id;
+    deps.onEvent({ type: 'session', session_id: id });
+  }
+  const currentCursor = Object.prototype.hasOwnProperty.call(state.cursors, id)
+    ? state.cursors[id]
+    : baseline;
+  const delta = advanceTranscriptCursor(records, currentCursor, baseline);
+  state.cursors[id] = delta.cursor;
+  for (const record of delta.records) {
+    for (const event of normalizeTranscriptRecord(record)) deps.onEvent(event);
+  }
+}
+
+function pollTranscriptEvents(beforeCache, options, minRecordCount, deps = {}) {
+  if (typeof deps.onEvent !== 'function') return;
+  const readCacheFn = getReadCache(deps);
+  const readTranscriptFn = getReadTranscript(deps);
+  const afterCache = readCacheFn();
+  for (const sessionId of candidateSessionIds(beforeCache, afterCache, options, deps)) {
+    try {
+      const records = readTranscriptFn(sessionId);
+      const baseline = getBaselineRecordCount(deps.baselineRecordCounts, sessionId, minRecordCount);
+      if (records.length <= baseline) continue;
+      emitTranscriptDelta(sessionId, records, baseline, deps);
+      return;
+    } catch { /* transcript may be between atomic writes */ }
+  }
+}
+
 function captureBaselineRecordCounts(beforeCache, options, readTranscriptFn) {
   const out = {};
   for (const sessionId of candidateSessionIds(beforeCache, beforeCache, options)) {
@@ -328,6 +368,7 @@ function spawnAgy(options, prompt, deps = {}) {
     };
     const pollFinalResponse = () => {
       if (finished || !deps.beforeCache) return;
+      pollTranscriptEvents(deps.beforeCache, options, Number(deps.minRecordCount || 0), deps);
       let finalResponse = null;
       try {
         finalResponse = readFinalResponseArtifact(
@@ -528,6 +569,7 @@ async function recoverMissingFinalTurn(options, originalPrompt, deps = {}) {
 
   const { sessionId, records: allRecords, minRecordCount: artifactRecordCount = minRecordCount } = artifacts;
   const records = recordsAfterLatestUser(allRecords.slice(artifactRecordCount));
+  emitTranscriptDelta(sessionId, allRecords, artifactRecordCount, artifactDeps);
   const text = selectFinalResponse(records);
   if (text) return { sessionId, text, records };
   return { error: null, sessionId, records };
@@ -554,7 +596,8 @@ async function run(options, prompt, deps = {}) {
   const startedAtMs = Date.now();
   const baselineRecordCounts = captureBaselineRecordCounts(before, options, readTranscriptFn);
   const beforeRecordCount = getBaselineRecordCount(baselineRecordCounts, options.sessionId, 0);
-  const artifactDeps = { ...deps, baselineRecordCounts, startedAtMs };
+  const eventState = deps.eventState || createTranscriptEventState();
+  const artifactDeps = { ...deps, eventState, baselineRecordCounts, startedAtMs };
   try {
     let result = await spawnAgyFn(options, prompt, { ...artifactDeps, beforeCache: before, minRecordCount: beforeRecordCount });
     if (shouldRetryAfterAuthFailure(result)) {
@@ -580,6 +623,7 @@ async function run(options, prompt, deps = {}) {
       };
     }
     const { sessionId, records: allRecords, minRecordCount: artifactRecordCount = beforeRecordCount } = artifacts;
+    emitTranscriptDelta(sessionId, allRecords, artifactRecordCount, artifactDeps);
     const newRecords = allRecords.slice(artifactRecordCount);
     const records = recordsAfterLatestUser(newRecords);
     const text = selectFinalResponse(records);
@@ -588,7 +632,11 @@ async function run(options, prompt, deps = {}) {
       if (!finalizationPrompt) return { error: classifyFailure(result), sessionId, records };
 
       const finalizationOptions = { ...options, sessionId };
-      const finalizationResult = await spawnAgyFn(finalizationOptions, finalizationPrompt, deps);
+      const finalizationResult = await spawnAgyFn(finalizationOptions, finalizationPrompt, {
+        ...artifactDeps,
+        beforeCache: before,
+        minRecordCount: allRecords.length,
+      });
       if (finalizationResult.error) return { error: finalizationResult.error, sessionId, records };
 
       const finalArtifacts = await waitForArtifacts(before, finalizationOptions, allRecords.length, artifactDeps);
@@ -603,6 +651,7 @@ async function run(options, prompt, deps = {}) {
       }
 
       const finalRecords = recordsAfterLatestUser(finalArtifacts.records.slice(allRecords.length));
+      emitTranscriptDelta(sessionId, finalArtifacts.records, allRecords.length, artifactDeps);
       const finalText = selectFinalResponse(finalRecords);
       const combinedRecords = [...records, ...finalRecords];
       if (finalText) return { sessionId, text: finalText, records: combinedRecords };
@@ -625,12 +674,10 @@ async function main() {
   try {
     const options = parseArgs(process.argv.slice(2));
     const prompt = await readStdin();
-    const result = await run(options, prompt);
-    if (result.sessionId) emit({ type: 'session', session_id: result.sessionId });
-    if (Array.isArray(result.records)) {
-      for (const record of result.records) {
-        for (const event of normalizeTranscriptRecord(record)) emit(event);
-      }
+    const eventState = createTranscriptEventState();
+    const result = await run(options, prompt, { onEvent: emit, eventState });
+    if (result.sessionId && eventState.sessionId !== result.sessionId) {
+      emit({ type: 'session', session_id: result.sessionId });
     }
     if (result.error) emit({ type: 'error', code: result.error.code, message: result.error.message });
     else {
@@ -662,5 +709,8 @@ module.exports = {
     terminateTree,
     stripAnsi,
     extractStdoutFinalText,
+    createTranscriptEventState,
+    emitTranscriptDelta,
+    pollTranscriptEvents,
   },
 };

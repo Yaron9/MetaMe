@@ -184,7 +184,7 @@ function ensureMemoryItemsCompatibility(db) {
 /**
  * Write a reflect Markdown file with frontmatter.
  */
-function writeReflectFile(filePath, entries, factsCount, sourceType) {
+function _writeReflectFile(filePath, entries, factsCount, sourceType) {
   const today = new Date().toISOString().slice(0, 10);
   const sections = entries
     .map(e => `## ${e.title}\n\n${e.content}`)
@@ -337,10 +337,10 @@ async function run() {
 
   if (!fs.existsSync(DB_PATH)) {
     console.log('[NIGHTLY-REFLECT] memory.db not found, skipping.');
-    return;
+    return { skipped: true, skipReason: 'memory_db_missing' };
   }
 
-  if (!acquireLock()) return;
+  if (!acquireLock()) return { skipped: true, skipReason: 'already_running' };
 
   const today = new Date().toISOString().slice(0, 10);
   const decisionFile = path.join(DECISIONS_DIR, `${today}-nightly-reflect.md`);
@@ -351,7 +351,7 @@ async function run() {
   if (fs.existsSync(candidateFile) || fs.existsSync(decisionFile) || fs.existsSync(lessonFile)) {
     console.log('[NIGHTLY-REFLECT] Already ran today, skipping.');
     releaseLock();
-    return;
+    return { skipped: true, skipReason: 'already_completed_today' };
   }
 
   let db;
@@ -375,8 +375,7 @@ async function run() {
     if (hotFacts.length < 3) {
       console.log('[NIGHTLY-REFLECT] Insufficient hot facts (< 3), skipping distillation.');
       writeReflectLog({ status: 'skipped', reason: 'insufficient_facts', facts_found: hotFacts.length });
-      releaseLock();
-      return;
+      return { skipped: true, skipReason: 'insufficient_facts' };
     }
 
     // Load Haiku helper from providers.js (callHaiku lives there)
@@ -433,8 +432,7 @@ Rules:
     } catch (e) {
       console.log(`[NIGHTLY-REFLECT] Haiku call failed: ${e.message}`);
       writeReflectLog({ status: 'error', reason: 'haiku_failed', error: e.message, facts_found: hotFacts.length });
-      releaseLock();
-      return;
+      throw new Error(`background_inference_failed: ${e.message}`);
     }
 
     // Parse once, then make a single bounded repair attempt for malformed JSON.
@@ -448,8 +446,7 @@ Rules:
     if (!parsed || typeof parsed !== 'object') {
       console.log('[NIGHTLY-REFLECT] Failed to parse Haiku output.');
       writeReflectLog({ status: 'error', reason: 'parse_failed', facts_found: hotFacts.length });
-      releaseLock();
-      return;
+      throw new Error('background_inference_invalid_output');
     }
 
     const decisions = Array.isArray(parsed.decisions) ? parsed.decisions.filter(d => d.title && d.content) : [];
@@ -705,11 +702,12 @@ ${JSON.stringify(conflictInput, null, 2)}
     });
 
     console.log('[NIGHTLY-REFLECT] Run complete.');
+    return { skipped: false };
 
   } catch (e) {
     console.error(`[NIGHTLY-REFLECT] Fatal error: ${e.message}`);
     writeReflectLog({ status: 'error', reason: 'fatal', error: e.message });
-    process.exitCode = 1;
+    throw e;
   } finally {
     try { if (db) db.close(); } catch { /* non-fatal */ }
     releaseLock();
@@ -717,11 +715,14 @@ ${JSON.stringify(conflictInput, null, 2)}
 }
 
 if (require.main === module) {
-  run().then(() => {
+  run().then(result => {
     console.log('✅ nightly-reflect complete');
     // Report estimated token usage for daemon budget tracking
     // ~5k tokens per reflection + capsule generation
     console.log('__TOKENS__:5000');
+    if (result && result.skipped) {
+      console.log(`__METAME_TASK_SKIPPED__:${result.skipReason || 'no_input'}`);
+    }
   }).catch(e => {
     console.error(`[NIGHTLY-REFLECT] Fatal: ${e.message}`);
     process.exit(1);

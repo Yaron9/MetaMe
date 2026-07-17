@@ -20,9 +20,13 @@ function resolveScopedEngine({
   if (requested !== 'agy') return { engine: requested, requested, fallback: false, reason: '' };
   const agyCfg = daemonCfg.experimental_engines && daemonCfg.experimental_engines.agy;
   const allowed = new Set(Array.isArray(agyCfg && agyCfg.allowed_projects) ? agyCfg.allowed_projects.map(String) : []);
-  const allowedBackground = scope === 'background';
+  // Background inference is a separate trusted boundary. It is selected by the
+  // distill/subconscious engine setting and does not share foreground allowlists.
+  if (scope === 'background') {
+    return { engine: 'agy', requested, fallback: false, reason: '' };
+  }
   const allowedProject = projectKey && allowed.has(String(projectKey));
-  if (agyCfg && agyCfg.enabled === true && (allowedBackground || allowedProject)) {
+  if (agyCfg && agyCfg.enabled === true && allowedProject) {
     return { engine: 'agy', requested, fallback: false, reason: '' };
   }
   return {

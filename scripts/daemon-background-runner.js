@@ -12,6 +12,7 @@ function collectNativeResult(runtime, output) {
   let usage = null;
   let finalValue = null;
   let classifiedError = null;
+  let toolUseCount = 0;
   for (const line of String(output || '').split('\n').filter(Boolean)) {
     for (const event of runtime.parseStreamEvent(line)) {
       if (event.type === 'session') sessionId = event.sessionId || sessionId;
@@ -23,9 +24,10 @@ function collectNativeResult(runtime, output) {
           || finalValue;
       }
       if (event.type === 'error') classifiedError = event;
+      if (event.type === 'tool_use') toolUseCount += 1;
     }
   }
-  return { sessionId, usage, finalValue, classifiedError };
+  return { sessionId, usage, finalValue, classifiedError, toolUseCount };
 }
 
 function createBackgroundRunner(deps = {}) {
@@ -123,6 +125,16 @@ function createBackgroundRunner(deps = {}) {
       const native = collectNativeResult(runtime, commandResult.output);
       if (native.classifiedError) {
         return { ok: false, error: native.classifiedError.message, errorCode: native.classifiedError.code };
+      }
+      if (options.forbidTools && native.toolUseCount > 0) {
+        return {
+          ok: false,
+          error: 'background_tool_use_forbidden',
+          errorCode: 'BACKGROUND_TOOL_USE_FORBIDDEN',
+        };
+      }
+      if (!structured && !String(native.finalValue || '').trim()) {
+        return { ok: false, error: 'empty_final_reply', errorCode: 'EMPTY_FINAL_REPLY' };
       }
       const normalized = structured ? normalizeCompletionResult(native.finalValue) : native.finalValue;
       return {

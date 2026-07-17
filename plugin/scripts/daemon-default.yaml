@@ -71,6 +71,7 @@ heartbeat:
     # 认知蒸馏：有偏好信号才触发，4小时冷却，一次处理所有 batch
     - name: cognitive-distill
       type: script
+      model_backed: true
       command: node ~/.metame/distill.js
       interval: 4h
       precondition: "test -s ~/.metame/raw_signals.jsonl"
@@ -81,6 +82,7 @@ heartbeat:
     # 记忆提取：扫描未分析 session，提取长期事实和会话标签，4小时冷却
     - name: memory-extract
       type: script
+      model_backed: true
       command: node ~/.metame/memory-extract.js
       interval: 4h
       timeout: 1800
@@ -100,6 +102,7 @@ heartbeat:
     # 技能演化：有技能信号才触发，12小时冷却，仅在用户闲置时执行
     - name: skill-evolve
       type: script
+      model_backed: true
       command: node ~/.metame/skill-evolution.js
       interval: 12h
       precondition: "test -s ~/.metame/skill_signals.jsonl"
@@ -110,6 +113,7 @@ heartbeat:
     # 自我反思：每天 23:00 扫描纠错信号，提炼成长模式
     - name: self-reflect
       type: script
+      model_backed: true
       command: node ~/.metame/self-reflect.js
       at: "23:00"
       require_idle: true
@@ -119,6 +123,7 @@ heartbeat:
     # 夜间记忆蒸馏：每天 01:00 提炼热区事实为决策与经验文档
     - name: nightly-reflect
       type: script
+      model_backed: true
       command: node ~/.metame/memory-nightly-reflect.js
       at: "01:00"
       require_idle: true
@@ -129,6 +134,7 @@ heartbeat:
     # 前置条件: daemon.wiki_output_dir 已配置，如: ~/Documents/ObsidianVault/MetaMe/wiki
     - name: wiki-sync
       type: script
+      model_backed: true
       command: node ~/.metame/wiki-reflect.js
       at: "02:30"
       require_idle: true

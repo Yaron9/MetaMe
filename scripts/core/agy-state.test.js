@@ -50,6 +50,34 @@ describe('agy-state transcript parsing', () => {
     assert.deepEqual(agy.recordsAfterLatestUser(records), records.slice(1));
   });
 
+  it('never treats a planner preamble with tool calls as the final response', () => {
+    const records = [
+      { type: 'USER_INPUT', source: 'USER_EXPLICIT', content: '检查 daemon 配置' },
+      {
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: 'I will inspect daemon.yaml.',
+        tool_calls: [{ name: 'view_file', args: { AbsolutePath: '/tmp/daemon.yaml' } }],
+      },
+      { type: 'VIEW_FILE', status: 'DONE', content: 'file contents' },
+      { type: 'PLANNER_RESPONSE', status: 'DONE' },
+    ];
+
+    assert.equal(agy.selectFinalResponse(records), '');
+  });
+
+  it('advances transcript cursors without replaying baseline or emitted records', () => {
+    const records = [{ id: 1 }, { id: 2 }, { id: 3 }];
+    assert.deepEqual(agy.advanceTranscriptCursor(records, 0, 1), {
+      records: [{ id: 2 }, { id: 3 }],
+      cursor: 3,
+    });
+    assert.deepEqual(agy.advanceTranscriptCursor(records, 3, 1), {
+      records: [],
+      cursor: 3,
+    });
+  });
+
   it('builds a finalization prompt from tool evidence when no final answer exists', () => {
     const records = [
       { type: 'USER_INPUT', source: 'USER_EXPLICIT', content: 'question' },

@@ -19,7 +19,9 @@ function runtime(name) {
     killSignal: 'SIGTERM',
     buildArgs: name === 'codex' ? _private.buildCodexArgs : _private.buildClaudeArgs,
     buildEnv: () => ({}),
-    parseStreamEvent: name === 'codex' ? _private.parseCodexStreamEvent : _private.parseClaudeStreamEvent,
+    parseStreamEvent: name === 'codex'
+      ? _private.parseCodexStreamEvent
+      : (name === 'agy' ? _private.parseAgyStreamEvent : _private.parseClaudeStreamEvent),
     classifyError: _private.classifyEngineError,
   };
 }
@@ -92,4 +94,33 @@ test('background runner reports truncated structured output explicitly', async (
   const completed = await runner.startTurn({ engine: 'codex', prompt: 'work' });
   assert.equal(completed.ok, false);
   assert.equal(completed.errorCode, 'BUFFER_LIMIT_EXCEEDED');
+});
+
+test('background runner rejects tools in pure subconscious inference', async () => {
+  const runner = createBackgroundRunner({
+    getEngineRuntime: () => runtime('agy'),
+    runCommand: async () => ({
+      output: [
+        JSON.stringify({ type: 'tool_use', tool_name: 'Read' }),
+        JSON.stringify({ type: 'text', text: 'should not be accepted' }),
+        JSON.stringify({ type: 'done' }),
+      ].join('\n'),
+      error: null,
+    }),
+  });
+  const completed = await runner.startTurn({
+    engine: 'agy', prompt: 'summarize', structured: false, forbidTools: true,
+  });
+  assert.equal(completed.ok, false);
+  assert.equal(completed.errorCode, 'BACKGROUND_TOOL_USE_FORBIDDEN');
+});
+
+test('background runner rejects a successful process without a terminal answer', async () => {
+  const runner = createBackgroundRunner({
+    getEngineRuntime: () => runtime('agy'),
+    runCommand: async () => ({ output: JSON.stringify({ type: 'done' }), error: null }),
+  });
+  const completed = await runner.startTurn({ engine: 'agy', prompt: 'summarize', structured: false });
+  assert.equal(completed.ok, false);
+  assert.equal(completed.errorCode, 'EMPTY_FINAL_REPLY');
 });

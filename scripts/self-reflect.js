@@ -209,7 +209,10 @@ async function run() {
   } catch (e) {
     if (e.code === 'EEXIST') {
       const age = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
-      if (age < 300000) { console.log('[self-reflect] Already running.'); return; }
+      if (age < 300000) {
+        console.log('[self-reflect] Already running.');
+        return { skipped: true, skipReason: 'already_running' };
+      }
       fs.unlinkSync(LOCK_FILE);
       try {
         lockFd = fs.openSync(LOCK_FILE, 'wx');
@@ -218,7 +221,7 @@ async function run() {
       } catch {
         // Another process acquired the lock, or write failed — ensure fd is closed
         try { if (lockFd !== undefined) fs.closeSync(lockFd); } catch { /* ignore */ }
-        return;
+        return { skipped: true, skipReason: 'already_running' };
       }
     } else throw e;
   }
@@ -243,7 +246,7 @@ async function run() {
     // Read signals from last WINDOW_DAYS days
     if (!fs.existsSync(SIGNAL_FILE)) {
       console.log('[self-reflect] No signal file, skipping.');
-      return;
+      return { skipped: true, skipReason: 'no_signals' };
     }
 
     const cutoff = Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000;
@@ -259,7 +262,7 @@ async function run() {
 
     if (correctionSignals.length < 2) {
       console.log(`[self-reflect] Only ${correctionSignals.length} correction signals this week, skipping.`);
-      return;
+      return { skipped: true, skipReason: 'insufficient_signals' };
     }
 
     // Read current profile for context
@@ -308,7 +311,7 @@ ${signalText}
       ]);
     } catch (e) {
       console.log(`[self-reflect] Haiku call failed: ${e.message}`);
-      return;
+      throw new Error(`background_inference_failed: ${e.message}`);
     }
 
     // Parse result
@@ -319,9 +322,9 @@ ${signalText}
       if (Array.isArray(parsed)) {
         patterns = parsed.filter(p => typeof p === 'string' && p.length > 5 && p.length <= 80);
       }
-    } catch {
+    } catch (e) {
       console.log('[self-reflect] Failed to parse Haiku output.');
-      return;
+      throw new Error(`background_inference_invalid_output: ${e.message}`);
     }
 
     // === Generate lessons/ from correction signals (independent of patterns result) ===
@@ -359,6 +362,7 @@ ${signalText}
       console.log(`[self-reflect] ${patterns.length} pattern(s) written to growth.self_reflection_patterns: ${patterns.join(' | ')}`);
     } catch (e) {
       console.log(`[self-reflect] Failed to write profile: ${e.message}`);
+      throw e;
     }
 
   } finally {
@@ -367,8 +371,11 @@ ${signalText}
 }
 
 if (require.main === module) {
-  run().then(() => {
+  run().then(result => {
     console.log('✅ self-reflect complete');
+    if (result && result.skipped) {
+      console.log(`__METAME_TASK_SKIPPED__:${result.skipReason || 'no_input'}`);
+    }
   }).catch(e => {
     console.error(`[self-reflect] Fatal: ${e.message}`);
     process.exit(1);

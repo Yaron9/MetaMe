@@ -5,6 +5,57 @@ const { classifyTaskUsage } = require('./usage-classifier');
 const { resolveEngineModel } = require('./daemon-engine-runtime');
 const { resolveScopedEngine } = require('./core/engine-policy');
 
+const MODEL_BACKED_SCRIPT_TASKS = new Set([
+  'cognitive-distill',
+  'memory-extract',
+  'skill-evolve',
+  'self-reflect',
+  'nightly-reflect',
+  'wiki-sync',
+  'daemon-health-scan',
+]);
+const MODEL_RETRY_DELAYS_MS = Object.freeze([60_000, 5 * 60_000]);
+const SCRIPT_SKIP_MARKER = '__METAME_TASK_SKIPPED__:';
+
+function isModelBackedTask(task = {}) {
+  if (task.model_backed === false) return false;
+  if (task.model_backed === true) return true;
+  if (task.type === 'workflow' || (!task.type && task.prompt)) return true;
+  return task.type === 'script' && MODEL_BACKED_SCRIPT_TASKS.has(String(task.name || ''));
+}
+
+function compactTaskMessage(value, limit = 300) {
+  return String(value || '')
+    .replace(/((?:token|secret|password|api[_-]?key))\s*[:=]\s*\S+/gi, '$1=<redacted>')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, limit);
+}
+
+function parseScriptTaskOutput(value) {
+  const lines = String(value || '').split('\n');
+  const marker = lines.find(line => line.startsWith(SCRIPT_SKIP_MARKER));
+  return {
+    skipped: !!marker,
+    skipReason: marker ? marker.slice(SCRIPT_SKIP_MARKER.length).trim() || 'no_input' : '',
+    output: lines.filter(line => !line.startsWith(SCRIPT_SKIP_MARKER)).join('\n').trim(),
+  };
+}
+
+function formatModelTaskNotification(task, result, taskState = {}) {
+  const attempts = Math.max(1, Number(taskState.attempt || 1));
+  const engine = compactTaskMessage(result?.engine || task?.engine || 'agy', 20).toUpperCase();
+  const durationMs = Number(result && result.durationMs || 0);
+  const duration = durationMs > 0 ? ` · ${Math.round(durationMs / 1000)}s` : '';
+  if (result && result.success) {
+    const summary = compactTaskMessage(result.output || '完成', 300);
+    return `✅ ${engine} 潜意识任务完成 · ${task.name}\n尝试 ${attempts}/3${duration}\n${summary || '完成'}`;
+  }
+  const code = compactTaskMessage(result && result.errorCode || 'EXEC_FAILURE', 80);
+  const detail = compactTaskMessage(result && result.error || 'unknown error', 300);
+  return `❌ ${engine} 潜意识任务失败 · ${task.name}\n已尝试 ${attempts}/3${duration}\n${code}: ${detail}`;
+}
+
 const WEEKDAY_INDEX = Object.freeze({
   sun: 0,
   sunday: 0,
@@ -152,6 +203,10 @@ function nextRunAfter(schedule, fromMs) {
 
 function computeInitialNextRun(task, schedule, state, nowMs, checkIntervalSec, newTaskIndex) {
   const taskState = state.tasks[task.name] || {};
+  if (isModelBackedTask(task) && taskState.status === 'retry_pending' && taskState.next_retry_at) {
+    const retryAt = new Date(taskState.next_retry_at).getTime();
+    if (Number.isFinite(retryAt)) return Math.max(nowMs, retryAt);
+  }
   const lastActivity = taskState.last_run || taskState.last_claimed_at;
   if (!schedule || schedule.mode !== 'clock') {
     const intervalSec = schedule && Number.isFinite(schedule.intervalSec)
@@ -181,6 +236,7 @@ function claimScheduledTask(state, taskName, scheduledTime, bootId, now = new Da
   if (current.last_claimed_schedule === scheduledAt) {
     return { claimed: false, scheduledAt, state: current };
   }
+  const retrying = current.status === 'retry_pending';
   const next = {
     ...current,
     status: 'running',
@@ -188,6 +244,7 @@ function claimScheduledTask(state, taskName, scheduledTime, bootId, now = new Da
     last_claimed_at: now.toISOString(),
     execution_boot_id: bootId,
     execution_started_at: now.toISOString(),
+    attempt: retrying ? Math.min(3, Number(current.attempt || 1) + 1) : 1,
   };
   state.tasks[taskName] = next;
   return { claimed: true, scheduledAt, state: next };
@@ -204,27 +261,32 @@ function mergeTaskScopedState(current, snapshot, taskName) {
   };
 }
 
-function recoverInterruptedClaims(state, taskNames, bootId, now = new Date()) {
+function recoverInterruptedClaims(state, taskNames, bootId, now = new Date(), modelTaskNames = new Set()) {
   if (!state.tasks) return [];
   const recovered = [];
   for (const taskName of taskNames) {
     const current = state.tasks[taskName];
     if (!current || current.status !== 'running' || !current.execution_boot_id
       || current.execution_boot_id === bootId) continue;
+    const modelBacked = modelTaskNames.has(taskName);
+    const retryable = modelBacked && Number(current.attempt || 1) < 3;
     state.tasks[taskName] = {
       ...current,
-      status: 'interrupted',
+      status: retryable ? 'retry_pending' : (modelBacked ? 'error' : 'interrupted'),
       error: 'daemon_restarted_during_task',
       interrupted_at: now.toISOString(),
+      ...(retryable
+        ? { next_retry_at: now.toISOString() }
+        : (modelBacked ? { last_run: now.toISOString(), error_code: 'DAEMON_RESTARTED' } : {})),
     };
     recovered.push(taskName);
   }
   return recovered;
 }
 
-function finalizeScheduledClaim(state, taskName, bootId, result, now = new Date()) {
+function finalizeScheduledClaim(state, taskName, bootId, result, now = new Date(), options = {}) {
   const current = state.tasks?.[taskName];
-  if (!current || current.status !== 'running' || current.execution_boot_id !== bootId) return false;
+  if (!current || current.execution_boot_id !== bootId) return false;
   if (result?.skipped) {
     state.tasks[taskName] = {
       ...current,
@@ -234,16 +296,40 @@ function finalizeScheduledClaim(state, taskName, bootId, result, now = new Date(
     };
     return true;
   }
+  const attempt = Math.max(1, Number(current.attempt || 1));
+  if (options.modelBacked && !result?.success && attempt < 3) {
+    const delays = options.retryDelaysMs || MODEL_RETRY_DELAYS_MS;
+    const delayMs = Number(delays[attempt - 1] || delays[delays.length - 1] || 60_000);
+    state.tasks[taskName] = {
+      ...current,
+      status: 'retry_pending',
+      attempt,
+      next_retry_at: new Date(now.getTime() + delayMs).toISOString(),
+      error: String(result?.error || 'unknown error').slice(0, 200),
+      error_code: String(result?.errorCode || 'EXEC_FAILURE').slice(0, 80),
+    };
+    return true;
+  }
+  const {
+    next_retry_at: _nextRetryAt,
+    error: _previousError,
+    error_code: _previousErrorCode,
+    ...withoutRetry
+  } = current;
   state.tasks[taskName] = {
-    ...current,
+    ...withoutRetry,
     status: result?.success ? 'success' : 'error',
+    attempt,
     last_run: now.toISOString(),
-    ...(result?.error ? { error: String(result.error).slice(0, 200) } : {}),
+    ...(!result?.success ? {
+      error: String(result?.error || 'unknown error').slice(0, 200),
+      error_code: String(result?.errorCode || 'EXEC_FAILURE').slice(0, 80),
+    } : {}),
   };
   return true;
 }
 
-function resolveTaskEnginePolicy(task, config, defaultEngine = 'claude') {
+function resolveTaskEnginePolicy(task, config, defaultEngine = 'claude', scope = 'auto') {
   const projectKey = task && task._project && task._project.key ? String(task._project.key) : '';
   const project = projectKey && config && config.projects ? config.projects[projectKey] : null;
   return resolveScopedEngine({
@@ -252,7 +338,7 @@ function resolveTaskEnginePolicy(task, config, defaultEngine = 'claude') {
     project,
     daemonCfg: (config && config.daemon) || {},
     defaultEngine,
-    scope: projectKey ? 'project' : 'background',
+    scope: scope === 'auto' ? (projectKey ? 'project' : 'background') : scope,
   });
 }
 
@@ -280,14 +366,21 @@ function createTaskScheduler(deps) {
     getWakeRecoveryHook,
     skillEvolution,
     backgroundRunner,
+    modelRetryDelaysMs = MODEL_RETRY_DELAYS_MS,
   } = deps;
   const schedulerBootId = crypto.randomUUID();
 
   // Max characters from precondition context to inject into prompts (prevents token bombs)
   const MAX_PRECONDITION_CHARS = 4000;
 
-  function resolveTaskEngine(task, config, defaultEngine = getDefaultEngine()) {
-    return resolveTaskEnginePolicy(task, config, defaultEngine);
+  function resolveTaskEngine(task, config, defaultEngine = getDefaultEngine(), scope = 'auto') {
+    return resolveTaskEnginePolicy(task, config, defaultEngine, scope);
+  }
+
+  function ensureBackgroundCwd() {
+    const dir = path.join(HOME, '.metame', 'runtime', 'background-inference');
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    return dir;
   }
   function checkPrecondition(task) {
     if (!task.precondition) return { pass: true, context: '' };
@@ -431,26 +524,47 @@ function createTaskScheduler(deps) {
 
     // Script tasks: run a local script directly (e.g. distill.js), no claude -p
     if (task.type === 'script') {
+      const startedAt = Date.now();
       const scriptCmd = task.command.replace(/^~|(?<=\s)~/g, HOME);
-      const enginePolicy = resolveTaskEngine(task, config, getDistillEngine());
-      const engine = enginePolicy.engine;
-      log('INFO', `Executing script task: ${task.name} [${engine}] → ${scriptCmd}`);
+      const modelBacked = isModelBackedTask(task);
+      const enginePolicy = modelBacked
+        ? resolveTaskEngine(task, config, getDistillEngine(), 'background')
+        : null;
+      const engine = enginePolicy ? enginePolicy.engine : '';
+      log('INFO', modelBacked
+        ? `Executing model-backed script task: ${task.name} [${engine}] → ${scriptCmd}`
+        : `Executing deterministic script task: ${task.name} → ${scriptCmd}`);
       try {
         const scriptEnv = {
           ...process.env,
           METAME_ROOT: process.env.METAME_ROOT || '',
           METAME_INTERNAL_PROMPT: '1',
-          METAME_ENGINE: engine,
-          METAME_DISTILL_ENGINE: engine,
+          ...(modelBacked ? {
+            METAME_ENGINE: engine,
+            METAME_DISTILL_ENGINE: engine,
+            METAME_TASK_ATTEMPT: String(state.tasks[task.name]?.attempt || 1),
+          } : {}),
         };
         delete scriptEnv.CLAUDECODE;
-        const output = execSync(scriptCmd, {
+        const rawOutput = execSync(scriptCmd, {
           encoding: 'utf8',
           timeout: resolveTimeoutMs(task.timeout, 120),
           maxBuffer: 1024 * 1024,
           env: scriptEnv,
           ...(process.platform === 'win32' ? { windowsHide: true } : {}),
         }).trim();
+        const taskOutput = parseScriptTaskOutput(rawOutput);
+        const output = taskOutput.output;
+        if (taskOutput.skipped) {
+          return {
+            success: true,
+            skipped: true,
+            error: taskOutput.skipReason,
+            output,
+            durationMs: Date.now() - startedAt,
+            engine,
+          };
+        }
 
         // Parse token report from script stdout: last line matching __TOKENS__:<number>
         // Scripts that call LLM APIs should print this before exiting.
@@ -468,6 +582,7 @@ function createTaskScheduler(deps) {
         }
 
         state.tasks[task.name] = {
+          ...(state.tasks[task.name] || {}),
           last_run: new Date().toISOString(),
           status: 'success',
           output_preview: output.slice(0, 200),
@@ -475,21 +590,29 @@ function createTaskScheduler(deps) {
         saveTaskScopedState(state, task.name);
         if (output) log('INFO', `Script task ${task.name} completed (${scriptTokens} tokens): ${output.slice(0, 300)}`);
         else log('INFO', `Script task ${task.name} completed`);
-        return { success: true, output, tokens: scriptTokens };
+        return { success: true, output, tokens: scriptTokens, durationMs: Date.now() - startedAt, engine };
       } catch (e) {
         log('ERROR', `Script task ${task.name} failed: ${e.message}`);
         state.tasks[task.name] = {
+          ...(state.tasks[task.name] || {}),
           last_run: new Date().toISOString(),
           status: 'error',
           error: e.message.slice(0, 200),
         };
         saveTaskScopedState(state, task.name);
-        return { success: false, error: e.message, output: '' };
+        return {
+          success: false,
+          error: e.message,
+          errorCode: e.code || 'SCRIPT_EXEC_FAILURE',
+          output: '',
+          durationMs: Date.now() - startedAt,
+          engine,
+        };
       }
     }
 
     const preamble = buildProfilePreamble();
-    const enginePolicy = resolveTaskEngine(task, config);
+    const enginePolicy = resolveTaskEngine(task, config, getDistillEngine(), 'background');
     const engine = enginePolicy.engine;
     if (enginePolicy.fallback) log('WARN', `Task ${task.name} engine fallback: agy -> ${engine} (${enginePolicy.reason})`);
     const model = engine === 'claude'
@@ -506,12 +629,8 @@ function createTaskScheduler(deps) {
     const fullPrompt = preamble + taskPrompt;
 
     // Auto-detect MCP config in task cwd or project directory
-    const cwd = task.cwd ? task.cwd.replace(/^~/, HOME) : undefined;
-    const mcpConfig = task.mcp_config
-      ? path.resolve(task.mcp_config.replace(/^~/, HOME))
-      : cwd && fs.existsSync(path.join(cwd, '.mcp.json'))
-        ? path.join(cwd, '.mcp.json')
-        : null;
+    const cwd = ensureBackgroundCwd();
+    const mcpConfig = '';
     let sessionRef = {};
 
     // Persistent session: reuse same session across runs (for tasks like weekly-review)
@@ -568,7 +687,9 @@ function createTaskScheduler(deps) {
       cwd,
       sessionRef,
       timeoutMs,
-      allowedTools: task.allowedTools || [],
+      readOnly: true,
+      forbidTools: true,
+      allowedTools: [],
       mcpConfig,
       daemonCfg: (config && config.daemon) || {},
       structured: false,
@@ -586,31 +707,31 @@ function createTaskScheduler(deps) {
 
       if (!result.ok) {
         if (result.errorCode === 'TIMEOUT') {
-          state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: `Task silent for ${timeoutMs / 1000}s`, ...sessionFields };
+          state.tasks[task.name] = { ...(state.tasks[task.name] || {}), last_run: new Date().toISOString(), status: 'error', error: `Task silent for ${timeoutMs / 1000}s`, ...sessionFields };
           saveTaskScopedState(state, task.name);
-          return { success: false, error: 'silent_timeout', output: output || '' };
+          return { success: false, error: 'silent_timeout', errorCode: 'TIMEOUT', output: output || '', engine };
         }
         const errMsg = result.error;
         // Persistent session expired: reset so next run creates a new one
         if (task.persistent_session && (errMsg.includes('not found') || errMsg.includes('No session'))) {
           log('WARN', `Persistent session for ${task.name} expired, will create new on next run`);
-          state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'session_reset', error: 'Session expired' };
+          state.tasks[task.name] = { ...(state.tasks[task.name] || {}), last_run: new Date().toISOString(), status: 'session_reset', error: 'Session expired' };
           saveTaskScopedState(state, task.name);
-          return { success: false, error: 'session_expired', output: '' };
+          return { success: false, error: 'session_expired', errorCode: 'SESSION_EXPIRED', output: '', engine };
         }
         log('ERROR', `Task ${task.name} failed: ${errMsg}`);
-        state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: errMsg, ...sessionFields };
+        state.tasks[task.name] = { ...(state.tasks[task.name] || {}), last_run: new Date().toISOString(), status: 'error', error: errMsg, ...sessionFields };
         saveTaskScopedState(state, task.name);
-        return { success: false, error: errMsg, output: '' };
+        return { success: false, error: errMsg, errorCode: result.errorCode || 'EXEC_FAILURE', output: '', engine };
       }
 
       const estimatedTokens = Math.ceil((fullPrompt.length + output.length) / 4);
       recordTokens(state, estimatedTokens, { category: classifyTaskUsage(task) });
-      state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'success', output_preview: output.slice(0, 200), ...sessionFields };
+      state.tasks[task.name] = { ...(state.tasks[task.name] || {}), last_run: new Date().toISOString(), status: 'success', output_preview: output.slice(0, 200), ...sessionFields };
       saveTaskScopedState(state, task.name);
       maybeSaveTaskMemory(task, output, estimatedTokens, prevSid || '');
       log('INFO', `Task ${task.name} completed (est. ${estimatedTokens} tokens)`);
-      return { success: true, output, tokens: estimatedTokens };
+      return { success: true, output, tokens: estimatedTokens, engine };
     });
   }
 
@@ -626,22 +747,16 @@ function createTaskScheduler(deps) {
     const steps = task.steps || [];
     if (steps.length === 0) return { success: false, error: 'No steps defined', output: '' };
 
-    // Workflow tasks match the user's session model setting (same quality as interactive)
-    const enginePolicy = resolveTaskEngine(task, config);
+    // Background workflows share the same isolated subconscious boundary.
+    const enginePolicy = resolveTaskEngine(task, config, getDistillEngine(), 'background');
     const engine = enginePolicy.engine;
     if (enginePolicy.fallback) log('WARN', `Workflow ${task.name} engine fallback: agy -> ${engine} (${enginePolicy.reason})`);
     const model = resolveEngineModel(engine, (config && config.daemon) || {}, task.model);
-    const cwd = task.cwd ? task.cwd.replace(/^~/, HOME) : HOME;
+    const cwd = ensureBackgroundCwd();
     let sessionId = crypto.randomUUID();
     const outputs = [];
     let totalTokens = 0;
-    const allowed = task.allowedTools || [];
-    // Auto-detect MCP config in task cwd
-    const mcpConfig = task.mcp_config
-      ? path.resolve(task.mcp_config.replace(/^~/, HOME))
-      : fs.existsSync(path.join(cwd, '.mcp.json'))
-        ? path.join(cwd, '.mcp.json')
-        : null;
+    const mcpConfig = '';
 
     log('INFO', `Workflow ${task.name}: ${steps.length} steps, session ${sessionId.slice(0, 8)}${mcpConfig ? ', mcp: ' + path.basename(mcpConfig) : ''}`);
 
@@ -667,7 +782,9 @@ function createTaskScheduler(deps) {
         cwd,
         sessionRef: { started: i > 0, id: sessionId },
         timeoutMs: resolveTimeoutMs(step.timeout, 1800),
-        allowedTools: allowed,
+        readOnly: true,
+        forbidTools: true,
+        allowedTools: [],
         mcpConfig,
         daemonCfg: (config && config.daemon) || {},
         structured: false,
@@ -688,19 +805,31 @@ function createTaskScheduler(deps) {
         outputs.push({ step: i + 1, skill: step.skill || null, error: errMsg });
         if (!step.optional) {
           recordTokens(loopState, totalTokens, { category: classifyTaskUsage(task) });
-          state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'error', error: `Step ${i + 1} failed`, steps_completed: i, steps_total: steps.length };
+          state.tasks[task.name] = { ...(state.tasks[task.name] || {}), last_run: new Date().toISOString(), status: 'error', error: `Step ${i + 1} failed`, steps_completed: i, steps_total: steps.length };
           saveTaskScopedState(state, task.name);
-          return { success: false, error: `Step ${i + 1} failed`, output: outputs.map(o => `Step ${o.step}: ${o.error ? 'FAILED' : 'OK'}`).join('\n'), tokens: totalTokens };
+          return {
+            success: false,
+            error: `Step ${i + 1} failed`,
+            errorCode: stepResult.errorCode || 'WORKFLOW_STEP_FAILED',
+            output: outputs.map(o => `Step ${o.step}: ${o.error ? 'FAILED' : 'OK'}`).join('\n'),
+            tokens: totalTokens,
+            engine,
+          };
         }
       }
     }
     recordTokens(loopState, totalTokens, { category: classifyTaskUsage(task) });
     const lastOk = [...outputs].reverse().find(o => !o.error);
-    state.tasks[task.name] = { last_run: new Date().toISOString(), status: 'success', output_preview: (lastOk ? lastOk.output : '').slice(0, 200), steps_completed: outputs.filter(o => !o.error).length, steps_total: steps.length };
+    state.tasks[task.name] = { ...(state.tasks[task.name] || {}), last_run: new Date().toISOString(), status: 'success', output_preview: (lastOk ? lastOk.output : '').slice(0, 200), steps_completed: outputs.filter(o => !o.error).length, steps_total: steps.length };
     saveTaskScopedState(state, task.name);
     maybeSaveTaskMemory(task, (lastOk ? lastOk.output : ''), totalTokens, sessionId);
     log('INFO', `Workflow ${task.name} done: ${outputs.filter(o => !o.error).length}/${steps.length} steps (${totalTokens} tokens)`);
-    return { success: true, output: outputs.map(o => `Step ${o.step} (${o.skill || 'prompt'}): ${o.error ? 'FAILED' : 'OK'}`).join('\n') + '\n\n' + (lastOk ? lastOk.output : ''), tokens: totalTokens };
+    return {
+      success: true,
+      output: outputs.map(o => `Step ${o.step} (${o.skill || 'prompt'}): ${o.error ? 'FAILED' : 'OK'}`).join('\n') + '\n\n' + (lastOk ? lastOk.output : ''),
+      tokens: totalTokens,
+      engine,
+    };
   }
 
   function getAllTasks(cfg) {
@@ -758,14 +887,17 @@ function createTaskScheduler(deps) {
     const nextRun = {};
     const now = Date.now();
     const state = loadState();
+    const modelTaskNames = new Set(runnableTasks.filter(isModelBackedTask).map(task => task.name));
     const interrupted = recoverInterruptedClaims(
       state,
       runnableTasks.map(task => task.name),
       schedulerBootId,
+      new Date(),
+      modelTaskNames,
     );
     if (interrupted.length > 0) {
       saveState(state);
-      log('WARN', `Recovered ${interrupted.length} interrupted heartbeat task(s) without replay`);
+      log('WARN', `Recovered ${interrupted.length} interrupted heartbeat task(s); model-backed tasks will resume through the retry queue`);
     }
 
     let newTaskIndex = 0;
@@ -778,6 +910,58 @@ function createTaskScheduler(deps) {
 
     // Tracks tasks currently running (prevents concurrent runs of the same task)
     const runningTasks = new Set();
+
+    function notifyTaskCompletion(task, result, taskState) {
+      if (result.skipped) return;
+      if (isModelBackedTask(task)) {
+        if (!adminNotifyFn) return;
+        Promise.resolve(adminNotifyFn(formatModelTaskNotification(task, result, taskState)))
+          .catch((err) => log('WARN', `Task ${task.name} admin notification failed: ${err.message}`));
+        return;
+      }
+      if (!task.notify || !notifyFn) return;
+      const proj = task._project || null;
+      const sendFn = proj ? notifyFn : (adminNotifyFn || notifyFn);
+      const message = result.success
+        ? `✅ *${task.name}* completed\n\n${result.output}`
+        : `❌ *${task.name}* failed: ${result.error}`;
+      Promise.resolve(sendFn(message, proj))
+        .catch((err) => log('WARN', `Task ${task.name} notification failed: ${err.message}`));
+    }
+
+    // A third attempt interrupted by daemon restart has exhausted the retry
+    // budget. Surface that terminal failure through the same admin channel.
+    for (const taskName of interrupted) {
+      const task = runnableTasks.find(item => item.name === taskName);
+      const taskState = state.tasks?.[taskName];
+      if (!task || !taskState || taskState.status !== 'error') continue;
+      notifyTaskCompletion(task, {
+        success: false,
+        error: taskState.error,
+        errorCode: taskState.error_code,
+      }, taskState);
+    }
+
+    function completeScheduledTask(task, result) {
+      const finalState = loadState();
+      const modelBacked = isModelBackedTask(task);
+      const changed = finalizeScheduledClaim(
+        finalState,
+        task.name,
+        schedulerBootId,
+        result,
+        new Date(),
+        { modelBacked, retryDelaysMs: modelRetryDelaysMs },
+      );
+      if (changed) saveState(finalState);
+      const taskState = finalState.tasks?.[task.name] || {};
+      if (taskState.status === 'retry_pending' && taskState.next_retry_at) {
+        nextRun[task.name] = new Date(taskState.next_retry_at).getTime();
+        log('WARN', `Task ${task.name} attempt ${taskState.attempt}/3 failed — retry at ${taskState.next_retry_at}`);
+        return;
+      }
+      notifyTaskCompletion(task, result, taskState);
+    }
 
     // Wake detection: if tick interval far exceeds expected, system likely slept (macOS lid close).
     // Use 5min floor to avoid false triggers from CPU load spikes or GC pauses.
@@ -856,8 +1040,7 @@ function createTaskScheduler(deps) {
           Promise.resolve(executeTask(task, config))
             .then((result) => {
               runningTasks.delete(task.name);
-              const finalState = loadState();
-              if (finalizeScheduledClaim(finalState, task.name, schedulerBootId, result)) saveState(finalState);
+              completeScheduledTask(task, result);
               // Budget exceeded: back off until next day instead of retrying every interval
               if (result.error === 'budget_exceeded') {
                 const tomorrow = new Date();
@@ -866,24 +1049,14 @@ function createTaskScheduler(deps) {
                 nextRun[task.name] = tomorrow.getTime();
                 return;
               }
-              if (task.notify && notifyFn && !result.skipped) {
-                const proj = task._project || null;
-                // Tasks without a project are system-level — send to admin chat only
-                const sendFn = proj ? notifyFn : (adminNotifyFn || notifyFn);
-                if (result.success) {
-                  sendFn(`✅ *${task.name}* completed\n\n${result.output}`, proj);
-                } else {
-                  sendFn(`❌ *${task.name}* failed: ${result.error}`, proj);
-                }
-              }
             })
             .catch((err) => {
               runningTasks.delete(task.name);
-              const finalState = loadState();
-              if (finalizeScheduledClaim(finalState, task.name, schedulerBootId, {
+              completeScheduledTask(task, {
                 success: false,
                 error: err.message,
-              })) saveState(finalState);
+                errorCode: err.code || 'UNHANDLED_TASK_ERROR',
+              });
               log('ERROR', `Task ${task.name} threw: ${err.message}`);
             });
         }
@@ -952,5 +1125,9 @@ module.exports = {
     finalizeScheduledClaim,
     nextRunAfter,
     resolveTaskEngine: resolveTaskEnginePolicy,
+    isModelBackedTask,
+    formatModelTaskNotification,
+    parseScriptTaskOutput,
+    MODEL_RETRY_DELAYS_MS,
   },
 };

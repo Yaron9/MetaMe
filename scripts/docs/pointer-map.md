@@ -16,7 +16,9 @@
 - 执行命令（`/stop`、`/compact` 等）：`scripts/daemon-exec-commands.js`
 - 会话存储：`scripts/daemon-session-store.js`
 - 默认配置：`scripts/daemon-default.yaml`
-- Provider/蒸馏模型配置：`scripts/providers.js`（`/provider`、`/distill-model`；后台蒸馏/记忆沉淀默认 `agy/auto`）
+- Provider/潜意识模型配置：`scripts/providers.js`（`/provider`、`/distill-model`；模型维护默认 `agy/auto`，隔离 cwd、禁用工具/MCP）
+- 后台引擎薄接口：`scripts/daemon-background-runner.js`（统一进程/事件/终态契约）；调度、持久化两次重试和主群终态通知：`scripts/daemon-task-scheduler.js`
+- AGY 前台协议适配：`scripts/bin/agy-adapter.js`；transcript 纯逻辑：`scripts/core/agy-state.js`
 - 跨平台基础设施：`scripts/platform.js`（`killProcessTree`、`socketPath`、`sleepSync`、`icon`）
 - 热重载安全机制：`scripts/daemon-runtime-lifecycle.js`（语法预检、last-good 备份、crash-loop 自愈）
 - 打包工具：`scripts/deploy-manifest.js`（部署清单）、`scripts/sync-plugin.js`（plugin 镜像同步）
@@ -188,7 +190,7 @@
 2. 再看命令入口：`scripts/daemon-admin-commands.js`、`scripts/daemon-command-router.js`、`scripts/daemon-exec-commands.js`
 3. 再看执行链路：`scripts/daemon-engine-runtime.js` → `scripts/daemon-claude-engine.js` → `scripts/core/handoff.js`（纯逻辑）→ `scripts/mentor-engine.js`
 4. 团队/跨设备：`scripts/daemon-team-dispatch.js` → `scripts/daemon-remote-dispatch.js` → `scripts/daemon-bridges.js`
-5. 最后看离线任务：`scripts/distill.js`、`scripts/memory-extract.js`、`scripts/memory-nightly-reflect.js`；引擎由 `daemon-task-scheduler.js` 统一通过 `METAME_ENGINE` 传入
+5. 最后看离线任务：模型任务经 `providers.js` → `daemon-background-runner.js`，由 `daemon-task-scheduler.js` 标记并通过 `METAME_ENGINE` 传入；确定性任务不注入引擎变量
 
 ## 同步提示
 

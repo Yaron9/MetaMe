@@ -927,6 +927,26 @@ describe('daemon-admin-commands /engine', () => {
 });
 
 describe('daemon-admin-commands /doctor', () => {
+  it('reports foreground and isolated AGY subconscious engines separately', async () => {
+    const sent = [];
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        providerMod: {
+          getActiveName: () => 'anthropic',
+          getDistillEngine: () => 'agy',
+        },
+        getDefaultEngine: () => 'codex',
+      },
+    );
+    await handleAdminCommand({
+      bot: createBot(sent), chatId: 'doctor-engines', text: '/doctor',
+      config: {}, state: { tasks: {} },
+    });
+    assert.match(sent[0], /前台默认引擎: codex/);
+    assert.match(sent[0], /后台潜意识引擎: agy（隔离、禁用工具）/);
+  });
+
   it('does not fail codex-only environments when default engine is codex', async () => {
     const sent = [];
     const { handleAdminCommand } = createHandler(

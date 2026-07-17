@@ -22,10 +22,11 @@ const path = require('path');
 const os = require('os');
 
 const yaml = require('./resolve-yaml');
-const { buildCodexArgs } = require('./daemon-engine-runtime');
+const { createEngineRuntimeFactory } = require('./daemon-engine-runtime');
+const { createBackgroundRunner } = require('./daemon-background-runner');
 const { normalizeAgyModel } = require('./core/agy-model');
 
-const DEFAULT_DISTILL_ENGINE = 'codex';
+const DEFAULT_DISTILL_ENGINE = 'agy';
 const DEFAULT_DISTILL_MODEL = 'auto';
 const DISTILL_MODEL_ALIASES = new Map([
   ['agy', 'auto'],
@@ -394,80 +395,70 @@ function listFormatted() {
  * not necessarily Haiku.
  */
 function callHaiku(input, extraEnv, timeout, options = {}) {
-  return callDistillModel(input, extraEnv, timeout, options);
+  return runBackgroundInference(input, extraEnv, timeout, options);
 }
 
 /**
- * Call distill model as a subprocess with extra env vars.
- * Engine-aware: agy uses the MetaMe agy adapter, claude uses `claude -p --model`,
- * codex uses `codex exec --json -m`.
+ * Historical public name retained for consumers outside this package.
  */
 function callDistillModel(input, extraEnv, timeout, options = {}) {
-  const { execFile } = require('child_process');
-  const env = { ...process.env, ...extraEnv, METAME_INTERNAL_PROMPT: '1' };
-  delete env.CLAUDECODE;
-  // Force refresh to pick up cross-process edits to providers.yaml immediately.
+  return runBackgroundInference(input, extraEnv, timeout, options);
+}
+
+let backgroundRunner = null;
+
+function getBackgroundRunner() {
+  if (backgroundRunner) return backgroundRunner;
+  const home = process.env.HOME || os.homedir();
+  const getEngineRuntime = createEngineRuntimeFactory({
+    HOME: home,
+    getActiveProviderEnv: buildDistillEnv,
+  });
+  backgroundRunner = createBackgroundRunner({ getEngineRuntime });
+  return backgroundRunner;
+}
+
+function ensureBackgroundCwd() {
+  const home = process.env.HOME || os.homedir();
+  const cwd = path.join(home, '.metame', 'runtime', 'background-inference');
+  fs.mkdirSync(cwd, { recursive: true, mode: 0o700 });
+  return cwd;
+}
+
+function backgroundPrompt(input, purpose) {
+  return [
+    '[MetaMe background inference]',
+    `Purpose: ${String(purpose || 'subconscious-maintenance')}`,
+    'Do not call tools, inspect files, browse, or modify external state.',
+    'Use only the material contained in this prompt and return the requested answer directly.',
+    '',
+    String(input || ''),
+  ].join('\n');
+}
+
+async function runBackgroundInference(input, extraEnv, timeout, options = {}) {
   const config = loadProviders({ force: true });
   const engine = resolveDistillEngine(config, options.engine);
   const model = resolveDistillModelForEngine(config, engine, options.model);
-  const bin = engine === 'agy' ? process.execPath : engine === 'codex' ? 'codex' : 'claude';
-  const args = engine === 'agy'
-    ? buildAgyDistillArgs({ model, timeout, cwd: process.cwd() })
-    : engine === 'codex'
-      ? buildCodexArgs({ model, readOnly: true, cwd: process.cwd() })
-      : ['-p', '--model', model, '--no-session-persistence'];
-  // On Windows, bare binary names need shell:true to resolve .cmd wrappers.
-  // For codex, also sanitize CODEX_HOME if it points to a non-existent path.
-  const isWin = process.platform === 'win32';
-  if (isWin && engine === 'codex' && env.CODEX_HOME && !fs.existsSync(env.CODEX_HOME)) {
-    delete env.CODEX_HOME;
-  }
-  const spawnOpts = {
-    env,
-    timeout,
-    maxBuffer: 10 * 1024 * 1024,
-    ...(isWin ? { shell: process.env.COMSPEC || true, windowsHide: true } : {}),
-  };
-  return new Promise((resolve, reject) => {
-    const run = (runArgs, allowModelFallback) => {
-      const proc = execFile(bin, runArgs, spawnOpts, (err, stdout, stderr) => {
-        if (err && (engine === 'codex' || engine === 'agy') && allowModelFallback && /model[^\n]+not supported/i.test(stdout || stderr || '')) {
-          const fallbackArgs = engine === 'agy'
-            ? buildAgyDistillArgs({ model: 'auto', timeout, cwd: process.cwd() })
-            : buildCodexArgs({ model: 'auto', readOnly: true, cwd: process.cwd() });
-          run(fallbackArgs, false);
-          return;
-        }
-        if (err) {
-          const engineDetail = engine === 'codex'
-            ? extractCodexError(stdout)
-            : engine === 'agy'
-              ? extractAgyError(stdout)
-              : '';
-          const detail = engineDetail || (stderr || stdout || '').trim().split('\n')[0];
-          err.message = detail || err.message;
-          err.stdout = stdout;
-          err.stderr = stderr;
-          reject(err);
-          return;
-        }
-        resolve(engine === 'codex'
-          ? (extractCodexAgentText(stdout) || stdout.trim())
-          : engine === 'agy'
-            ? (extractAgyAgentText(stdout) || stdout.trim())
-            : stdout.trim());
-      });
-      proc.stdin.write(input);
-      proc.stdin.end();
-    };
-    run(args, model !== 'auto');
+  const runner = options.runner || getBackgroundRunner();
+  const result = await runner.startTurn({
+    engine,
+    model,
+    prompt: backgroundPrompt(input, options.purpose),
+    cwd: ensureBackgroundCwd(),
+    timeoutMs: Number(timeout || 60_000),
+    readOnly: true,
+    forbidTools: true,
+    structured: false,
+    allowedTools: [],
+    mcpConfig: '',
+    providerEnv: { ...(extraEnv || {}) },
+    internalPrompt: true,
   });
-}
-
-function buildAgyDistillArgs({ model, timeout, cwd }) {
-  const adapterPath = path.join(__dirname, 'bin', 'agy-adapter.js');
-  const args = [adapterPath, '--cwd', cwd || process.cwd(), '--model', model || 'auto', '--timeout-ms', String(timeout || 60000), '--read-only'];
-  return args;
+  if (result.ok) return result.output;
+  const err = new Error(result.error || 'background_inference_failed');
+  err.code = result.errorCode || 'BACKGROUND_INFERENCE_FAILED';
+  throw err;
 }
 
 function parseCodexEvents(stdout) {
@@ -544,7 +535,16 @@ const api = {
   listFormatted,
   callDistillModel,
   callHaiku,
-  _internal: { extractCodexAgentText, extractCodexError, extractAgyAgentText, extractAgyError, resolveDistillEngine, resolveDistillModelForEngine },
+  runBackgroundInference,
+  _internal: {
+    extractCodexAgentText,
+    extractCodexError,
+    extractAgyAgentText,
+    extractAgyError,
+    resolveDistillEngine,
+    resolveDistillModelForEngine,
+    backgroundPrompt,
+  },
   getProvidersFilePath,
   setEngine,
   getEngine,

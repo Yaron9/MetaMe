@@ -183,7 +183,6 @@ function sanitizePatternList(value, fallback) {
     if (!p || p.length > 300) continue;
     try {
       // Validate regex compileability once so hot path won't crash at runtime.
-      // eslint-disable-next-line no-new
       new RegExp(p, 'i');
       clean.push(p);
     } catch { /* invalid pattern */ }
@@ -604,23 +603,25 @@ const { callHaiku, buildDistillEnv } = require('./providers');
 
 async function distillSkills() {
   let yaml;
-  try { yaml = require('js-yaml'); } catch { return null; }
+  try { yaml = require('js-yaml'); } catch (error) { throw new Error(`js-yaml unavailable: ${error.message}`); }
 
   const policy = loadPolicy();
 
   // Read signals
-  if (!fs.existsSync(SKILL_SIGNAL_FILE)) return null;
+  if (!fs.existsSync(SKILL_SIGNAL_FILE)) return { updates: [], missing_skills: [], skipped: true, skipReason: 'no_signals' };
   const content = fs.readFileSync(SKILL_SIGNAL_FILE, 'utf8').trim();
-  if (!content) return null;
+  if (!content) return { updates: [], missing_skills: [], skipped: true, skipReason: 'no_signals' };
 
   const lines = content.split('\n');
   const signals = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-  if (signals.length < policy.min_signals_for_distill) return null;
+  if (signals.length < policy.min_signals_for_distill) {
+    return { updates: [], missing_skills: [], skipped: true, skipReason: 'insufficient_signals' };
+  }
 
   // Get installed skills list
   const installedSkills = listInstalledSkills();
   if (installedSkills.length === 0) {
-    return null;
+    return { updates: [], missing_skills: [], skipped: true, skipReason: 'no_installed_skills' };
   }
 
   // Read metacognition patterns for bridge context
@@ -673,7 +674,7 @@ async function distillSkills() {
 
     const jsonMatch = result.match(/```json\s*([\s\S]*?)```/);
     if (!jsonMatch) {
-      return null;
+      throw new Error('background_inference_invalid_output');
     }
 
     const evolution = JSON.parse(jsonMatch[1]);
@@ -745,7 +746,7 @@ async function distillSkills() {
 
   } catch (err) {
     try { console.log(`⚠️ Skill evolution analysis failed: ${err.message}`); } catch {}
-    return null;
+    throw err;
   }
 }
 
@@ -1414,6 +1415,9 @@ if (require.main === module) {
         console.log(`Skill evolution: ${r.updates.length} update(s) applied`);
       } else {
         console.log('Skill evolution: no updates');
+      }
+      if (r && r.skipped) {
+        console.log(`__METAME_TASK_SKIPPED__:${r.skipReason || 'no_input'}`);
       }
     })
     .catch(e => {

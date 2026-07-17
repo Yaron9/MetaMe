@@ -19,8 +19,8 @@ describe('scoped engine policy', () => {
     assert.deepEqual({ engine: denied.engine, reason: denied.reason }, { engine: 'codex', reason: 'project_not_allowlisted' });
   });
 
-  it('allows enabled agy for trusted background tasks without a project binding', () => {
-    const resolved = resolveScopedEngine({ requestedEngine: 'agy', scope: 'background', daemonCfg: enabled });
+  it('allows agy for the isolated background boundary independently of foreground opt-in', () => {
+    const resolved = resolveScopedEngine({ requestedEngine: 'agy', scope: 'background', daemonCfg: {} });
     assert.equal(resolved.engine, 'agy');
     assert.equal(resolved.fallback, false);
   });

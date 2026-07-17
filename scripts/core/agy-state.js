@@ -99,10 +99,24 @@ function selectFinalResponse(records) {
   for (const record of records.slice(lastUserIndex + 1)) {
     if (!record || record.type !== 'PLANNER_RESPONSE') continue;
     if (String(record.status || '').toUpperCase() !== 'DONE') continue;
+    // agy writes the natural-language preamble and its tool call in the same
+    // planner record. That preamble describes intended work; it is not a
+    // terminal answer. Accepting it makes MetaMe reply "I will ..." and then
+    // silently drop the tool result and the empty final planner record.
+    if (Array.isArray(record.tool_calls) && record.tool_calls.length > 0) continue;
     const text = typeof record.content === 'string' ? record.content.trim() : '';
     if (text) finalText = text;
   }
   return finalText;
+}
+
+function advanceTranscriptCursor(records, cursor = 0, baseline = 0) {
+  const list = Array.isArray(records) ? records : [];
+  const start = Math.min(list.length, Math.max(0, Number(cursor || 0), Number(baseline || 0)));
+  return {
+    records: list.slice(start),
+    cursor: list.length,
+  };
 }
 
 function recordsAfterLatestUser(records) {
@@ -215,6 +229,7 @@ module.exports = {
   splitJsonLines,
   normalizeTranscriptRecord,
   selectFinalResponse,
+  advanceTranscriptCursor,
   recordsAfterLatestUser,
   collectToolEvidence,
   buildFinalizationPrompt,

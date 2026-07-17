@@ -1502,17 +1502,23 @@ function createAdminCommandHandler(deps) {
       else checks.push(hasAgy ? 'ℹ️ agy CLI（scoped engine 未启用）' : 'ℹ️ agy CLI 未安装');
       if (agyCfg && agyCfg.enabled === true && !hasAgy) issues++;
 
-      const currentEngine = getDefaultEngine() === 'codex' ? 'codex' : 'claude';
-      if (currentEngine === 'claude' && !hasClaude) {
-        checks.push('❌ 当前默认引擎是 claude，但 Claude CLI 不可用');
+      const currentEngine = getDefaultEngine();
+      const engineReady = { claude: hasClaude, codex: hasCodex, agy: hasAgy };
+      if (engineReady[currentEngine] === false) {
+        checks.push(`❌ 当前默认引擎是 ${currentEngine}，但对应 CLI 不可用`);
         issues++;
       }
-      if (currentEngine === 'codex' && !hasCodex) {
-        checks.push('❌ 当前默认引擎是 codex，但 Codex CLI 不可用');
+      const distillEngine = providerMod && typeof providerMod.getDistillEngine === 'function'
+        ? providerMod.getDistillEngine()
+        : 'agy';
+      if (engineReady[distillEngine] === false) {
+        checks.push(`❌ 后台潜意识引擎是 ${distillEngine}，但对应 CLI 不可用`);
         issues++;
+      } else {
+        checks.push(`✅ 后台潜意识引擎: ${distillEngine}（隔离、禁用工具）`);
       }
 
-      checks.push(`✅ 默认引擎: ${currentEngine}`);
+      checks.push(`✅ 前台默认引擎: ${currentEngine}`);
       checks.push(`✅ Provider: ${activeProvider}${isCustomProvider ? ' (custom)' : ''}`);
 
       const bakFile = CONFIG_FILE + '.bak';

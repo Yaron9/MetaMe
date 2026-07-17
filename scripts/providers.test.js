@@ -28,9 +28,9 @@ describe('providers distill model config', () => {
     fs.rmSync(tmpHome, { recursive: true, force: true });
   });
 
-  it('defaults unattended background distill to codex/auto when distill_model is empty', () => {
+  it('defaults unattended background distill to agy/auto when distill_model is empty', () => {
     const providers = loadProvidersWithHome(tmpHome);
-    assert.equal(providers.getDistillEngine(), 'codex');
+    assert.equal(providers.getDistillEngine(), 'agy');
     assert.equal(providers.getDistillModel(), 'auto');
   });
 
@@ -69,7 +69,7 @@ describe('providers distill model config', () => {
     assert.equal(providers.getDistillModel(), 'gpt-5-mini');
   });
 
-  it('keeps legacy Claude/Codex distill model config on the non-AGY default engine', () => {
+  it('maps a legacy model to auto while migrating the implicit default engine to AGY', () => {
     const providers = loadProvidersWithHome(tmpHome);
     const metameDir = path.join(tmpHome, '.metame');
     fs.mkdirSync(metameDir, { recursive: true });
@@ -78,8 +78,8 @@ describe('providers distill model config', () => {
       providers: { anthropic: { label: 'Anthropic (Official)' } },
       distill_model: 'haiku',
     }), 'utf8');
-    assert.equal(providers.getDistillEngine(), 'codex');
-    assert.equal(providers.getDistillModel(), 'haiku');
+    assert.equal(providers.getDistillEngine(), 'agy');
+    assert.equal(providers.getDistillModel(), 'auto');
   });
 
   it('maps legacy per-call model overrides to agy-supported models', () => {
@@ -99,6 +99,32 @@ describe('providers distill model config', () => {
       if (oldEngine === undefined) delete process.env.METAME_ENGINE;
       else process.env.METAME_ENGINE = oldEngine;
     }
+  });
+
+  it('runs subconscious inference through the isolated, tool-free AGY boundary', async () => {
+    const providers = loadProvidersWithHome(tmpHome);
+    const calls = [];
+    const output = await providers.runBackgroundInference(
+      'source material', {}, 1234,
+      {
+        purpose: 'memory-extract',
+        runner: {
+          startTurn: async options => {
+            calls.push(options);
+            return { ok: true, output: 'distilled result' };
+          },
+        },
+      },
+    );
+    assert.equal(output, 'distilled result');
+    assert.equal(calls[0].engine, 'agy');
+    assert.equal(calls[0].readOnly, true);
+    assert.equal(calls[0].forbidTools, true);
+    assert.deepEqual(calls[0].allowedTools, []);
+    assert.equal(calls[0].mcpConfig, '');
+    assert.match(calls[0].cwd, /\.metame\/runtime\/background-inference$/);
+    assert.match(calls[0].prompt, /Do not call tools/);
+    assert.match(calls[0].prompt, /source material/);
   });
 
   it('rejects malformed model name', () => {

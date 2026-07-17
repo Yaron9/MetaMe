@@ -244,7 +244,7 @@ async function run() {
         const lockAge = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
         if (lockAge < 300000) { // 5 min timeout for extraction
           console.log('[memory-extract] Already running, skipping.');
-          return { sessionsProcessed: 0, factsSaved: 0, factsSkipped: 0 };
+          return { sessionsProcessed: 0, factsSaved: 0, factsSkipped: 0, skipped: true, skipReason: 'already_running' };
         }
         fs.unlinkSync(LOCK_FILE);
         lockFd = fs.openSync(LOCK_FILE, 'wx');
@@ -252,7 +252,7 @@ async function run() {
         fs.closeSync(lockFd);
       } catch {
         console.log('[memory-extract] Already running, skipping.');
-        return { sessionsProcessed: 0, factsSaved: 0, factsSkipped: 0 };
+        return { sessionsProcessed: 0, factsSaved: 0, factsSkipped: 0, skipped: true, skipReason: 'already_running' };
       }
     } else {
       throw e;
@@ -263,16 +263,16 @@ async function run() {
   try {
     sessionAnalytics = require('./session-analytics');
   } catch (e) {
-    console.log(`[memory-extract] session-analytics unavailable: ${e.message} — memory extraction disabled`);
-    return { sessionsProcessed: 0, factsSaved: 0, factsSkipped: 0 };
+    try { fs.unlinkSync(LOCK_FILE); } catch { }
+    throw new Error(`session-analytics unavailable: ${e.message}`);
   }
 
   let memory;
   try {
     memory = require('./memory');
-  } catch {
-    console.log('[memory-extract] memory module not available, exiting.');
-    return { sessionsProcessed: 0, factsSaved: 0, factsSkipped: 0 };
+  } catch (e) {
+    try { fs.unlinkSync(LOCK_FILE); } catch { }
+    throw new Error(`memory module not available: ${e.message}`);
   }
 
   try {
@@ -433,19 +433,27 @@ async function run() {
     // ── end Codex ────────────────────────────────────────────────────────────
 
     memory.close();
-    return { sessionsProcessed: processed, sessionsFailed: failed, factsSaved: totalSaved, factsSkipped: totalSkipped };
+    return {
+      sessionsProcessed: processed,
+      sessionsFailed: failed,
+      factsSaved: totalSaved,
+      factsSkipped: totalSkipped,
+      skipped: processed === 0 && failed === 0,
+      skipReason: processed === 0 && failed === 0 ? 'no_unanalyzed_sessions' : '',
+    };
   } finally {
     try { fs.unlinkSync(LOCK_FILE); } catch { }
   }
 }
 
 if (require.main === module) {
-  run().then(({ sessionsProcessed, sessionsFailed = 0, factsSaved, factsSkipped }) => {
+  run().then(({ sessionsProcessed, sessionsFailed = 0, factsSaved, factsSkipped, skipped, skipReason }) => {
     console.log(`✅ memory-extract: ${sessionsProcessed} session(s), ${sessionsFailed} failed, ${factsSaved} facts saved, ${factsSkipped} skipped`);
     // Report estimated token usage for daemon budget tracking
     // Each session processed ≈ 1 callHaiku invocation ≈ 3k tokens
     const estTokens = sessionsProcessed * 3000;
     if (estTokens > 0) console.log(`__TOKENS__:${estTokens}`);
+    if (skipped) console.log(`__METAME_TASK_SKIPPED__:${skipReason || 'no_input'}`);
     if (sessionsFailed > 0) process.exitCode = 1;
   }).catch(e => {
     console.error(`[memory-extract] Fatal: ${e.message}`);

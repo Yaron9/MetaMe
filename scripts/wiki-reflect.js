@@ -363,7 +363,6 @@ async function _reflectDossierTopic(db, topic, { outputDir, providers, threshold
 
   for (const dossier of grouped.dossiers) {
     const slug = buildDossierSlug(topic.slug, dossier.projectKey);
-    const evidence = dossier.facts.map(fact => ({ evidence_type: 'memory_item', evidence_id: fact.id }));
     const membership = sourceMembershipHash(dossier.facts.map(fact => ({ ...fact, evidence_type: 'memory_item', evidence_id: fact.id })));
     const existing = getWikiPageBySlug(db, slug);
     const needsBuild = !existing
@@ -590,6 +589,9 @@ function _shouldBuild(staleness, failedEntry, threshold) {
 
   // Retry queue: retries < MAX_RETRIES AND next_retry has passed
   if (failedEntry && failedEntry.retries < MAX_RETRIES && failedEntry.next_retry) {
+    // The scheduler owns short task-level retries. Page-level day backoff still
+    // applies to ordinary/manual runs and the next regular schedule.
+    if (Number(process.env.METAME_TASK_ATTEMPT || 1) > 1) return true;
     if (Date.now() >= Date.parse(failedEntry.next_retry)) return true;
     return false; // Not yet time to retry
   }
@@ -619,12 +621,17 @@ function _parseTags(raw) {
 module.exports = {
   runWikiReflect,
   runConfiguredWikiReflect,
-  _internal: { resolveConfiguredOutputDir },
+  _internal: { resolveConfiguredOutputDir, shouldBuild: _shouldBuild },
 };
 
 if (require.main === module) {
   runConfiguredWikiReflect()
-    .then(result => console.log('wiki-sync done', JSON.stringify(result)))
+    .then(result => {
+      console.log('wiki-sync done', JSON.stringify(result));
+      if ((result.failed || []).length > 0 || (result.exportFailed || []).length > 0) {
+        process.exitCode = 1;
+      }
+    })
     .catch(err => {
       console.error(`[wiki-sync] ${err.message}`);
       process.exitCode = 1;

@@ -17,6 +17,10 @@ const {
   finalizeScheduledClaim,
   nextRunAfter,
   resolveTaskEngine,
+  isModelBackedTask,
+  formatModelTaskNotification,
+  parseScriptTaskOutput,
+  MODEL_RETRY_DELAYS_MS,
 } = _private;
 
 function nextDayOfWeek(base, day) {
@@ -72,6 +76,105 @@ describe('daemon-task-scheduler private helpers', () => {
     assert.deepEqual(recovered, ['scan']);
     assert.equal(state.tasks.scan.status, 'interrupted');
     assert.equal(state.tasks.scan.error, 'daemon_restarted_during_task');
+  });
+
+  it('recovers an interrupted model task into the durable retry queue', () => {
+    const state = { tasks: { 'wiki-sync': {
+      status: 'running', execution_boot_id: 'boot-old', attempt: 1,
+    } } };
+    recoverInterruptedClaims(
+      state,
+      ['wiki-sync'],
+      'boot-new',
+      new Date('2026-07-15T10:00:00.000Z'),
+      new Set(['wiki-sync']),
+    );
+    assert.equal(state.tasks['wiki-sync'].status, 'retry_pending');
+    assert.equal(state.tasks['wiki-sync'].next_retry_at, '2026-07-15T10:00:00.000Z');
+  });
+
+  it('makes an interrupted third model attempt terminal', () => {
+    const state = { tasks: { 'wiki-sync': {
+      status: 'running', execution_boot_id: 'boot-old', attempt: 3,
+    } } };
+    recoverInterruptedClaims(
+      state,
+      ['wiki-sync'],
+      'boot-new',
+      new Date('2026-07-15T10:00:00.000Z'),
+      new Set(['wiki-sync']),
+    );
+    assert.equal(state.tasks['wiki-sync'].status, 'error');
+    assert.equal(state.tasks['wiki-sync'].error_code, 'DAEMON_RESTARTED');
+    assert.equal(state.tasks['wiki-sync'].next_retry_at, undefined);
+  });
+
+  it('persists two model retries and makes the third failure terminal', () => {
+    const now = new Date('2026-07-15T10:00:00.000Z');
+    const state = { tasks: { wiki: {
+      status: 'error', execution_boot_id: 'boot-a', attempt: 1,
+    } } };
+    assert.equal(finalizeScheduledClaim(
+      state, 'wiki', 'boot-a', { success: false, error: 'timeout', errorCode: 'TIMEOUT' },
+      now, { modelBacked: true, retryDelaysMs: MODEL_RETRY_DELAYS_MS },
+    ), true);
+    assert.equal(state.tasks.wiki.status, 'retry_pending');
+    assert.equal(state.tasks.wiki.next_retry_at, '2026-07-15T10:01:00.000Z');
+
+    state.tasks.wiki = { ...state.tasks.wiki, status: 'error', attempt: 2 };
+    finalizeScheduledClaim(
+      state, 'wiki', 'boot-a', { success: false, error: 'timeout', errorCode: 'TIMEOUT' },
+      now, { modelBacked: true, retryDelaysMs: MODEL_RETRY_DELAYS_MS },
+    );
+    assert.equal(state.tasks.wiki.next_retry_at, '2026-07-15T10:05:00.000Z');
+
+    state.tasks.wiki = { ...state.tasks.wiki, status: 'error', attempt: 3 };
+    finalizeScheduledClaim(
+      state, 'wiki', 'boot-a', { success: false, error: 'timeout', errorCode: 'TIMEOUT' },
+      now, { modelBacked: true, retryDelaysMs: MODEL_RETRY_DELAYS_MS },
+    );
+    assert.equal(state.tasks.wiki.status, 'error');
+    assert.equal(state.tasks.wiki.next_retry_at, undefined);
+  });
+
+  it('clears stale retry errors after a successful retry', () => {
+    const state = { tasks: { wiki: {
+      status: 'running', execution_boot_id: 'boot-a', attempt: 2,
+      next_retry_at: '2026-07-15T10:05:00.000Z', error: 'timeout', error_code: 'TIMEOUT',
+    } } };
+    finalizeScheduledClaim(
+      state, 'wiki', 'boot-a', { success: true, output: 'done' },
+      new Date('2026-07-15T10:01:00.000Z'), { modelBacked: true },
+    );
+    assert.equal(state.tasks.wiki.status, 'success');
+    assert.equal(state.tasks.wiki.next_retry_at, undefined);
+    assert.equal(state.tasks.wiki.error, undefined);
+    assert.equal(state.tasks.wiki.error_code, undefined);
+  });
+
+  it('classifies only inference tasks as model-backed and formats safe admin notices', () => {
+    const modelTasks = [
+      'cognitive-distill', 'memory-extract', 'skill-evolve', 'self-reflect',
+      'nightly-reflect', 'wiki-sync', 'daemon-health-scan',
+    ];
+    const deterministicTasks = ['memory-gc', 'memory-index', 'embedding', 'openwiki-sync'];
+    for (const name of modelTasks) assert.equal(isModelBackedTask({ name, type: 'script' }), true, name);
+    for (const name of deterministicTasks) assert.equal(isModelBackedTask({ name, type: 'script' }), false, name);
+    assert.equal(isModelBackedTask({ name: 'custom', prompt: 'work' }), true);
+    const message = formatModelTaskNotification(
+      { name: 'wiki-sync' },
+      { success: false, errorCode: 'AUTH', error: 'api_key=secret-value failed' },
+      { attempt: 3 },
+    );
+    assert.match(message, /3\/3/);
+    assert.doesNotMatch(message, /secret-value/);
+  });
+
+  it('parses the Unix script skip marker without leaking it into output', () => {
+    assert.deepEqual(
+      parseScriptTaskOutput('checked input\n__METAME_TASK_SKIPPED__:no_sessions\n'),
+      { skipped: true, skipReason: 'no_sessions', output: 'checked input' },
+    );
   });
 
   it('closes skipped and thrown claims without advancing last_run for a skip', () => {
@@ -252,11 +355,76 @@ describe('background runtime integration', () => {
 
     const result = scheduler.executeTask({
       name: 'wiki-sync', type: 'script', command: 'node ~/.metame/wiki-reflect.js',
-    }, { daemon: { experimental_engines: { agy: { enabled: true, allowed_projects: [] } } } });
+    }, { daemon: {} });
 
     assert.equal(result.success, true);
     assert.equal(calls[0].env.METAME_ENGINE, 'agy');
     assert.equal(calls[0].env.METAME_DISTILL_ENGINE, 'agy');
+  });
+
+  it('simulates every canonical model-backed maintenance task on AGY', () => {
+    const tasks = [
+      ['cognitive-distill', 'distill.js'],
+      ['memory-extract', 'memory-extract.js'],
+      ['skill-evolve', 'skill-evolution.js'],
+      ['self-reflect', 'self-reflect.js'],
+      ['nightly-reflect', 'memory-nightly-reflect.js'],
+      ['wiki-sync', 'wiki-reflect.js'],
+      ['daemon-health-scan', 'daemon-health-scan.js'],
+    ];
+    const calls = [];
+    const state = { tasks: {} };
+    const scheduler = createTaskScheduler({
+      fs: require('fs'), path: require('path'), HOME: '/tmp/metame-task-matrix',
+      execSync: (cmd, options) => { calls.push({ cmd, env: options.env }); return `${cmd} complete`; },
+      loadState: () => state, saveState: () => {}, checkBudget: () => true,
+      recordTokens: () => {}, log: () => {}, getDistillEngine: () => 'agy',
+    });
+    for (const [name, file] of tasks) {
+      const result = scheduler.executeTask({
+        name, type: 'script', command: `node ~/.metame/${file}`,
+      }, { daemon: {} });
+      assert.equal(result.success, true, name);
+    }
+    assert.equal(calls.length, tasks.length);
+    for (const call of calls) {
+      assert.equal(call.env.METAME_ENGINE, 'agy');
+      assert.equal(call.env.METAME_DISTILL_ENGINE, 'agy');
+      assert.equal(call.env.METAME_INTERNAL_PROMPT, '1');
+      assert.equal(call.env.METAME_TASK_ATTEMPT, '1');
+    }
+  });
+
+  it('does not label deterministic maintenance scripts as agy tasks', () => {
+    const calls = [];
+    const scheduler = createTaskScheduler({
+      fs: require('fs'), path: require('path'), HOME: '/tmp/test-home',
+      execSync: (_cmd, options) => { calls.push(options.env); return ''; },
+      loadState: () => ({ tasks: {} }), saveState: () => {}, checkBudget: () => true,
+      recordTokens: () => {}, log: () => {}, getDistillEngine: () => 'agy',
+    });
+    const result = scheduler.executeTask({
+      name: 'memory-gc', type: 'script', command: 'node ~/.metame/memory-gc.js',
+    }, {});
+    assert.equal(result.success, true);
+    assert.equal(calls[0].METAME_ENGINE, undefined);
+    assert.equal(calls[0].METAME_DISTILL_ENGINE, undefined);
+  });
+
+  it('treats a script no-input marker as a skip instead of a successful model run', () => {
+    const scheduler = createTaskScheduler({
+      fs: require('fs'), path: require('path'), HOME: '/tmp/test-home',
+      execSync: () => 'nothing to process\n__METAME_TASK_SKIPPED__:no_sessions',
+      loadState: () => ({ tasks: {} }), saveState: () => {}, checkBudget: () => true,
+      recordTokens: () => {}, log: () => {}, getDistillEngine: () => 'agy',
+    });
+    const result = scheduler.executeTask({
+      name: 'memory-extract', type: 'script', command: 'node ~/.metame/memory-extract.js',
+    }, {});
+    assert.equal(result.success, true);
+    assert.equal(result.skipped, true);
+    assert.equal(result.error, 'no_sessions');
+    assert.doesNotMatch(result.output, /METAME_TASK_SKIPPED/);
   });
 
   it('uses the agy default model instead of mapping the distill Claude model', async () => {
@@ -279,6 +447,11 @@ describe('background runtime integration', () => {
     assert.equal(completed.success, true);
     assert.equal(calls[0].engine, 'agy');
     assert.equal(calls[0].model, 'Gemini 3.5 Flash (Medium)');
+    assert.equal(calls[0].readOnly, true);
+    assert.equal(calls[0].forbidTools, true);
+    assert.deepEqual(calls[0].allowedTools, []);
+    assert.equal(calls[0].mcpConfig, '');
+    assert.match(calls[0].cwd, /background-inference$/);
   });
 
   it('maps a legacy Claude task model to an agy-supported label', async () => {
@@ -365,5 +538,102 @@ describe('background runtime integration', () => {
     assert.equal(calls[1].sessionRef.started, true);
     assert.equal(calls[0].internalPrompt, true);
     assert.deepEqual(calls[0].providerEnv, { PROVIDER: 'daemon' });
+    assert.equal(calls[0].readOnly, true);
+    assert.equal(calls[0].forbidTools, true);
+    assert.deepEqual(calls[0].allowedTools, []);
+    assert.equal(calls[0].mcpConfig, '');
+  });
+});
+
+describe('subconscious retry and notification integration', () => {
+  function makeStateStore(initial = { tasks: {} }) {
+    let value = structuredClone(initial);
+    return {
+      load: () => structuredClone(value),
+      save: next => { value = structuredClone(next); },
+      get: () => structuredClone(value),
+    };
+  }
+
+  function startModelTask(execSync, notifications, taskOverrides = {}, initialState) {
+    const store = makeStateStore(initialState);
+    const scheduler = createTaskScheduler({
+      fs: require('fs'), path: require('path'), HOME: '/tmp/metame-retry-test',
+      execSync, parseInterval: () => 3600,
+      loadState: store.load, saveState: store.save,
+      checkBudget: () => true, recordTokens: () => {}, log: () => {},
+      physiologicalHeartbeat: () => {}, isUserIdle: () => false,
+      isInSleepMode: () => false, setSleepMode: () => {},
+      getDistillEngine: () => 'agy', modelRetryDelaysMs: [5, 10],
+    });
+    const timer = scheduler.startHeartbeat({
+      daemon: { heartbeat_check_interval: 0.005 },
+      heartbeat: { tasks: [{
+        name: 'memory-extract', type: 'script', model_backed: true,
+        command: 'node ~/.metame/memory-extract.js', interval: '1h',
+        ...taskOverrides,
+      }] },
+    }, null, null, async message => { notifications.push(message); });
+    return { timer, store };
+  }
+
+  it('retries twice, then sends one success notice to the admin channel', async (t) => {
+    let attempts = 0;
+    const notifications = [];
+    const { timer, store } = startModelTask(() => {
+      attempts++;
+      if (attempts < 3) throw Object.assign(new Error('temporary timeout'), { code: 'TIMEOUT' });
+      return 'memory extraction complete';
+    }, notifications);
+    t.after(() => clearInterval(timer));
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(attempts, 3);
+    assert.equal(store.get().tasks['memory-extract'].status, 'success');
+    assert.equal(notifications.length, 1);
+    assert.match(notifications[0], /AGY 潜意识任务完成/);
+    assert.match(notifications[0], /尝试 3\/3/);
+  });
+
+  it('retries twice, then sends one terminal failure notice to the admin channel', async (t) => {
+    let attempts = 0;
+    const notifications = [];
+    const { timer, store } = startModelTask(() => {
+      attempts++;
+      throw Object.assign(new Error('still unavailable'), { code: 'AUTH' });
+    }, notifications);
+    t.after(() => clearInterval(timer));
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(attempts, 3);
+    assert.equal(store.get().tasks['memory-extract'].status, 'error');
+    assert.equal(notifications.length, 1);
+    assert.match(notifications[0], /AGY 潜意识任务失败/);
+    assert.match(notifications[0], /已尝试 3\/3/);
+  });
+
+  it('does not notify or retry a no-input precondition skip', async (t) => {
+    let attempts = 0;
+    const notifications = [];
+    const { timer, store } = startModelTask(() => { attempts++; return 'unused'; }, notifications, {
+      precondition: 'test -s /nonexistent/metame/no-input.jsonl',
+    });
+    t.after(() => clearInterval(timer));
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(attempts, 0);
+    assert.equal(store.get().tasks['memory-extract'].status, 'skipped');
+    assert.equal(notifications.length, 0);
+  });
+
+  it('notifies a third attempt interrupted by daemon restart as terminal failure', async (t) => {
+    const notifications = [];
+    const { timer, store } = startModelTask(() => 'unused', notifications, {}, {
+      tasks: { 'memory-extract': {
+        status: 'running', attempt: 3, execution_boot_id: 'previous-boot',
+      } },
+    });
+    t.after(() => clearInterval(timer));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(store.get().tasks['memory-extract'].status, 'error');
+    assert.equal(notifications.length, 1);
+    assert.match(notifications[0], /DAEMON_RESTARTED/);
   });
 });

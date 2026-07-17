@@ -128,6 +128,54 @@ describe('agy-adapter invocation', () => {
     assert.deepEqual(signals, ['SIGTERM']);
   });
 
+  it('streams transcript tool status before the terminal answer settles', async () => {
+    const child = new EventEmitter();
+    child.pid = 234568;
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    const cwd = path.join(os.tmpdir(), `metame-agy-stream-${Date.now()}-${Math.random()}`);
+    const sessionId = 'sess-stream-status';
+    const records = [];
+    const events = [];
+    let settled = false;
+
+    const resultPromise = adapter.spawnAgy({
+      cwd, model: 'auto', sessionId, timeoutMs: 10_000, readOnly: false,
+    }, '检查项目状态', {
+      allowAnyPlatform: true,
+      spawn: () => child,
+      readCache: () => ({ [cwd]: sessionId }),
+      readTranscript: () => records.slice(),
+      beforeCache: { [cwd]: sessionId },
+      minRecordCount: 0,
+      finalPollIntervalMs: 2,
+      authLogPollIntervalMs: 0,
+      onEvent: event => events.push({ ...event, beforeSettled: !settled }),
+      eventState: adapter._internal.createTranscriptEventState(),
+      terminateTree: () => {},
+      killAfterMs: 10_000,
+    });
+    setTimeout(() => records.push(
+      { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: '检查项目状态' },
+      {
+        type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE',
+        content: 'I will inspect the project.', tool_calls: [{ name: 'list_directory' }],
+      },
+      { type: 'LIST_DIRECTORY', source: 'MODEL', status: 'DONE', content: 'scripts\npackage.json' },
+    ), 4);
+    setTimeout(() => records.push({
+      type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE', content: '检查完成：项目状态正常。',
+    }), 12);
+
+    const result = await resultPromise;
+    settled = true;
+    assert.equal(result.error, undefined);
+    assert.match(result.earlyFinal.text, /项目状态正常/);
+    const toolEvents = events.filter(event => event.type === 'tool_use' || event.type === 'tool_result');
+    assert.deepEqual(toolEvents.map(event => event.type), ['tool_use', 'tool_result']);
+    assert.equal(toolEvents.every(event => event.beforeSettled), true);
+  });
+
   it('blocks interactive OAuth browser login in unattended agy runs', async () => {
     const child = new EventEmitter();
     child.pid = 345678;
@@ -230,6 +278,7 @@ describe('agy-adapter invocation', () => {
     const sessionId = 'sess-finalize';
     const records = [];
     const prompts = [];
+    const events = [];
 
     const result = await adapter.run({
       cwd,
@@ -240,14 +289,23 @@ describe('agy-adapter invocation', () => {
     }, '管网阀门相关被错误定价的股有哪些', {
       readCache: () => ({ [cwd]: sessionId }),
       readTranscript: () => records.slice(),
+      onEvent: event => events.push(event),
+      eventState: adapter._internal.createTranscriptEventState(),
       sleep: async () => {},
       spawnAgy: async (_options, prompt) => {
         prompts.push(prompt);
         if (prompts.length === 1) {
           records.push(
             { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: prompt },
-            { type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE', tool_calls: [{ name: 'search_web' }] },
+            {
+              type: 'PLANNER_RESPONSE',
+              source: 'MODEL',
+              status: 'DONE',
+              content: 'I will search for undervalued pipeline-valve companies.',
+              tool_calls: [{ name: 'search_web' }],
+            },
             { type: 'SEARCH_WEB', source: 'MODEL', status: 'DONE', content: '搜索结果：A公司管网阀门业务占比高，估值低；B公司传感器订单增长。' },
+            { type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE' },
           );
         } else {
           records.push(
@@ -264,6 +322,11 @@ describe('agy-adapter invocation', () => {
     assert.match(prompts[1], /搜索结果：A公司/);
     assert.equal(result.error, undefined);
     assert.match(result.text, /优先看A公司/);
+    assert.deepEqual(events, [
+      { type: 'session', session_id: sessionId },
+      { type: 'tool_use', toolName: 'search_web', toolInput: {} },
+      { type: 'tool_result', toolName: 'WebSearch', status: 'DONE' },
+    ]);
   });
 
   it('reports a clear failure when there is no final text and no tool evidence', async () => {
