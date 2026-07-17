@@ -15,6 +15,7 @@ function makeProjectTree() {
   const pluginDir = path.join(root, 'plugin', 'scripts');
 
   fs.mkdirSync(path.join(scriptsDir, 'core', 'nested'), { recursive: true });
+  fs.mkdirSync(path.join(scriptsDir, 'bin'), { recursive: true });
   fs.mkdirSync(path.join(scriptsDir, 'hooks'), { recursive: true });
   fs.mkdirSync(path.join(root, 'plugin', '.claude-plugin'), { recursive: true });
   fs.mkdirSync(pluginDir, { recursive: true });
@@ -35,6 +36,7 @@ function makeProjectTree() {
   fs.writeFileSync(path.join(scriptsDir, 'daemon.test.js'), 'nope\n', 'utf8');
   fs.writeFileSync(path.join(scriptsDir, 'core', 'audit.js'), 'module.exports = 1;\n', 'utf8');
   fs.writeFileSync(path.join(scriptsDir, 'core', 'nested', 'child.js'), 'module.exports = 2;\n', 'utf8');
+  fs.writeFileSync(path.join(scriptsDir, 'bin', 'agy-adapter.js'), 'module.exports = 4;\n', 'utf8');
   fs.writeFileSync(path.join(scriptsDir, 'hooks', 'intent.js'), 'module.exports = 3;\n', 'utf8');
   fs.writeFileSync(path.join(scriptsDir, 'hooks', 'intent.test.js'), 'nope\n', 'utf8');
   fs.writeFileSync(path.join(scriptsDir, 'hooks', 'test-stop-hook.js'), 'nope\n', 'utf8');
@@ -43,7 +45,7 @@ function makeProjectTree() {
 }
 
 describe('syncPluginScripts', () => {
-  it('syncs top-level, nested core files, and hooks into plugin/scripts', () => {
+  it('syncs top-level, nested core/bin files, and hooks into plugin/scripts', () => {
     const root = makeProjectTree();
     const updated = syncPluginScripts(root);
 
@@ -51,6 +53,7 @@ describe('syncPluginScripts', () => {
     assert.equal(fs.existsSync(path.join(root, 'plugin', 'scripts', 'daemon.js')), true);
     assert.equal(fs.existsSync(path.join(root, 'plugin', 'scripts', 'core', 'audit.js')), true);
     assert.equal(fs.existsSync(path.join(root, 'plugin', 'scripts', 'core', 'nested', 'child.js')), true);
+    assert.equal(fs.existsSync(path.join(root, 'plugin', 'scripts', 'bin', 'agy-adapter.js')), true);
     assert.equal(fs.existsSync(path.join(root, 'plugin', 'scripts', 'hooks', 'intent.js')), true);
     assert.equal(fs.existsSync(path.join(root, 'plugin', 'scripts', 'hooks', 'intent.test.js')), false);
     assert.equal(fs.existsSync(path.join(root, 'plugin', 'scripts', 'hooks', 'test-stop-hook.js')), false);

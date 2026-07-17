@@ -116,6 +116,12 @@ function syncPluginScripts(projectRoot = process.cwd()) {
   updated = syncDirFiles(path.join(scriptsDir, 'hooks'), path.join(pluginScriptsDir, 'hooks'), {
     cleanupStale: true,
   }) || updated;
+  // The runtime resolves this adapter relative to plugin/scripts. Other bin
+  // utilities are source-maintainer commands and must not be distributed.
+  updated = syncDirFiles(path.join(scriptsDir, 'bin'), path.join(pluginScriptsDir, 'bin'), {
+    fileList: ['agy-adapter.js'],
+    cleanupStale: true,
+  }) || updated;
   updated = syncPluginManifest(projectRoot) || updated;
   return updated;
 }
