@@ -2437,17 +2437,9 @@ async function main() {
     log('WARN', `Memory DB pre-init failed (non-fatal, will retry on first use): ${e.message}`);
   }
 
-  // Start QMD semantic search daemon if available (optional, non-fatal)
-  try {
-    const qmd = require('./qmd-client');
-    if (qmd.isAvailable()) {
-      qmd.ensureCollection();
-      qmd.startDaemon().then(running => {
-        if (running) log('INFO', '[QMD] Semantic search daemon started (localhost:8181)');
-        else log('INFO', '[QMD] Available but daemon not started — will use CLI fallback');
-      }).catch(() => { });
-    }
-  } catch { /* qmd-client not available, skip */ }
+  // QMD retired from auto-start (plan P3.3): no code path ever queried it —
+  // recall goes through core/hybrid-search.js (FTS5+vector RRF). qmd-client.js
+  // stays on disk; re-register it as a hybrid-search backend if ever needed.
   // Hourly heartbeat so daemon.log stays fresh even when idle (visible aliveness check)
   setInterval(() => {
     log('INFO', `Daemon heartbeat — uptime: ${Math.round(process.uptime() / 60)}m, active sessions: ${activeProcesses.size}`);
