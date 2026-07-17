@@ -142,6 +142,37 @@ function resolveMemory() {
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
+/**
+ * Programmatic write path (shared by the CLI below and the MCP server).
+ * Runs the same validation + candidate-state pipeline as the CLI; never
+ * bypasses promotion. Returns { ok, errors?, result? } instead of exiting.
+ */
+function writeFact({ entity, relation, value, confidence = 'medium', project = '*', tags = [], sourceType = 'manual' } = {}) {
+  const errors = [
+    validateEntity(entity),
+    validateRelation(relation),
+    validateValue(value),
+    validateConfidence(confidence),
+  ].filter(Boolean);
+  if (errors.length) return { ok: false, errors };
+
+  const memoryPath = resolveMemory();
+  if (!memoryPath) return { ok: false, errors: ['memory.js not found — MetaMe not deployed'] };
+  const memory = require(memoryPath);
+  const sessionId = `${sourceType}-${Date.now()}`;
+  if (typeof memory.acquire === 'function') memory.acquire();
+  try {
+    const result = memory.saveFacts(sessionId, project, [
+      { entity, relation, value, confidence, tags: (tags || []).slice(0, 3), source_type: sourceType },
+    ]);
+    return { ok: result.saved > 0, result };
+  } catch (err) {
+    return { ok: false, errors: [err.message] };
+  } finally {
+    try { if (typeof memory.release === 'function') memory.release(); } catch { }
+  }
+}
+
 function main() {
   const { positional, opts } = parseArgs(process.argv.slice(2));
 
@@ -156,53 +187,27 @@ function main() {
   const tagsRaw = opts.tags || '';
   const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean).slice(0, 3) : [];
 
-  // Validate
-  const errors = [
-    validateEntity(entity),
-    validateRelation(relation),
-    validateValue(value),
-    opts.confidence ? validateConfidence(confidence) : null,
-  ].filter(Boolean);
+  const outcome = writeFact({ entity, relation, value, confidence, project, tags, sourceType: 'manual' });
 
-  if (errors.length) {
-    for (const e of errors) console.error('错误: ' + e);
+  if (!outcome.ok && outcome.errors) {
+    for (const e of outcome.errors) console.error('错误: ' + e);
     console.error('\n运行 node memory-write.js --help 查看用法');
     process.exit(1);
   }
 
-  // Resolve memory module
-  const memoryPath = resolveMemory();
-  if (!memoryPath) {
-    console.error('错误: 找不到 memory.js，请确认 MetaMe 已部署');
-    process.exit(1);
-  }
-
-  const memory = require(memoryPath);
-  const sessionId = 'manual-' + Date.now();
-
-  if (typeof memory.acquire === 'function') memory.acquire();
-  try {
-    const result = memory.saveFacts(sessionId, project, [
-      { entity, relation, value, confidence, tags, source_type: 'manual' },
-    ]);
-
-    if (result.saved > 0) {
-      const preview = value.slice(0, 30) + (value.length > 30 ? '...' : '');
-      console.log(`✓ 已保存 [${relation}] ${entity}: "${preview}"`);
-      if (result.superseded > 0) {
-        console.log(`  (已将 ${result.superseded} 条旧记录标记为 superseded)`);
-      }
-    } else {
-      // skipped: duplicate or validation filtered by saveFacts
-      console.log(`⚠ 未保存（可能是重复内容）。已跳过: ${result.skipped}`);
-      process.exit(1);
+  if (outcome.ok) {
+    const preview = value.slice(0, 30) + (value.length > 30 ? '...' : '');
+    console.log(`✓ 已保存 [${relation}] ${entity}: "${preview}"`);
+    if (outcome.result.superseded > 0) {
+      console.log(`  (已将 ${outcome.result.superseded} 条旧记录标记为 superseded)`);
     }
-  } catch (err) {
-    console.error('错误: 写入失败 —', err.message);
+  } else {
+    // skipped: duplicate or validation filtered by saveFacts
+    console.log(`⚠ 未保存（可能是重复内容）。已跳过: ${outcome.result ? outcome.result.skipped : '-'}`);
     process.exit(1);
-  } finally {
-    try { if (typeof memory.release === 'function') memory.release(); } catch { }
   }
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { writeFact, _private: { validateEntity, validateRelation, validateValue, validateConfidence } };
