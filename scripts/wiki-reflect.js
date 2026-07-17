@@ -495,7 +495,9 @@ async function runConfiguredWikiReflect({
     return await runWikiReflect(db, {
       providers,
       outputDir: resolveConfiguredOutputDir(config, home),
-      dossierMode: true,
+      // Dossier generation runs one LLM call per topic — opt-in only
+      // (daemon.wiki_dossier: true). Plain topic pages stay on by default.
+      dossierMode: !!(config.daemon && config.daemon.wiki_dossier),
     });
   } finally {
     db.close();

@@ -2385,6 +2385,7 @@ async function main() {
     'enable_nl_mac_control',
     'enable_nl_mac_fallback',
     'wiki_output_dir',       // wiki export path (used by daemon-command-router)
+    'wiki_dossier',          // opt-in LLM dossier generation in wiki-reflect (default off)
     'embedding',             // local/cloud embedding backend configuration
     'skill_evolution_notify', // whether to notify on skill evolution (used by daemon-task-scheduler)
     'memory_recall_enabled',
