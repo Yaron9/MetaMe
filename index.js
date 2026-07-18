@@ -494,7 +494,7 @@ function requestDaemonRestart({
 // Auto-deploy bundled scripts to ~/.metame/
 // IMPORTANT: daemon.yaml is USER CONFIG — never overwrite it. Only daemon-default.yaml (template) is synced.
 const scriptsDir = path.join(__dirname, 'scripts');
-const EXCLUDED_SCRIPTS = new Set(['sync-readme.js', 'test_daemon.js', 'daemon.yaml']);
+const EXCLUDED_SCRIPTS = new Set(['sync-readme.js', 'test_daemon.js', 'daemon.yaml', 'file-map.yaml']);
 const RETIRED_PERPETUAL_ARTIFACTS = [
   'daemon-loop-coordinator.js',
   'daemon-loop-reconciler.js',

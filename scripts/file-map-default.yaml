@@ -1,0 +1,53 @@
+# MetaMe file-map configuration (TEMPLATE).
+# Deployed to ~/.metame/file-map.yaml on first run — edit that copy, not this file.
+# Missing keys fall back to built-in defaults; lists REPLACE the defaults, so
+# keep the protection entries when customizing.
+
+# Every operation (including cleanup proposals) must stay inside these roots.
+roots:
+  - "~"
+
+# Hard protection net — cleanup_propose rejects anything matching these globs
+# (only ** and * are supported). Checked against both the given path and its
+# resolved real path.
+protected:
+  - "/System/**"
+  - "/Library/**"
+  - "/usr/**"
+  - "/bin/**"
+  - "/sbin/**"
+  - "/private/**"
+  - "/Applications/**"
+  - "~/Library/**"
+  - "~/.metame/**"
+  - "~/.claude/**"
+  - "~/.ssh/**"
+  - "~/.config/**"
+  - "**/.git"
+  - "**/.git/**"
+  # Loose files directly at the home directory top level (dotfiles etc.).
+  # Does not affect files nested inside ~/Downloads, ~/Documents, …
+  - "~/*"
+
+# Files modified within this many days are never proposed for cleanup.
+protect_recent_days: 14
+
+# Skipped during overview scans and duplicate collection.
+exclude:
+  - "**/node_modules/**"
+  - "**/.git/**"
+  - "**/Library/**"
+  - "**/.Trash/**"
+  - "**/*.photoslibrary/**"
+
+cleanup:
+  method: quarantine        # quarantine | trash
+  proposal_ttl_minutes: 60  # a proposed batch expires if not executed in time
+  quarantine_days: 30       # quarantined files kept this long before lazy GC moves them to Trash
+  max_batch_files: 500
+  max_batch_gb: 50
+
+overview:
+  depth: 3
+  ttl_hours: 24
+  du_budget_seconds: 60
