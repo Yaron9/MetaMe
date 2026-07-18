@@ -913,6 +913,17 @@ function ensureHookInstalled() {
       if (settings.hooks.UserPromptSubmit.length !== before) modified = true;
     }
 
+    // Pre-allow the metame MCP memory tools so agents can invoke them
+    // autonomously in any permission mode (headless -p included). Read-heavy
+    // surface; memory_write runs the validated candidate pipeline.
+    const METAME_MCP_ALLOW = 'mcp__metame';
+    if (!settings.permissions) settings.permissions = {};
+    if (!Array.isArray(settings.permissions.allow)) settings.permissions.allow = [];
+    if (!settings.permissions.allow.includes(METAME_MCP_ALLOW)) {
+      settings.permissions.allow.push(METAME_MCP_ALLOW);
+      modified = true;
+    }
+
     if (modified) {
       fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2), 'utf8');
     }
@@ -1206,10 +1217,15 @@ const PROTOCOL_NORMAL = `${METAME_START}
    *   **REMINDER:** If the User expresses a strong persistent preference, you may gently ask *at the end of the task*: "Should I save this preference to your MetaMe profile?"
 
 **3. MEMORY SYSTEM (Three-Layer Recall):**
+   * **On-demand recall (PRIMARY):** the \`metame\` MCP tools ARE your cross-session long-term memory — use them proactively, without being asked:
+       - Question touches "之前/上次/约定/偏好/教训" or you lack historical context → \`memory_recall\` (assembled context) or \`memory_search\` (keyword).
+       - Need the user's background/preferences → \`profile_get\`. Discover capabilities → \`skill_list\`.
+       - A fact/decision/lesson gets CONFIRMED during the task → persist it with \`memory_write\` (verified facts only).
+       - The local per-project memory directory is NOT the long-term store; check metame tools before concluding "no memory of this".
    * **Long-term Facts** → injected as \`<!-- FACTS:START -->\` blocks. Follow implicitly, never repeat to user.
    * **Session Summary** → injected as \`[上次对话摘要，供参考]\` when resuming after 2h+ gap. Use for continuity, do NOT quote back to user.
    * **Background Pipeline:** Sleep mode triggers memory consolidation automatically. Memory improves over time without user action.
-   * **Search:** \`node ~/.metame/memory-search.js "<keyword>"\` to recall facts manually.
+   * **Fallback (no MCP):** \`node ~/.metame/memory-search.js "<keyword>"\`.
 ---
 `;
 
