@@ -37,6 +37,7 @@ const { loadFileMapConfig, expandHome } = require('./core/file-map-config');
 const protect = require('./core/file-map-protect');
 const overviewCore = require('./core/file-map-overview');
 const dupesCore = require('./core/file-map-dupes');
+const storageCore = require('./core/file-map-storage');
 const manifestCore = require('./core/file-map-manifest');
 const auditCore = require('./core/file-map-audit');
 const quarantineCore = require('./core/file-map-quarantine');
@@ -141,6 +142,19 @@ const TOOLS = [
         unused_days: { type: 'number', description: 'Staleness threshold in days (default 180)' },
         min_size_mb: { type: 'number', description: 'Minimum size in MB (default 10)' },
         limit: { type: 'number', description: 'Max results (default 50, cap 200)' },
+      },
+    },
+  },
+  {
+    name: 'storage_assess',
+    description: 'Read-only macOS storage assessment: disk baseline, Time Machine snapshots, categorized storage footprints, running-app/tool guards, cloud warnings, and an optional low-risk-first plan for a target reclaim amount. It never moves, deletes, prunes, or clears anything.',
+    annotations: READ_ONLY,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        target_reclaim_gb: { type: 'number', description: 'Optional amount of space to plan for reclaiming; the plan is advisory and never authorizes cleanup' },
+        min_report_mb: { type: 'number', description: 'Hide measured categories below this size (default 500 MB; target planning still considers them)' },
+        du_budget_seconds: { type: 'number', description: 'Maximum wall-clock budget for category sizing (default 45s, cap 120s)' },
       },
     },
   },
@@ -285,6 +299,12 @@ function clamp(value, fallback, min, max) {
   return Math.min(Math.max(Math.floor(n), min), max);
 }
 
+function boundedNumber(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(n, min), max);
+}
+
 function statSafe(fsx, p) {
   try {
     const st = fsx.statSync(p);
@@ -393,6 +413,18 @@ async function buildOverview(deps, cfg, roots, depth) {
 
 function existsL(fsx, p) {
   try { fsx.lstatSync(p); return true; } catch { return false; }
+}
+
+function isAssessablePath(deps, cfg, p) {
+  if (!protect.isWithinRoots(p, cfg.roots)) return false;
+  try {
+    const st = deps.fsx.lstatSync(p);
+    if (typeof st.isSymbolicLink === 'function' && st.isSymbolicLink()) return false;
+    const real = typeof deps.fsx.realpathSync === 'function' ? deps.fsx.realpathSync(p) : p;
+    return protect.isWithinRoots(real, cfg.roots);
+  } catch {
+    return false;
+  }
 }
 
 function auditEvent(deps, record) {
@@ -513,6 +545,79 @@ async function probeTools(deps) {
     out[name] = error ? { available: false, install: hint } : { available: true };
   }
   return out;
+}
+
+async function probeMaintenanceTools(deps) {
+  const pairs = await Promise.all(storageCore.MAINTENANCE_TOOLS.map(async spec => {
+    const { error } = await deps.runCapture(spec.name, spec.args, { timeoutMs: 3000 });
+    return [spec.name, { available: !error }];
+  }));
+  return Object.fromEntries(pairs);
+}
+
+async function collectStorageAssessment(args, deps, loaded) {
+  const cfg = loaded.config;
+  const fullCatalog = storageCore.buildCatalog(deps.home);
+  const catalog = fullCatalog.map(category => ({
+    ...category,
+    paths: category.paths.filter(p => protect.isWithinRoots(p, cfg.roots)),
+  }));
+  const outsideRoots = fullCatalog.reduce(
+    (sum, category) => sum + category.paths.filter(p => !protect.isWithinRoots(p, cfg.roots)).length,
+    0
+  );
+  const paths = [...new Set(catalog.flatMap(category => category.paths))]
+    .filter(p => isAssessablePath(deps, cfg, p));
+  const budget = clamp(args.du_budget_seconds, cfg.storage.duBudgetSeconds, 5, 120);
+  const [sizes, df, snapshots, processList, externalTools] = await Promise.all([
+    runDuBatch(deps, paths, budget),
+    deps.runCapture('df', ['-kP', '/'], { timeoutMs: 5000 }),
+    deps.runCapture('tmutil', ['listlocalsnapshots', '/'], { timeoutMs: 10000 }),
+    deps.runCapture('ps', ['-axo', 'comm='], { timeoutMs: 5000 }),
+    probeMaintenanceTools(deps),
+  ]);
+  const reports = storageCore.buildCategoryReports(catalog, sizes, {
+    protectedMatch: p => protect.findProtectedMatch(p, cfg.protectedPatterns),
+    runningProcesses: storageCore.parseProcessList(processList.stdout),
+  });
+  const minReportMb = boundedNumber(args.min_report_mb, cfg.storage.minReportMb, 0, 1024 * 1024);
+  const thresholdBytes = minReportMb * 1024 ** 2;
+  const categories = reports.filter(category => category.total_bytes >= thresholdBytes && category.total_bytes > 0);
+  const targetGb = boundedNumber(args.target_reclaim_gb, 0, 0, 1024 * 1024);
+  const targetBytes = targetGb * 1024 ** 3;
+  const plan = storageCore.buildTargetPlan(reports, targetBytes, cfg.storage.targetMaxCategories);
+  const runningApps = [...new Set(reports.flatMap(category => category.running_apps))].sort();
+  const scanHints = reports
+    .filter(category => category.scan_hint)
+    .filter(category => !category.scan_hint.root
+      || protect.isWithinRoots(expandHome(category.scan_hint.root, deps.home), cfg.roots))
+    .map(category => ({ category: category.id, ...category.scan_hint }));
+  return {
+    ok: true,
+    generated_at: new Date(deps.now()).toISOString(),
+    volume: storageCore.parseDfKb(df.stdout),
+    volume_error: df.error || undefined,
+    local_snapshots: { available: !snapshots.error, ...storageCore.parseSnapshots(snapshots.stdout) },
+    categories,
+    scan_hints: scanHints,
+    scope: { roots: cfg.roots, outside_root_catalog_paths: outsideRoots },
+    report_threshold_mb: minReportMb,
+    hidden_categories: reports.filter(category => category.total_bytes > 0 && category.total_bytes < thresholdBytes).length,
+    running_apps: runningApps,
+    process_check_available: !processList.error,
+    external_tools: externalTools,
+    target_plan: plan || undefined,
+    warnings: [
+      'This assessment is read-only. Category totals are estimates and some aggregate categories overlap.',
+      'Cloud-synced paths require provider-aware eviction; deleting a synced path may delete the cloud copy.',
+      'Tool-native prune commands are not recoverable and are intentionally outside cleanup_execute.',
+      processList.error ? 'Running-app guard is unavailable; verify manually that related apps are closed before clearing caches.' : null,
+      snapshots.error ? 'Local snapshot status is unavailable; verify Time Machine/APFS snapshots separately.' : null,
+      outsideRoots ? `${outsideRoots} catalog paths were not scanned because they are outside configured roots.` : null,
+    ].filter(Boolean),
+    next_step: 'Review a category, narrow it with scan_large/scan_stale/scan_duplicates, then use cleanup_propose for selected unprotected paths.',
+    ...(loaded.ok ? {} : { config_warning: loaded.error }),
+  };
 }
 
 function defaultDeps() {
@@ -750,6 +855,11 @@ const handlers = {
       ...(loaded.ok ? {} : { config_warning: loaded.error }),
     };
   },
+
+  async storage_assess(args, deps) {
+    return collectStorageAssessment(args, deps, deps.loadConfig());
+  },
+
   async cleanup_propose(args, deps) {
     const loaded = deps.loadConfig();
     if (!loaded.ok) return { ok: false, error: `config invalid — destructive pipeline disabled: ${loaded.error}` };

@@ -23,6 +23,7 @@ const DEFAULT_CONFIG = {
   exclude: ['**/node_modules/**', '**/.git/**', '**/Library/**', '**/.Trash/**', '**/*.photoslibrary/**'],
   cleanup: { method: 'quarantine', proposal_ttl_minutes: 60, quarantine_days: 30, max_batch_files: 500, max_batch_gb: 50 },
   overview: { depth: 3, ttl_hours: 24, du_budget_seconds: 60 },
+  storage: { min_report_mb: 500, du_budget_seconds: 45, target_max_categories: 12 },
 };
 
 function expandHome(p, home) {
@@ -47,6 +48,7 @@ function normalizeConfig(raw, home) {
   const src = raw && typeof raw === 'object' ? raw : {};
   const cleanup = { ...DEFAULT_CONFIG.cleanup, ...(src.cleanup && typeof src.cleanup === 'object' ? src.cleanup : {}) };
   const overview = { ...DEFAULT_CONFIG.overview, ...(src.overview && typeof src.overview === 'object' ? src.overview : {}) };
+  const storage = { ...DEFAULT_CONFIG.storage, ...(src.storage && typeof src.storage === 'object' ? src.storage : {}) };
   return {
     roots: stringList(src.roots, DEFAULT_CONFIG.roots).map(p => expandHome(p, home)),
     protectedPatterns: stringList(src.protected, DEFAULT_CONFIG.protected).map(p => expandHome(p, home)),
@@ -63,6 +65,11 @@ function normalizeConfig(raw, home) {
       depth: clampNumber(overview.depth, 3, 1, 4),
       ttlHours: clampNumber(overview.ttl_hours, 24, 1, 24 * 14),
       duBudgetSeconds: clampNumber(overview.du_budget_seconds, 60, 5, 600),
+    },
+    storage: {
+      minReportMb: clampNumber(storage.min_report_mb, 500, 0, 1024 * 1024),
+      duBudgetSeconds: clampNumber(storage.du_budget_seconds, 45, 5, 120),
+      targetMaxCategories: clampNumber(storage.target_max_categories, 12, 1, 30),
     },
   };
 }

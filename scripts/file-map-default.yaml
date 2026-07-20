@@ -51,3 +51,10 @@ overview:
   depth: 3
   ttl_hours: 24
   du_budget_seconds: 60
+
+# Read-only macOS storage assessment. Categories below this size stay out of
+# the default report but still participate in an explicit target plan.
+storage:
+  min_report_mb: 500
+  du_budget_seconds: 45
+  target_max_categories: 12

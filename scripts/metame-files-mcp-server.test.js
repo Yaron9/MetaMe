@@ -48,7 +48,7 @@ describe('metame-files-mcp-server protocol', () => {
 
     const list = await handleMessage({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
     const byName = new Map(list.result.tools.map(t => [t.name, t]));
-    for (const name of ['file_search', 'file_overview', 'file_last_used', 'scan_large', 'scan_stale']) {
+    for (const name of ['file_search', 'file_overview', 'file_last_used', 'scan_large', 'scan_stale', 'storage_assess']) {
       assert.ok(byName.has(name), `${name} must be listed`);
     }
     const destructive = new Set(['cleanup_execute', 'cleanup_purge']);
@@ -448,5 +448,88 @@ describe('scan_stale', () => {
     const out = await callTool('scan_stale', {}, deps);
     assert.equal(out.ok, false);
     assert.match(out.error, /ENOENT/);
+  });
+});
+
+describe('storage_assess', () => {
+  it('reports disk baseline, categorized sizes, guards and a review-only target plan', async () => {
+    const present = new Set([
+      '/home/u/.Trash',
+      '/home/u/Library/Caches/com.apple.Safari',
+      '/home/u/.npm',
+    ]);
+    const kb = new Map([
+      ['/home/u/.Trash', 1024],
+      ['/home/u/Library/Caches/com.apple.Safari', 2048],
+      ['/home/u/.npm', 4096],
+    ]);
+    const duPaths = [];
+    const deps = tempDeps({
+      loadConfig: stubConfig,
+      fsx: { lstatSync: p => { if (!present.has(p)) throw new Error('ENOENT'); return {}; } },
+      runCapture: async (cmd, args) => {
+        if (cmd === 'du') {
+          duPaths.push(args[args.length - 1]);
+          return { stdout: `${kb.get(args[args.length - 1])}\t${args[args.length - 1]}\n`, error: null };
+        }
+        if (cmd === 'df') {
+          return {
+            stdout: 'Filesystem 1024-blocks Used Available Capacity iused ifree %iused Mounted on\n/dev/disk3s1 10000 6000 4000 60% 1 2 33% /System/Volumes/Data\n',
+            error: null,
+          };
+        }
+        if (cmd === 'tmutil') return { stdout: 'com.apple.TimeMachine.2026-07-18-010101.local\n', error: null };
+        if (cmd === 'ps') return { stdout: '/Applications/Safari.app/Contents/MacOS/Safari\n', error: null };
+        if (cmd === 'npm') return { stdout: '10.0.0\n', error: null };
+        return { stdout: '', error: `spawn ${cmd} ENOENT` };
+      },
+    });
+    const out = await callTool('storage_assess', {
+      min_report_mb: 0,
+      target_reclaim_gb: 0.001,
+    }, deps);
+    assert.equal(out.ok, true);
+    assert.equal(out.volume.available_bytes, 4000 * 1024);
+    assert.equal(out.local_snapshots.count, 1);
+    assert.ok(out.running_apps.includes('Safari'));
+    assert.equal(out.external_tools.npm.available, true);
+    assert.equal(out.external_tools.docker.available, false);
+    assert.ok(out.categories.some(c => c.id === 'browser_caches' && c.total_bytes === 2048 * 1024));
+    assert.ok(out.scope.outside_root_catalog_paths > 0);
+    assert.ok(!duPaths.includes('/Applications'), 'paths outside configured roots are never sized');
+    assert.ok(out.scan_hints.some(h => h.category === 'old_installers'));
+    assert.equal(out.target_plan.status, 'manual_or_out_of_pipeline_actions_required');
+    assert.equal(out.target_plan.steps[0].category, 'trash', 'low-risk category planned first');
+    assert.ok(out.target_plan.steps.every(step => step.requires_review));
+    assert.equal(out.target_plan.steps[0].out_of_pipeline, true);
+  });
+
+  it('never sizes symlinks or paths whose real path escapes configured roots', async () => {
+    const duPaths = [];
+    const deps = tempDeps({
+      loadConfig: stubConfig,
+      fsx: {
+        lstatSync: p => {
+          if (p === '/home/u/.Trash') return { isSymbolicLink: () => true };
+          if (p === '/home/u/Downloads') return { isSymbolicLink: () => false };
+          throw new Error('ENOENT');
+        },
+        realpathSync: p => p === '/home/u/Downloads' ? '/outside/Downloads' : p,
+      },
+      runCapture: async (cmd, args) => {
+        if (cmd === 'du') duPaths.push(args[args.length - 1]);
+        if (cmd === 'df') return { stdout: '', error: 'unavailable' };
+        if (cmd === 'ps') return { stdout: '', error: 'unavailable' };
+        if (cmd === 'tmutil') return { stdout: '', error: 'unavailable' };
+        return { stdout: '', error: `spawn ${cmd} ENOENT` };
+      },
+    });
+    const out = await callTool('storage_assess', { min_report_mb: 0 }, deps);
+    assert.equal(out.ok, true);
+    assert.deepEqual(duPaths, []);
+    assert.deepEqual(out.categories, []);
+    assert.equal(out.process_check_available, false);
+    assert.ok(out.warnings.some(w => /Running-app guard is unavailable/.test(w)));
+    assert.ok(out.warnings.some(w => /snapshot status is unavailable/.test(w)));
   });
 });
