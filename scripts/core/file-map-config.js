@@ -24,6 +24,13 @@ const DEFAULT_CONFIG = {
   cleanup: { method: 'quarantine', proposal_ttl_minutes: 60, quarantine_days: 30, max_batch_files: 500, max_batch_gb: 50 },
   overview: { depth: 3, ttl_hours: 24, du_budget_seconds: 60 },
   storage: { min_report_mb: 500, du_budget_seconds: 45, target_max_categories: 12 },
+  mole: {
+    enabled: true,
+    analyze_timeout_seconds: 120,
+    preview_timeout_seconds: 180,
+    preview_ttl_minutes: 60,
+    max_returned_candidates: 200,
+  },
 };
 
 function expandHome(p, home) {
@@ -49,6 +56,7 @@ function normalizeConfig(raw, home) {
   const cleanup = { ...DEFAULT_CONFIG.cleanup, ...(src.cleanup && typeof src.cleanup === 'object' ? src.cleanup : {}) };
   const overview = { ...DEFAULT_CONFIG.overview, ...(src.overview && typeof src.overview === 'object' ? src.overview : {}) };
   const storage = { ...DEFAULT_CONFIG.storage, ...(src.storage && typeof src.storage === 'object' ? src.storage : {}) };
+  const mole = { ...DEFAULT_CONFIG.mole, ...(src.mole && typeof src.mole === 'object' ? src.mole : {}) };
   return {
     roots: stringList(src.roots, DEFAULT_CONFIG.roots).map(p => expandHome(p, home)),
     protectedPatterns: stringList(src.protected, DEFAULT_CONFIG.protected).map(p => expandHome(p, home)),
@@ -70,6 +78,13 @@ function normalizeConfig(raw, home) {
       minReportMb: clampNumber(storage.min_report_mb, 500, 0, 1024 * 1024),
       duBudgetSeconds: clampNumber(storage.du_budget_seconds, 45, 5, 120),
       targetMaxCategories: clampNumber(storage.target_max_categories, 12, 1, 30),
+    },
+    mole: {
+      enabled: mole.enabled !== false,
+      analyzeTimeoutMs: clampNumber(mole.analyze_timeout_seconds, 120, 10, 600) * 1000,
+      previewTimeoutMs: clampNumber(mole.preview_timeout_seconds, 180, 10, 900) * 1000,
+      previewTtlMs: clampNumber(mole.preview_ttl_minutes, 60, 1, 24 * 60) * 60 * 1000,
+      maxReturnedCandidates: clampNumber(mole.max_returned_candidates, 200, 1, 500),
     },
   };
 }

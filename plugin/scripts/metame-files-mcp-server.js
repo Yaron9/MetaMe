@@ -13,11 +13,14 @@
  *   claude mcp add metame-files -- node ~/.metame/metame-files-mcp-server.js
  *
  * Safety contract:
- *  - every tool except cleanup_execute is read-only (annotations.readOnlyHint);
+ *  - discovery and scan tools are read-only; proposal, preview and restore tools
+ *    may write private metadata; cleanup_execute is the only cleanup action;
  *  - cleanup_execute takes NO paths — only a batch manifest produced by
- *    cleanup_propose (its token is printed exactly once), and it never
- *    unlinks: files move to ~/.metame/file-map/quarantine/<batch>/ and are
- *    restorable via cleanup_restore;
+ *    cleanup_propose (its raw token is returned once and only its hash is
+ *    persisted). Same-volume files move atomically into an opaque quarantine
+ *    path and remain restorable; cross-volume candidates fail closed;
+ *  - Mole is optional and bounded to `analyze --json` and `clean --dry-run`;
+ *    its output never bypasses the native proposal and protection gates;
  *  - deployment discipline: do NOT allowlist cleanup_execute — the host's
  *    per-call permission prompt is the final "user present" gate.
  *
@@ -41,6 +44,8 @@ const storageCore = require('./core/file-map-storage');
 const manifestCore = require('./core/file-map-manifest');
 const auditCore = require('./core/file-map-audit');
 const quarantineCore = require('./core/file-map-quarantine');
+const executionCore = require('./core/file-map-execution');
+const moleCore = require('./core/file-map-mole');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
@@ -55,6 +60,7 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false };
 const WRITES_METADATA = { readOnlyHint: false, destructiveHint: false };
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true };
 const USER_CONSENT_PHRASE = 'USER CONFIRMED';
+const EXECUTION_LEASE_MS = 5 * 60 * 1000;
 
 // ── Tool definitions ─────────────────────────────────────────────────────────
 
@@ -155,6 +161,21 @@ const TOOLS = [
         target_reclaim_gb: { type: 'number', description: 'Optional amount of space to plan for reclaiming; the plan is advisory and never authorizes cleanup' },
         min_report_mb: { type: 'number', description: 'Hide measured categories below this size (default 500 MB; target planning still considers them)' },
         du_budget_seconds: { type: 'number', description: 'Maximum wall-clock budget for category sizing (default 45s, cap 120s)' },
+        include_mole_analysis: { type: 'boolean', description: 'Optionally augment the native assessment with read-only `mo analyze --json` output' },
+        mole_root: { type: 'string', description: 'Root passed to Mole analysis (default ~; must stay inside configured roots)' },
+      },
+    },
+  },
+  {
+    name: 'mole_cleanup_preview',
+    description: 'Run the fixed non-destructive command `mo clean --dry-run`, then normalize its fresh clean-list for review. This tool never installs Mole, never runs a real cleanup, and never auto-proposes candidates.',
+    annotations: WRITES_METADATA,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        refresh: { type: 'boolean', description: 'Run a new dry-run before reading the list (default true)' },
+        offset: { type: 'number', description: 'Pagination offset (default 0)' },
+        limit: { type: 'number', description: 'Candidates returned (default 100, cap 200/config cap)' },
       },
     },
   },
@@ -174,7 +195,7 @@ const TOOLS = [
   },
   {
     name: 'cleanup_execute',
-    description: 'Execute a previously proposed batch. Takes NO paths — only the batch_id + one-time token from cleanup_propose, plus confirm:"USER CONFIRMED" (only pass this after the user explicitly approved the presented batch). Every item is re-verified against its snapshot; drifted items are skipped. Files are MOVED to a recoverable quarantine (or macOS Trash) — never unlinked. Undo with cleanup_restore.',
+    description: 'Execute a previously proposed batch. Takes NO paths — only the batch_id + one-time token from cleanup_propose, plus confirm:"USER CONFIRMED" (only pass this after the user explicitly approved the presented batch). Every item is re-verified against its snapshot; drifted items are skipped. Same-volume files are atomically moved to recoverable quarantine; cross-volume candidates are skipped. Undo quarantined items with cleanup_restore.',
     annotations: DESTRUCTIVE,
     inputSchema: {
       type: 'object',
@@ -201,7 +222,7 @@ const TOOLS = [
   },
   {
     name: 'cleanup_status',
-    description: 'Read-only view of the cleanup pipeline: pending proposals (with expiry), executed batches (restorable or not), quarantine footprint, batches past retention (purge-due), external tool availability, and optionally the audit tail.',
+    description: 'Read-only view of the cleanup pipeline: pending proposals (with expiry), in-flight executions, executed batches (restorable or not), quarantine footprint, batches past retention (purge-due), external tool availability, and optionally the audit tail.',
     annotations: READ_ONLY,
     inputSchema: {
       type: 'object',
@@ -358,14 +379,39 @@ function readJsonSafe(fsx, p) {
   try { return JSON.parse(fsx.readFileSync(p, 'utf8')); } catch { return null; }
 }
 
-/** tmp + rename so a crashed write can never leave a torn cache file. */
-function writeJsonAtomic(fsx, p, data) {
+function ensurePrivateDir(fsx, dir) {
+  fsx.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (typeof fsx.chmodSync === 'function') fsx.chmodSync(dir, 0o700);
+}
+
+/** Unique tmp + fsync + rename. Manifest callers use strict mode. */
+function writeJsonAtomic(fsx, p, data, { strict = false } = {}) {
+  let tmp = null;
   try {
-    fsx.mkdirSync(path.dirname(p), { recursive: true });
-    const tmp = `${p}.tmp`;
-    fsx.writeFileSync(tmp, JSON.stringify(data));
+    ensurePrivateDir(fsx, path.dirname(p));
+    tmp = `${p}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
+    const payload = JSON.stringify(data);
+    if (typeof fsx.openSync === 'function') {
+      const fd = fsx.openSync(tmp, 'wx', 0o600);
+      try {
+        fsx.writeFileSync(fd, payload);
+        if (typeof fsx.fsyncSync === 'function') fsx.fsyncSync(fd);
+      } finally {
+        fsx.closeSync(fd);
+      }
+    } else {
+      fsx.writeFileSync(tmp, payload, { flag: 'wx', mode: 0o600 });
+    }
     fsx.renameSync(tmp, p);
-  } catch { /* cache write is best-effort */ }
+    if (typeof fsx.chmodSync === 'function') fsx.chmodSync(p, 0o600);
+    return true;
+  } catch (err) {
+    if (tmp) {
+      try { fsx.unlinkSync(tmp); } catch { /* best effort */ }
+    }
+    if (strict) throw err;
+    return false;
+  }
 }
 
 /** `du -sk` over dirs, concurrency 4, hard wall-clock budget; late dirs stay unsized. */
@@ -429,7 +475,7 @@ function isAssessablePath(deps, cfg, p) {
 
 function auditEvent(deps, record) {
   const file = manifestCore.manifestPaths(deps.fileMapDir).audit;
-  try { deps.fsx.mkdirSync(deps.fileMapDir, { recursive: true }); } catch { /* appendAudit degrades */ }
+  try { ensurePrivateDir(deps.fsx, deps.fileMapDir); } catch { /* appendAudit degrades */ }
   auditCore.appendAudit({ fsx: deps.fsx }, file, { ts: new Date(deps.now()).toISOString(), ...record });
 }
 
@@ -442,7 +488,7 @@ function readManifest(deps, kind, batchId) {
 }
 
 function writeManifest(deps, kind, manifest) {
-  writeJsonAtomic(deps.fsx, manifestFile(deps, kind, manifest.batch_id), manifest);
+  writeJsonAtomic(deps.fsx, manifestFile(deps, kind, manifest.batch_id), manifest, { strict: true });
 }
 
 function listManifests(deps, kind) {
@@ -464,26 +510,80 @@ function gcExpiredProposals(deps) {
   }
 }
 
-/** rename, falling back to copy → verify → remove for cross-device moves. Never a blind delete. */
-function moveWithFallback(fsx, from, to, isDirectory) {
-  fsx.mkdirSync(path.dirname(to), { recursive: true });
+function leaseFile(deps, batchId) {
+  return path.join(manifestCore.manifestPaths(deps.fileMapDir).inflight, `${batchId}.lease`);
+}
+
+function acquireExecutionLease(deps, batchId) {
+  const file = leaseFile(deps, batchId);
+  ensurePrivateDir(deps.fsx, path.dirname(file));
+  const existed = existsL(deps.fsx, file);
+  const old = readJsonSafe(deps.fsx, file);
+  const isPidAlive = deps.isPidAlive || (() => false);
+  if (old && !executionCore.canReclaimLease(old, {
+    nowMs: deps.now(), leaseMs: EXECUTION_LEASE_MS, isPidAlive,
+  })) {
+    return { ok: false, error: 'execution-in-progress' };
+  }
+  if (existed && !old) {
+    let stale = false;
+    try { stale = deps.now() - deps.fsx.statSync(file).mtimeMs > EXECUTION_LEASE_MS; } catch { /* raced */ }
+    if (!stale) return { ok: false, error: 'execution-in-progress' };
+  }
+  if (existed) {
+    try { deps.fsx.unlinkSync(file); } catch { return { ok: false, error: 'execution-in-progress' }; }
+  }
+  const lease = { pid: deps.pid || process.pid, started_ms: deps.now() };
+  try {
+    deps.fsx.writeFileSync(file, JSON.stringify(lease), { flag: 'wx', mode: 0o600 });
+    if (typeof deps.fsx.chmodSync === 'function') deps.fsx.chmodSync(file, 0o600);
+    return { ok: true, file };
+  } catch (err) {
+    if (err.code === 'EEXIST') return { ok: false, error: 'execution-in-progress' };
+    throw err;
+  }
+}
+
+function releaseExecutionLease(deps, batchId) {
+  try { deps.fsx.unlinkSync(leaseFile(deps, batchId)); } catch { /* process crash leaves the lease for recovery */ }
+}
+
+function renameSameVolume(fsx, from, to, { privateParent = false } = {}) {
+  const parent = path.dirname(to);
+  if (privateParent) ensurePrivateDir(fsx, parent);
+  else fsx.mkdirSync(parent, { recursive: true });
+  const sourceDev = fsx.lstatSync(from).dev;
+  const targetDev = fsx.statSync(parent).dev;
+  if (sourceDev != null && targetDev != null && sourceDev !== targetDev) {
+    const err = new Error('cross-device-quarantine-disabled');
+    err.code = 'EXDEV';
+    throw err;
+  }
   try {
     fsx.renameSync(from, to);
-    return;
   } catch (err) {
-    if (err.code !== 'EXDEV') throw err;
+    if (err.code === 'EXDEV') throw Object.assign(new Error('cross-device-quarantine-disabled'), { code: 'EXDEV' });
+    throw err;
   }
-  if (isDirectory) {
-    fsx.cpSync(from, to, { recursive: true, errorOnExist: true });
-    fsx.rmSync(from, { recursive: true });
-  } else {
-    fsx.copyFileSync(from, to);
-    if (fsx.statSync(to).size !== fsx.statSync(from).size) {
-      fsx.rmSync(to, { force: true });
-      throw new Error('copy verification failed — source left untouched');
-    }
-    fsx.unlinkSync(from);
+}
+
+function validateRestoreTarget(deps, cfg, target) {
+  const syntax = protect.validatePathSyntax(target);
+  if (!syntax.ok) return syntax;
+  if (protect.findProtectedMatch(target, cfg.protectedPatterns)) return { ok: false, rule: 'protected-target' };
+  let ancestor = path.dirname(target);
+  while (!existsL(deps.fsx, ancestor)) {
+    const next = path.dirname(ancestor);
+    if (next === ancestor) return { ok: false, rule: 'missing-root-ancestor' };
+    ancestor = next;
   }
+  let real;
+  try { real = deps.fsx.realpathSync(ancestor); } catch { return { ok: false, rule: 'unresolvable-ancestor' }; }
+  if (real !== ancestor) return { ok: false, rule: 'symlink-ancestor' };
+  const within = cfg.roots.some(root => real === root || protect.isWithinRoots(real, [root]));
+  if (!within) return { ok: false, rule: 'outside-roots' };
+  if (protect.findProtectedMatch(real, cfg.protectedPatterns)) return { ok: false, rule: 'protected-ancestor' };
+  return { ok: true };
 }
 
 async function trashViaFinder(deps, p) {
@@ -496,10 +596,31 @@ async function trashViaFinder(deps, p) {
 async function executeManifest(deps, cfg, manifest) {
   const io = { lstatSync: p => deps.fsx.lstatSync(p), realpathSync: p => deps.fsx.realpathSync(p), now: deps.now };
   const qroot = manifestCore.manifestPaths(deps.fileMapDir).quarantine;
-  let moved = 0;
-  let bytesFreed = 0;
-  const skipped = [];
   for (const item of manifest.items) {
+    if (item.result === 'moved' || item.result === 'trashed' || String(item.result || '').startsWith('skipped:')) continue;
+    const dest = manifest.method === 'quarantine'
+      ? quarantineCore.quarantinePathFor(qroot, manifest.batch_id, item.path)
+      : null;
+    if (item.result === 'moving') {
+      const recovery = executionCore.reconcileMoving({
+        sourceExists: existsL(deps.fsx, item.path),
+        destinationExists: dest ? existsL(deps.fsx, dest) : false,
+        method: manifest.method,
+      });
+      if (recovery.action === 'complete') {
+        item.result = recovery.result;
+        if (recovery.result === 'moved') item.quarantine_path = dest;
+        writeManifest(deps, 'inflight', manifest);
+        auditEvent(deps, { event: 'execute', batch_id: manifest.batch_id, path: item.path, outcome: `recovered:${recovery.result}` });
+        continue;
+      }
+      if (recovery.action === 'conflict') {
+        item.result = `skipped:recovery-${recovery.reason}`;
+        writeManifest(deps, 'inflight', manifest);
+        auditEvent(deps, { event: 'skip', batch_id: manifest.batch_id, path: item.path, outcome: recovery.reason });
+        continue;
+      }
+    }
     const recheck = protect.checkPath(item.path, cfg, io);
     let reason = null;
     if (!recheck.ok) reason = recheck.rule;
@@ -509,38 +630,40 @@ async function executeManifest(deps, cfg, manifest) {
     }
     if (reason) {
       item.result = `skipped:${reason}`;
-      skipped.push({ path: item.path, reason });
+      writeManifest(deps, 'inflight', manifest);
       auditEvent(deps, { event: 'skip', batch_id: manifest.batch_id, path: item.path, outcome: reason });
       continue;
     }
     try {
+      item.result = 'moving';
+      if (dest) item.quarantine_path = dest;
+      writeManifest(deps, 'inflight', manifest);
       if (manifest.method === 'trash') {
         await trashViaFinder(deps, item.path);
         item.result = 'trashed';
       } else {
-        const dest = quarantineCore.quarantinePathFor(qroot, manifest.batch_id, item.path);
-        moveWithFallback(deps.fsx, item.path, dest, item.is_directory);
-        item.quarantine_path = dest;
+        renameSameVolume(deps.fsx, item.path, dest, { privateParent: true });
         item.result = 'moved';
       }
-      moved++;
-      bytesFreed += item.size || 0;
+      writeManifest(deps, 'inflight', manifest);
       auditEvent(deps, {
         event: 'execute', batch_id: manifest.batch_id, path: item.path, outcome: item.result,
         bytes: item.size, method: manifest.method, dest: item.quarantine_path || 'trash',
       });
     } catch (err) {
-      item.result = 'skipped:error';
-      skipped.push({ path: item.path, reason: err.message });
+      item.result = `skipped:${err.code === 'EXDEV' ? 'cross-device-quarantine-disabled' : err.message}`;
+      writeManifest(deps, 'inflight', manifest);
       auditEvent(deps, { event: 'execute', batch_id: manifest.batch_id, path: item.path, outcome: 'error', error: err.message });
     }
   }
-  return { moved, skipped, bytesFreed };
+  return executionCore.summarizeExecution(manifest.items);
 }
 
 async function probeTools(deps) {
   const out = {};
-  for (const [name, hint] of [['fclones', 'brew install fclones'], ['gdu', 'brew install gdu']]) {
+  for (const [name, hint] of [
+    ['fclones', 'brew install fclones'], ['gdu', 'brew install gdu'], ['mo', 'brew install mole'],
+  ]) {
     const { error } = await deps.runCapture(name, ['--version'], { timeoutMs: 3000 });
     out[name] = error ? { available: false, install: hint } : { available: true };
   }
@@ -553,6 +676,119 @@ async function probeMaintenanceTools(deps) {
     return [spec.name, { available: !error }];
   }));
   return Object.fromEntries(pairs);
+}
+
+async function probeMole(deps) {
+  const { stdout, error } = await deps.runCapture('mo', ['--version'], { timeoutMs: 5000 });
+  if (error) return { available: false, error, install: 'brew install mole' };
+  return { available: true, version: String(stdout || '').trim() || 'unknown' };
+}
+
+function validateMoleRoot(deps, cfg, requested) {
+  const root = expandHome(String(requested || '~'), deps.home);
+  const syntax = protect.validatePathSyntax(root);
+  if (!syntax.ok) return { ok: false, error: syntax.rule };
+  let st;
+  try { st = deps.fsx.lstatSync(root); } catch { return { ok: false, error: 'missing-root' }; }
+  if (st.isSymbolicLink() || !st.isDirectory()) return { ok: false, error: 'root-must-be-real-directory' };
+  let real;
+  try { real = deps.fsx.realpathSync(root); } catch { return { ok: false, error: 'unresolvable-root' }; }
+  if (real !== root) return { ok: false, error: 'symlink-ancestor' };
+  const inside = cfg.roots.some(base => root === base || protect.isWithinRoots(root, [base]));
+  return inside ? { ok: true, root } : { ok: false, error: 'outside-roots' };
+}
+
+async function collectMoleAnalysis(args, deps, cfg) {
+  if (!cfg.mole.enabled) return { available: false, disabled: true };
+  const rootCheck = validateMoleRoot(deps, cfg, args.mole_root);
+  if (!rootCheck.ok) return { available: false, error: rootCheck.error };
+  const probe = await probeMole(deps);
+  if (!probe.available) return probe;
+  const { stdout, error } = await deps.runCapture(
+    'mo', ['analyze', '--json', rootCheck.root], { timeoutMs: cfg.mole.analyzeTimeoutMs }
+  );
+  if (error && !stdout) return { available: true, version: probe.version, error };
+  const parsed = moleCore.parseAnalyzeJson(stdout, { limit: 100 });
+  return parsed.ok
+    ? { available: true, version: probe.version, ...parsed }
+    : { available: true, version: probe.version, error: parsed.error };
+}
+
+function normalizeMoleCandidates(paths, deps, cfg) {
+  const io = { lstatSync: p => deps.fsx.lstatSync(p), realpathSync: p => deps.fsx.realpathSync(p), now: deps.now };
+  const seenIdentity = new Set();
+  const candidates = [];
+  for (const candidatePath of paths) {
+    let st = null;
+    try { st = deps.fsx.lstatSync(candidatePath); } catch { /* retained as missing advice */ }
+    if (st && st.dev != null && st.ino != null) {
+      const identity = `${st.dev}:${st.ino}`;
+      if (seenIdentity.has(identity)) continue;
+      seenIdentity.add(identity);
+    }
+    const checked = protect.checkPath(candidatePath, cfg, io);
+    const isDirectory = !!(st && st.isDirectory());
+    const protectionRule = checked.ok
+      ? (isDirectory ? 'directory-not-supported' : null)
+      : checked.rule;
+    candidates.push({
+      path: candidatePath,
+      size: st ? st.size : null,
+      is_directory: isDirectory,
+      protection_rule: protectionRule || undefined,
+      pipeline_eligible: checked.ok && !isDirectory,
+    });
+  }
+  return candidates;
+}
+
+async function collectMolePreview(args, deps, loaded) {
+  const cfg = loaded.config;
+  if (!cfg.mole.enabled) return { ok: false, error: 'Mole adapter disabled by configuration' };
+  const probe = await probeMole(deps);
+  if (!probe.available) return { ok: false, error: 'Mole is not installed', install_hint: probe.install };
+  const listFile = path.join(deps.home, '.config', 'mole', 'clean-list.txt');
+  const refresh = args.refresh !== false;
+  const started = deps.now();
+  if (refresh) {
+    const { error } = await deps.runCapture('mo', ['clean', '--dry-run'], { timeoutMs: cfg.mole.previewTimeoutMs });
+    if (error) return { ok: false, error: `Mole dry-run failed: ${error}` };
+  }
+  let stat;
+  let text;
+  try {
+    stat = deps.fsx.statSync(listFile);
+    text = deps.fsx.readFileSync(listFile, 'utf8');
+  } catch {
+    return { ok: false, error: 'Mole clean-list is unavailable' };
+  }
+  if (refresh && stat.mtimeMs < started) return { ok: false, error: 'Mole clean-list was not refreshed' };
+  if (!refresh && !moleCore.isPreviewFresh(stat.mtimeMs, deps.now(), cfg.mole.previewTtlMs)) {
+    return { ok: false, error: 'Mole clean-list is stale — call with refresh:true' };
+  }
+  const parsedPaths = moleCore.parseCleanList(text, { limit: cfg.mole.maxReturnedCandidates + 1 });
+  const sourceTruncated = parsedPaths.length > cfg.mole.maxReturnedCandidates;
+  const candidates = normalizeMoleCandidates(parsedPaths.slice(0, cfg.mole.maxReturnedCandidates), deps, cfg);
+  const offset = Math.max(0, Math.floor(Number(args.offset) || 0));
+  const limit = clamp(args.limit, 100, 1, Math.min(200, cfg.mole.maxReturnedCandidates));
+  return {
+    ok: true,
+    available: true,
+    version: probe.version,
+    source: 'mo clean --dry-run',
+    generated_at: new Date(stat.mtimeMs).toISOString(),
+    preview_path: listFile,
+    total_candidates: candidates.length,
+    candidate_cap: cfg.mole.maxReturnedCandidates,
+    source_truncated: sourceTruncated || undefined,
+    total_bytes: candidates.reduce((sum, item) => sum + (item.size || 0), 0),
+    returned: candidates.slice(offset, offset + limit).length,
+    truncated: offset + limit < candidates.length || undefined,
+    candidates: candidates.slice(offset, offset + limit),
+    executable: false,
+    note: 'Preview only. Review candidates explicitly; this tool never runs a real Mole cleanup or cleanup_propose.',
+    ...(loaded.ok ? {} : { config_warning: loaded.error }),
+  };
 }
 
 async function collectStorageAssessment(args, deps, loaded) {
@@ -638,6 +874,10 @@ function defaultDeps() {
     home: HOME,
     fileMapDir: FILE_MAP_DIR,
     now: () => Date.now(),
+    pid: process.pid,
+    isPidAlive: (pid) => {
+      try { process.kill(pid, 0); return true; } catch { return false; }
+    },
   };
 }
 
@@ -857,7 +1097,16 @@ const handlers = {
   },
 
   async storage_assess(args, deps) {
-    return collectStorageAssessment(args, deps, deps.loadConfig());
+    const loaded = deps.loadConfig();
+    const assessment = await collectStorageAssessment(args, deps, loaded);
+    if (args.include_mole_analysis) {
+      assessment.mole_analysis = await collectMoleAnalysis(args, deps, loaded.config);
+    }
+    return assessment;
+  },
+
+  async mole_cleanup_preview(args, deps) {
+    return collectMolePreview(args, deps, deps.loadConfig());
   },
 
   async cleanup_propose(args, deps) {
@@ -869,14 +1118,19 @@ const handlers = {
     if (!paths.length) return { ok: false, error: 'paths: non-empty array of absolute paths required' };
     if (reason.length < 5) return { ok: false, error: 'reason: a meaningful justification is required — it is shown to the user and audited' };
     const io = { lstatSync: p => deps.fsx.lstatSync(p), realpathSync: p => deps.fsx.realpathSync(p), now: deps.now };
-    const { accepted, rejected } = protect.validateCandidates(paths, cfg, io);
+    const validated = protect.validateCandidates(paths, cfg, io);
+    const rejectedDirectories = validated.accepted
+      .filter(item => item.isDirectory)
+      .map(item => ({ path: item.displayPath || item.path, rule: 'directory-not-supported' }));
+    const accepted = validated.accepted.filter(item => !item.isDirectory);
+    const rejected = [...validated.rejected, ...rejectedDirectories];
     if (!accepted.length) {
       auditEvent(deps, { event: 'reject', outcome: 'all-rejected', reason, rejected: rejected.length });
       return { ok: false, error: 'no candidate survived the protection checks', rejected };
     }
     const limits = manifestCore.checkBatchLimits(accepted, cfg.cleanup);
     if (!limits.ok) return { ok: false, error: limits.error };
-    const manifest = manifestCore.createManifest({
+    const created = manifestCore.createManifest({
       items: accepted,
       reason,
       source: args.source,
@@ -885,6 +1139,7 @@ const handlers = {
       ttlMinutes: cfg.cleanup.proposalTtlMinutes,
       randomHex: deps.randomHex,
     });
+    const { manifest, token } = created;
     writeManifest(deps, 'proposals', manifest);
     gcExpiredProposals(deps);
     auditEvent(deps, {
@@ -894,7 +1149,8 @@ const handlers = {
     return {
       ok: true,
       batch_id: manifest.batch_id,
-      token: manifest.token,
+      token,
+      proposal_version: manifest.version,
       method: manifest.method,
       accepted: manifest.totals.count,
       total_bytes: manifest.totals.bytes,
@@ -911,37 +1167,68 @@ const handlers = {
     }
     const loaded = deps.loadConfig();
     if (!loaded.ok) return { ok: false, error: `config invalid — destructive pipeline disabled: ${loaded.error}` };
-    const manifest = readManifest(deps, 'proposals', args.batch_id);
-    if (!manifest || manifest.status !== 'proposed') {
+    const proposed = readManifest(deps, 'proposals', args.batch_id);
+    const inflight = proposed ? null : readManifest(deps, 'inflight', args.batch_id);
+    const manifest = proposed || inflight;
+    const sourceKind = proposed ? 'proposals' : 'inflight';
+    if (!manifest) {
       return { ok: false, error: 'unknown, already executed, or expired batch — run cleanup_propose again' };
+    }
+    if (manifest.version !== 2) {
+      return { ok: false, error: 'legacy proposal cannot be executed — run cleanup_propose again' };
     }
     if (!manifestCore.verifyToken(manifest, args.token)) {
       auditEvent(deps, { event: 'execute', batch_id: args.batch_id, outcome: 'token-mismatch' });
       return { ok: false, error: 'token mismatch — use the one-time token returned by cleanup_propose' };
     }
-    if (manifestCore.isExpired(manifest, deps.now())) {
+    if (sourceKind === 'proposals' && manifestCore.isExpired(manifest, deps.now())) {
       return { ok: false, error: `proposal expired at ${manifest.expires_at} — re-propose to get a fresh snapshot` };
     }
-    const summary = await executeManifest(deps, loaded.config, manifest);
-    manifest.status = 'executed';
-    manifest.executed_at = new Date(deps.now()).toISOString();
-    writeManifest(deps, 'executed', manifest);
-    try { deps.fsx.unlinkSync(manifestFile(deps, 'proposals', manifest.batch_id)); } catch { /* executed copy is authoritative */ }
-    return {
-      ok: true,
-      batch_id: manifest.batch_id,
-      method: manifest.method,
-      moved: summary.moved,
-      skipped: summary.skipped,
-      bytes_freed: summary.bytesFreed,
-      restore_hint: manifest.method === 'trash'
-        ? 'items went to the macOS Trash — restore from the Trash in Finder'
-        : `cleanup_restore { batch_id: "${manifest.batch_id}" } undoes this batch`,
-    };
+    const lease = acquireExecutionLease(deps, manifest.batch_id);
+    if (!lease.ok) return { ok: false, error: lease.error };
+    try {
+      if (sourceKind === 'proposals') {
+        ensurePrivateDir(deps.fsx, manifestCore.manifestPaths(deps.fileMapDir).inflight);
+        try {
+          deps.fsx.renameSync(
+            manifestFile(deps, 'proposals', manifest.batch_id),
+            manifestFile(deps, 'inflight', manifest.batch_id)
+          );
+        } catch {
+          return { ok: false, error: 'proposal claim lost to another execution' };
+        }
+        manifest.status = 'inflight';
+        writeManifest(deps, 'inflight', manifest);
+      }
+      const summary = await executeManifest(deps, loaded.config, manifest);
+      manifest.status = 'executed';
+      manifest.executed_at = new Date(deps.now()).toISOString();
+      writeManifest(deps, 'inflight', manifest);
+      ensurePrivateDir(deps.fsx, manifestCore.manifestPaths(deps.fileMapDir).executed);
+      deps.fsx.renameSync(
+        manifestFile(deps, 'inflight', manifest.batch_id),
+        manifestFile(deps, 'executed', manifest.batch_id)
+      );
+      return {
+        ok: true,
+        batch_id: manifest.batch_id,
+        method: manifest.method,
+        moved: summary.moved,
+        skipped: summary.skipped,
+        bytes_freed: summary.bytesFreed,
+        restore_hint: manifest.method === 'trash'
+          ? 'items went to the macOS Trash — restore from the Trash in Finder'
+          : `cleanup_restore { batch_id: "${manifest.batch_id}" } undoes this batch`,
+      };
+    } finally {
+      releaseExecutionLease(deps, manifest.batch_id);
+    }
   },
 
   async cleanup_restore(args, deps) {
     if (!manifestCore.isValidBatchId(args.batch_id)) return { ok: false, error: 'invalid batch_id' };
+    const loaded = deps.loadConfig();
+    if (!loaded.ok) return { ok: false, error: `config invalid — restore disabled: ${loaded.error}` };
     const manifest = readManifest(deps, 'executed', args.batch_id);
     if (!manifest) return { ok: false, error: 'unknown executed batch' };
     const plan = quarantineCore.planRestore(manifest, { paths: args.paths });
@@ -970,8 +1257,14 @@ const handlers = {
         target = `${mv.to}.restored-${deps.now()}`;
         renamed.push({ path: mv.path, restored_to: target });
       }
+      const targetCheck = validateRestoreTarget(deps, loaded.config, target);
+      if (!targetCheck.ok) {
+        errors.push({ path: mv.path, error: targetCheck.rule });
+        auditEvent(deps, { event: 'restore', batch_id: manifest.batch_id, path: mv.path, outcome: 'error', error: targetCheck.rule });
+        continue;
+      }
       try {
-        moveWithFallback(deps.fsx, mv.from, target, item.is_directory);
+        renameSameVolume(deps.fsx, mv.from, target);
         item.result = 'restored';
         restored.push(target);
         auditEvent(deps, { event: 'restore', batch_id: manifest.batch_id, path: mv.path, outcome: 'ok', dest: target });
@@ -990,9 +1283,11 @@ const handlers = {
     const cfg = loaded.config;
     if (args.batch_id) {
       if (!manifestCore.isValidBatchId(args.batch_id)) return { ok: false, error: 'invalid batch_id' };
-      const m = readManifest(deps, 'proposals', args.batch_id) || readManifest(deps, 'executed', args.batch_id);
+      const m = readManifest(deps, 'proposals', args.batch_id)
+        || readManifest(deps, 'inflight', args.batch_id)
+        || readManifest(deps, 'executed', args.batch_id);
       if (!m) return { ok: false, error: 'unknown batch' };
-      const detail = { ok: true, manifest: m };
+      const detail = { ok: true, manifest: manifestCore.redactManifest(m) };
       if (m.status === 'proposed') detail.expired = manifestCore.isExpired(m, deps.now());
       return detail;
     }
@@ -1006,6 +1301,7 @@ const handlers = {
       proposals: listManifests(deps, 'proposals').map(m => ({
         ...brief(m), expires_at: m.expires_at, expired: manifestCore.isExpired(m, deps.now()),
       })),
+      inflight: listManifests(deps, 'inflight').map(brief),
       executed: executedRaw.map(m => ({
         ...brief(m), executed_at: m.executed_at,
         restorable: m.items.some(it => it.result === 'moved'),
@@ -1099,6 +1395,25 @@ async function handleMessage(msg) {
   return null;
 }
 
+function hardenStatePermissions({ fsx, fileMapDir, configPath }) {
+  const paths = manifestCore.manifestPaths(fileMapDir);
+  ensurePrivateDir(fsx, fileMapDir);
+  for (const dir of [paths.proposals, paths.inflight, paths.executed, paths.quarantine]) {
+    ensurePrivateDir(fsx, dir);
+  }
+  for (const dir of [paths.proposals, paths.inflight, paths.executed]) {
+    let names = [];
+    try { names = fsx.readdirSync(dir); } catch { continue; }
+    for (const name of names) {
+      if (!name.endsWith('.json') && !name.endsWith('.lease')) continue;
+      try { fsx.chmodSync(path.join(dir, name), 0o600); } catch { /* best effort */ }
+    }
+  }
+  for (const file of [paths.audit, path.join(fileMapDir, 'overview.json'), configPath]) {
+    try { fsx.chmodSync(file, 0o600); } catch { /* optional or not created yet */ }
+  }
+}
+
 /** First run: materialize the user config from the deployed template. */
 function ensureUserConfig() {
   try {
@@ -1106,6 +1421,7 @@ function ensureUserConfig() {
       fs.mkdirSync(METAME_DIR, { recursive: true });
       fs.copyFileSync(DEFAULT_CONFIG_PATH, CONFIG_PATH);
     }
+    hardenStatePermissions({ fsx: fs, fileMapDir: FILE_MAP_DIR, configPath: CONFIG_PATH });
   } catch { /* best-effort — the loader falls back to the template */ }
 }
 
@@ -1141,8 +1457,9 @@ module.exports = {
   callTool,
   handleMessage,
   _private: {
-    defaultDeps, runLines, runCapture, ensureUserConfig, clamp, statSafe,
+    defaultDeps, runLines, runCapture, ensureUserConfig, hardenStatePermissions, clamp, statSafe,
     runDuBatch, buildOverview, readJsonSafe, writeJsonAtomic,
-    moveWithFallback, executeManifest, gcExpiredProposals, listManifests,
+    ensurePrivateDir, acquireExecutionLease, releaseExecutionLease, renameSameVolume,
+    validateRestoreTarget, executeManifest, gcExpiredProposals, listManifests,
   },
 };

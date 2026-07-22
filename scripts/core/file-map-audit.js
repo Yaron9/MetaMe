@@ -11,7 +11,8 @@ const MAX_BYTES = 10 * 1024 * 1024;
 function appendAudit({ fsx }, file, record) {
   try {
     rotateIfNeeded({ fsx }, file, MAX_BYTES);
-    fsx.appendFileSync(file, JSON.stringify(record) + '\n');
+    fsx.appendFileSync(file, JSON.stringify(record) + '\n', { mode: 0o600 });
+    if (typeof fsx.chmodSync === 'function') fsx.chmodSync(file, 0o600);
     return true;
   } catch {
     return false; // audit must never block the operation it describes

@@ -19,6 +19,8 @@ describe('file-map-config normalize', () => {
     assert.equal(cfg.overview.depth, 3);
     assert.equal(cfg.storage.minReportMb, 500);
     assert.equal(cfg.storage.duBudgetSeconds, 45);
+    assert.equal(cfg.mole.enabled, true);
+    assert.equal(cfg.mole.analyzeTimeoutMs, 120000);
   });
 
   it('user values override defaults, out-of-range numbers clamp', () => {
@@ -28,6 +30,7 @@ describe('file-map-config normalize', () => {
       cleanup: { method: 'trash', proposal_ttl_minutes: 1, max_batch_gb: 5000 },
       overview: { depth: 99 },
       storage: { min_report_mb: -10, du_budget_seconds: 9999, target_max_categories: 0 },
+      mole: { enabled: false, preview_timeout_seconds: 9999, max_returned_candidates: 0 },
     }, HOME);
     assert.deepEqual(cfg.roots, [`${HOME}/Work`]);
     assert.equal(cfg.protectRecentDays, 365, 'clamped to max');
@@ -38,6 +41,9 @@ describe('file-map-config normalize', () => {
     assert.equal(cfg.storage.minReportMb, 0, 'report threshold permits explicit zero');
     assert.equal(cfg.storage.duBudgetSeconds, 120, 'storage scan budget matches the runtime cap');
     assert.equal(cfg.storage.targetMaxCategories, 1, 'target plan keeps at least one category');
+    assert.equal(cfg.mole.enabled, false);
+    assert.equal(cfg.mole.previewTimeoutMs, 900000);
+    assert.equal(cfg.mole.maxReturnedCandidates, 1);
     // untouched sections keep defaults
     assert.equal(cfg.cleanup.quarantineDays, 30);
     assert.equal(cfg.protectedPatterns.length, DEFAULT_CONFIG.protected.length);

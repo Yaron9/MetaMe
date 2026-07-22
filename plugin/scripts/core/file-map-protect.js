@@ -1,5 +1,7 @@
 'use strict';
 
+const path = require('path');
+
 /**
  * file-map-protect.js — the hard safety net in front of every destructive
  * candidate. Pure logic: all fs access is injected.
@@ -55,18 +57,30 @@ function isWithinRoots(p, roots) {
   });
 }
 
+/** Reject ambiguous spellings before any filesystem resolution occurs. */
+function validatePathSyntax(p) {
+  if (typeof p !== 'string' || !path.isAbsolute(p)) return { ok: false, rule: 'not-absolute' };
+  if (p.includes('\0')) return { ok: false, rule: 'nul-byte' };
+  const parts = p.split('/');
+  if (parts.includes('.') || parts.includes('..')) return { ok: false, rule: 'dot-component' };
+  if (path.normalize(p) !== p) return { ok: false, rule: 'not-normalized' };
+  return { ok: true };
+}
+
 /**
  * Validate one candidate path against the config.
  * io: { lstatSync, realpathSync, now } — now() in epoch ms.
  * Returns { ok:true, stat:{size,mtimeMs,inode,isDirectory} } or { ok:false, rule }.
  */
 function checkPath(p, cfg, io) {
-  if (typeof p !== 'string' || !p.startsWith('/')) return { ok: false, rule: 'not-absolute' };
+  const syntax = validatePathSyntax(p);
+  if (!syntax.ok) return syntax;
   let st;
   try { st = io.lstatSync(p); } catch { return { ok: false, rule: 'missing' }; }
   if (st.isSymbolicLink()) return { ok: false, rule: 'symlink' };
   let real;
   try { real = io.realpathSync(p); } catch { return { ok: false, rule: 'unresolvable' }; }
+  if (real !== p) return { ok: false, rule: 'symlink-ancestor' };
   if (!isWithinRoots(p, cfg.roots) || !isWithinRoots(real, cfg.roots)) {
     return { ok: false, rule: 'outside-roots' };
   }
@@ -77,7 +91,14 @@ function checkPath(p, cfg, io) {
   }
   return {
     ok: true,
-    stat: { size: st.size, mtimeMs: st.mtimeMs, inode: st.ino, isDirectory: st.isDirectory() },
+    stat: {
+      size: st.size,
+      mtimeMs: st.mtimeMs,
+      inode: st.ino,
+      device: st.dev,
+      isDirectory: st.isDirectory(),
+      canonicalPath: real,
+    },
   };
 }
 
@@ -90,10 +111,19 @@ function validateCandidates(paths, cfg, io) {
     if (typeof p !== 'string' || seen.has(p)) continue;
     seen.add(p);
     const res = checkPath(p, cfg, io);
-    if (res.ok) accepted.push({ path: p, ...res.stat });
+    if (res.ok) accepted.push({ path: res.stat.canonicalPath, displayPath: p, ...res.stat });
     else rejected.push({ path: p, rule: res.rule });
   }
   return { accepted, rejected };
 }
 
-module.exports = { matchGlob, shouldExclude, findProtectedMatch, isWithinRoots, checkPath, validateCandidates, _internal: { globToRegExp } };
+module.exports = {
+  matchGlob,
+  shouldExclude,
+  findProtectedMatch,
+  isWithinRoots,
+  validatePathSyntax,
+  checkPath,
+  validateCandidates,
+  _internal: { globToRegExp },
+};

@@ -1,15 +1,24 @@
 'use strict';
 
+const crypto = require('crypto');
+const path = require('path');
+
 /**
  * file-map-quarantine.js — computes move/restore/purge PLANS; the server
- * executes them. Quarantine layout mirrors the absolute original path under
- * quarantine/<batch_id>/, so restore mapping is unambiguous:
+ * executes them. Quarantine uses an opaque digest plus a sanitized basename;
+ * the manifest is the authoritative restore mapping:
  *
- *   /Users/u/Downloads/x.dmg → <quarantine>/b-20260718-a1f2/Users/u/Downloads/x.dmg
+ *   /Users/u/Downloads/x.dmg → <quarantine>/<batch>/<sha256>--x.dmg
  */
 
 function quarantinePathFor(quarantineRoot, batchId, originalPath) {
-  return `${quarantineRoot}/${batchId}${originalPath}`;
+  const batchRoot = path.join(quarantineRoot, batchId);
+  const digest = crypto.createHash('sha256').update(String(originalPath)).digest('hex');
+  const basename = path.basename(originalPath).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120) || 'item';
+  const destination = path.join(batchRoot, `${digest}--${basename}`);
+  const prefix = batchRoot.endsWith(path.sep) ? batchRoot : batchRoot + path.sep;
+  if (!destination.startsWith(prefix)) throw new Error('quarantine path escaped batch root');
+  return destination;
 }
 
 function planQuarantineMoves(items, quarantineRoot, batchId) {

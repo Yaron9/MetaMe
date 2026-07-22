@@ -6,8 +6,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { callTool, handleMessage } = require('./metame-files-mcp-server');
+const { callTool, handleMessage, _private } = require('./metame-files-mcp-server');
 const { normalizeConfig } = require('./core/file-map-config');
+const { quarantinePathFor } = require('./core/file-map-quarantine');
 
 const HOME = '/home/u';
 const NOW = Date.parse('2026-07-18T00:00:00Z');
@@ -22,6 +23,8 @@ function tempDeps(overrides = {}) {
     home: HOME,
     fileMapDir: '/nonexistent/file-map',
     now: () => NOW,
+    pid: 4242,
+    isPidAlive: () => false,
     ...overrides,
   };
 }
@@ -48,11 +51,15 @@ describe('metame-files-mcp-server protocol', () => {
 
     const list = await handleMessage({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
     const byName = new Map(list.result.tools.map(t => [t.name, t]));
-    for (const name of ['file_search', 'file_overview', 'file_last_used', 'scan_large', 'scan_stale', 'storage_assess']) {
+    assert.equal(list.result.tools.length, 13);
+    for (const name of [
+      'file_search', 'file_overview', 'file_last_used', 'scan_large', 'scan_stale',
+      'storage_assess', 'mole_cleanup_preview',
+    ]) {
       assert.ok(byName.has(name), `${name} must be listed`);
     }
     const destructive = new Set(['cleanup_execute', 'cleanup_purge']);
-    const writesMetadata = new Set(['cleanup_propose', 'cleanup_restore']);
+    const writesMetadata = new Set(['cleanup_propose', 'cleanup_restore', 'mole_cleanup_preview']);
     for (const tool of list.result.tools) {
       assert.ok(tool.description.length > 20, `${tool.name} needs a real description`);
       assert.equal(tool.inputSchema.type, 'object');
@@ -323,6 +330,12 @@ describe('cleanup pipeline', () => {
     assert.equal(prop.rejected.length, 2);
     assert.ok(prop.rejected.some(r => r.path === w.secret && /protected/.test(r.rule)), 'ssh key must be protected');
     assert.match(prop.summary_for_user, /explicit consent/);
+    const proposalFile = path.join(w.work, 'file-map', 'proposals', `${prop.batch_id}.json`);
+    const storedProposal = JSON.parse(fs.readFileSync(proposalFile, 'utf8'));
+    assert.equal(storedProposal.token, undefined, 'raw capability token is never persisted');
+    assert.equal(typeof storedProposal.token_hash, 'string');
+    assert.equal(fs.statSync(proposalFile).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(path.dirname(proposalFile)).mode & 0o777, 0o700);
 
     // wrong confirm / wrong token / fake batch all refuse
     const noConfirm = await callTool('cleanup_execute', { batch_id: prop.batch_id, token: prop.token, confirm: 'yes' }, w.deps);
@@ -343,8 +356,11 @@ describe('cleanup pipeline', () => {
     assert.equal(exec.skipped.length, 1);
     assert.ok(!fs.existsSync(w.stale1), 'stale1 moved out');
     assert.ok(fs.existsSync(w.stale2), 'drifted file untouched');
-    const qPath = path.join(w.work, 'file-map', 'quarantine', prop.batch_id) + w.stale1;
-    assert.ok(fs.existsSync(qPath), 'quarantine mirrors the absolute original path');
+    const qDir = path.join(w.work, 'file-map', 'quarantine', prop.batch_id);
+    const [quarantinedName] = fs.readdirSync(qDir);
+    const qPath = path.join(qDir, quarantinedName);
+    assert.match(quarantinedName, /^[0-9a-f]{64}--old1\.dmg$/);
+    assert.ok(fs.existsSync(qPath), 'quarantine uses an opaque contained path');
     assert.ok(!fs.existsSync(path.join(w.work, 'file-map', 'proposals', `${prop.batch_id}.json`)), 'proposal consumed');
 
     // replay refused
@@ -353,6 +369,7 @@ describe('cleanup pipeline', () => {
 
     // status shows executed + restorable, audit trail recorded
     const status = await callTool('cleanup_status', { audit_tail: 50 }, w.deps);
+    assert.equal(JSON.stringify(status).includes('token_hash'), false, 'status must not disclose token hashes');
     assert.equal(status.executed.length, 1);
     assert.equal(status.executed[0].restorable, true);
     assert.ok(status.quarantine_bytes > 0);
@@ -385,6 +402,154 @@ describe('cleanup pipeline', () => {
     assert.equal(prop2.ok, true);
     assert.ok(!fs.existsSync(path.join(w.work, 'file-map', 'proposals', `${prop.batch_id}.json`)), 'expired proposal GC-ed');
     w.cleanup();
+  });
+
+  it('rejects directories and legacy proposals', async () => {
+    const w = pipelineWorld();
+    const dir = path.join(w.work, 'Downloads', 'old-dir');
+    fs.mkdirSync(dir);
+    const old = (Date.now() - 100 * 24 * 3600 * 1000) / 1000;
+    fs.utimesSync(dir, old, old);
+    const directoryProposal = await callTool('cleanup_propose', { paths: [dir], reason: 'directory test' }, w.deps);
+    assert.equal(directoryProposal.ok, false);
+    assert.ok(directoryProposal.rejected.some(item => item.rule === 'directory-not-supported'));
+
+    const legacyId = 'b-20260718-abab';
+    const proposals = path.join(w.work, 'file-map', 'proposals');
+    fs.mkdirSync(proposals, { recursive: true });
+    fs.writeFileSync(path.join(proposals, `${legacyId}.json`), JSON.stringify({
+      version: 1, batch_id: legacyId, token: 'abababab', status: 'proposed',
+      expires_at: new Date(Date.now() + 3600000).toISOString(), items: [], totals: { count: 0, bytes: 0 },
+    }));
+    const legacy = await callTool('cleanup_execute', {
+      batch_id: legacyId, token: 'abababab', confirm: 'USER CONFIRMED',
+    }, w.deps);
+    assert.equal(legacy.ok, false);
+    assert.match(legacy.error, /legacy proposal/);
+    w.cleanup();
+  });
+
+  it('atomically admits only one concurrent execution', async () => {
+    const w = pipelineWorld();
+    const prop = await callTool('cleanup_propose', { paths: [w.stale1], reason: 'concurrency test' }, w.deps);
+    const args = { batch_id: prop.batch_id, token: prop.token, confirm: 'USER CONFIRMED' };
+    const results = await Promise.all([
+      callTool('cleanup_execute', args, w.deps),
+      callTool('cleanup_execute', args, w.deps),
+    ]);
+    assert.equal(results.filter(result => result.ok).length, 1);
+    assert.equal(results.filter(result => !result.ok).length, 1);
+    assert.ok(!fs.existsSync(w.stale1));
+    w.cleanup();
+  });
+
+  it('blocks a fresh malformed lease but reclaims it after the timeout', () => {
+    const w = pipelineWorld();
+    const batchId = 'b-20260718-abab';
+    const inflight = path.join(w.work, 'file-map', 'inflight');
+    const leaseFile = path.join(inflight, `${batchId}.lease`);
+    fs.mkdirSync(inflight, { recursive: true });
+    fs.writeFileSync(leaseFile, '{torn');
+    const fresh = _private.acquireExecutionLease(w.deps, batchId);
+    assert.deepEqual(fresh, { ok: false, error: 'execution-in-progress' });
+    fs.utimesSync(leaseFile, (w.deps.now() - 6 * 60 * 1000) / 1000, (w.deps.now() - 6 * 60 * 1000) / 1000);
+    const reclaimed = _private.acquireExecutionLease(w.deps, batchId);
+    assert.equal(reclaimed.ok, true);
+    assert.equal(fs.statSync(leaseFile).mode & 0o777, 0o600);
+    _private.releaseExecutionLease(w.deps, batchId);
+    w.cleanup();
+  });
+
+  it('recovers a crash after rename but before manifest completion', async () => {
+    const w = pipelineWorld();
+    const prop = await callTool('cleanup_propose', { paths: [w.stale1], reason: 'crash recovery' }, w.deps);
+    const proposalFile = path.join(w.work, 'file-map', 'proposals', `${prop.batch_id}.json`);
+    const inflightDir = path.join(w.work, 'file-map', 'inflight');
+    const inflightFile = path.join(inflightDir, `${prop.batch_id}.json`);
+    fs.mkdirSync(inflightDir, { recursive: true });
+    const manifest = JSON.parse(fs.readFileSync(proposalFile, 'utf8'));
+    const dest = quarantinePathFor(path.join(w.work, 'file-map', 'quarantine'), prop.batch_id, w.stale1);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    manifest.status = 'inflight';
+    manifest.items[0].result = 'moving';
+    manifest.items[0].quarantine_path = dest;
+    fs.renameSync(w.stale1, dest);
+    fs.renameSync(proposalFile, inflightFile);
+    fs.writeFileSync(inflightFile, JSON.stringify(manifest));
+
+    const recovered = await callTool('cleanup_execute', {
+      batch_id: prop.batch_id, token: prop.token, confirm: 'USER CONFIRMED',
+    }, w.deps);
+    assert.equal(recovered.ok, true);
+    assert.equal(recovered.moved, 1);
+    assert.ok(fs.existsSync(dest));
+    assert.ok(!fs.existsSync(w.stale1));
+    w.cleanup();
+  });
+
+  it('fails closed on EXDEV and leaves the source untouched', async () => {
+    const w = pipelineWorld();
+    const realFs = w.deps.fsx;
+    w.deps.fsx = new Proxy(realFs, {
+      get(target, prop) {
+        if (prop === 'renameSync') {
+          return (from, to) => {
+            if (from === w.stale1 && String(to).includes('/quarantine/')) {
+              throw Object.assign(new Error('simulated EXDEV'), { code: 'EXDEV' });
+            }
+            return target.renameSync(from, to);
+          };
+        }
+        return target[prop];
+      },
+    });
+    const prop = await callTool('cleanup_propose', { paths: [w.stale1], reason: 'cross volume test' }, w.deps);
+    const out = await callTool('cleanup_execute', {
+      batch_id: prop.batch_id, token: prop.token, confirm: 'USER CONFIRMED',
+    }, w.deps);
+    assert.equal(out.ok, true);
+    assert.equal(out.moved, 0);
+    assert.equal(out.skipped[0].reason, 'cross-device-quarantine-disabled');
+    assert.ok(fs.existsSync(w.stale1));
+    w.cleanup();
+  });
+
+  it('keeps legacy executed quarantine manifests restorable', async () => {
+    const w = pipelineWorld();
+    const batchId = 'b-20260718-abab';
+    const quarantineDir = path.join(w.work, 'file-map', 'quarantine', batchId);
+    const executedDir = path.join(w.work, 'file-map', 'executed');
+    const quarantined = path.join(quarantineDir, 'legacy-old1.dmg');
+    fs.mkdirSync(quarantineDir, { recursive: true });
+    fs.mkdirSync(executedDir, { recursive: true });
+    fs.renameSync(w.stale1, quarantined);
+    fs.writeFileSync(path.join(executedDir, `${batchId}.json`), JSON.stringify({
+      version: 1,
+      batch_id: batchId,
+      status: 'executed',
+      method: 'quarantine',
+      executed_at: new Date(w.deps.now()).toISOString(),
+      items: [{ path: w.stale1, quarantine_path: quarantined, result: 'moved', size: 1 }],
+    }));
+    const restored = await callTool('cleanup_restore', { batch_id: batchId }, w.deps);
+    assert.equal(restored.ok, true);
+    assert.equal(restored.restored, 1);
+    assert.ok(fs.existsSync(w.stale1));
+    w.cleanup();
+  });
+
+  it('hardens existing state metadata without changing payload files', () => {
+    const work = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'metame-fmap-mode-')));
+    const fileMapDir = path.join(work, 'file-map');
+    const proposalDir = path.join(fileMapDir, 'proposals');
+    fs.mkdirSync(proposalDir, { recursive: true, mode: 0o755 });
+    const metadata = path.join(proposalDir, 'b-20260718-abab.json');
+    fs.writeFileSync(metadata, '{}', { mode: 0o644 });
+    _private.hardenStatePermissions({ fsx: fs, fileMapDir, configPath: path.join(work, 'file-map.yaml') });
+    assert.equal(fs.statSync(fileMapDir).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(proposalDir).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(metadata).mode & 0o777, 0o600);
+    fs.rmSync(work, { recursive: true, force: true });
   });
 
   it('purge moves due batches to Trash via Finder and needs explicit targeting', async () => {
@@ -531,5 +696,116 @@ describe('storage_assess', () => {
     assert.equal(out.process_check_available, false);
     assert.ok(out.warnings.some(w => /Running-app guard is unavailable/.test(w)));
     assert.ok(out.warnings.some(w => /snapshot status is unavailable/.test(w)));
+  });
+
+  it('optionally augments the native report with bounded Mole analyze JSON', async () => {
+    const commands = [];
+    const deps = tempDeps({
+      loadConfig: stubConfig,
+      fsx: {
+        lstatSync: p => {
+          if (p !== HOME) throw new Error('ENOENT');
+          return { isSymbolicLink: () => false, isDirectory: () => true };
+        },
+        realpathSync: p => p,
+      },
+      runCapture: async (cmd, args) => {
+        commands.push([cmd, args]);
+        if (cmd === 'mo' && args[0] === '--version') return { stdout: 'Mole 1.47.1\n', error: null };
+        if (cmd === 'mo' && args[0] === 'analyze') {
+          return {
+            stdout: JSON.stringify({
+              path: HOME, overview: true, total_size: 30, total_files: 2,
+              entries: [{ name: 'Downloads', path: `${HOME}/Downloads`, size: 30, is_dir: true }],
+              large_files: [],
+            }),
+            error: null,
+          };
+        }
+        if (cmd === 'df') return { stdout: 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk 10 5 5 50% /\n', error: null };
+        return { stdout: '', error: `spawn ${cmd} ENOENT` };
+      },
+    });
+    const out = await callTool('storage_assess', { include_mole_analysis: true }, deps);
+    assert.equal(out.ok, true);
+    assert.equal(out.mole_analysis.available, true);
+    assert.equal(out.mole_analysis.total_size, 30);
+    assert.deepEqual(commands.find(([cmd, args]) => cmd === 'mo' && args[0] === 'analyze')[1], ['analyze', '--json', HOME]);
+  });
+});
+
+describe('mole_cleanup_preview', () => {
+  function previewWorld() {
+    const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'metame-mole-preview-')));
+    const downloads = path.join(home, 'Downloads');
+    const ssh = path.join(home, '.ssh');
+    const oldDir = path.join(downloads, 'old-dir');
+    fs.mkdirSync(downloads, { recursive: true });
+    fs.mkdirSync(ssh, { recursive: true });
+    fs.mkdirSync(oldDir);
+    const oldFile = path.join(downloads, 'old.dmg');
+    const aliasFile = path.join(downloads, 'old-hardlink.dmg');
+    const secret = path.join(ssh, 'id_rsa');
+    fs.writeFileSync(oldFile, 'old installer');
+    fs.linkSync(oldFile, aliasFile);
+    fs.writeFileSync(secret, 'secret');
+    const old = (Date.now() - 100 * 24 * 3600 * 1000) / 1000;
+    for (const target of [oldFile, aliasFile, secret, oldDir]) fs.utimesSync(target, old, old);
+    const listFile = path.join(home, '.config', 'mole', 'clean-list.txt');
+    fs.mkdirSync(path.dirname(listFile), { recursive: true });
+    fs.writeFileSync(listFile, `${oldFile}\n${aliasFile}\n${secret}\n${oldDir}\nrelative\n`);
+    const now = Date.now();
+    fs.utimesSync(listFile, now / 1000, now / 1000);
+    const calls = [];
+    const deps = tempDeps({
+      home,
+      fileMapDir: path.join(home, 'file-map'),
+      fsx: fs,
+      now: () => now,
+      loadConfig: () => ({
+        ok: true,
+        source: 'test',
+        config: normalizeConfig({ roots: [home], protected: ['**/.ssh/**'] }, home),
+      }),
+      runCapture: async (cmd, args) => {
+        calls.push([cmd, args]);
+        if (cmd === 'mo' && args[0] === '--version') return { stdout: 'Mole 1.47.1\n', error: null };
+        if (cmd === 'mo' && args[0] === 'clean') {
+          fs.utimesSync(listFile, (now + 1000) / 1000, (now + 1000) / 1000);
+          return { stdout: 'dry run\n', error: null };
+        }
+        return { stdout: '', error: `unexpected ${cmd}` };
+      },
+    });
+    return { home, oldFile, secret, oldDir, listFile, calls, deps, cleanup: () => fs.rmSync(home, { recursive: true, force: true }) };
+  }
+
+  it('runs only the allowlisted dry-run and returns deduplicated guarded candidates', async () => {
+    const w = previewWorld();
+    const out = await callTool('mole_cleanup_preview', { refresh: true, limit: 20 }, w.deps);
+    assert.equal(out.ok, true);
+    assert.equal(out.executable, false);
+    assert.deepEqual(w.calls, [
+      ['mo', ['--version']],
+      ['mo', ['clean', '--dry-run']],
+    ]);
+    assert.equal(out.total_candidates, 3, 'hard links deduplicate by device+inode and relative lines are ignored');
+    assert.equal(out.candidates.find(item => item.path === w.oldFile).pipeline_eligible, true);
+    assert.match(out.candidates.find(item => item.path === w.secret).protection_rule, /protected/);
+    assert.equal(out.candidates.find(item => item.path === w.oldDir).protection_rule, 'directory-not-supported');
+    w.cleanup();
+  });
+
+  it('refuses a stale cached list and reports a missing Mole install hint', async () => {
+    const w = previewWorld();
+    w.deps.now = () => fs.statSync(w.listFile).mtimeMs + 61 * 60 * 1000;
+    const stale = await callTool('mole_cleanup_preview', { refresh: false }, w.deps);
+    assert.equal(stale.ok, false);
+    assert.match(stale.error, /stale/);
+    w.deps.runCapture = async () => ({ stdout: '', error: 'spawn mo ENOENT' });
+    const missing = await callTool('mole_cleanup_preview', {}, w.deps);
+    assert.equal(missing.ok, false);
+    assert.equal(missing.install_hint, 'brew install mole');
+    w.cleanup();
   });
 });

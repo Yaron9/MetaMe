@@ -12,6 +12,7 @@
 - 脚本/模块指针地图：`scripts/docs/pointer-map.md`
 - Agent 手机端指南：`scripts/docs/agent-guide.md`
 - 文件互传说明：`scripts/docs/file-transfer.md`
+- 文件地图与安全清理：`scripts/docs/file-map-maintenance.md`
 
 ## 2) 关键目标（当前）
 

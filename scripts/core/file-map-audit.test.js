@@ -13,7 +13,10 @@ describe('file-map-audit', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-fmap-audit-'));
     const file = path.join(dir, 'audit.jsonl');
     appendAudit({ fsx: fs }, file, { ts: 't1', event: 'propose' });
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    fs.chmodSync(file, 0o644);
     appendAudit({ fsx: fs }, file, { ts: 't2', event: 'execute' });
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600, 'existing audit metadata is hardened');
     fs.appendFileSync(file, '{torn line\n');
     appendAudit({ fsx: fs }, file, { ts: 't3', event: 'restore' });
 

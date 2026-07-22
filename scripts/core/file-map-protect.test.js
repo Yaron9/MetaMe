@@ -3,7 +3,9 @@
 require('../test-support/env-setup');
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { matchGlob, findProtectedMatch, isWithinRoots, checkPath, validateCandidates } = require('./file-map-protect');
+const {
+  matchGlob, findProtectedMatch, isWithinRoots, validatePathSyntax, checkPath, validateCandidates,
+} = require('./file-map-protect');
 const { normalizeConfig } = require('./file-map-config');
 
 const HOME = '/home/u';
@@ -17,6 +19,7 @@ function fileStat(over = {}) {
     size: 1024,
     mtimeMs: OLD_MTIME,
     ino: 42,
+    dev: 7,
     ...over,
   };
 }
@@ -50,6 +53,13 @@ describe('file-map-protect glob', () => {
     assert.ok(!isWithinRoots('/home/u', ['/home/u']));
     assert.ok(!isWithinRoots('/home/uu/x', ['/home/u']), 'prefix must respect path boundaries');
   });
+
+  it('rejects ambiguous and traversal-shaped paths before filesystem access', () => {
+    for (const value of ['relative/path', '/home/u/a/../b', '/home/u/./b', '/home/u/x\0y', '/home/u//b']) {
+      assert.equal(validatePathSyntax(value).ok, false, `${JSON.stringify(value)} must be rejected`);
+    }
+    assert.deepEqual(validatePathSyntax('/home/u/Downloads/a.zip'), { ok: true });
+  });
 });
 
 describe('file-map-protect checkPath', () => {
@@ -67,7 +77,7 @@ describe('file-map-protect checkPath', () => {
       ['relative/path', ioFor({}), 'not-absolute'],
       [`${HOME}/gone`, ioFor({}), 'missing'],
       [`${HOME}/Downloads/link`, ioFor({ [`${HOME}/Downloads/link`]: fileStat({ isSymbolicLink: () => true }) }), 'symlink'],
-      [`${HOME}/Downloads/esc`, ioFor({ [`${HOME}/Downloads/esc`]: fileStat() }, { realpath: { [`${HOME}/Downloads/esc`]: '/etc/passwd' } }), 'outside-roots'],
+      [`${HOME}/Downloads/esc`, ioFor({ [`${HOME}/Downloads/esc`]: fileStat() }, { realpath: { [`${HOME}/Downloads/esc`]: '/etc/passwd' } }), 'symlink-ancestor'],
       [`${HOME}/Library/Caches/x`, ioFor({ [`${HOME}/Library/Caches/x`]: fileStat() }), `protected:${HOME}/Library/**`],
       [`${HOME}/.zshrc`, ioFor({ [`${HOME}/.zshrc`]: fileStat() }), `protected:${HOME}/*`],
       [`${HOME}/proj/.git/config`, ioFor({ [`${HOME}/proj/.git/config`]: fileStat() }), 'protected:**/.git/**'],
@@ -85,7 +95,7 @@ describe('file-map-protect checkPath', () => {
     const io = ioFor({ [p]: fileStat() }, { realpath: { [p]: `${HOME}/Library/Data/real` } });
     const res = checkPath(p, cfg, io);
     assert.equal(res.ok, false);
-    assert.match(res.rule, /protected:/);
+    assert.equal(res.rule, 'symlink-ancestor');
   });
 });
 
@@ -98,6 +108,7 @@ describe('file-map-protect validateCandidates', () => {
     const out = validateCandidates([ok, bad, ok, 42, null], cfg, io);
     assert.equal(out.accepted.length, 1);
     assert.equal(out.accepted[0].path, ok);
+    assert.equal(out.accepted[0].device, 7);
     assert.equal(out.rejected.length, 1);
     assert.match(out.rejected[0].rule, /protected:/);
   });

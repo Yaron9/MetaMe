@@ -9,13 +9,15 @@ const NOW = Date.parse('2026-07-18T00:00:00Z');
 const DAY = 24 * 3600 * 1000;
 
 describe('file-map-quarantine plans', () => {
-  it('mirrors the absolute original path under the batch dir', () => {
-    assert.equal(
-      quarantinePathFor('/q', 'b-20260718-abab', '/Users/u/Downloads/x.dmg'),
-      '/q/b-20260718-abab/Users/u/Downloads/x.dmg'
-    );
+  it('derives an opaque destination that stays inside the batch dir', () => {
+    const first = quarantinePathFor('/q', 'b-20260718-abab', '/Users/u/Downloads/x.dmg');
+    assert.match(first, /^\/q\/b-20260718-abab\/[0-9a-f]{64}--x\.dmg$/);
+    const hostile = quarantinePathFor('/q', 'b-20260718-abab', '/Users/u/a/../../../../Users/u/x');
+    assert.ok(hostile.startsWith('/q/b-20260718-abab/'));
     const moves = planQuarantineMoves([{ path: '/a/1' }, { path: '/b/2' }], '/q', 'bid');
-    assert.deepEqual(moves.map(m => m.to), ['/q/bid/a/1', '/q/bid/b/2']);
+    assert.equal(moves.length, 2);
+    assert.ok(moves.every(m => m.to.startsWith('/q/bid/')));
+    assert.notEqual(moves[0].to, moves[1].to);
   });
 
   it('planRestore only touches moved items and honors the subset filter', () => {

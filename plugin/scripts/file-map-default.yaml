@@ -43,7 +43,7 @@ exclude:
 cleanup:
   method: quarantine        # quarantine | trash
   proposal_ttl_minutes: 60  # a proposed batch expires if not executed in time
-  quarantine_days: 30       # quarantined files kept this long before lazy GC moves them to Trash
+  quarantine_days: 30       # age threshold reported by status; purge remains explicit
   max_batch_files: 500
   max_batch_gb: 50
 
@@ -58,3 +58,12 @@ storage:
   min_report_mb: 500
   du_budget_seconds: 45
   target_max_categories: 12
+
+# Optional Mole CLI adapter. MetaMe never installs Mole and never runs a real
+# Mole cleanup; the preview command is always `mo clean --dry-run`.
+mole:
+  enabled: true
+  analyze_timeout_seconds: 120
+  preview_timeout_seconds: 180
+  preview_ttl_minutes: 60
+  max_returned_candidates: 200
