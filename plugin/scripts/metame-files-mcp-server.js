@@ -46,6 +46,8 @@ const auditCore = require('./core/file-map-audit');
 const quarantineCore = require('./core/file-map-quarantine');
 const executionCore = require('./core/file-map-execution');
 const moleCore = require('./core/file-map-mole');
+const maintenanceRules = require('./core/file-map-maintenance-rules');
+const maintenanceScan = require('./core/file-map-maintenance-scan');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
@@ -163,6 +165,23 @@ const TOOLS = [
         du_budget_seconds: { type: 'number', description: 'Maximum wall-clock budget for category sizing (default 45s, cap 120s)' },
         include_mole_analysis: { type: 'boolean', description: 'Optionally augment the native assessment with read-only `mo analyze --json` output' },
         mole_root: { type: 'string', description: 'Root passed to Mole analysis (default ~; must stay inside configured roots)' },
+      },
+    },
+  },
+  {
+    name: 'maintenance_scan',
+    description: 'Native, read-only discovery of rebuildable project artifacts, old installer files, and known caches. Results explain risk and execution capability, protect recent work by default, and are saved as a short-lived snapshot for cleanup_propose. No cleanup occurs.',
+    annotations: READ_ONLY,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kinds: { type: 'array', items: { type: 'string', enum: ['artifact', 'installer', 'cache'] }, description: 'Candidate kinds (default all three)' },
+        roots: { type: 'array', items: { type: 'string' }, description: 'Absolute scan roots inside configured roots (default configured roots, cap 8)' },
+        include_recent: { type: 'boolean', description: 'Include candidates changed inside the protection window (default false)' },
+        min_size_mb: { type: 'number', description: 'Minimum allocated size (default 100 MB)' },
+        limit: { type: 'number', description: 'Results per page (default 200, cap 500)' },
+        scan_id: { type: 'string', description: 'Existing fresh scan snapshot to page without rescanning' },
+        cursor: { type: 'string', description: 'Opaque cursor returned with an existing scan_id' },
       },
     },
   },
@@ -333,6 +352,163 @@ function statSafe(fsx, p) {
   } catch {
     return null;
   }
+}
+
+const SCAN_ID_RE = /^s-\d{8}-[0-9a-f]{32}$/;
+
+function maintenanceScanDir(deps) {
+  return path.join(deps.fileMapDir, 'scans');
+}
+
+function overviewCachePath(deps, roots, depth) {
+  const key = crypto.createHash('sha256').update(JSON.stringify({ roots, depth })).digest('hex');
+  return path.join(deps.fileMapDir, 'overviews', `${key}.json`);
+}
+
+function maintenanceScanFile(deps, scanId) {
+  return path.join(maintenanceScanDir(deps), `${scanId}.json`);
+}
+
+function publicCandidate(candidate) {
+  const copy = { ...candidate };
+  delete copy.snapshot;
+  return copy;
+}
+
+function pageMaintenanceSnapshot(snapshot, cursor, limit) {
+  const offset = maintenanceScan._internal.decodeCursor(cursor);
+  const page = snapshot.candidates.slice(offset, offset + limit).map(publicCandidate);
+  const nextOffset = offset + page.length;
+  return {
+    ok: true,
+    scan_id: snapshot.scan_id,
+    generated_at: snapshot.generated_at,
+    expires_at: snapshot.expires_at,
+    candidates: page,
+    returned: page.length,
+    total: snapshot.candidates.length,
+    partial: snapshot.partial || undefined,
+    next_cursor: nextOffset < snapshot.candidates.length
+      ? maintenanceScan._internal.encodeCursor(nextOffset)
+      : undefined,
+    stats: snapshot.stats,
+  };
+}
+
+function readMaintenanceSnapshot(deps, scanId) {
+  if (!SCAN_ID_RE.test(String(scanId || ''))) return null;
+  return readJsonSafe(deps.fsx, maintenanceScanFile(deps, scanId));
+}
+
+function gcMaintenanceSnapshots(deps, nowMs) {
+  const dir = maintenanceScanDir(deps);
+  let names = [];
+  try { names = deps.fsx.readdirSync(dir); } catch { return; }
+  for (const name of names) {
+    if (!/^s-\d{8}-[0-9a-f]{32}\.json$/.test(name)) continue;
+    const file = path.join(dir, name);
+    const snapshot = readJsonSafe(deps.fsx, file);
+    if (!snapshot || Date.parse(snapshot.expires_at) <= nowMs) {
+      try { deps.fsx.unlinkSync(file); } catch { /* best effort */ }
+    }
+  }
+}
+
+function normalizeMaintenanceRoots(args, deps, cfg) {
+  const requested = Array.isArray(args.roots) && args.roots.length ? args.roots.slice(0, 8) : cfg.roots;
+  const configuredRoots = cfg.roots.map(root => {
+    try { return deps.fsx.realpathSync(root); } catch { return path.resolve(root); }
+  });
+  const roots = [];
+  const rejected = [];
+  for (const raw of requested) {
+    if (typeof raw !== 'string') continue;
+    const expanded = expandHome(raw, deps.home);
+    if (!path.isAbsolute(expanded)) { rejected.push({ path: raw, rule: 'absolute-path-required' }); continue; }
+    let stat;
+    let canonical;
+    try {
+      stat = deps.fsx.lstatSync(expanded);
+      canonical = deps.fsx.realpathSync(expanded);
+    } catch { rejected.push({ path: raw, rule: 'missing-or-unreadable' }); continue; }
+    if (stat.isSymbolicLink()) { rejected.push({ path: raw, rule: 'symlink-root' }); continue; }
+    if (!stat.isDirectory()) { rejected.push({ path: raw, rule: 'directory-root-required' }); continue; }
+    const allowed = configuredRoots.some(root => canonical === root || protect.isWithinRoots(canonical, [root]));
+    if (!allowed) { rejected.push({ path: raw, rule: 'outside-roots' }); continue; }
+    if (!roots.includes(canonical)) roots.push(canonical);
+  }
+  return { roots, rejected };
+}
+
+async function collectMaintenanceScan(args, deps, loaded) {
+  const cfg = loaded.config;
+  const limit = clamp(args.limit, 200, 1, 500);
+  if (args.scan_id) {
+    const snapshot = readMaintenanceSnapshot(deps, args.scan_id);
+    if (!snapshot) return { ok: false, error: 'unknown scan_id — run maintenance_scan again' };
+    if (Date.parse(snapshot.expires_at) <= deps.now()) {
+      return { ok: false, error: `scan snapshot expired at ${snapshot.expires_at} — run maintenance_scan again` };
+    }
+    return pageMaintenanceSnapshot(snapshot, args.cursor, limit);
+  }
+
+  const allowedKinds = new Set(['artifact', 'installer', 'cache']);
+  const requestedKinds = Array.isArray(args.kinds) && args.kinds.length ? [...new Set(args.kinds)] : [...allowedKinds];
+  if (requestedKinds.some(kind => !allowedKinds.has(kind))) return { ok: false, error: 'kinds may contain only artifact, installer, cache' };
+  const normalizedRoots = normalizeMaintenanceRoots(args, deps, cfg);
+  if (!normalizedRoots.roots.length && requestedKinds.some(kind => kind !== 'cache')) {
+    return { ok: false, error: 'no valid scan root', rejected_roots: normalizedRoots.rejected };
+  }
+  const processList = await deps.runCapture('ps', ['-axo', 'comm='], { timeoutMs: 5000, maxBuffer: 2 * 1024 * 1024 });
+  const runningProcesses = storageCore.parseProcessList(processList.stdout);
+  const cacheRules = maintenanceRules.cacheRulesFromCatalog(storageCore.buildCatalog(deps.home))
+    .filter(rule => protect.isWithinRoots(rule.path, cfg.roots));
+  const result = await maintenanceScan.scanMaintenance({
+    fsx: deps.fsx,
+    now: deps.now,
+    listZipEntries: async file => {
+      const listed = await deps.runCapture('unzip', ['-Z1', file], { timeoutMs: 2000, maxBuffer: 256 * 1024 });
+      if (listed.error && !listed.stdout) return null;
+      return listed.stdout.split('\n').filter(Boolean).slice(0, 51);
+    },
+  }, {
+    roots: normalizedRoots.roots,
+    kinds: requestedKinds,
+    cacheRules,
+    runningProcesses,
+    recentDays: cfg.maintenance.recentDays,
+    includeRecent: !!args.include_recent,
+    minSizeBytes: boundedNumber(args.min_size_mb, 100, 0, 1024 * 1024) * 1024 ** 2,
+    maxDepth: cfg.maintenance.maxDepth,
+    maxEntries: cfg.maintenance.maxEntries,
+    maxMs: cfg.maintenance.budgetMs,
+    maxCandidates: cfg.maintenance.maxCandidates,
+    limit,
+    cursor: args.cursor,
+  });
+  const nowMs = deps.now();
+  const ymd = new Date(nowMs).toISOString().slice(0, 10).replace(/-/g, '');
+  const snapshot = {
+    version: 1,
+    scan_id: `s-${ymd}-${deps.randomHex(16)}`,
+    generated_at: new Date(nowMs).toISOString(),
+    expires_at: new Date(nowMs + cfg.maintenance.snapshotTtlMs).toISOString(),
+    kinds: requestedKinds,
+    roots: normalizedRoots.roots,
+    candidates: result._all_candidates,
+    partial: result.partial,
+    stats: result.stats,
+  };
+  ensurePrivateDir(deps.fsx, maintenanceScanDir(deps));
+  writeJsonAtomic(deps.fsx, maintenanceScanFile(deps, snapshot.scan_id), snapshot, { strict: true });
+  gcMaintenanceSnapshots(deps, nowMs);
+  return {
+    ...pageMaintenanceSnapshot(snapshot, null, limit),
+    rejected_roots: normalizedRoots.rejected.length ? normalizedRoots.rejected : undefined,
+    process_check_available: !processList.error,
+    note: 'Read-only snapshot. report_only candidates cannot be executed; quarantine_file and native_adapter candidates still require cleanup_propose and explicit confirmation.',
+    ...(loaded.ok ? {} : { config_warning: loaded.error }),
+  };
 }
 
 function enrichPath(fsx, p) {
@@ -923,7 +1099,7 @@ const handlers = {
     const roots = args.root ? [expandHome(String(args.root), deps.home)] : cfg.roots;
     const depth = clamp(args.depth, cfg.overview.depth, 1, 4);
     const format = args.format === 'json' ? 'json' : 'markdown';
-    const cachePath = path.join(deps.fileMapDir, 'overview.json');
+    const cachePath = overviewCachePath(deps, roots, depth);
     let overview = null;
     let cached = false;
     if (!args.refresh) {
@@ -937,6 +1113,7 @@ const handlers = {
     }
     if (!overview) {
       overview = await buildOverview(deps, cfg, roots, depth);
+      ensurePrivateDir(deps.fsx, path.dirname(cachePath));
       writeJsonAtomic(deps.fsx, cachePath, overview);
     }
     const base = {
@@ -1103,6 +1280,10 @@ const handlers = {
       assessment.mole_analysis = await collectMoleAnalysis(args, deps, loaded.config);
     }
     return assessment;
+  },
+
+  async maintenance_scan(args, deps) {
+    return collectMaintenanceScan(args, deps, deps.loadConfig());
   },
 
   async mole_cleanup_preview(args, deps) {
@@ -1398,10 +1579,16 @@ async function handleMessage(msg) {
 function hardenStatePermissions({ fsx, fileMapDir, configPath }) {
   const paths = manifestCore.manifestPaths(fileMapDir);
   ensurePrivateDir(fsx, fileMapDir);
-  for (const dir of [paths.proposals, paths.inflight, paths.executed, paths.quarantine]) {
+  for (const dir of [
+    paths.proposals, paths.inflight, paths.executed, paths.quarantine,
+    path.join(fileMapDir, 'scans'), path.join(fileMapDir, 'overviews'),
+  ]) {
     ensurePrivateDir(fsx, dir);
   }
-  for (const dir of [paths.proposals, paths.inflight, paths.executed]) {
+  for (const dir of [
+    paths.proposals, paths.inflight, paths.executed,
+    path.join(fileMapDir, 'scans'), path.join(fileMapDir, 'overviews'),
+  ]) {
     let names = [];
     try { names = fsx.readdirSync(dir); } catch { continue; }
     for (const name of names) {
@@ -1458,7 +1645,7 @@ module.exports = {
   handleMessage,
   _private: {
     defaultDeps, runLines, runCapture, ensureUserConfig, hardenStatePermissions, clamp, statSafe,
-    runDuBatch, buildOverview, readJsonSafe, writeJsonAtomic,
+    runDuBatch, buildOverview, readJsonSafe, writeJsonAtomic, overviewCachePath,
     ensurePrivateDir, acquireExecutionLease, releaseExecutionLease, renameSameVolume,
     validateRestoreTarget, executeManifest, gcExpiredProposals, listManifests,
   },

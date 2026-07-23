@@ -59,6 +59,15 @@ storage:
   du_budget_seconds: 45
   target_max_categories: 12
 
+# Native, bounded project-artifact / installer / cache discovery.
+maintenance:
+  recent_days: 14
+  max_depth: 6
+  max_entries: 200000
+  budget_seconds: 15
+  snapshot_ttl_minutes: 60
+  max_candidates: 5000
+
 # Optional Mole CLI adapter. MetaMe never installs Mole and never runs a real
 # Mole cleanup; the preview command is always `mo clean --dry-run`.
 mole:

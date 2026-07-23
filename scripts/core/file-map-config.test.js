@@ -19,6 +19,8 @@ describe('file-map-config normalize', () => {
     assert.equal(cfg.overview.depth, 3);
     assert.equal(cfg.storage.minReportMb, 500);
     assert.equal(cfg.storage.duBudgetSeconds, 45);
+    assert.equal(cfg.maintenance.maxDepth, 6);
+    assert.equal(cfg.maintenance.snapshotTtlMs, 3600000);
     assert.equal(cfg.mole.enabled, true);
     assert.equal(cfg.mole.analyzeTimeoutMs, 120000);
   });
@@ -30,6 +32,7 @@ describe('file-map-config normalize', () => {
       cleanup: { method: 'trash', proposal_ttl_minutes: 1, max_batch_gb: 5000 },
       overview: { depth: 99 },
       storage: { min_report_mb: -10, du_budget_seconds: 9999, target_max_categories: 0 },
+      maintenance: { recent_days: -1, max_depth: 99, max_entries: 5, budget_seconds: 999, max_candidates: 99999 },
       mole: { enabled: false, preview_timeout_seconds: 9999, max_returned_candidates: 0 },
     }, HOME);
     assert.deepEqual(cfg.roots, [`${HOME}/Work`]);
@@ -41,6 +44,11 @@ describe('file-map-config normalize', () => {
     assert.equal(cfg.storage.minReportMb, 0, 'report threshold permits explicit zero');
     assert.equal(cfg.storage.duBudgetSeconds, 120, 'storage scan budget matches the runtime cap');
     assert.equal(cfg.storage.targetMaxCategories, 1, 'target plan keeps at least one category');
+    assert.equal(cfg.maintenance.recentDays, 0);
+    assert.equal(cfg.maintenance.maxDepth, 12);
+    assert.equal(cfg.maintenance.maxEntries, 100);
+    assert.equal(cfg.maintenance.budgetMs, 120000);
+    assert.equal(cfg.maintenance.maxCandidates, 20000);
     assert.equal(cfg.mole.enabled, false);
     assert.equal(cfg.mole.previewTimeoutMs, 900000);
     assert.equal(cfg.mole.maxReturnedCandidates, 1);

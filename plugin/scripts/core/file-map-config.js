@@ -24,6 +24,14 @@ const DEFAULT_CONFIG = {
   cleanup: { method: 'quarantine', proposal_ttl_minutes: 60, quarantine_days: 30, max_batch_files: 500, max_batch_gb: 50 },
   overview: { depth: 3, ttl_hours: 24, du_budget_seconds: 60 },
   storage: { min_report_mb: 500, du_budget_seconds: 45, target_max_categories: 12 },
+  maintenance: {
+    recent_days: 14,
+    max_depth: 6,
+    max_entries: 200000,
+    budget_seconds: 15,
+    snapshot_ttl_minutes: 60,
+    max_candidates: 5000,
+  },
   mole: {
     enabled: true,
     analyze_timeout_seconds: 120,
@@ -56,6 +64,7 @@ function normalizeConfig(raw, home) {
   const cleanup = { ...DEFAULT_CONFIG.cleanup, ...(src.cleanup && typeof src.cleanup === 'object' ? src.cleanup : {}) };
   const overview = { ...DEFAULT_CONFIG.overview, ...(src.overview && typeof src.overview === 'object' ? src.overview : {}) };
   const storage = { ...DEFAULT_CONFIG.storage, ...(src.storage && typeof src.storage === 'object' ? src.storage : {}) };
+  const maintenance = { ...DEFAULT_CONFIG.maintenance, ...(src.maintenance && typeof src.maintenance === 'object' ? src.maintenance : {}) };
   const mole = { ...DEFAULT_CONFIG.mole, ...(src.mole && typeof src.mole === 'object' ? src.mole : {}) };
   return {
     roots: stringList(src.roots, DEFAULT_CONFIG.roots).map(p => expandHome(p, home)),
@@ -78,6 +87,14 @@ function normalizeConfig(raw, home) {
       minReportMb: clampNumber(storage.min_report_mb, 500, 0, 1024 * 1024),
       duBudgetSeconds: clampNumber(storage.du_budget_seconds, 45, 5, 120),
       targetMaxCategories: clampNumber(storage.target_max_categories, 12, 1, 30),
+    },
+    maintenance: {
+      recentDays: clampNumber(maintenance.recent_days, 14, 0, 365),
+      maxDepth: clampNumber(maintenance.max_depth, 6, 1, 12),
+      maxEntries: clampNumber(maintenance.max_entries, 200000, 100, 1000000),
+      budgetMs: clampNumber(maintenance.budget_seconds, 15, 1, 120) * 1000,
+      snapshotTtlMs: clampNumber(maintenance.snapshot_ttl_minutes, 60, 5, 24 * 60) * 60 * 1000,
+      maxCandidates: clampNumber(maintenance.max_candidates, 5000, 1, 20000),
     },
     mole: {
       enabled: mole.enabled !== false,

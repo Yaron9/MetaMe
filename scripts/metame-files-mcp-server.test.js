@@ -23,6 +23,7 @@ function tempDeps(overrides = {}) {
     home: HOME,
     fileMapDir: '/nonexistent/file-map',
     now: () => NOW,
+    randomHex: n => 'a'.repeat(n * 2),
     pid: 4242,
     isPidAlive: () => false,
     ...overrides,
@@ -51,10 +52,10 @@ describe('metame-files-mcp-server protocol', () => {
 
     const list = await handleMessage({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
     const byName = new Map(list.result.tools.map(t => [t.name, t]));
-    assert.equal(list.result.tools.length, 13);
+    assert.equal(list.result.tools.length, 14);
     for (const name of [
       'file_search', 'file_overview', 'file_last_used', 'scan_large', 'scan_stale',
-      'storage_assess', 'mole_cleanup_preview',
+      'storage_assess', 'maintenance_scan', 'mole_cleanup_preview',
     ]) {
       assert.ok(byName.has(name), `${name} must be listed`);
     }
@@ -78,6 +79,87 @@ describe('metame-files-mcp-server protocol', () => {
     const bad = await handleMessage({ jsonrpc: '2.0', id: 3, method: 'no/such' });
     assert.equal(bad.error.code, -32601);
     await assert.rejects(() => callTool('no_such_tool', {}, tempDeps()), /unknown tool/);
+  });
+});
+
+describe('maintenance_scan', () => {
+  function maintenanceWorld() {
+    const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'metame-maintenance-api-')));
+    const write = (rel, content = 'x') => {
+      const file = path.join(home, rel);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, content);
+      return file;
+    };
+    write('rust/Cargo.toml', '[package]');
+    write('rust/target/debug/app', 'artifact');
+    write('web/package.json', '{}');
+    write('web/node_modules/pkg/index.js', 'artifact');
+    write('Downloads/App.dmg', 'installer');
+    write('Downloads/source.zip', 'archive');
+    write('Downloads/Product.zip', 'archive');
+    const now = Date.now();
+    const old = (now - 30 * 86400000) / 1000;
+    const touchOld = current => {
+      const stat = fs.lstatSync(current);
+      if (stat.isDirectory()) for (const name of fs.readdirSync(current)) touchOld(path.join(current, name));
+      fs.utimesSync(current, old, old);
+    };
+    for (const name of ['rust', 'web', 'Downloads']) touchOld(path.join(home, name));
+    const calls = [];
+    const deps = tempDeps({
+      home,
+      fileMapDir: path.join(home, '.state'),
+      fsx: fs,
+      now: () => now,
+      randomHex: n => 'b'.repeat(n * 2),
+      loadConfig: () => ({ ok: true, source: 'test', config: normalizeConfig({ roots: [home] }, home) }),
+      runCapture: async (cmd, args) => {
+        calls.push([cmd, args]);
+        if (cmd === 'ps') return { stdout: '', error: null };
+        if (cmd === 'unzip') {
+          return args[1].endsWith('Product.zip')
+            ? { stdout: 'Product.app/Contents/Info.plist\n', error: null }
+            : { stdout: 'src/index.js\n', error: null };
+        }
+        return { stdout: '', error: `unexpected ${cmd}` };
+      },
+    });
+    return { home, deps, calls, cleanup: () => fs.rmSync(home, { recursive: true, force: true }) };
+  }
+
+  it('creates a private native snapshot and pages it without rescanning', async () => {
+    const w = maintenanceWorld();
+    const first = await callTool('maintenance_scan', { min_size_mb: 0, limit: 1 }, w.deps);
+    assert.equal(first.ok, true, JSON.stringify(first));
+    assert.match(first.scan_id, /^s-\d{8}-b{32}$/);
+    assert.equal(first.returned, 1);
+    assert.equal(first.total, 4);
+    assert.ok(first.next_cursor);
+    assert.equal(first.candidates[0].snapshot, undefined, 'filesystem identity stays private');
+    const scanFile = path.join(w.deps.fileMapDir, 'scans', `${first.scan_id}.json`);
+    assert.equal(fs.statSync(scanFile).mode & 0o777, 0o600);
+
+    const callsBeforePage = w.calls.length;
+    const second = await callTool('maintenance_scan', {
+      scan_id: first.scan_id,
+      cursor: first.next_cursor,
+      limit: 1,
+    }, w.deps);
+    assert.equal(second.ok, true);
+    assert.notEqual(second.candidates[0].candidate_id, first.candidates[0].candidate_id);
+    assert.equal(w.calls.length, callsBeforePage, 'snapshot pagination performs no process or filesystem scan commands');
+    w.cleanup();
+  });
+
+  it('rejects roots outside the configured boundary', async () => {
+    const w = maintenanceWorld();
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-maintenance-outside-'));
+    const out = await callTool('maintenance_scan', { roots: [outside], kinds: ['artifact'] }, w.deps);
+    assert.equal(out.ok, false);
+    assert.equal(out.rejected_roots[0].rule, 'outside-roots');
+    fs.rmSync(outside, { recursive: true, force: true });
+    w.cleanup();
   });
 });
 
@@ -149,7 +231,8 @@ describe('file_overview', () => {
     assert.match(first.markdown, /# File Map/);
     assert.match(first.markdown, /Docs — 77 KB · 1 files/);
     assert.ok(duCalls >= 2, 'du runs for root and Docs');
-    assert.ok(fs.existsSync(path.join(work, 'file-map', 'overview.json')), 'cache written atomically');
+    const cacheDir = path.join(work, 'file-map', 'overviews');
+    assert.equal(fs.readdirSync(cacheDir).length, 1, 'scope-keyed cache written atomically');
 
     const before = duCalls;
     const second = await callTool('file_overview', { root, format: 'json' }, deps);
@@ -160,6 +243,12 @@ describe('file_overview', () => {
     const third = await callTool('file_overview', { root, refresh: true }, deps);
     assert.equal(third.cached, false);
     assert.ok(duCalls > before, 'refresh forces rescan');
+
+    const nested = path.join(root, 'Docs');
+    await callTool('file_overview', { root: nested, format: 'json' }, deps);
+    assert.equal(fs.readdirSync(cacheDir).length, 2, 'a narrow scope cannot overwrite the wider overview');
+    const wideAgain = await callTool('file_overview', { root, format: 'json' }, deps);
+    assert.equal(wideAgain.cached, true, 'wide scope remains independently cached');
     fs.rmSync(work, { recursive: true, force: true });
   });
 

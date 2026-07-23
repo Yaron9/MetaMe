@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const path = require('path');
 const rules = require('./file-map-maintenance-rules');
 
-const DEFAULT_LIMITS = Object.freeze({ maxDepth: 6, maxEntries: 200000, maxMs: 15000, limit: 200 });
+const DEFAULT_LIMITS = Object.freeze({ maxDepth: 6, maxEntries: 200000, maxMs: 15000, maxCandidates: 5000, limit: 200 });
 const SKIP_DIRS = new Set(['.git', '.Trash']);
 
 async function scanMaintenance(deps, options) {
@@ -51,12 +51,16 @@ async function scanMaintenance(deps, options) {
   }
 
   const recentCutoff = state.startedAt - scanOptions.recentDays * 86400000;
-  const candidates = all
+  let candidates = all
     .filter(item => !item._zipPending || item.rule_id)
     .map(item => finalizeCandidate(item, recentCutoff))
     .filter(item => scanOptions.includeRecent || !item.recent)
     .filter(item => item.allocated_bytes >= scanOptions.minSizeBytes)
     .sort((a, b) => b.allocated_bytes - a.allocated_bytes || a.path.localeCompare(b.path));
+  if (candidates.length > limits.maxCandidates) {
+    candidates = candidates.slice(0, limits.maxCandidates);
+    state.partial = true;
+  }
   const offset = decodeCursor(options.cursor);
   const page = candidates.slice(offset, offset + limits.limit);
   const nextOffset = offset + page.length;
@@ -66,6 +70,7 @@ async function scanMaintenance(deps, options) {
     partial: state.partial || undefined,
     next_cursor: nextOffset < candidates.length ? encodeCursor(nextOffset) : undefined,
     stats: { visited_entries: state.visited, elapsed_ms: Math.max(0, now() - state.startedAt) },
+    _all_candidates: candidates,
   };
 }
 
@@ -235,6 +240,7 @@ function normalizeLimits(options) {
     maxDepth: clamp(options.maxDepth, 1, 12, DEFAULT_LIMITS.maxDepth),
     maxEntries: clamp(options.maxEntries, 100, 1000000, DEFAULT_LIMITS.maxEntries),
     maxMs: clamp(options.maxMs, 100, 120000, DEFAULT_LIMITS.maxMs),
+    maxCandidates: clamp(options.maxCandidates, 1, 20000, DEFAULT_LIMITS.maxCandidates),
     limit: clamp(options.limit, 1, 500, DEFAULT_LIMITS.limit),
   };
 }
