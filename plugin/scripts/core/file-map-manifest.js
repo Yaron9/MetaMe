@@ -58,6 +58,50 @@ function createManifest({ items, reason, source, method, nowMs, ttlMinutes, rand
   return { manifest, token };
 }
 
+function createActionManifest({ items, reason, scanId, nowMs, ttlMinutes, randomHex }) {
+  const ymd = new Date(nowMs).toISOString().slice(0, 10).replace(/-/g, '');
+  const token = randomHex(16);
+  const manifest = {
+    version: 3,
+    batch_id: `b-${ymd}-${randomHex(16)}`,
+    token_hash: sha256(token),
+    status: 'proposed',
+    created_at: new Date(nowMs).toISOString(),
+    expires_at: new Date(nowMs + ttlMinutes * 60 * 1000).toISOString(),
+    reason: String(reason),
+    source: 'maintenance_scan',
+    scan_id: scanId,
+    method: 'typed_actions',
+    items: items.map(it => ({
+      item_id: sha256(`${it.action_type}\0${it.path}`),
+      candidate_id: it.candidate_id,
+      action_type: it.action_type,
+      rule_id: it.rule_id,
+      path: it.path,
+      display_path: it.path,
+      project_root: it.project_root,
+      adapter_id: it.adapter_id,
+      size: it.snapshot.size,
+      estimated_bytes: it.allocated_bytes,
+      mtime_ms: it.snapshot.mtimeMs,
+      inode: it.snapshot.ino,
+      device: it.snapshot.device,
+      is_directory: !!it.snapshot.isDirectory,
+      preflight: it.preflight || null,
+      quarantine_path: null,
+      result: null,
+    })),
+    totals: {
+      count: items.length,
+      bytes: items.reduce((sum, item) => sum + (item.allocated_bytes || 0), 0),
+      quarantine_files: items.filter(item => item.action_type === 'quarantine_file').length,
+      native_actions: items.filter(item => item.action_type === 'native_adapter').length,
+    },
+    executed_at: null,
+  };
+  return { manifest, token };
+}
+
 function checkBatchLimits(items, cleanupCfg) {
   if (items.length > cleanupCfg.maxBatchFiles) {
     return { ok: false, error: `batch too large: ${items.length} files > max ${cleanupCfg.maxBatchFiles} — split into smaller batches` };
@@ -75,7 +119,7 @@ function isExpired(manifest, nowMs) {
 }
 
 function verifyToken(manifest, token) {
-  if (!manifest || manifest.version !== 2 || typeof token !== 'string' || token.length !== 32) return false;
+  if (!manifest || ![2, 3].includes(manifest.version) || typeof token !== 'string' || token.length !== 32) return false;
   const expected = Buffer.from(String(manifest.token_hash || ''), 'hex');
   const actual = Buffer.from(sha256(token), 'hex');
   return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
@@ -112,6 +156,14 @@ function redactManifest(manifest) {
 /** The text the agent must relay to the user before cleanup_execute. */
 function summarizeForUser(manifest) {
   const mb = (manifest.totals.bytes / 1024 / 1024).toFixed(1);
+  if (manifest.version === 3) {
+    const recoverable = manifest.totals.quarantine_files;
+    const native = manifest.totals.native_actions;
+    return `Proposal ${manifest.batch_id}: ${manifest.totals.count} reviewed action(s), approximately ${mb} MB. `
+      + `${recoverable} file(s) go to recoverable quarantine; ${native} tool-native action(s) are NOT restorable. `
+      + `Reason: ${manifest.reason}. Present every action and its recovery status to the user before calling cleanup_execute `
+      + `(expires ${manifest.expires_at}).`;
+  }
   const action = manifest.method === 'trash' ? 'move to the macOS Trash' : 'move to the recoverable quarantine area';
   const recovery = manifest.method === 'trash'
     ? 'Items can only be recovered through Finder Trash.'
@@ -124,6 +176,7 @@ function summarizeForUser(manifest) {
 module.exports = {
   isValidBatchId,
   createManifest,
+  createActionManifest,
   checkBatchLimits,
   isExpired,
   verifyToken,

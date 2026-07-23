@@ -30,8 +30,14 @@ describe('file-map execution recovery', () => {
     const out = summarizeExecution([
       { path: '/a', size: 10, result: 'moved' },
       { path: '/b', size: 20, result: 'trashed' },
+      { path: '/target', estimated_bytes: 40, result: 'cleaned' },
       { path: '/c', size: 30, result: 'skipped:mtime-changed' },
     ]);
-    assert.deepEqual(out, { moved: 2, bytesFreed: 30, skipped: [{ path: '/c', reason: 'mtime-changed' }] });
+    assert.deepEqual(out, {
+      moved: 2,
+      actionsCompleted: 1,
+      bytesFreed: 70,
+      skipped: [{ path: '/c', reason: 'mtime-changed' }],
+    });
   });
 });

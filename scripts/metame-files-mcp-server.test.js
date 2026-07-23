@@ -406,6 +406,27 @@ describe('cleanup pipeline', () => {
     };
   }
 
+  function addOldMaintenanceProjects(w) {
+    const write = (rel, content = 'x') => {
+      const file = path.join(w.work, rel);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, content);
+      return file;
+    };
+    write('rust/Cargo.toml', '[package]');
+    write('rust/target/debug/app', 'artifact');
+    write('web/package.json', '{}');
+    write('web/node_modules/pkg/index.js', 'artifact');
+    const old = (w.deps.now() - 100 * 86400000) / 1000;
+    const touchOld = current => {
+      const stat = fs.lstatSync(current);
+      if (stat.isDirectory()) for (const name of fs.readdirSync(current)) touchOld(path.join(current, name));
+      fs.utimesSync(current, old, old);
+    };
+    touchOld(path.join(w.work, 'rust'));
+    touchOld(path.join(w.work, 'web'));
+  }
+
   it('full lifecycle: propose gates → execute moves to quarantine → restore brings back', async () => {
     const w = pipelineWorld();
     // propose: protected + missing paths rejected, valid ones snapshotted
@@ -475,6 +496,120 @@ describe('cleanup pipeline', () => {
     assert.equal(fs.readFileSync(w.stale1, 'utf8'), 'content of Downloads/old1.dmg');
     const status2 = await callTool('cleanup_status', { batch_id: prop.batch_id }, w.deps);
     assert.equal(status2.manifest.status, 'restored');
+    w.cleanup();
+  });
+
+  it('executes a mixed v3 batch through quarantine and exact native argv', async () => {
+    const w = pipelineWorld();
+    addOldMaintenanceProjects(w);
+    const calls = [];
+    w.deps.runCapture = async (cmd, args) => {
+      calls.push([cmd, args]);
+      if (cmd === 'ps') return { stdout: '', error: null };
+      if (cmd === 'unzip') return { stdout: 'src/index.js\n', error: null };
+      if (cmd === 'cargo' && args[0] === 'metadata') return { stdout: '{"workspace_root":"rust"}\n', error: null };
+      if (cmd === 'cargo' && args[0] === 'clean') return { stdout: 'Removed files\n', error: null };
+      return { stdout: '', error: `unexpected ${cmd}` };
+    };
+    const scan = await callTool('maintenance_scan', {
+      roots: [w.work], kinds: ['artifact', 'installer'], min_size_mb: 0, limit: 100,
+    }, w.deps);
+    assert.equal(scan.ok, true);
+    const cargo = scan.candidates.find(item => item.rule_id === 'rust-target');
+    const nodeModules = scan.candidates.find(item => item.rule_id === 'javascript-node-modules');
+    const installer = scan.candidates.find(item => item.path === w.stale1);
+    assert.ok(cargo && nodeModules && installer);
+
+    const proposal = await callTool('cleanup_propose', {
+      scan_id: scan.scan_id,
+      candidate_ids: [cargo.candidate_id, nodeModules.candidate_id, installer.candidate_id],
+      reason: 'reviewed rebuildable output and installer',
+    }, w.deps);
+    assert.equal(proposal.ok, true);
+    assert.equal(proposal.proposal_version, 3);
+    assert.equal(proposal.accepted, 2);
+    assert.equal(proposal.recoverable_items, 1);
+    assert.equal(proposal.non_restorable_actions, 1);
+    assert.equal(proposal.rejected[0].rule, 'report-only');
+    assert.match(proposal.summary_for_user, /NOT restorable/);
+
+    const executed = await callTool('cleanup_execute', {
+      batch_id: proposal.batch_id, token: proposal.token, confirm: 'USER CONFIRMED',
+    }, w.deps);
+    assert.equal(executed.ok, true);
+    assert.equal(executed.moved, 1);
+    assert.equal(executed.actions_completed, 1);
+    assert.ok(!fs.existsSync(w.stale1));
+    const cargoCalls = calls.filter(([cmd]) => cmd === 'cargo');
+    assert.deepEqual(cargoCalls, [
+      ['cargo', ['metadata', '--no-deps', '--format-version', '1', '--manifest-path', path.join(w.work, 'rust', 'Cargo.toml')]],
+      ['cargo', ['metadata', '--no-deps', '--format-version', '1', '--manifest-path', path.join(w.work, 'rust', 'Cargo.toml')]],
+      ['cargo', ['clean', '--manifest-path', path.join(w.work, 'rust', 'Cargo.toml')]],
+    ]);
+    const restored = await callTool('cleanup_restore', { batch_id: proposal.batch_id }, w.deps);
+    assert.equal(restored.restored, 1);
+    assert.ok(fs.existsSync(w.stale1));
+    w.cleanup();
+  });
+
+  it('fails closed when an adapter preflight changes after proposal', async () => {
+    const w = pipelineWorld();
+    addOldMaintenanceProjects(w);
+    let metadata = 'before';
+    let cleaned = false;
+    w.deps.runCapture = async (cmd, args) => {
+      if (cmd === 'ps') return { stdout: '', error: null };
+      if (cmd === 'unzip') return { stdout: 'src/index.js\n', error: null };
+      if (cmd === 'cargo' && args[0] === 'metadata') return { stdout: metadata, error: null };
+      if (cmd === 'cargo' && args[0] === 'clean') { cleaned = true; return { stdout: '', error: null }; }
+      return { stdout: '', error: `unexpected ${cmd}` };
+    };
+    const scan = await callTool('maintenance_scan', { roots: [w.work], kinds: ['artifact'], min_size_mb: 0 }, w.deps);
+    const cargo = scan.candidates.find(item => item.rule_id === 'rust-target');
+    const proposal = await callTool('cleanup_propose', {
+      scan_id: scan.scan_id, candidate_ids: [cargo.candidate_id], reason: 'reviewed rust build output',
+    }, w.deps);
+    metadata = 'after';
+    const executed = await callTool('cleanup_execute', {
+      batch_id: proposal.batch_id, token: proposal.token, confirm: 'USER CONFIRMED',
+    }, w.deps);
+    assert.equal(executed.actions_completed, 0);
+    assert.equal(executed.skipped[0].reason, 'preflight-changed');
+    assert.equal(cleaned, false);
+    w.cleanup();
+  });
+
+  it('keeps Homebrew cleanup behind dry-run parity and fixed argv', async () => {
+    const w = pipelineWorld();
+    const cache = path.join(w.work, 'Library', 'Caches', 'Homebrew');
+    fs.mkdirSync(cache, { recursive: true });
+    fs.writeFileSync(path.join(cache, 'download.tar'), 'cache');
+    const old = (w.deps.now() - 100 * 86400000) / 1000;
+    fs.utimesSync(path.join(cache, 'download.tar'), old, old);
+    fs.utimesSync(cache, old, old);
+    const calls = [];
+    w.deps.runCapture = async (cmd, args) => {
+      calls.push([cmd, args]);
+      if (cmd === 'ps') return { stdout: '', error: null };
+      if (cmd === 'brew' && args[1] === '--dry-run') return { stdout: 'Would remove download.tar\n', error: null };
+      if (cmd === 'brew' && args[0] === 'cleanup') return { stdout: 'Removed download.tar\n', error: null };
+      return { stdout: '', error: `unexpected ${cmd}` };
+    };
+    const scan = await callTool('maintenance_scan', { kinds: ['cache'], min_size_mb: 0 }, w.deps);
+    const brew = scan.candidates.find(item => item.rule_id === 'homebrew-cache');
+    assert.ok(brew);
+    const proposal = await callTool('cleanup_propose', {
+      scan_id: scan.scan_id, candidate_ids: [brew.candidate_id], reason: 'reviewed Homebrew cache',
+    }, w.deps);
+    const executed = await callTool('cleanup_execute', {
+      batch_id: proposal.batch_id, token: proposal.token, confirm: 'USER CONFIRMED',
+    }, w.deps);
+    assert.equal(executed.actions_completed, 1);
+    assert.deepEqual(calls.filter(([cmd]) => cmd === 'brew'), [
+      ['brew', ['cleanup', '--dry-run']],
+      ['brew', ['cleanup', '--dry-run']],
+      ['brew', ['cleanup']],
+    ]);
     w.cleanup();
   });
 

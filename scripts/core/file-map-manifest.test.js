@@ -4,7 +4,7 @@ require('../test-support/env-setup');
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  isValidBatchId, createManifest, checkBatchLimits, isExpired, verifyToken, verifyItemUnchanged,
+  isValidBatchId, createManifest, createActionManifest, checkBatchLimits, isExpired, verifyToken, verifyItemUnchanged,
   manifestPaths, redactManifest, summarizeForUser,
 } = require('./file-map-manifest');
 
@@ -43,6 +43,23 @@ describe('file-map-manifest lifecycle', () => {
     assert.equal(m.items[0].mtime_ms, 5000.7);
     assert.equal(m.items[0].quarantine_path, null);
     assert.deepEqual(m.totals, { count: 1, bytes: 100 });
+  });
+
+  it('creates a v3 typed-action manifest without weakening v2 tokens', () => {
+    const created = createActionManifest({
+      items: [{
+        candidate_id: 'c1', action_type: 'native_adapter', path: '/work/app/target',
+        project_root: '/work/app', adapter_id: 'cargo_clean', allocated_bytes: 4096,
+        snapshot: { size: 96, mtimeMs: NOW - 1000, ino: 7, device: 1, isDirectory: true },
+        preflight: { command: 'cargo', args: ['metadata'], output_hash: 'abc' },
+      }],
+      reason: 'rebuildable output', scanId: 's-20260718-aaaa', nowMs: NOW, ttlMinutes: 60, randomHex,
+    });
+    assert.equal(created.manifest.version, 3);
+    assert.equal(created.manifest.items[0].action_type, 'native_adapter');
+    assert.equal(created.manifest.totals.native_actions, 1);
+    assert.equal(verifyToken(created.manifest, created.token), true);
+    assert.match(summarizeForUser(created.manifest), /NOT restorable/);
   });
 
   it('batch id validation rejects traversal-shaped ids', () => {

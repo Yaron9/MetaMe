@@ -48,6 +48,7 @@ const executionCore = require('./core/file-map-execution');
 const moleCore = require('./core/file-map-mole');
 const maintenanceRules = require('./core/file-map-maintenance-rules');
 const maintenanceScan = require('./core/file-map-maintenance-scan');
+const maintenanceActions = require('./core/file-map-maintenance-actions');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
@@ -200,16 +201,18 @@ const TOOLS = [
   },
   {
     name: 'cleanup_propose',
-    description: 'Stage a cleanup batch: candidate paths are validated against the hard protection net (system dirs, ~/Library, .git, recently-modified, symlinks, roots containment), snapshotted (size/mtime/inode) and written to a manifest with a one-time token. NOTHING is moved or deleted. Present the returned summary to the user; only after their explicit consent may cleanup_execute be called.',
+    description: 'Stage a cleanup batch from explicit file paths or candidate IDs in a fresh maintenance_scan. Paths use the existing recoverable quarantine flow; typed candidates preserve report-only boundaries and run allowlisted adapter preflights. NOTHING is cleaned during proposal. Present the summary before cleanup_execute.',
     annotations: WRITES_METADATA,
     inputSchema: {
       type: 'object',
       properties: {
         paths: { type: 'array', items: { type: 'string' }, description: 'Absolute paths of cleanup candidates' },
+        scan_id: { type: 'string', description: 'Fresh maintenance_scan snapshot containing the selected candidates' },
+        candidate_ids: { type: 'array', items: { type: 'string' }, description: 'Candidate IDs from scan_id; report_only candidates are rejected' },
         reason: { type: 'string', description: 'Why these files should go — shown to the user and audited' },
-        source: { type: 'string', enum: ['scan_large', 'scan_stale', 'scan_duplicates', 'manual'] },
+        source: { type: 'string', enum: ['scan_large', 'scan_stale', 'scan_duplicates', 'maintenance_scan', 'manual'] },
       },
-      required: ['paths', 'reason'],
+      required: ['reason'],
     },
   },
   {
@@ -511,6 +514,108 @@ async function collectMaintenanceScan(args, deps, loaded) {
   };
 }
 
+function proposalResult(deps, manifest, token, rejected) {
+  writeManifest(deps, 'proposals', manifest);
+  gcExpiredProposals(deps);
+  auditEvent(deps, {
+    event: 'propose', batch_id: manifest.batch_id, outcome: 'ok', reason: manifest.reason, source: manifest.source,
+    count: manifest.totals.count, bytes: manifest.totals.bytes, rejected: rejected.length,
+  });
+  return {
+    ok: true,
+    batch_id: manifest.batch_id,
+    token,
+    proposal_version: manifest.version,
+    method: manifest.method,
+    accepted: manifest.totals.count,
+    total_bytes: manifest.totals.bytes,
+    recoverable_items: manifest.totals.quarantine_files,
+    non_restorable_actions: manifest.totals.native_actions,
+    rejected,
+    expires_at: manifest.expires_at,
+    summary_for_user: manifestCore.summarizeForUser(manifest),
+  };
+}
+
+function candidateFilesystemDrift(candidate, checked) {
+  if (!candidate.snapshot) return { ok: false, reason: 'missing-scan-snapshot' };
+  return manifestCore.verifyItemUnchanged({
+    size: candidate.snapshot.size,
+    mtime_ms: candidate.snapshot.mtimeMs,
+    inode: candidate.snapshot.ino,
+    device: candidate.snapshot.device,
+  }, checked.snapshot || checked.stat);
+}
+
+async function prepareNativeAction(candidate, deps, cfg) {
+  const shape = maintenanceActions.validateAdapterCandidate(candidate, { home: deps.home });
+  if (!shape.ok) return shape;
+  const checked = validateNativeFilesystem(deps, cfg, candidate);
+  if (!checked.ok) return checked;
+  const drift = candidateFilesystemDrift(candidate, checked);
+  if (!drift.ok) return drift;
+  const invocation = maintenanceActions.adapterInvocation(candidate, 'preview');
+  const preview = await deps.runCapture(invocation.command, invocation.args, { timeoutMs: 30000, maxBuffer: 1024 * 1024 });
+  if (preview.error) return { ok: false, reason: 'preflight-failed', error: preview.error };
+  return {
+    ok: true,
+    action: {
+      ...candidate,
+      action_type: 'native_adapter',
+      preflight: maintenanceActions.preflightEvidence(invocation, preview.stdout, deps.now()),
+    },
+  };
+}
+
+function prepareQuarantineAction(candidate, deps, cfg) {
+  const io = { lstatSync: p => deps.fsx.lstatSync(p), realpathSync: p => deps.fsx.realpathSync(p), now: deps.now };
+  const checked = protect.checkPath(candidate.path, cfg, io);
+  if (!checked.ok) return { ok: false, reason: checked.rule };
+  if (checked.stat.isDirectory) return { ok: false, reason: 'directory-not-supported' };
+  const drift = candidateFilesystemDrift(candidate, { snapshot: checked.stat });
+  if (!drift.ok) return drift;
+  return { ok: true, action: { ...candidate, action_type: 'quarantine_file' } };
+}
+
+async function proposeMaintenanceBatch(args, deps, cfg, reason) {
+  if (!SCAN_ID_RE.test(String(args.scan_id || ''))) return { ok: false, error: 'valid scan_id required with candidate_ids' };
+  const ids = Array.isArray(args.candidate_ids) ? [...new Set(args.candidate_ids.filter(id => typeof id === 'string'))] : [];
+  if (!ids.length) return { ok: false, error: 'candidate_ids: non-empty array required with scan_id' };
+  const snapshot = readMaintenanceSnapshot(deps, args.scan_id);
+  if (!snapshot || Date.parse(snapshot.expires_at) <= deps.now()) {
+    return { ok: false, error: 'maintenance scan is missing or expired — run maintenance_scan again' };
+  }
+  const byId = new Map(snapshot.candidates.map(candidate => [candidate.candidate_id, candidate]));
+  const accepted = [];
+  const rejected = [];
+  for (const id of ids) {
+    const candidate = byId.get(id);
+    if (!candidate) { rejected.push({ candidate_id: id, rule: 'not-in-scan' }); continue; }
+    if (candidate.recent) { rejected.push({ candidate_id: id, path: candidate.path, rule: 'recently-modified' }); continue; }
+    if (candidate.execution_mode === 'report_only') {
+      rejected.push({ candidate_id: id, path: candidate.path, rule: 'report-only' });
+      continue;
+    }
+    const prepared = candidate.execution_mode === 'quarantine_file'
+      ? prepareQuarantineAction(candidate, deps, cfg)
+      : await prepareNativeAction(candidate, deps, cfg);
+    if (prepared.ok) accepted.push(prepared.action);
+    else rejected.push({ candidate_id: id, path: candidate.path, rule: prepared.reason, error: prepared.error });
+  }
+  if (!accepted.length) return { ok: false, error: 'no candidate survived the maintenance action checks', rejected };
+  const limits = manifestCore.checkBatchLimits(accepted.map(item => ({ size: item.allocated_bytes })), cfg.cleanup);
+  if (!limits.ok) return { ok: false, error: limits.error };
+  const created = manifestCore.createActionManifest({
+    items: accepted,
+    reason,
+    scanId: snapshot.scan_id,
+    nowMs: deps.now(),
+    ttlMinutes: cfg.cleanup.proposalTtlMinutes,
+    randomHex: deps.randomHex,
+  });
+  return proposalResult(deps, created.manifest, created.token, rejected);
+}
+
 function enrichPath(fsx, p) {
   const st = statSafe(fsx, p);
   if (!st) return { path: p, size: null, mtime: null, stat_error: true };
@@ -768,69 +873,130 @@ async function trashViaFinder(deps, p) {
   if (error) throw new Error(`Finder trash failed: ${error}`);
 }
 
-/** Move every still-valid item of a confirmed manifest into quarantine (or Trash). */
-async function executeManifest(deps, cfg, manifest) {
+function currentItemStat(deps, itemPath) {
+  let stat;
+  let real;
+  try {
+    stat = deps.fsx.lstatSync(itemPath);
+    if (stat.isSymbolicLink()) return { ok: false, reason: 'symlink' };
+    real = deps.fsx.realpathSync(itemPath);
+  } catch { return { ok: false, reason: 'missing' }; }
+  if (real !== itemPath) return { ok: false, reason: 'canonical-path-changed' };
+  return {
+    ok: true,
+    stat,
+    snapshot: { size: stat.size, mtimeMs: stat.mtimeMs, inode: stat.ino, device: stat.dev },
+  };
+}
+
+function validateNativeFilesystem(deps, cfg, item) {
+  const checked = currentItemStat(deps, item.path);
+  if (!checked.ok) return checked;
+  if (!checked.stat.isDirectory()) return { ok: false, reason: 'adapter-path-not-directory' };
+  if (!protect.isWithinRoots(item.path, cfg.roots)) return { ok: false, reason: 'outside-roots' };
+  const candidateCheck = maintenanceActions.validateAdapterCandidate({
+    ...item,
+    execution_mode: 'native_adapter',
+    rule_id: item.rule_id || (item.adapter_id === 'cargo_clean' ? 'rust-target' : 'homebrew-cache'),
+    active_guard: null,
+  }, { home: deps.home });
+  if (!candidateCheck.ok) return candidateCheck;
+  if (item.adapter_id === 'cargo_clean') {
+    try {
+      const marker = deps.fsx.lstatSync(path.join(item.project_root, 'Cargo.toml'));
+      if (marker.isSymbolicLink() || !marker.isFile()) return { ok: false, reason: 'cargo-manifest-invalid' };
+    } catch { return { ok: false, reason: 'cargo-manifest-missing' }; }
+  }
+  return checked;
+}
+
+async function executeNativeItem(deps, cfg, manifest, item) {
+  if (item.result === 'cleaned' || String(item.result || '').startsWith('skipped:')) return;
+  const checked = validateNativeFilesystem(deps, cfg, item);
+  if (!checked.ok) {
+    item.result = item.result === 'adapter-running' && checked.reason === 'missing'
+      ? 'cleaned'
+      : `skipped:${checked.reason}`;
+    writeManifest(deps, 'inflight', manifest);
+    return;
+  }
+  const drift = manifestCore.verifyItemUnchanged(item, checked.snapshot);
+  if (!drift.ok) {
+    item.result = item.result === 'adapter-running' ? 'skipped:adapter-outcome-unknown' : `skipped:${drift.reason}`;
+    writeManifest(deps, 'inflight', manifest);
+    return;
+  }
+  const preview = maintenanceActions.adapterInvocation(item, 'preview');
+  const previewed = await deps.runCapture(preview.command, preview.args, { timeoutMs: 30000, maxBuffer: 1024 * 1024 });
+  if (previewed.error || !maintenanceActions.preflightMatches(item.preflight, preview, previewed.stdout)) {
+    item.result = `skipped:${previewed.error ? 'preflight-failed' : 'preflight-changed'}`;
+    writeManifest(deps, 'inflight', manifest);
+    return;
+  }
+  const invocation = maintenanceActions.adapterInvocation(item, 'execute');
+  item.result = 'adapter-running';
+  writeManifest(deps, 'inflight', manifest);
+  const executed = await deps.runCapture(invocation.command, invocation.args, { timeoutMs: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+  item.result = executed.error ? 'skipped:adapter-failed' : 'cleaned';
+  writeManifest(deps, 'inflight', manifest);
+  auditEvent(deps, {
+    event: 'execute', batch_id: manifest.batch_id, path: item.path,
+    outcome: item.result, adapter_id: item.adapter_id, bytes: item.estimated_bytes,
+  });
+}
+
+async function executeFileItem(deps, cfg, manifest, item) {
+  const method = manifest.version === 3 ? 'quarantine' : manifest.method;
   const io = { lstatSync: p => deps.fsx.lstatSync(p), realpathSync: p => deps.fsx.realpathSync(p), now: deps.now };
   const qroot = manifestCore.manifestPaths(deps.fileMapDir).quarantine;
+  const dest = method === 'quarantine' ? quarantineCore.quarantinePathFor(qroot, manifest.batch_id, item.path) : null;
+  if (item.result === 'moving') {
+    const recovery = executionCore.reconcileMoving({
+      sourceExists: existsL(deps.fsx, item.path), destinationExists: dest ? existsL(deps.fsx, dest) : false, method,
+    });
+    if (recovery.action === 'complete') {
+      item.result = recovery.result;
+      if (recovery.result === 'moved') item.quarantine_path = dest;
+      writeManifest(deps, 'inflight', manifest);
+      return;
+    }
+    if (recovery.action === 'conflict') {
+      item.result = `skipped:recovery-${recovery.reason}`;
+      writeManifest(deps, 'inflight', manifest);
+      return;
+    }
+  }
+  const recheck = protect.checkPath(item.path, cfg, io);
+  const drift = recheck.ok ? manifestCore.verifyItemUnchanged(item, recheck.stat) : null;
+  const reason = !recheck.ok ? recheck.rule : (!drift.ok ? drift.reason : null);
+  if (reason) {
+    item.result = `skipped:${reason}`;
+    writeManifest(deps, 'inflight', manifest);
+    auditEvent(deps, { event: 'skip', batch_id: manifest.batch_id, path: item.path, outcome: reason });
+    return;
+  }
+  try {
+    item.result = 'moving';
+    if (dest) item.quarantine_path = dest;
+    writeManifest(deps, 'inflight', manifest);
+    if (method === 'trash') await trashViaFinder(deps, item.path);
+    else renameSameVolume(deps.fsx, item.path, dest, { privateParent: true });
+    item.result = method === 'trash' ? 'trashed' : 'moved';
+    writeManifest(deps, 'inflight', manifest);
+    auditEvent(deps, { event: 'execute', batch_id: manifest.batch_id, path: item.path, outcome: item.result, bytes: item.size, method });
+  } catch (err) {
+    item.result = `skipped:${err.code === 'EXDEV' ? 'cross-device-quarantine-disabled' : err.message}`;
+    writeManifest(deps, 'inflight', manifest);
+    auditEvent(deps, { event: 'execute', batch_id: manifest.batch_id, path: item.path, outcome: 'error', error: err.message });
+  }
+}
+
+/** Move every still-valid item of a confirmed manifest into quarantine (or Trash). */
+async function executeManifest(deps, cfg, manifest) {
   for (const item of manifest.items) {
-    if (item.result === 'moved' || item.result === 'trashed' || String(item.result || '').startsWith('skipped:')) continue;
-    const dest = manifest.method === 'quarantine'
-      ? quarantineCore.quarantinePathFor(qroot, manifest.batch_id, item.path)
-      : null;
-    if (item.result === 'moving') {
-      const recovery = executionCore.reconcileMoving({
-        sourceExists: existsL(deps.fsx, item.path),
-        destinationExists: dest ? existsL(deps.fsx, dest) : false,
-        method: manifest.method,
-      });
-      if (recovery.action === 'complete') {
-        item.result = recovery.result;
-        if (recovery.result === 'moved') item.quarantine_path = dest;
-        writeManifest(deps, 'inflight', manifest);
-        auditEvent(deps, { event: 'execute', batch_id: manifest.batch_id, path: item.path, outcome: `recovered:${recovery.result}` });
-        continue;
-      }
-      if (recovery.action === 'conflict') {
-        item.result = `skipped:recovery-${recovery.reason}`;
-        writeManifest(deps, 'inflight', manifest);
-        auditEvent(deps, { event: 'skip', batch_id: manifest.batch_id, path: item.path, outcome: recovery.reason });
-        continue;
-      }
-    }
-    const recheck = protect.checkPath(item.path, cfg, io);
-    let reason = null;
-    if (!recheck.ok) reason = recheck.rule;
-    else {
-      const drift = manifestCore.verifyItemUnchanged(item, recheck.stat);
-      if (!drift.ok) reason = drift.reason;
-    }
-    if (reason) {
-      item.result = `skipped:${reason}`;
-      writeManifest(deps, 'inflight', manifest);
-      auditEvent(deps, { event: 'skip', batch_id: manifest.batch_id, path: item.path, outcome: reason });
-      continue;
-    }
-    try {
-      item.result = 'moving';
-      if (dest) item.quarantine_path = dest;
-      writeManifest(deps, 'inflight', manifest);
-      if (manifest.method === 'trash') {
-        await trashViaFinder(deps, item.path);
-        item.result = 'trashed';
-      } else {
-        renameSameVolume(deps.fsx, item.path, dest, { privateParent: true });
-        item.result = 'moved';
-      }
-      writeManifest(deps, 'inflight', manifest);
-      auditEvent(deps, {
-        event: 'execute', batch_id: manifest.batch_id, path: item.path, outcome: item.result,
-        bytes: item.size, method: manifest.method, dest: item.quarantine_path || 'trash',
-      });
-    } catch (err) {
-      item.result = `skipped:${err.code === 'EXDEV' ? 'cross-device-quarantine-disabled' : err.message}`;
-      writeManifest(deps, 'inflight', manifest);
-      auditEvent(deps, { event: 'execute', batch_id: manifest.batch_id, path: item.path, outcome: 'error', error: err.message });
-    }
+    if (['moved', 'trashed', 'cleaned'].includes(item.result) || String(item.result || '').startsWith('skipped:')) continue;
+    if (item.action_type === 'native_adapter') await executeNativeItem(deps, cfg, manifest, item);
+    else await executeFileItem(deps, cfg, manifest, item);
   }
   return executionCore.summarizeExecution(manifest.items);
 }
@@ -1296,8 +1462,11 @@ const handlers = {
     const cfg = loaded.config;
     const paths = Array.isArray(args.paths) ? args.paths.filter(p => typeof p === 'string') : [];
     const reason = String(args.reason || '').trim();
-    if (!paths.length) return { ok: false, error: 'paths: non-empty array of absolute paths required' };
     if (reason.length < 5) return { ok: false, error: 'reason: a meaningful justification is required — it is shown to the user and audited' };
+    const typedRequest = args.scan_id != null || args.candidate_ids != null;
+    if (typedRequest && paths.length) return { ok: false, error: 'provide paths OR scan_id + candidate_ids, never both' };
+    if (typedRequest) return proposeMaintenanceBatch(args, deps, cfg, reason);
+    if (!paths.length) return { ok: false, error: 'paths: non-empty array of absolute paths required' };
     const io = { lstatSync: p => deps.fsx.lstatSync(p), realpathSync: p => deps.fsx.realpathSync(p), now: deps.now };
     const validated = protect.validateCandidates(paths, cfg, io);
     const rejectedDirectories = validated.accepted
@@ -1320,25 +1489,7 @@ const handlers = {
       ttlMinutes: cfg.cleanup.proposalTtlMinutes,
       randomHex: deps.randomHex,
     });
-    const { manifest, token } = created;
-    writeManifest(deps, 'proposals', manifest);
-    gcExpiredProposals(deps);
-    auditEvent(deps, {
-      event: 'propose', batch_id: manifest.batch_id, outcome: 'ok', reason, source: manifest.source,
-      count: manifest.totals.count, bytes: manifest.totals.bytes, rejected: rejected.length,
-    });
-    return {
-      ok: true,
-      batch_id: manifest.batch_id,
-      token,
-      proposal_version: manifest.version,
-      method: manifest.method,
-      accepted: manifest.totals.count,
-      total_bytes: manifest.totals.bytes,
-      rejected,
-      expires_at: manifest.expires_at,
-      summary_for_user: manifestCore.summarizeForUser(manifest),
-    };
+    return proposalResult(deps, created.manifest, created.token, rejected);
   },
 
   async cleanup_execute(args, deps) {
@@ -1355,7 +1506,7 @@ const handlers = {
     if (!manifest) {
       return { ok: false, error: 'unknown, already executed, or expired batch — run cleanup_propose again' };
     }
-    if (manifest.version !== 2) {
+    if (![2, 3].includes(manifest.version)) {
       return { ok: false, error: 'legacy proposal cannot be executed — run cleanup_propose again' };
     }
     if (!manifestCore.verifyToken(manifest, args.token)) {
@@ -1395,6 +1546,7 @@ const handlers = {
         batch_id: manifest.batch_id,
         method: manifest.method,
         moved: summary.moved,
+        actions_completed: summary.actionsCompleted,
         skipped: summary.skipped,
         bytes_freed: summary.bytesFreed,
         restore_hint: manifest.method === 'trash'

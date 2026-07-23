@@ -19,12 +19,15 @@ function canReclaimLease(lease, { nowMs, leaseMs, isPidAlive }) {
 
 function summarizeExecution(items) {
   const movedItems = items.filter(item => item.result === 'moved' || item.result === 'trashed');
+  const actionItems = items.filter(item => item.result === 'cleaned');
   const skipped = items
     .filter(item => typeof item.result === 'string' && item.result.startsWith('skipped:'))
     .map(item => ({ path: item.path, reason: item.result.slice('skipped:'.length) }));
   return {
     moved: movedItems.length,
-    bytesFreed: movedItems.reduce((sum, item) => sum + (item.size || 0), 0),
+    actionsCompleted: actionItems.length,
+    bytesFreed: movedItems.reduce((sum, item) => sum + (item.estimated_bytes || item.size || 0), 0)
+      + actionItems.reduce((sum, item) => sum + (item.estimated_bytes || 0), 0),
     skipped,
   };
 }
