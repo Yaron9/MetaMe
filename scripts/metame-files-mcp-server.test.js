@@ -539,6 +539,8 @@ describe('cleanup pipeline', () => {
     assert.equal(executed.ok, true);
     assert.equal(executed.moved, 1);
     assert.equal(executed.actions_completed, 1);
+    assert.equal(executed.bytes_freed_estimated, true);
+    assert.match(executed.restore_hint, /remain non-restorable/);
     assert.ok(!fs.existsSync(w.stale1));
     const cargoCalls = calls.filter(([cmd]) => cmd === 'cargo');
     assert.deepEqual(cargoCalls, [
@@ -549,6 +551,8 @@ describe('cleanup pipeline', () => {
     const restored = await callTool('cleanup_restore', { batch_id: proposal.batch_id }, w.deps);
     assert.equal(restored.restored, 1);
     assert.ok(fs.existsSync(w.stale1));
+    const status = await callTool('cleanup_status', { batch_id: proposal.batch_id }, w.deps);
+    assert.equal(status.manifest.status, 'restored_with_nonreversible_actions');
     w.cleanup();
   });
 

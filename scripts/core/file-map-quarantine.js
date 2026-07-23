@@ -42,6 +42,7 @@ function planPurge(manifests, { quarantineDays, nowMs }) {
   const cutoff = nowMs - quarantineDays * 24 * 3600 * 1000;
   return manifests.filter(m => {
     if (m.status !== 'executed' || !m.executed_at) return false;
+    if (!Array.isArray(m.items) || !m.items.some(item => item.result === 'moved' && item.quarantine_path)) return false;
     const t = Date.parse(m.executed_at);
     return Number.isFinite(t) && t < cutoff;
   });

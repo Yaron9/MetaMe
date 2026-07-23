@@ -35,12 +35,20 @@ describe('file-map-quarantine plans', () => {
 
   it('planPurge selects only executed batches past retention', () => {
     const manifests = [
-      { batch_id: 'old', status: 'executed', executed_at: new Date(NOW - 31 * DAY).toISOString() },
-      { batch_id: 'young', status: 'executed', executed_at: new Date(NOW - 5 * DAY).toISOString() },
-      { batch_id: 'restored', status: 'restored', executed_at: new Date(NOW - 90 * DAY).toISOString() },
-      { batch_id: 'broken', status: 'executed', executed_at: null },
+      { batch_id: 'old', status: 'executed', executed_at: new Date(NOW - 31 * DAY).toISOString(), items: [{ result: 'moved', quarantine_path: '/q/old' }] },
+      { batch_id: 'young', status: 'executed', executed_at: new Date(NOW - 5 * DAY).toISOString(), items: [{ result: 'moved', quarantine_path: '/q/young' }] },
+      { batch_id: 'restored', status: 'restored', executed_at: new Date(NOW - 90 * DAY).toISOString(), items: [] },
+      { batch_id: 'broken', status: 'executed', executed_at: null, items: [] },
     ];
     const due = planPurge(manifests, { quarantineDays: 30, nowMs: NOW });
     assert.deepEqual(due.map(m => m.batch_id), ['old']);
+  });
+
+  it('never schedules native-only manifests for quarantine purge', () => {
+    const manifests = [{
+      batch_id: 'native', status: 'executed', executed_at: new Date(NOW - 40 * DAY).toISOString(),
+      items: [{ action_type: 'native_adapter', result: 'cleaned', quarantine_path: null }],
+    }];
+    assert.deepEqual(planPurge(manifests, { quarantineDays: 30, nowMs: NOW }), []);
   });
 });

@@ -985,6 +985,17 @@ async function executeManifest(deps, cfg, manifest) {
   return executionCore.summarizeExecution(manifest.items);
 }
 
+function restoreHint(manifest, summary) {
+  if (manifest.method === 'trash') return 'items went to the macOS Trash — restore from the Trash in Finder';
+  if (manifest.version !== 3) return `cleanup_restore { batch_id: "${manifest.batch_id}" } undoes this batch`;
+  const files = summary ? summary.moved : (manifest.totals.quarantine_files || 0);
+  const actions = summary ? summary.actionsCompleted : (manifest.totals.native_actions || 0);
+  if (!files && !actions) return 'No item completed, so there is nothing to restore';
+  if (!files) return `${actions} native action(s) completed; no automatic restore is available`;
+  return `cleanup_restore { batch_id: "${manifest.batch_id}" } restores ${files} quarantined file(s); `
+    + `${actions} native action(s) remain non-restorable`;
+}
+
 async function probeTools(deps) {
   const out = {};
   for (const [name, hint] of [
@@ -1421,9 +1432,8 @@ const handlers = {
         actions_completed: summary.actionsCompleted,
         skipped: summary.skipped,
         bytes_freed: summary.bytesFreed,
-        restore_hint: manifest.method === 'trash'
-          ? 'items went to the macOS Trash — restore from the Trash in Finder'
-          : `cleanup_restore { batch_id: "${manifest.batch_id}" } undoes this batch`,
+        bytes_freed_estimated: manifest.version === 3 || undefined,
+        restore_hint: restoreHint(manifest, summary),
       };
     } finally {
       releaseExecutionLease(deps, manifest.batch_id);
@@ -1478,7 +1488,11 @@ const handlers = {
         auditEvent(deps, { event: 'restore', batch_id: manifest.batch_id, path: mv.path, outcome: 'error', error: err.message });
       }
     }
-    if (!manifest.items.some(it => it.result === 'moved')) manifest.status = 'restored';
+    if (!manifest.items.some(it => it.result === 'moved')) {
+      manifest.status = manifest.version === 3 && manifest.items.some(it => it.result === 'cleaned')
+        ? 'restored_with_nonreversible_actions'
+        : 'restored';
+    }
     writeManifest(deps, 'executed', manifest);
     return { ok: true, batch_id: manifest.batch_id, restored: restored.length, renamed, missing, errors };
   },
@@ -1500,6 +1514,8 @@ const handlers = {
     const brief = (m) => ({
       batch_id: m.batch_id, status: m.status, reason: m.reason, method: m.method,
       count: m.totals.count, bytes: m.totals.bytes,
+      quarantine_files: m.totals.quarantine_files,
+      native_actions: m.totals.native_actions,
     });
     const out = {
       ok: true,
@@ -1513,7 +1529,8 @@ const handlers = {
       })),
       quarantine_bytes: executedRaw
         .filter(m => m.status === 'executed')
-        .reduce((s, m) => s + m.items.filter(it => it.result === 'moved').reduce((s2, it) => s2 + (it.size || 0), 0), 0),
+        .reduce((s, m) => s + m.items.filter(it => it.result === 'moved')
+          .reduce((s2, it) => s2 + (it.estimated_bytes || it.size || 0), 0), 0),
       purge_due: quarantineCore.planPurge(executedRaw, { quarantineDays: cfg.cleanup.quarantineDays, nowMs: deps.now() }).map(m => m.batch_id),
       external_tools: await probeTools(deps),
     };
