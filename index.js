@@ -524,6 +524,7 @@ const OBSOLETE_RUNTIME_ARTIFACTS = [
   'memory-migrate-v2.js',
   'test-env-setup.js',
   'verify-reactive-claude-md.js',
+  path.join('core', 'file-map-mole.js'),
   path.join('.last-good', 'memory-migrate-v2.js'),
   path.join('.last-good', 'test-env-setup.js'),
   path.join('.last-good', 'verify-reactive-claude-md.js'),

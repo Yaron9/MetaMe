@@ -27,6 +27,7 @@ describe('index.js deploy command', () => {
     const metameDir = path.join(home, '.metame');
     fs.mkdirSync(metameDir, { recursive: true });
     fs.mkdirSync(path.join(metameDir, '.last-good'), { recursive: true });
+    fs.mkdirSync(path.join(metameDir, 'core'), { recursive: true });
     fs.mkdirSync(path.join(metameDir, 'hooks'), { recursive: true });
     fs.mkdirSync(path.join(metameDir, 'memory'), { recursive: true });
     fs.writeFileSync(path.join(metameDir, '.DS_Store'), 'macOS metadata\n', 'utf8');
@@ -35,6 +36,7 @@ describe('index.js deploy command', () => {
     fs.writeFileSync(path.join(metameDir, 'verify-reactive-claude-md.js'), '// stale verifier\n', 'utf8');
     fs.writeFileSync(path.join(metameDir, '.last-good', 'memory-migrate-v2.js'), '// stale backup migration\n', 'utf8');
     fs.writeFileSync(path.join(metameDir, '.last-good', 'verify-reactive-claude-md.js'), '// stale backup verifier\n', 'utf8');
+    fs.writeFileSync(path.join(metameDir, 'core', 'file-map-mole.js'), '// retired adapter\n', 'utf8');
     fs.writeFileSync(path.join(metameDir, 'hooks', 'test-stop-hook.js'), '// stale test hook\n', 'utf8');
 
     const output = execFileSync(process.execPath, [path.join(ROOT, 'index.js'), 'deploy'], {
@@ -57,6 +59,7 @@ describe('index.js deploy command', () => {
     assert.equal(fs.existsSync(path.join(home, '.metame', 'verify-reactive-claude-md.js')), false);
     assert.equal(fs.existsSync(path.join(home, '.metame', '.last-good', 'memory-migrate-v2.js')), false);
     assert.equal(fs.existsSync(path.join(home, '.metame', '.last-good', 'verify-reactive-claude-md.js')), false);
+    assert.equal(fs.existsSync(path.join(home, '.metame', 'core', 'file-map-mole.js')), false);
     assert.equal(fs.existsSync(path.join(home, '.metame', 'hooks', 'test-stop-hook.js')), false);
     assert.equal(fs.existsSync(path.join(home, '.metame', '.DS_Store')), false);
     assert.equal(fs.existsSync(path.join(home, '.metame', 'memory', '.DS_Store')), false);
