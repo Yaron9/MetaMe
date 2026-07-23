@@ -19,8 +19,8 @@
  *    cleanup_propose (its raw token is returned once and only its hash is
  *    persisted). Same-volume files move atomically into an opaque quarantine
  *    path and remain restorable; cross-volume candidates fail closed;
- *  - Mole is optional and bounded to `analyze --json` and `clean --dry-run`;
- *    its output never bypasses the native proposal and protection gates;
+ *  - maintenance discovery is native and has no external cleaner dependency;
+ *    tool-specific actions are fixed argv adapters behind the same proposal gate;
  *  - deployment discipline: do NOT allowlist cleanup_execute — the host's
  *    per-call permission prompt is the final "user present" gate.
  *
@@ -45,7 +45,6 @@ const manifestCore = require('./core/file-map-manifest');
 const auditCore = require('./core/file-map-audit');
 const quarantineCore = require('./core/file-map-quarantine');
 const executionCore = require('./core/file-map-execution');
-const moleCore = require('./core/file-map-mole');
 const maintenanceRules = require('./core/file-map-maintenance-rules');
 const maintenanceScan = require('./core/file-map-maintenance-scan');
 const maintenanceActions = require('./core/file-map-maintenance-actions');
@@ -164,8 +163,6 @@ const TOOLS = [
         target_reclaim_gb: { type: 'number', description: 'Optional amount of space to plan for reclaiming; the plan is advisory and never authorizes cleanup' },
         min_report_mb: { type: 'number', description: 'Hide measured categories below this size (default 500 MB; target planning still considers them)' },
         du_budget_seconds: { type: 'number', description: 'Maximum wall-clock budget for category sizing (default 45s, cap 120s)' },
-        include_mole_analysis: { type: 'boolean', description: 'Optionally augment the native assessment with read-only `mo analyze --json` output' },
-        mole_root: { type: 'string', description: 'Root passed to Mole analysis (default ~; must stay inside configured roots)' },
       },
     },
   },
@@ -183,19 +180,6 @@ const TOOLS = [
         limit: { type: 'number', description: 'Results per page (default 200, cap 500)' },
         scan_id: { type: 'string', description: 'Existing fresh scan snapshot to page without rescanning' },
         cursor: { type: 'string', description: 'Opaque cursor returned with an existing scan_id' },
-      },
-    },
-  },
-  {
-    name: 'mole_cleanup_preview',
-    description: 'Run the fixed non-destructive command `mo clean --dry-run`, then normalize its fresh clean-list for review. This tool never installs Mole, never runs a real cleanup, and never auto-proposes candidates.',
-    annotations: WRITES_METADATA,
-    inputSchema: {
-      type: 'object',
-      properties: {
-        refresh: { type: 'boolean', description: 'Run a new dry-run before reading the list (default true)' },
-        offset: { type: 'number', description: 'Pagination offset (default 0)' },
-        limit: { type: 'number', description: 'Candidates returned (default 100, cap 200/config cap)' },
       },
     },
   },
@@ -1004,7 +988,7 @@ async function executeManifest(deps, cfg, manifest) {
 async function probeTools(deps) {
   const out = {};
   for (const [name, hint] of [
-    ['fclones', 'brew install fclones'], ['gdu', 'brew install gdu'], ['mo', 'brew install mole'],
+    ['fclones', 'brew install fclones'], ['gdu', 'brew install gdu'],
   ]) {
     const { error } = await deps.runCapture(name, ['--version'], { timeoutMs: 3000 });
     out[name] = error ? { available: false, install: hint } : { available: true };
@@ -1018,119 +1002,6 @@ async function probeMaintenanceTools(deps) {
     return [spec.name, { available: !error }];
   }));
   return Object.fromEntries(pairs);
-}
-
-async function probeMole(deps) {
-  const { stdout, error } = await deps.runCapture('mo', ['--version'], { timeoutMs: 5000 });
-  if (error) return { available: false, error, install: 'brew install mole' };
-  return { available: true, version: String(stdout || '').trim() || 'unknown' };
-}
-
-function validateMoleRoot(deps, cfg, requested) {
-  const root = expandHome(String(requested || '~'), deps.home);
-  const syntax = protect.validatePathSyntax(root);
-  if (!syntax.ok) return { ok: false, error: syntax.rule };
-  let st;
-  try { st = deps.fsx.lstatSync(root); } catch { return { ok: false, error: 'missing-root' }; }
-  if (st.isSymbolicLink() || !st.isDirectory()) return { ok: false, error: 'root-must-be-real-directory' };
-  let real;
-  try { real = deps.fsx.realpathSync(root); } catch { return { ok: false, error: 'unresolvable-root' }; }
-  if (real !== root) return { ok: false, error: 'symlink-ancestor' };
-  const inside = cfg.roots.some(base => root === base || protect.isWithinRoots(root, [base]));
-  return inside ? { ok: true, root } : { ok: false, error: 'outside-roots' };
-}
-
-async function collectMoleAnalysis(args, deps, cfg) {
-  if (!cfg.mole.enabled) return { available: false, disabled: true };
-  const rootCheck = validateMoleRoot(deps, cfg, args.mole_root);
-  if (!rootCheck.ok) return { available: false, error: rootCheck.error };
-  const probe = await probeMole(deps);
-  if (!probe.available) return probe;
-  const { stdout, error } = await deps.runCapture(
-    'mo', ['analyze', '--json', rootCheck.root], { timeoutMs: cfg.mole.analyzeTimeoutMs }
-  );
-  if (error && !stdout) return { available: true, version: probe.version, error };
-  const parsed = moleCore.parseAnalyzeJson(stdout, { limit: 100 });
-  return parsed.ok
-    ? { available: true, version: probe.version, ...parsed }
-    : { available: true, version: probe.version, error: parsed.error };
-}
-
-function normalizeMoleCandidates(paths, deps, cfg) {
-  const io = { lstatSync: p => deps.fsx.lstatSync(p), realpathSync: p => deps.fsx.realpathSync(p), now: deps.now };
-  const seenIdentity = new Set();
-  const candidates = [];
-  for (const candidatePath of paths) {
-    let st = null;
-    try { st = deps.fsx.lstatSync(candidatePath); } catch { /* retained as missing advice */ }
-    if (st && st.dev != null && st.ino != null) {
-      const identity = `${st.dev}:${st.ino}`;
-      if (seenIdentity.has(identity)) continue;
-      seenIdentity.add(identity);
-    }
-    const checked = protect.checkPath(candidatePath, cfg, io);
-    const isDirectory = !!(st && st.isDirectory());
-    const protectionRule = checked.ok
-      ? (isDirectory ? 'directory-not-supported' : null)
-      : checked.rule;
-    candidates.push({
-      path: candidatePath,
-      size: st ? st.size : null,
-      is_directory: isDirectory,
-      protection_rule: protectionRule || undefined,
-      pipeline_eligible: checked.ok && !isDirectory,
-    });
-  }
-  return candidates;
-}
-
-async function collectMolePreview(args, deps, loaded) {
-  const cfg = loaded.config;
-  if (!cfg.mole.enabled) return { ok: false, error: 'Mole adapter disabled by configuration' };
-  const probe = await probeMole(deps);
-  if (!probe.available) return { ok: false, error: 'Mole is not installed', install_hint: probe.install };
-  const listFile = path.join(deps.home, '.config', 'mole', 'clean-list.txt');
-  const refresh = args.refresh !== false;
-  const started = deps.now();
-  if (refresh) {
-    const { error } = await deps.runCapture('mo', ['clean', '--dry-run'], { timeoutMs: cfg.mole.previewTimeoutMs });
-    if (error) return { ok: false, error: `Mole dry-run failed: ${error}` };
-  }
-  let stat;
-  let text;
-  try {
-    stat = deps.fsx.statSync(listFile);
-    text = deps.fsx.readFileSync(listFile, 'utf8');
-  } catch {
-    return { ok: false, error: 'Mole clean-list is unavailable' };
-  }
-  if (refresh && stat.mtimeMs < started) return { ok: false, error: 'Mole clean-list was not refreshed' };
-  if (!refresh && !moleCore.isPreviewFresh(stat.mtimeMs, deps.now(), cfg.mole.previewTtlMs)) {
-    return { ok: false, error: 'Mole clean-list is stale — call with refresh:true' };
-  }
-  const parsedPaths = moleCore.parseCleanList(text, { limit: cfg.mole.maxReturnedCandidates + 1 });
-  const sourceTruncated = parsedPaths.length > cfg.mole.maxReturnedCandidates;
-  const candidates = normalizeMoleCandidates(parsedPaths.slice(0, cfg.mole.maxReturnedCandidates), deps, cfg);
-  const offset = Math.max(0, Math.floor(Number(args.offset) || 0));
-  const limit = clamp(args.limit, 100, 1, Math.min(200, cfg.mole.maxReturnedCandidates));
-  return {
-    ok: true,
-    available: true,
-    version: probe.version,
-    source: 'mo clean --dry-run',
-    generated_at: new Date(stat.mtimeMs).toISOString(),
-    preview_path: listFile,
-    total_candidates: candidates.length,
-    candidate_cap: cfg.mole.maxReturnedCandidates,
-    source_truncated: sourceTruncated || undefined,
-    total_bytes: candidates.reduce((sum, item) => sum + (item.size || 0), 0),
-    returned: candidates.slice(offset, offset + limit).length,
-    truncated: offset + limit < candidates.length || undefined,
-    candidates: candidates.slice(offset, offset + limit),
-    executable: false,
-    note: 'Preview only. Review candidates explicitly; this tool never runs a real Mole cleanup or cleanup_propose.',
-    ...(loaded.ok ? {} : { config_warning: loaded.error }),
-  };
 }
 
 async function collectStorageAssessment(args, deps, loaded) {
@@ -1188,12 +1059,12 @@ async function collectStorageAssessment(args, deps, loaded) {
     warnings: [
       'This assessment is read-only. Category totals are estimates and some aggregate categories overlap.',
       'Cloud-synced paths require provider-aware eviction; deleting a synced path may delete the cloud copy.',
-      'Tool-native prune commands are not recoverable and are intentionally outside cleanup_execute.',
+      'Tool-native actions are not recoverable and require a maintenance_scan candidate, fixed adapter preflight, and explicit cleanup_execute confirmation.',
       processList.error ? 'Running-app guard is unavailable; verify manually that related apps are closed before clearing caches.' : null,
       snapshots.error ? 'Local snapshot status is unavailable; verify Time Machine/APFS snapshots separately.' : null,
       outsideRoots ? `${outsideRoots} catalog paths were not scanned because they are outside configured roots.` : null,
     ].filter(Boolean),
-    next_step: 'Review a category, narrow it with scan_large/scan_stale/scan_duplicates, then use cleanup_propose for selected unprotected paths.',
+    next_step: 'Use maintenance_scan for project artifacts, installers and known caches; select candidate IDs, then use cleanup_propose.',
     ...(loaded.ok ? {} : { config_warning: loaded.error }),
   };
 }
@@ -1441,19 +1312,20 @@ const handlers = {
 
   async storage_assess(args, deps) {
     const loaded = deps.loadConfig();
-    const assessment = await collectStorageAssessment(args, deps, loaded);
-    if (args.include_mole_analysis) {
-      assessment.mole_analysis = await collectMoleAnalysis(args, deps, loaded.config);
-    }
-    return assessment;
+    return collectStorageAssessment(args, deps, loaded);
   },
 
   async maintenance_scan(args, deps) {
     return collectMaintenanceScan(args, deps, deps.loadConfig());
   },
 
-  async mole_cleanup_preview(args, deps) {
-    return collectMolePreview(args, deps, deps.loadConfig());
+  async mole_cleanup_preview(_args, _deps) {
+    return {
+      ok: false,
+      error: 'tool_removed',
+      replacement: 'maintenance_scan',
+      note: 'This deprecated alias performs no command or filesystem action.',
+    };
   },
 
   async cleanup_propose(args, deps) {

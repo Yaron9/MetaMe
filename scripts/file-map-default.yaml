@@ -67,12 +67,3 @@ maintenance:
   budget_seconds: 15
   snapshot_ttl_minutes: 60
   max_candidates: 5000
-
-# Optional Mole CLI adapter. MetaMe never installs Mole and never runs a real
-# Mole cleanup; the preview command is always `mo clean --dry-run`.
-mole:
-  enabled: true
-  analyze_timeout_seconds: 120
-  preview_timeout_seconds: 180
-  preview_ttl_minutes: 60
-  max_returned_candidates: 200

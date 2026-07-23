@@ -32,13 +32,6 @@ const DEFAULT_CONFIG = {
     snapshot_ttl_minutes: 60,
     max_candidates: 5000,
   },
-  mole: {
-    enabled: true,
-    analyze_timeout_seconds: 120,
-    preview_timeout_seconds: 180,
-    preview_ttl_minutes: 60,
-    max_returned_candidates: 200,
-  },
 };
 
 function expandHome(p, home) {
@@ -65,7 +58,6 @@ function normalizeConfig(raw, home) {
   const overview = { ...DEFAULT_CONFIG.overview, ...(src.overview && typeof src.overview === 'object' ? src.overview : {}) };
   const storage = { ...DEFAULT_CONFIG.storage, ...(src.storage && typeof src.storage === 'object' ? src.storage : {}) };
   const maintenance = { ...DEFAULT_CONFIG.maintenance, ...(src.maintenance && typeof src.maintenance === 'object' ? src.maintenance : {}) };
-  const mole = { ...DEFAULT_CONFIG.mole, ...(src.mole && typeof src.mole === 'object' ? src.mole : {}) };
   return {
     roots: stringList(src.roots, DEFAULT_CONFIG.roots).map(p => expandHome(p, home)),
     protectedPatterns: stringList(src.protected, DEFAULT_CONFIG.protected).map(p => expandHome(p, home)),
@@ -95,13 +87,6 @@ function normalizeConfig(raw, home) {
       budgetMs: clampNumber(maintenance.budget_seconds, 15, 1, 120) * 1000,
       snapshotTtlMs: clampNumber(maintenance.snapshot_ttl_minutes, 60, 5, 24 * 60) * 60 * 1000,
       maxCandidates: clampNumber(maintenance.max_candidates, 5000, 1, 20000),
-    },
-    mole: {
-      enabled: mole.enabled !== false,
-      analyzeTimeoutMs: clampNumber(mole.analyze_timeout_seconds, 120, 10, 600) * 1000,
-      previewTimeoutMs: clampNumber(mole.preview_timeout_seconds, 180, 10, 900) * 1000,
-      previewTtlMs: clampNumber(mole.preview_ttl_minutes, 60, 1, 24 * 60) * 60 * 1000,
-      maxReturnedCandidates: clampNumber(mole.max_returned_candidates, 200, 1, 500),
     },
   };
 }

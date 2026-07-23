@@ -57,6 +57,7 @@ const ARTIFACT_RULES = Object.freeze([
 
 const INSTALLER_EXTENSIONS = Object.freeze(new Set(['.dmg', '.pkg', '.mpkg', '.iso', '.xip']));
 const CACHE_CATEGORY_IDS = Object.freeze(new Set(['browser_caches', 'developer_tools']));
+const CACHEDIR_SIGNATURE = 'Signature: 8a477f597d28d172789f06886806bc55';
 
 function artifactRuleFor(fsx, pathx, candidatePath) {
   const basename = pathx.basename(candidatePath);
@@ -65,7 +66,22 @@ function artifactRuleFor(fsx, pathx, candidatePath) {
     const markerRoot = rule.markerLocation === 'self' ? candidatePath : pathx.dirname(candidatePath);
     if (rule.markers.some(marker => existsFile(fsx, pathx.join(markerRoot, marker)))) return rule;
   }
+  if (hasValidCacheDirTag(fsx, pathx.join(candidatePath, 'CACHEDIR.TAG'))) {
+    return {
+      id: 'cachedir-tag',
+      risk: 'medium',
+      recoverability: 'regenerable',
+      executionMode: 'report_only',
+    };
+  }
   return null;
+}
+
+function hasValidCacheDirTag(fsx, file) {
+  try {
+    const content = fsx.readFileSync(file);
+    return content.subarray(0, CACHEDIR_SIGNATURE.length).toString('utf8') === CACHEDIR_SIGNATURE;
+  } catch { return false; }
 }
 
 function installerRuleFor(pathx, candidatePath, zipEntries) {
@@ -125,8 +141,10 @@ module.exports = {
   ARTIFACT_RULES,
   INSTALLER_EXTENSIONS,
   CACHE_CATEGORY_IDS,
+  CACHEDIR_SIGNATURE,
   artifactRuleFor,
   installerRuleFor,
   isInstallerZip,
   cacheRulesFromCatalog,
+  hasValidCacheDirTag,
 };

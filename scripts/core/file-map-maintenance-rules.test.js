@@ -18,6 +18,17 @@ describe('file-map maintenance rules', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it('recognizes only a valid standard CACHEDIR.TAG signature', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-cachedir-'));
+    const cache = path.join(root, 'opaque-cache');
+    fs.mkdirSync(cache);
+    fs.writeFileSync(path.join(cache, 'CACHEDIR.TAG'), 'invalid');
+    assert.equal(rules.artifactRuleFor(fs, path, cache), null);
+    fs.writeFileSync(path.join(cache, 'CACHEDIR.TAG'), `${rules.CACHEDIR_SIGNATURE}\n# cache directory tag`);
+    assert.equal(rules.artifactRuleFor(fs, path, cache).id, 'cachedir-tag');
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   it('accepts strong installer types and only installation-shaped ZIPs', () => {
     assert.equal(rules.installerRuleFor(path, '/x/App.dmg', null).executionMode, 'quarantine_file');
     assert.equal(rules.installerRuleFor(path, '/x/source.zip', ['src/index.js']), null);

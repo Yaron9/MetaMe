@@ -52,15 +52,15 @@ describe('metame-files-mcp-server protocol', () => {
 
     const list = await handleMessage({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
     const byName = new Map(list.result.tools.map(t => [t.name, t]));
-    assert.equal(list.result.tools.length, 14);
+    assert.equal(list.result.tools.length, 13);
     for (const name of [
       'file_search', 'file_overview', 'file_last_used', 'scan_large', 'scan_stale',
-      'storage_assess', 'maintenance_scan', 'mole_cleanup_preview',
+      'storage_assess', 'maintenance_scan',
     ]) {
       assert.ok(byName.has(name), `${name} must be listed`);
     }
     const destructive = new Set(['cleanup_execute', 'cleanup_purge']);
-    const writesMetadata = new Set(['cleanup_propose', 'cleanup_restore', 'mole_cleanup_preview']);
+    const writesMetadata = new Set(['cleanup_propose', 'cleanup_restore']);
     for (const tool of list.result.tools) {
       assert.ok(tool.description.length > 20, `${tool.name} needs a real description`);
       assert.equal(tool.inputSchema.type, 'object');
@@ -922,114 +922,16 @@ describe('storage_assess', () => {
     assert.ok(out.warnings.some(w => /snapshot status is unavailable/.test(w)));
   });
 
-  it('optionally augments the native report with bounded Mole analyze JSON', async () => {
-    const commands = [];
-    const deps = tempDeps({
-      loadConfig: stubConfig,
-      fsx: {
-        lstatSync: p => {
-          if (p !== HOME) throw new Error('ENOENT');
-          return { isSymbolicLink: () => false, isDirectory: () => true };
-        },
-        realpathSync: p => p,
-      },
-      runCapture: async (cmd, args) => {
-        commands.push([cmd, args]);
-        if (cmd === 'mo' && args[0] === '--version') return { stdout: 'Mole 1.47.1\n', error: null };
-        if (cmd === 'mo' && args[0] === 'analyze') {
-          return {
-            stdout: JSON.stringify({
-              path: HOME, overview: true, total_size: 30, total_files: 2,
-              entries: [{ name: 'Downloads', path: `${HOME}/Downloads`, size: 30, is_dir: true }],
-              large_files: [],
-            }),
-            error: null,
-          };
-        }
-        if (cmd === 'df') return { stdout: 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk 10 5 5 50% /\n', error: null };
-        return { stdout: '', error: `spawn ${cmd} ENOENT` };
-      },
-    });
-    const out = await callTool('storage_assess', { include_mole_analysis: true }, deps);
-    assert.equal(out.ok, true);
-    assert.equal(out.mole_analysis.available, true);
-    assert.equal(out.mole_analysis.total_size, 30);
-    assert.deepEqual(commands.find(([cmd, args]) => cmd === 'mo' && args[0] === 'analyze')[1], ['analyze', '--json', HOME]);
-  });
 });
 
-describe('mole_cleanup_preview', () => {
-  function previewWorld() {
-    const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'metame-mole-preview-')));
-    const downloads = path.join(home, 'Downloads');
-    const ssh = path.join(home, '.ssh');
-    const oldDir = path.join(downloads, 'old-dir');
-    fs.mkdirSync(downloads, { recursive: true });
-    fs.mkdirSync(ssh, { recursive: true });
-    fs.mkdirSync(oldDir);
-    const oldFile = path.join(downloads, 'old.dmg');
-    const aliasFile = path.join(downloads, 'old-hardlink.dmg');
-    const secret = path.join(ssh, 'id_rsa');
-    fs.writeFileSync(oldFile, 'old installer');
-    fs.linkSync(oldFile, aliasFile);
-    fs.writeFileSync(secret, 'secret');
-    const old = (Date.now() - 100 * 24 * 3600 * 1000) / 1000;
-    for (const target of [oldFile, aliasFile, secret, oldDir]) fs.utimesSync(target, old, old);
-    const listFile = path.join(home, '.config', 'mole', 'clean-list.txt');
-    fs.mkdirSync(path.dirname(listFile), { recursive: true });
-    fs.writeFileSync(listFile, `${oldFile}\n${aliasFile}\n${secret}\n${oldDir}\nrelative\n`);
-    const now = Date.now();
-    fs.utimesSync(listFile, now / 1000, now / 1000);
-    const calls = [];
-    const deps = tempDeps({
-      home,
-      fileMapDir: path.join(home, 'file-map'),
-      fsx: fs,
-      now: () => now,
-      loadConfig: () => ({
-        ok: true,
-        source: 'test',
-        config: normalizeConfig({ roots: [home], protected: ['**/.ssh/**'] }, home),
-      }),
-      runCapture: async (cmd, args) => {
-        calls.push([cmd, args]);
-        if (cmd === 'mo' && args[0] === '--version') return { stdout: 'Mole 1.47.1\n', error: null };
-        if (cmd === 'mo' && args[0] === 'clean') {
-          fs.utimesSync(listFile, (now + 1000) / 1000, (now + 1000) / 1000);
-          return { stdout: 'dry run\n', error: null };
-        }
-        return { stdout: '', error: `unexpected ${cmd}` };
-      },
+describe('removed cleaner compatibility alias', () => {
+  it('returns an inert migration error for old clients', async () => {
+    const out = await callTool('mole_cleanup_preview', {}, tempDeps());
+    assert.deepEqual(out, {
+      ok: false,
+      error: 'tool_removed',
+      replacement: 'maintenance_scan',
+      note: 'This deprecated alias performs no command or filesystem action.',
     });
-    return { home, oldFile, secret, oldDir, listFile, calls, deps, cleanup: () => fs.rmSync(home, { recursive: true, force: true }) };
-  }
-
-  it('runs only the allowlisted dry-run and returns deduplicated guarded candidates', async () => {
-    const w = previewWorld();
-    const out = await callTool('mole_cleanup_preview', { refresh: true, limit: 20 }, w.deps);
-    assert.equal(out.ok, true);
-    assert.equal(out.executable, false);
-    assert.deepEqual(w.calls, [
-      ['mo', ['--version']],
-      ['mo', ['clean', '--dry-run']],
-    ]);
-    assert.equal(out.total_candidates, 3, 'hard links deduplicate by device+inode and relative lines are ignored');
-    assert.equal(out.candidates.find(item => item.path === w.oldFile).pipeline_eligible, true);
-    assert.match(out.candidates.find(item => item.path === w.secret).protection_rule, /protected/);
-    assert.equal(out.candidates.find(item => item.path === w.oldDir).protection_rule, 'directory-not-supported');
-    w.cleanup();
-  });
-
-  it('refuses a stale cached list and reports a missing Mole install hint', async () => {
-    const w = previewWorld();
-    w.deps.now = () => fs.statSync(w.listFile).mtimeMs + 61 * 60 * 1000;
-    const stale = await callTool('mole_cleanup_preview', { refresh: false }, w.deps);
-    assert.equal(stale.ok, false);
-    assert.match(stale.error, /stale/);
-    w.deps.runCapture = async () => ({ stdout: '', error: 'spawn mo ENOENT' });
-    const missing = await callTool('mole_cleanup_preview', {}, w.deps);
-    assert.equal(missing.ok, false);
-    assert.equal(missing.install_hint, 'brew install mole');
-    w.cleanup();
   });
 });

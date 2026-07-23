@@ -21,8 +21,6 @@ describe('file-map-config normalize', () => {
     assert.equal(cfg.storage.duBudgetSeconds, 45);
     assert.equal(cfg.maintenance.maxDepth, 6);
     assert.equal(cfg.maintenance.snapshotTtlMs, 3600000);
-    assert.equal(cfg.mole.enabled, true);
-    assert.equal(cfg.mole.analyzeTimeoutMs, 120000);
   });
 
   it('user values override defaults, out-of-range numbers clamp', () => {
@@ -33,7 +31,6 @@ describe('file-map-config normalize', () => {
       overview: { depth: 99 },
       storage: { min_report_mb: -10, du_budget_seconds: 9999, target_max_categories: 0 },
       maintenance: { recent_days: -1, max_depth: 99, max_entries: 5, budget_seconds: 999, max_candidates: 99999 },
-      mole: { enabled: false, preview_timeout_seconds: 9999, max_returned_candidates: 0 },
     }, HOME);
     assert.deepEqual(cfg.roots, [`${HOME}/Work`]);
     assert.equal(cfg.protectRecentDays, 365, 'clamped to max');
@@ -49,9 +46,6 @@ describe('file-map-config normalize', () => {
     assert.equal(cfg.maintenance.maxEntries, 100);
     assert.equal(cfg.maintenance.budgetMs, 120000);
     assert.equal(cfg.maintenance.maxCandidates, 20000);
-    assert.equal(cfg.mole.enabled, false);
-    assert.equal(cfg.mole.previewTimeoutMs, 900000);
-    assert.equal(cfg.mole.maxReturnedCandidates, 1);
     // untouched sections keep defaults
     assert.equal(cfg.cleanup.quarantineDays, 30);
     assert.equal(cfg.protectedPatterns.length, DEFAULT_CONFIG.protected.length);

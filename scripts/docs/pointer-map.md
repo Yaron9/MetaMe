@@ -23,7 +23,7 @@
 - 热重载安全机制：`scripts/daemon-runtime-lifecycle.js`（语法预检、last-good 备份、crash-loop 自愈）
 - 打包工具：`scripts/deploy-manifest.js`（部署清单）、`scripts/sync-plugin.js`（plugin 镜像同步）
 - 维护手册：`scripts/docs/maintenance-manual.md`
-- 文件地图、安全清理与 Mole 边界：`scripts/docs/file-map-maintenance.md`
+- 文件地图、原生维护扫描与 typed-action 清理：`scripts/docs/file-map-maintenance.md`
 
 ## 多引擎（Claude/Codex）定位
 

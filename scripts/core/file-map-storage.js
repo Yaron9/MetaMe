@@ -186,7 +186,7 @@ const CATEGORY_SPECS = [
       '~/.cargo/registry/cache',
       '~/.cargo/registry/src',
     ],
-    warning: 'Tool-native prune commands are not reversible and must never be folded into cleanup_execute.',
+    warning: 'Only built-in typed adapters may execute here; all other developer caches remain report-only.',
   },
 ];
 
