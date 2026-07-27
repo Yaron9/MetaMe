@@ -1,8 +1,6 @@
 ---
 name: deep-research
 description: AI深度研究助手。对任何主题进行迭代式深度研究，结合搜索引擎、网页抓取和大语言模型生成详细研究报告。触发词：深度研究、调研、research。
-version: 2.0.0
-created_at: 2026-01-29
 ---
 
 # Deep Research 深度研究

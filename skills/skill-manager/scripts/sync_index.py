@@ -46,8 +46,6 @@ def source_label(root: Path):
     s = str(root)
     if "/.claude/" in s:
         return "claude"
-    if "/.opencode/" in s:
-        return "opencode"
     return root.name or "local"
 
 
@@ -123,7 +121,7 @@ def main():
     parser.add_argument(
         "roots",
         nargs="+",
-        help="Skill root folders to scan (e.g. ~/.claude/skills ~/.opencode/skills).",
+        help="Skill root folders to scan (e.g. ~/.claude/skills ./.claude/skills).",
     )
     args = parser.parse_args()
 

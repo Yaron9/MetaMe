@@ -76,7 +76,7 @@ npm view metame-cli version
 ## 架构要点（避免重蹈覆辙）
 
 - **npm "files"** 包含 `"scripts/"` 通配符 → 所有 `scripts/` 文件自动发布，无需手动维护列表
-- **`plugin/`** 是 Claude Code 插件目录，**不是** npm 发布路径
+- **`plugin/`** 是 Codex 插件目录，**不是** npm 发布路径
 - **`sync:plugin`** 已改为自动扫描：新增文件无需更新任何列表
 - **`BUNDLED_SCRIPTS`** 在 `index.js` 也已自动扫描：排除 `*.test.js` / `sync-readme.js` / `test_daemon.js`
 - **Windows 用户**：`IS_DEV_MODE=false`，走文件复制，hooks/bin 均由 `index.js` 的 `syncDirFiles` 处理

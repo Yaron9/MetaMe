@@ -1,9 +1,6 @@
 ---
 name: agent-browser
 description: AI Agent 专属无头浏览器 CLI（省 token 80%）。触发：网页自动化、打开网页、点击填表、截图抓快照、agent-browser。
-version: "1.0.0"
-tool: agent-browser
-install: npm install -g agent-browser && agent-browser install
 ---
 
 # agent-browser — AI Agent 专属浏览器

@@ -1,6 +1,10 @@
 ---
 name: skill-creator
-description: Create, iterate, evolve, and package skills that extend Claude's capabilities. Use when: (1) Creating a new skill from scratch, (2) Updating or improving an existing skill's instructions or bundled resources, (3) Evolving a skill based on session experience (bugs, preferences, workarounds) — triggers: "进化技能", "更新 skill", "/evolve", "记录这个经验", "skill evolution", (4) Packaging a skill for distribution to other Claude Code (Codex) users. Do NOT trigger for general programming tasks unrelated to skill authoring.
+description: >-
+  Create, iterate, evolve, and package skills that extend Claude's capabilities.
+  Use when creating a skill, updating skill instructions or resources, recording
+  reusable experience, or packaging a skill for Claude Code or Codex users.
+  Do not trigger for unrelated programming tasks.
 license: Complete terms in LICENSE.txt
 ---
 

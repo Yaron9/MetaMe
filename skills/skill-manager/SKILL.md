@@ -1,6 +1,6 @@
 ---
 name: skill-manager
-description: 技能系统总管。AI 遇到任何能力不足、工具缺失、任务失败时，第一时间查阅此 skill。它掌握全部已安装技能的清单，决定是调用现有技能还是获取新技能，并在任务完成后自动进化技能库。触发条件：(1)任务执行失败或结果不理想，(2)需要的工具/能力不存在，(3)用户说"找技能"、"管理技能"、"更新技能"。本协议应自动触发，无需用户指令。
+description: 技能能力路由与治理。用于能力不足、工具缺失、任务失败，以及用户要求查找、安装、更新或管理 skill 时。
 ---
 
 # Skill Manager — 技能系统总管
@@ -12,8 +12,12 @@ description: 技能系统总管。AI 遇到任何能力不足、工具缺失、�
 ## 第一步：看清全局
 
 ```bash
-python ~/.opencode/skills/skill-manager/scripts/list_skills.py ~/.claude/skills 2>/dev/null; python ~/.opencode/skills/skill-manager/scripts/list_skills.py ~/.opencode/skills 2>/dev/null
+python ~/.claude/skills/skill-manager/scripts/list_skills.py ~/.claude/skills 2>/dev/null
 ```
+
+> `~/.claude/skills/` 是唯一的全局技能源；`~/.codex/skills` 与
+> `~/.agents/skills` 只作为指向它的兼容入口。项目专属技能放在项目的
+> `.claude/skills/`，并按需从 `.agents/skills/` 建立项目内软链接。
 
 有匹配的 skill → **路径 A**。没有 → **路径 B**。
 
@@ -40,27 +44,35 @@ python ~/.opencode/skills/skill-manager/scripts/list_skills.py ~/.claude/skills 
 
 | 调研发现 | 行动 | 用哪个子系统 |
 |---------|------|-------------|
-| skills.sh 商城有现成 skill | 直接装 | `find-skills` |
-| GitHub 上有个项目能做这件事 | 包装成 skill | `github-to-skills` |
+| skills.sh 商城有现成 skill | 在本 skill 内评估并安装 | Skills CLI |
+| GitHub 上有个项目能做这件事 | 研究后创建适配版本 | `skill-creator` |
 | 找到了教程/方法，但没有现成工具 | 基于调研结果从零创建 | `skill-creator` |
 | 什么都没找到 | 用自己的知识从零创建 | `skill-creator` |
 
 **B2a. 商城安装（最便宜）**
+
 ```bash
 npx skills find <关键词>
-npx skills add <owner/repo> -g -y
+npx skills add <owner/repo@skill> -g -y
 ```
 
-**B2b. GitHub 包装（中等成本）**
+安装前必须检查：
 
-调用 `github-to-skills` skill，提供 GitHub URL，自动生成 skill。
+- 与现有能力是否重复
+- 来源、维护活跃度和许可证
+- 是否引用未随安装提供的其他 skill、脚本或 MCP
+- description 是否过宽，会不会常驻占用上下文或误触发
 
-**B2c. 从零创建（最贵）**
+一次给出不超过 3 个候选，说明差异后再选择。安装完成后继续执行原任务。
+
+**B2b. 从 GitHub 或方法创建**
 
 调用 `skill-creator` skill，将调研到的流程写成 SKILL.md：
 - 具体步骤（URL、按钮、等待元素）
 - 前置依赖（Playwright MCP？登录？API Key？）
 - 已知限制和坑
+- 上游来源与许可证
+- 本地适配点及验证方式
 
 ### B3. 验证
 
@@ -74,26 +86,25 @@ ls ~/.claude/skills/<技能名>/SKILL.md 2>/dev/null || ls ~/.agents/skills/<技
 
 ## 路径 C：进化（任务完成后自动执行）
 
-查阅 `skill-evolution-manager`，将本次经验写回 skill。只记有价值的：踩过的坑、用户偏好、优化策略。没有新经验则跳过。
+按 `skill-creator` 的 evolution 流程将本次经验写回 skill。只记有价值的踩坑、用户偏好和优化策略；没有新经验则跳过。
 
 ## 路径 D：更新过时 skill
 
 ```bash
-python ~/.opencode/skills/skill-manager/scripts/scan_and_check.py ~/.claude/skills
+python ~/.claude/skills/skill-manager/scripts/scan_and_check.py ~/.claude/skills
 ```
 
 1. `python scripts/update_helper.py <skill_path>` 备份
 2. 拉取新版本
-3. `python ~/.opencode/skills/skill-evolution-manager/scripts/smart_stitch.py <skill_path>` 恢复经验
+3. 用 `skill-creator/scripts/smart_stitch.py <skill_path>` 恢复经验
 
 ## 子系统索引
 
 | 子系统 | Skill 名 | 何时调用 |
 |--------|----------|---------|
-| 商城搜索 | `find-skills` | B2a |
-| GitHub 包装 | `github-to-skills` | B2b |
-| 从零创建 | `skill-creator` | B2c |
-| 经验进化 | `skill-evolution-manager` | 路径 C |
+| 商城搜索与安装 | Skills CLI | B2a |
+| 创建与适配 | `skill-creator` | B2b |
+| 经验进化 | `skill-creator` | 路径 C |
 | 环境修复 | `mcp-installer` | 工具缺失错误 |
 | 深度调研 | `deep-research` | B1（复杂主题时） |
 | 自愈诊断 | `self-diagnose` | Daemon 执行失败自动触发；手机 `/doctor` 手动触发 |
@@ -106,7 +117,8 @@ python ~/.opencode/skills/skill-manager/scripts/scan_and_check.py ~/.claude/skil
 ## 约束
 
 - 单次最多安装 2 个新技能
-- 优先可信来源（anthropics/、vercel-labs/）
+- 优先可信且许可清晰的来源
+- 已有能力能覆盖时不新增同类 skill
 - 依赖 MCP 的技能先走 `mcp-installer` 自愈协议
 - 商城：https://skills.sh/
 - 删除：`python scripts/delete_skill.py <name> ~/.claude/skills`

@@ -1,3 +1,8 @@
+---
+name: mcp-installer
+description: Install, enable, and manage MCP servers for Claude Code, Codex, and compatible local coding agents. Use when the user asks to install an MCP, enable browser automation, configure Playwright MCP, or repair MCP configuration.
+---
+
 # MCP 安装与管理协议
 
 当用户要求安装、启用或管理 MCP 工具时，执行本协议。

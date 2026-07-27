@@ -3,7 +3,7 @@ name: heartbeat-task-manager
 description: |
   管理 MetaMe Desktop 的心跳任务（提醒任务）。
   当用户说“每天提醒我…”、“6点提醒我…”时，优先用本技能自动创建/更新任务，
-  并通过 /tasks、/run <task> 与手机端协同。
+  并通过 /tasks、/run 任务名 与手机端协同。
 ---
 
 # Heartbeat Task Manager
@@ -60,4 +60,3 @@ metame daemon --sub tasks
   - 你可以在手机输入 `/tasks` 查看，或 `/run <task>` 立即执行。
 - 失败（语义不匹配）：
   - 我没识别到提醒语义，请改成“每天提醒我…”或“每天6点提醒我…”。
-
