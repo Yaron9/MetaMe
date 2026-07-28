@@ -7,7 +7,6 @@ const {
   normalizeEngineName,
   resolveEngineModel,
   ENGINE_MODEL_CONFIG,
-  _private: { resolveCodexPermissionProfile },
 } = require('./daemon-engine-runtime');
 const { rawChatId } = require('./core/thread-chat-id');
 const { resolveScopedEngine, fallbackForUnavailableRuntime } = require('./core/engine-policy');
@@ -130,12 +129,6 @@ function createClaudeEngine(deps) {
       engine: engineName,
     };
   }
-  function validateEngineSession(engineName, sessionId, cwd) {
-    if (typeof isEngineSessionValid === 'function') {
-      return isEngineSessionValid(engineName, sessionId, cwd);
-    }
-    return true;
-  }
   // Card reuse for merge-pause: when a task is paused for message merging,
   // save the statusMsgId so the next askClaude reuses the same card.
   // Entries auto-expire via periodic sweep (60s) to prevent unbounded growth.
@@ -165,9 +158,54 @@ function createClaudeEngine(deps) {
     return true;
   }
 
+  const fallbackEngineRuntime = createEngineRuntimeFactory({
+      fs,
+      path,
+      HOME,
+      CLAUDE_BIN,
+      getActiveProviderEnv,
+      log,
+      validateNativeSession: isEngineSessionValid,
+      claudeSessionPolicy: {
+        fs,
+        findSessionFile,
+        listRecentSessions,
+        autoSyncMinGapMs,
+        stripThinkingSignatures,
+      },
+      codexSessionPolicy: {
+        getSessionSandboxProfile: getCodexSessionSandboxProfile,
+        getSessionPermissionMode: getCodexSessionPermissionMode,
+      },
+    });
   const getEngineRuntime = typeof injectedGetEngineRuntime === 'function'
     ? injectedGetEngineRuntime
-    : createEngineRuntimeFactory({ fs, path, HOME, CLAUDE_BIN, getActiveProviderEnv });
+    : fallbackEngineRuntime;
+
+  function acceptsRuntimeNativeSession(runtime, engineName, session) {
+    const adapter = runtime && typeof runtime.acceptsNativeSession === 'function'
+      ? runtime
+      : fallbackEngineRuntime(engineName);
+    return adapter.acceptsNativeSession(session);
+  }
+
+  function validateRuntimeNativeSession(runtime, engineName, session) {
+    const adapter = runtime && typeof runtime.validateNativeSession === 'function'
+      ? runtime
+      : fallbackEngineRuntime(engineName);
+    return adapter.validateNativeSession(session);
+  }
+
+  function runtimeSupportsWarmPool(runtime) {
+    if (runtime && runtime.capabilities && typeof runtime.capabilities.warmPool === 'boolean') {
+      return runtime.capabilities.warmPool;
+    }
+    return runtime && runtime.name === 'claude';
+  }
+  const claudeSessionPolicy = getEngineRuntime('claude').sessionPolicy
+    || fallbackEngineRuntime('claude').sessionPolicy;
+  const codexSessionPolicy = getEngineRuntime('codex').sessionPolicy
+    || fallbackEngineRuntime('codex').sessionPolicy;
   const { spawn } = createPlatformSpawn({
     fs,
     path,
@@ -202,56 +240,43 @@ function createClaudeEngine(deps) {
     return next;
   }
 
-  const CODEX_RESUME_RETRY_WINDOW_MS = 10 * 60 * 1000;
-  const CODEX_PERMISSION_STABILIZE_MAX_RETRIES = 2;
-  const _codexResumeRetryTs = new Map(); // `${chatId}:${kind}` -> last retry ts
+  const CODEX_PERMISSION_STABILIZE_MAX_RETRIES = codexSessionPolicy.maxStabilizationRetries;
+  const CODEX_RESUME_RETRY_WINDOW_MS = codexSessionPolicy.retryWindowMs;
 
   function getCodexResumeRetryKey(chatId, kind = 'default') {
-    const base = String(chatId || '').trim();
-    const mode = String(kind || 'default').trim();
-    return base && mode ? `${base}:${mode}` : '';
+    return codexSessionPolicy.retryKey(chatId, kind);
   }
 
   function canRetryCodexResume(chatId, kind = 'default') {
-    const key = getCodexResumeRetryKey(chatId, kind);
-    if (!key) return false;
-    const last = Number(_codexResumeRetryTs.get(key) || 0);
-    if (!last) return true;
-    return (Date.now() - last) > CODEX_RESUME_RETRY_WINDOW_MS;
+    return codexSessionPolicy.canRetry(chatId, kind);
   }
 
   function markCodexResumeRetried(chatId, kind = 'default') {
-    const key = getCodexResumeRetryKey(chatId, kind);
-    if (!key) return;
-    _codexResumeRetryTs.set(key, Date.now());
+    codexSessionPolicy.markRetried(chatId, kind);
   }
 
   function shouldRetryCodexResumeFallback({ runtimeName, wasResumeAttempt, output, error, errorCode, canRetry, failureKind = '' }) {
-    return runtimeName === 'codex'
-      && !!wasResumeAttempt
-      && !!error
-      && (!output || !!errorCode)
-      && failureKind !== 'user-stop'
-      && failureKind !== 'merge-pause'
-      && failureKind !== 'fatal'
-      && !!canRetry;
+    return runtimeName === 'codex' && codexSessionPolicy.shouldRetryResumeFallback({
+      wasResumeAttempt,
+      output,
+      error,
+      errorCode,
+      canRetry,
+      failureKind,
+    });
   }
 
   function formatEngineSpawnError(err, runtime) {
-    if (!err) return 'Unknown spawn error';
     const rt = runtime || { name: getDefaultEngine() };
-    if (err.code === 'ENOENT') {
-      if (rt.name === 'codex') {
-        return 'Codex CLI 未安装。请先运行: npm install -g @openai/codex';
-      }
-      if (rt.name === 'agy') return 'agy adapter 无法启动，请运行 `/doctor` 检查 agy CLI。';
-      return 'Claude CLI 未安装或不在 PATH。请先确认 `claude` 可执行。';
-    }
-    return err.message || String(err);
+    const adapter = getEngineRuntime(rt.name);
+    const formatter = adapter && typeof adapter.formatSpawnError === 'function'
+      ? adapter.formatSpawnError
+      : fallbackEngineRuntime(rt.name).formatSpawnError;
+    return formatter(err);
   }
 
   function getCodexPermissionProfile(readOnly, daemonCfg = {}, session = {}) {
-    return resolveCodexPermissionProfile({ readOnly, daemonCfg, session });
+    return codexSessionPolicy.resolvePermissionProfile({ readOnly, daemonCfg, session });
   }
 
   function getSessionChatId(chatId, boundProjectKey) {
@@ -265,48 +290,8 @@ function createClaudeEngine(deps) {
     return chatIdStr || chatId;
   }
 
-  function normalizeCodexSandboxMode(value, fallback = null) {
-    const text = String(value || '').trim().toLowerCase();
-    if (!text) return fallback;
-    if (text === 'read-only' || text === 'readonly') return 'read-only';
-    if (text === 'workspace-write' || text === 'workspace') return 'workspace-write';
-    if (
-      text === 'danger-full-access'
-      || text === 'dangerous'
-      || text === 'full-access'
-      || text === 'full'
-      || text === 'bypass'
-      || text === 'writable'
-    ) return 'danger-full-access';
-    return fallback;
-  }
-
-  function normalizeCodexApprovalPolicy(value, fallback = null) {
-    const text = String(value || '').trim().toLowerCase();
-    if (!text) return fallback;
-    if (text === 'never' || text === 'no' || text === 'none') return 'never';
-    if (text === 'on-failure' || text === 'on_failure' || text === 'failure') return 'on-failure';
-    if (text === 'on-request' || text === 'on_request' || text === 'request') return 'on-request';
-    if (text === 'untrusted') return 'untrusted';
-    return fallback;
-  }
-
   function normalizeComparableCodexPermissionProfile(profile) {
-    if (!profile) return null;
-    const sandboxMode = normalizeCodexSandboxMode(
-      profile.sandboxMode || profile.permissionMode,
-      null
-    );
-    const approvalPolicy = normalizeCodexApprovalPolicy(
-      profile.approvalPolicy,
-      null
-    );
-    if (!sandboxMode && !approvalPolicy) return null;
-    return {
-      sandboxMode,
-      approvalPolicy,
-      permissionMode: sandboxMode,
-    };
+    return codexSessionPolicy.normalizeComparablePermissionProfile(profile);
   }
 
   function normalizeSenderId(senderId) {
@@ -315,223 +300,43 @@ function createClaudeEngine(deps) {
   }
 
   function sameCodexPermissionProfile(left, right) {
-    const normalizedLeft = normalizeComparableCodexPermissionProfile(left);
-    const normalizedRight = normalizeComparableCodexPermissionProfile(right);
-    if (!normalizedLeft || !normalizedRight) return false;
-    const sameSandbox = normalizedLeft.sandboxMode === normalizedRight.sandboxMode;
-    const leftApproval = String(normalizedLeft.approvalPolicy || '').trim();
-    const rightApproval = String(normalizedRight.approvalPolicy || '').trim();
-    if (!leftApproval || !rightApproval) return sameSandbox;
-    return sameSandbox && leftApproval === rightApproval;
-  }
-
-  function codexSandboxPrivilegeRank(value) {
-    const normalized = normalizeCodexSandboxMode(value, null);
-    if (normalized === 'read-only') return 0;
-    if (normalized === 'workspace-write') return 1;
-    if (normalized === 'danger-full-access') return 2;
-    return -1;
-  }
-
-  function codexApprovalPrivilegeRank(value) {
-    const normalized = normalizeCodexApprovalPolicy(value, null);
-    if (normalized === 'untrusted') return 0;
-    if (normalized === 'on-request') return 1;
-    if (normalized === 'on-failure') return 2;
-    if (normalized === 'never') return 3;
-    return -1;
+    return codexSessionPolicy.samePermissionProfile(left, right);
   }
 
   function codexNeedsFallbackForRequestedPermissions(actualProfile, requestedProfile) {
-    const normalizedActual = normalizeComparableCodexPermissionProfile(actualProfile);
-    const normalizedRequested = normalizeComparableCodexPermissionProfile(requestedProfile);
-    if (!normalizedActual || !normalizedRequested) return false;
-    return (
-      codexSandboxPrivilegeRank(normalizedActual.sandboxMode) < codexSandboxPrivilegeRank(normalizedRequested.sandboxMode)
-      || codexApprovalPrivilegeRank(normalizedActual.approvalPolicy) < codexApprovalPrivilegeRank(normalizedRequested.approvalPolicy)
-    );
+    return codexSessionPolicy.needsFallbackForRequestedPermissions(actualProfile, requestedProfile);
   }
 
-  function buildCodexFallbackBridgePrompt({ fullPrompt, previousSessionId, previousProfile, requestedProfile, recentContext }) {
-    const bridge = [];
-    bridge.push('[Note: continuing the same MetaMe persona conversation on a fresh Codex execution thread because the previous thread could not satisfy the newly requested permission profile.]');
-    if (previousSessionId) {
-      bridge.push(`Previous Codex thread: ${String(previousSessionId).slice(0, 8)}`);
-    }
-    if (previousProfile || requestedProfile) {
-      const previousSummary = previousProfile
-        ? `${previousProfile.sandboxMode || previousProfile.permissionMode || 'unknown'}/${previousProfile.approvalPolicy || 'unknown'}`
-        : 'unknown/unknown';
-      const requestedSummary = requestedProfile
-        ? `${requestedProfile.sandboxMode || requestedProfile.permissionMode || 'unknown'}/${requestedProfile.approvalPolicy || 'unknown'}`
-        : 'unknown/unknown';
-      bridge.push(`Permission migration: ${previousSummary} -> ${requestedSummary}`);
-    }
-    if (recentContext && (recentContext.lastUser || recentContext.lastAssistant)) {
-      bridge.push('Recent conversation context:');
-      if (recentContext.lastUser) bridge.push(`Last user message: ${String(recentContext.lastUser).trim()}`);
-      if (recentContext.lastAssistant) bridge.push(`Last assistant reply: ${String(recentContext.lastAssistant).trim()}`);
-    }
-    bridge.push('Continue as the same conversation. Do not mention any internal thread migration unless the user explicitly asks.');
-    return `${bridge.join('\n')}\n\n[Current user message follows:]\n\n${fullPrompt}`;
+  function codexSandboxPrivilegeRank(value) {
+    return codexSessionPolicy.sandboxPrivilegeRank(value);
+  }
+
+  function codexApprovalPrivilegeRank(value) {
+    return codexSessionPolicy.approvalPrivilegeRank(value);
+  }
+
+  function buildCodexFallbackBridgePrompt(options) {
+    return codexSessionPolicy.buildFallbackBridgePrompt(options);
   }
 
   function getActualCodexPermissionProfile(session) {
-    if (!session || !session.id) return null;
-    if (typeof getCodexSessionSandboxProfile === 'function') {
-      return getCodexSessionSandboxProfile(session.id, session.cwd || '');
-    }
-    if (typeof getCodexSessionPermissionMode === 'function') {
-      const permissionMode = getCodexSessionPermissionMode(session.id, session.cwd || '');
-      return permissionMode ? { sandboxMode: permissionMode, approvalPolicy: null, permissionMode } : null;
-    }
-    return null;
-  }
-
-  // Map full API model IDs back to their CLI alias family.
-  // When the configured model is an alias (e.g. "sonnet") and the JSONL records the full ID
-  // (e.g. "claude-sonnet-4-6"), they are the same family — no pin needed.
-  // This prevents pinning to a deprecated/retired full model name.
-  function _modelFamilyAlias(fullModelId) {
-    const m = String(fullModelId || '').toLowerCase();
-    if (m.includes('opus')) return 'opus';
-    if (m.includes('sonnet')) return 'sonnet';
-    if (m.includes('haiku')) return 'haiku';
-    return null;
+    return codexSessionPolicy.getActualPermissionProfile(session);
   }
 
   function inspectClaudeResumeSession(session, configuredModel) {
-    const result = {
-      shouldResume: true,
-      modelPin: null,
-      reason: '',
-    };
-    if (!session || !session.started || !session.id) return result;
-    try {
-      const sessionFile = findSessionFile && findSessionFile(session.id);
-      if (!sessionFile) return result;
-      const lines = fs.readFileSync(sessionFile, 'utf8').split('\n').filter(Boolean);
-      for (const line of lines.slice(0, 30)) {
-        const entry = JSON.parse(line);
-        const sessionModel = entry && entry.message && entry.message.model;
-        if (!sessionModel || sessionModel === '<synthetic>') continue;
-        // If the configured model is a short alias (sonnet/opus/haiku) and the JSONL model
-        // belongs to the same family, do NOT pin — let the alias resolve to the latest version.
-        // Only pin when the families genuinely differ (e.g. session was opus, config says sonnet).
-        const sessionFamily = _modelFamilyAlias(sessionModel);
-        const configFamily = _modelFamilyAlias(configuredModel);
-        if (sessionFamily && configFamily && sessionFamily === configFamily) {
-          return result; // same family, no pin needed
-        }
-        // Pin to the family alias (e.g., "opus") instead of the full JSONL model name
-        // (e.g., "claude-opus-4-6"). The Claude CLI rejects full model IDs via the API.
-        if (sessionFamily) {
-          return {
-            shouldResume: true,
-            modelPin: sessionFamily,
-            reason: '',
-          };
-        }
-        // Cannot determine session model family — don't pin, use configured model
-        return result;
-      }
-    } catch {
-      return result;
-    }
-    return result;
+    return claudeSessionPolicy.inspectResumeSession(session, configuredModel);
   }
 
   function isClaudeThinkingSignatureError(errMsg) {
-    const msg = String(errMsg || '');
-    return msg.includes('Invalid signature') && msg.includes('thinking block');
+    return claudeSessionPolicy.isThinkingSignatureError(errMsg);
   }
 
   function formatClaudeResumeFallbackUserMessage(retryError) {
-    if (retryError) {
-      return '⚠️ 旧 session 无法继续，已自动切换到新 session，但本次请求仍失败。';
-    }
-    return '';
+    return claudeSessionPolicy.formatResumeFallbackUserMessage(retryError);
   }
 
   function classifyCodexResumeFailure(error, errorCode) {
-    const message = String(error || '').trim();
-    const code = String(errorCode || '').trim();
-    const lowered = message.toLowerCase();
-    const nonRetryable = (
-      code === 'AUTH_REQUIRED'
-      || code === 'RATE_LIMIT'
-      || lowered.includes('usage limit')
-      || lowered.includes('purchase more credits')
-      || lowered.includes('quota')
-      || lowered.includes('rate limit')
-      || lowered.includes('too many requests')
-      || lowered.includes('429')
-      || lowered.includes('unauthorized')
-      || lowered.includes('authentication')
-      || lowered.includes('api key')
-      || lowered.includes('login')
-      || lowered.includes('forbidden')
-      || lowered.includes('401')
-      || lowered.includes('403')
-    );
-    if (nonRetryable) {
-      return {
-        kind: 'fatal',
-        userMessage: '',
-        retryPromptPrefix: '',
-      };
-    }
-    if (code === 'INTERRUPTED_USER') {
-      return {
-        kind: 'user-stop',
-        userMessage: '⚠️ 当前执行已按你的停止动作中断，本轮不会自动续跑。',
-        retryPromptPrefix: '',
-      };
-    }
-    if (code === 'INTERRUPTED_MERGE_PAUSE' || lowered.includes('paused for merge')) {
-      return {
-        kind: 'merge-pause',
-        userMessage: '',
-        retryPromptPrefix: '',
-      };
-    }
-    const interrupted = (
-      lowered.includes('stopped by user')
-      || lowered.includes('interrupted')
-      || lowered.includes('signal')
-      || code === 'INTERRUPTED'
-      || code === 'INTERRUPTED_RESTART'
-    );
-    if (interrupted) {
-      return {
-        kind: 'interrupted',
-        userMessage: '⚠️ 后台刚刚重启或本轮执行被中断。系统正在自动恢复到同一条会话，请稍等。',
-        retryPromptPrefix: '[Note: the previous Codex execution was interrupted by a daemon restart or user stop signal. Continue the same conversation if possible. User message follows:]',
-      };
-    }
-    const transportInterrupted = (
-      lowered.includes('stream disconnected')
-      || lowered.includes('connection reset')
-      || lowered.includes('connection aborted')
-      || lowered.includes('broken pipe')
-      || lowered.includes('timed out')
-      || lowered.includes('timeout')
-      || lowered.includes('temporarily unavailable')
-      || lowered.includes('error sending request')
-      || lowered.includes('http2')
-    );
-    if (transportInterrupted) {
-      return {
-        kind: 'transport',
-        userMessage: '⚠️ Codex 续接时网络/传输中断。系统正在优先重试同一条会话，不按 session 过期处理。',
-        retryPromptPrefix: '[Note: the previous Codex resume attempt was interrupted by a transient transport error. Continue the same conversation if possible. User message follows:]',
-      };
-    }
-    return {
-      kind: 'expired',
-      userMessage: '⚠️ Codex session 已过期，上下文可能丢失。正在以全新 session 重试，请在回复后补充必要背景。',
-      retryPromptPrefix: '[Note: previous Codex session expired and could not be resumed. Treating this as a new session. User message follows:]',
-    };
+    return codexSessionPolicy.classifyResumeFailure(error, errorCode);
   }
 
 
@@ -828,8 +633,10 @@ function createClaudeEngine(deps) {
       };
       const rt = runtime || getEngineRuntime(getDefaultEngine());
       const { warmChild, persistent, warmPool: _warmPool, warmSessionKey } = options;
-      const isPersistent = persistent && rt.name === 'claude'; // Only Claude supports stream-json
-      const streamArgs = rt.name === 'claude'
+      const isPersistent = persistent && runtimeSupportsWarmPool(rt);
+      const streamArgs = options.preparedInvocation
+        ? args
+        : rt.name === 'claude'
         ? [...args, '--output-format', 'stream-json', '--verbose', ...(isPersistent ? ['--input-format', 'stream-json'] : [])]
         : args;
       const _spawnAt = Date.now();
@@ -840,7 +647,7 @@ function createClaudeEngine(deps) {
         binary: rt.binary,
         args: streamArgs,
         cwd,
-        env: rt.buildEnv({ metameProject, metameSenderId, cwd }),
+        env: options.preparedEnv || rt.buildEnv({ metameProject, metameSenderId, cwd }),
         useDetached: process.platform !== 'win32',
       });
       if (reused) log('INFO', `[TIMING:${chatId}] reusing warm pid=${child.pid} (+0ms)`);
@@ -1153,6 +960,49 @@ function createClaudeEngine(deps) {
     });
   }
 
+  function runNativeCliTurn(runtime, turn, options = {}) {
+    const usesAdapterTurn = typeof runtime.runTurn === 'function';
+    const adapterTurn = usesAdapterTurn
+      ? {
+        ...turn,
+        streaming: true,
+        persistent: !!(options.streaming && options.streaming.persistent),
+      }
+      : turn;
+    const execute = invocation => spawnClaudeStreaming(
+      invocation.args,
+      invocation.input,
+      invocation.cwd,
+      options.onStatus,
+      options.timeoutMs,
+      options.chatId,
+      turn.metameProject,
+      turn.metameSenderId,
+      runtime,
+      options.onSession,
+      {
+        ...(options.streaming || {}),
+        preparedEnv: invocation.env,
+        preparedInvocation: usesAdapterTurn,
+      },
+    );
+    if (!usesAdapterTurn) {
+      return execute({
+        args: runtime.buildArgs({ ...adapterTurn, session: adapterTurn.session }),
+        env: runtime.buildEnv({ ...adapterTurn, session: adapterTurn.session }),
+        input: adapterTurn.input,
+        cwd: adapterTurn.cwd,
+      });
+    }
+    return runtime.runTurn({
+      turn: adapterTurn,
+      nativeSession: adapterTurn.session,
+      executionPolicy: {
+        execute,
+      },
+    });
+  }
+
   const MSG_SESSION_MAX_ENTRIES = 5000;
   const MSG_SESSION_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 
@@ -1430,6 +1280,15 @@ function createClaudeEngine(deps) {
 
       // Resolve flat view for current engine (id + started are engine-specific; cwd is shared)
       let session = resolveSessionForEngine(sessionChatId, engineName) || { cwd: boundCwd || HOME, engine: engineName, id: null, started: false };
+      if (!acceptsRuntimeNativeSession(runtime, engineName, session)) {
+        log('WARN', `[SessionIsolation] rejected ${session.engine || 'unknown'} session for ${engineName}; starting fresh target-engine session`);
+        session = {
+          cwd: boundCwd || session.cwd || HOME,
+          engine: engineName,
+          id: null,
+          started: false,
+        };
+      }
       session.engine = engineName; // keep local copy for Codex resume detection below
       session.logicalChatId = sessionChatId;
       // Finalize effectiveCwd: bound config > stored session > HOME
@@ -1441,29 +1300,20 @@ function createClaudeEngine(deps) {
         await patchSessionSerialized(sessionChatId, (cur) => ({ ...cur, cwd: effectiveCwd }));
       }
 
-      // Auto-sync: when daemon is idle (no warm process), check if a newer Claude session exists
-      // in the project directory (e.g., created from Claude Code CLI on the same computer).
-      // This keeps phone (Feishu/mobile) and computer (Claude Code CLI) sessions in sync.
+      // Adapters may discover a newer native session while the daemon is idle.
       const _hasWarm = !!(warmPool && typeof warmPool.hasWarm === 'function' && warmPool.hasWarm(sessionChatId));
-      if (runtime.name === 'claude' && !String(sessionChatId).startsWith('_agent_') &&
-          !_hasWarm && session.started && session.id && session.id !== '__continue__' && session.cwd) {
-        const _recentInProject = typeof listRecentSessions === 'function'
-          ? listRecentSessions(2, session.cwd, 'claude') : [];
-        const _currentMtime = (() => {
-          try {
-            const _f = typeof findSessionFile === 'function' ? findSessionFile(session.id) : null;
-            return _f ? fs.statSync(_f).mtimeMs : 0;
-          } catch { return 0; }
-        })();
-        const _newerSession = _recentInProject.find(
-          s => s.sessionId !== session.id && (s.fileMtime || 0) - _currentMtime > autoSyncMinGapMs
-        );
+      const _sessionPolicy = runtime.sessionPolicy
+        || fallbackEngineRuntime(engineName).sessionPolicy
+        || {};
+      if (!String(sessionChatId).startsWith('_agent_') && !_hasWarm &&
+          typeof _sessionPolicy.findNewerSession === 'function') {
+        const _newerSession = _sessionPolicy.findNewerSession(session);
         if (_newerSession) {
-          const _gapSec = Math.round(((_newerSession.fileMtime || 0) - _currentMtime) / 1000);
+          const _gapSec = Math.round((_newerSession.gapMs || 0) / 1000);
           log('INFO', `[AutoSync] ${String(sessionChatId).slice(-8)}: switching ${session.id.slice(0, 8)} -> ${_newerSession.sessionId.slice(0, 8)} (newer by ${_gapSec}s)`);
           await patchSessionSerialized(sessionChatId, (cur) => {
             const _engines = { ...(cur.engines || {}) };
-            _engines.claude = { ...(_engines.claude || {}), id: _newerSession.sessionId, started: true };
+            _engines[engineName] = { ...(_engines[engineName] || {}), id: _newerSession.sessionId, started: true };
             return { ...cur, engines: _engines };
           });
           session = { ...session, id: _newerSession.sessionId };
@@ -1474,14 +1324,16 @@ function createClaudeEngine(deps) {
       // Warm pool: check if a persistent process is available for this session (Claude only).
       // Declared early so downstream logic can skip expensive operations when reusing warm process.
       const _warmSessionKey = sessionChatId;
-      const _warmEntry = (warmPool && runtime.name === 'claude') ? warmPool.acquireWarm(_warmSessionKey) : null;
+      const _warmEntry = (warmPool && runtimeSupportsWarmPool(runtime))
+        ? warmPool.acquireWarm(_warmSessionKey)
+        : null;
 
-      // Pre-spawn session validation: unified for all engines.
-      // Claude checks JSONL file existence; Codex checks SQLite. Same interface, different backend.
+      // Pre-spawn validation is owned by the selected adapter. Claude checks its
+      // JSONL store, Codex checks SQLite, and Agy owns its native session rules.
       // Skip warning for virtual agents (team members) - they may use worktrees with fresh sessions
       const isVirtualAgent = String(sessionChatId).startsWith('_agent_');
       if (session.started && session.id && session.id !== '__continue__' && session.cwd) {
-        const valid = validateEngineSession(engineName, session.id, session.cwd);
+        const valid = validateRuntimeNativeSession(runtime, engineName, session);
         if (!valid) {
           log('WARN', `${engineName} session ${session.id.slice(0, 8)} invalid for ${sessionChatId}; starting fresh ${engineName} session`);
           if (!isVirtualAgent) {
@@ -1895,7 +1747,7 @@ function createClaudeEngine(deps) {
         }
       }
 
-      const args = runtime.buildArgs({
+      const turnOptions = {
         model,
         readOnly,
         daemonCfg,
@@ -1903,50 +1755,13 @@ function createClaudeEngine(deps) {
         cwd: session.cwd,
         addDirs: boundProject && boundProject.addDirs,
         permissionProfile: runtime.name === 'codex' ? requestedCodexPermissionProfile : null,
-      });
+        metameProject: boundProjectKey || '',
+        metameSenderId: normalizeSenderId(senderId),
+      };
 
-      // Projection strategy 'agents-md-merge' (see core/engine-descriptors.js):
-      // write/refresh AGENTS.md = CLAUDE.md + SOUL.md on every fresh execution thread.
-      // This must happen after any permission-triggered fallback decision so the spawned process uses
-      // the final session object and fresh exec args rather than stale resume args.
-      if (runtime.descriptor && runtime.descriptor.contextProjection === 'agents-md-merge' && session.cwd && !session.started) {
-        try {
-          const agentsMd = path.join(session.cwd, 'AGENTS.md');
-          // Refresh AGENTS.md only when we KNOW it is a regular file (or absent).
-          // If lstat says symlink, skip — writeFileSync would follow it and
-          // recursively append SOUL into the link target (the original CLAUDE.md
-          // pollution bug). For any other lstat failure (EACCES, EPERM, races),
-          // skip too — better to miss a refresh than to risk the recursion.
-          let canRefresh = false;
-          try {
-            const st = fs.lstatSync(agentsMd);
-            canRefresh = !st.isSymbolicLink();
-          } catch (statErr) {
-            if (statErr && statErr.code === 'ENOENT') {
-              canRefresh = true;
-            } else {
-              log('WARN', `AGENTS.md lstat failed in ${session.cwd}; skip refresh: ${statErr.message}`);
-            }
-          }
-          if (!canRefresh) {
-            log('INFO', `AGENTS.md is not a regular file in ${session.cwd}; relying on link target (skip refresh)`);
-          } else {
-            const parts = [];
-            const claudeMd = path.join(session.cwd, 'CLAUDE.md');
-            const soulMd = path.join(session.cwd, 'SOUL.md');
-            if (fs.existsSync(claudeMd)) parts.push(fs.readFileSync(claudeMd, 'utf8').trim());
-            if (fs.existsSync(soulMd)) {
-              const soulContent = fs.readFileSync(soulMd, 'utf8').trim();
-              if (soulContent) parts.push(soulContent);
-            }
-            if (parts.length > 0) {
-              fs.writeFileSync(agentsMd, parts.join('\n\n'), 'utf8');
-              log('INFO', `Refreshed AGENTS.md (${parts.length} section(s)) in ${session.cwd}`);
-            }
-          }
-        } catch (e) {
-          log('WARN', `AGENTS.md refresh failed: ${e.message}`);
-        }
+      // The selected adapter owns its native context projection.
+      if (typeof runtime.projectContext === 'function') {
+        runtime.projectContext({ cwd: session.cwd, fresh: !session.started });
       }
 
       // Git checkpoint before Claude modifies files (for /undo).
@@ -2094,22 +1909,20 @@ function createClaudeEngine(deps) {
           files,
           toolUsageLog,
           sessionId,
-        } = await spawnClaudeStreaming(
-          args,
-          fullPrompt,
-          session.cwd,
-          onStatus,
-          600000,
-          chatId,
-          boundProjectKey || '',
-          normalizeSenderId(senderId),
+        } = await runNativeCliTurn(
           runtime,
-          onSession,
+          { ...turnOptions, input: fullPrompt },
           {
+            onStatus,
+            timeoutMs: 600000,
+            chatId,
+            onSession,
+            streaming: {
             warmChild: _warmEntry ? _warmEntry.child : null,
-            persistent: runtime.name === 'claude' && !!warmPool,
+            persistent: !!(runtimeSupportsWarmPool(runtime) && warmPool),
             warmPool,
             warmSessionKey: _warmSessionKey,
+            },
           },
         ));
 
@@ -2147,14 +1960,6 @@ function createClaudeEngine(deps) {
               requestedProfile: requestedCodexPermissionProfile,
               recentContext: retryRecentContext,
             });
-            const freshRetryArgs = runtime.buildArgs({
-              model,
-              readOnly,
-              daemonCfg,
-              session,
-              cwd: session.cwd,
-              permissionProfile: requestedCodexPermissionProfile,
-            });
             ({
               output,
               error,
@@ -2163,17 +1968,20 @@ function createClaudeEngine(deps) {
               files,
               toolUsageLog,
               sessionId,
-            } = await spawnClaudeStreaming(
-              freshRetryArgs,
-              freshRetryPrompt,
-              session.cwd,
-              onStatus,
-              600000,
-              chatId,
-              boundProjectKey || '',
-              normalizeSenderId(senderId),
+            } = await runNativeCliTurn(
               runtime,
-              onSession,
+              {
+                model,
+                readOnly,
+                daemonCfg,
+                session,
+                cwd: session.cwd,
+                permissionProfile: requestedCodexPermissionProfile,
+                metameProject: boundProjectKey || '',
+                metameSenderId: normalizeSenderId(senderId),
+                input: freshRetryPrompt,
+              },
+              { onStatus, timeoutMs: 600000, chatId, onSession },
             ));
             if (sessionId) await onSession(sessionId);
             observedRuntimeProfile = getActualCodexPermissionProfile(sessionId ? { id: sessionId } : session);
@@ -2215,14 +2023,6 @@ function createClaudeEngine(deps) {
               requestedCodexPermissionProfile
             );
           }
-          const retryArgs = runtime.buildArgs({
-            model,
-            readOnly,
-            daemonCfg,
-            session,
-            cwd: session.cwd,
-            permissionProfile: requestedCodexPermissionProfile,
-          });
           const retryPrompt = `${resumeFailure.retryPromptPrefix}\n\n${fullPrompt}`;
           ({
             output,
@@ -2232,17 +2032,20 @@ function createClaudeEngine(deps) {
             files,
             toolUsageLog,
             sessionId,
-          } = await spawnClaudeStreaming(
-            retryArgs,
-            retryPrompt,
-            session.cwd,
-            onStatus,
-            600000,
-            chatId,
-            boundProjectKey || '',
-            normalizeSenderId(senderId),
+          } = await runNativeCliTurn(
             runtime,
-            onSession,
+            {
+              model,
+              readOnly,
+              daemonCfg,
+              session,
+              cwd: session.cwd,
+              permissionProfile: requestedCodexPermissionProfile,
+              metameProject: boundProjectKey || '',
+              metameSenderId: normalizeSenderId(senderId),
+              input: retryPrompt,
+            },
+            { onStatus, timeoutMs: 600000, chatId, onSession },
           ));
           if (sessionId) await onSession(sessionId);
         }
@@ -2348,9 +2151,7 @@ function createClaudeEngine(deps) {
 
       if (output) {
         if (runtime.name === 'codex') {
-          _codexResumeRetryTs.delete(getCodexResumeRetryKey(chatId, 'interrupted'));
-          _codexResumeRetryTs.delete(getCodexResumeRetryKey(chatId, 'expired'));
-          _codexResumeRetryTs.delete(getCodexResumeRetryKey(chatId, 'default'));
+          codexSessionPolicy.clearRetries(chatId);
         }
         // Detect provider/model errors disguised as output (e.g., "model not found", API errors)
         if (runtime.name === 'claude') {
@@ -2613,19 +2414,17 @@ function createClaudeEngine(deps) {
         }
 
         // If session not found / locked / thinking signature invalid — try repair or create new and retry once (Claude path)
-        const _isThinkingSignatureError = isClaudeThinkingSignatureError(errMsg);
-        const _isSessionResumeFail = errMsg.includes('not found') || errMsg.includes('No session') || errMsg.includes('already in use') || _isThinkingSignatureError;
-        if (runtime.name === 'claude' && _isSessionResumeFail) {
-          const _reason = errMsg.includes('already in use') ? 'locked' : _isThinkingSignatureError ? 'thinking-signature-invalid' : 'not found';
+        const _nativeResumeFailure = _sessionPolicy.classifyResumeFailure
+          ? _sessionPolicy.classifyResumeFailure(errMsg)
+          : { isResumeFailure: false, reason: '', repairable: false };
+        if (_nativeResumeFailure.isResumeFailure) {
+          const _reason = _nativeResumeFailure.reason;
 
           // For thinking signature errors, try to repair the session in-place first (preserve context)
-          let _repaired = false;
-          if (_isThinkingSignatureError && session.id) {
-            const stripped = stripThinkingSignatures(session.id);
-            if (stripped > 0) {
-              log('INFO', `Session ${session.id} repaired: stripped ${stripped} thinking signatures, retrying same session`);
-              _repaired = true;
-            }
+          const _repaired = typeof _sessionPolicy.repairResumeSession === 'function'
+            && _sessionPolicy.repairResumeSession(session, _nativeResumeFailure);
+          if (_repaired) {
+            log('INFO', `Session ${session.id} repaired: stripped invalid thinking signatures, retrying same session`);
           }
 
           if (!_repaired) {
@@ -2633,25 +2432,19 @@ function createClaudeEngine(deps) {
             session = createSession(sessionChatId, effectiveCwd, '', runtime.name);
           }
 
-          const retryArgs = runtime.buildArgs({
-            model,
-            readOnly,
-            daemonCfg,
-            session,
-            cwd: session.cwd,
-          });
-
-          const retry = await spawnClaudeStreaming(
-            retryArgs,
-            fullPrompt,
-            session.cwd,
-            onStatus,
-            600000,
-            chatId,
-            boundProjectKey || '',
-            normalizeSenderId(senderId),
+          const retry = await runNativeCliTurn(
             runtime,
-            onSession,
+            {
+              model,
+              readOnly,
+              daemonCfg,
+              session,
+              cwd: session.cwd,
+              metameProject: boundProjectKey || '',
+              metameSenderId: normalizeSenderId(senderId),
+              input: fullPrompt,
+            },
+            { onStatus, timeoutMs: 600000, chatId, onSession },
           );
           if (retry.sessionId) await onSession(retry.sessionId);
           if (retry.output) {
@@ -2665,7 +2458,7 @@ function createClaudeEngine(deps) {
             return { ok: true };
           } else {
             log('ERROR', `askClaude retry failed: ${(retry.error || '').slice(0, 200)}`);
-            const retryUserMsg = _isThinkingSignatureError
+            const retryUserMsg = _nativeResumeFailure.reason === 'thinking-signature-invalid'
               ? formatClaudeResumeFallbackUserMessage(retry.error || errMsg)
               : userErrMsg;
             try { await bot.sendMessage(chatId, retryUserMsg); } catch { /* */ }

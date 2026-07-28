@@ -46,6 +46,22 @@ function createBackgroundRunner(deps = {}) {
   }).spawn;
   const activeChildren = new Set();
 
+  function runAdapterTurn(runtime, request) {
+    if (typeof runtime.runTurn === 'function') return runtime.runTurn(request);
+    const turn = request.turn || {};
+    const session = request.nativeSession || {};
+    return request.executionPolicy.execute({
+      engine: runtime.name,
+      binary: runtime.binary,
+      args: runtime.buildArgs({ ...turn, session }),
+      env: runtime.buildEnv({ ...turn, session }),
+      input: turn.input,
+      cwd: turn.cwd,
+      killSignal: runtime.killSignal,
+      timeouts: runtime.timeouts,
+    });
+  }
+
   async function startTurn(options = {}) {
     const runtime = deps.getEngineRuntime(options.engine);
     if (typeof runtime.isReady === 'function' && !runtime.isReady()) {
@@ -62,44 +78,48 @@ function createBackgroundRunner(deps = {}) {
         outputSchemaPath = pathModule.join(schemaDir, 'completion.schema.json');
         fsModule.writeFileSync(outputSchemaPath, JSON.stringify(schema), { mode: 0o600 });
       }
-      const args = runtime.buildArgs({
+      const turn = {
+        input: String(options.prompt || ''),
         model: options.model || runtime.defaultModel,
         readOnly: !!options.readOnly,
-        session: options.sessionRef || {},
         cwd: options.cwd,
         timeoutMs: options.timeoutMs || runtime.timeouts.idleMs,
         daemonCfg: options.daemonCfg || {},
         permissionProfile: options.permissions || null,
         outputSchema: runtime.name === 'claude' ? schema : null,
         outputSchemaPath,
+        outputFormat: runtime.name === 'claude' ? 'json' : '',
         allowedTools: options.allowedTools || [],
         mcpConfig: options.mcpConfig || '',
-      });
-      if (runtime.name === 'claude') args.push('--output-format', 'json');
-      const commandResult = await runCommand({
-        spawn: spawnProcess,
-        cmd: runtime.binary,
-        args,
-        cwd: options.cwd,
-        env: runtime.buildEnv({
-          metameProject: options.projectKey || '',
-          metameSenderId: options.senderId || '',
-          cwd: options.cwd || '',
-          providerEnv: options.providerEnv || {},
-          internalPrompt: !!options.internalPrompt,
-        }),
-        input: String(options.prompt || ''),
-        timeoutMs: options.timeoutMs || runtime.timeouts.idleMs,
-        killSignal: runtime.killSignal,
-        useProcessGroup: process.platform !== 'win32',
-        signal: options.signal || null,
-        // Structured/Codex JSONL keeps the tail where the final native event lives.
-        // Legacy Claude text keeps its historical prefix preview. Structured truncation
-        // is rejected below, so neither mode can silently validate partial output.
-        stdoutBufferMode: structured || runtime.name === 'codex' ? 'tail' : 'prefix',
-        onChild(child) {
-          childRef = child;
-          activeChildren.add(child);
+        metameProject: options.projectKey || '',
+        metameSenderId: options.senderId || '',
+        providerEnv: options.providerEnv || {},
+        internalPrompt: !!options.internalPrompt,
+      };
+      const commandResult = await runAdapterTurn(runtime, {
+        turn,
+        nativeSession: options.sessionRef || {},
+        executionPolicy: {
+          execute: invocation => runCommand({
+            spawn: spawnProcess,
+            cmd: invocation.binary,
+            args: invocation.args,
+            cwd: invocation.cwd,
+            env: invocation.env,
+            input: invocation.input,
+            timeoutMs: options.timeoutMs || runtime.timeouts.idleMs,
+            killSignal: runtime.killSignal,
+            useProcessGroup: process.platform !== 'win32',
+            signal: options.signal || null,
+            // Structured/Codex JSONL keeps the tail where the final native event lives.
+            // Legacy Claude text keeps its historical prefix preview. Structured truncation
+            // is rejected below, so neither mode can silently validate partial output.
+            stdoutBufferMode: structured || runtime.name === 'codex' ? 'tail' : 'prefix',
+            onChild(child) {
+              childRef = child;
+              activeChildren.add(child);
+            },
+          }),
         },
       });
       if (childRef) activeChildren.delete(childRef);
@@ -122,7 +142,10 @@ function createBackgroundRunner(deps = {}) {
           errorCode: 'BUFFER_LIMIT_EXCEEDED',
         };
       }
-      const native = collectNativeResult(runtime, commandResult.output);
+      let native = collectNativeResult(runtime, commandResult.output);
+      if (!structured && typeof runtime.recoverFinalOutput === 'function') {
+        native = runtime.recoverFinalOutput(commandResult.output, native);
+      }
       if (native.classifiedError) {
         return { ok: false, error: native.classifiedError.message, errorCode: native.classifiedError.code };
       }

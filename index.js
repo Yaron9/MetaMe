@@ -535,7 +535,7 @@ const OBSOLETE_RUNTIME_ARTIFACTS = [
 const OBSOLETE_RUNTIME_TEST_DIRS = ['', '.last-good', 'core', 'hooks', 'bin'];
 const SCRIPT_DEPLOY_GROUPS = collectDeployGroups(fs, path, scriptsDir, {
   excludedScripts: EXCLUDED_SCRIPTS,
-  includeNestedDirs: ['core'],
+  includeNestedDirs: ['core', 'engines'],
 });
 
 function cleanupObsoleteRuntimeArtifacts() {

@@ -134,7 +134,7 @@ function syncPluginScripts(projectRoot = process.cwd()) {
   const pluginScriptsDir = path.join(projectRoot, 'plugin', 'scripts');
   const deployGroups = collectDeployGroups(fs, path, scriptsDir, {
     excludedScripts: PLUGIN_EXCLUDED_SCRIPTS,
-    includeNestedDirs: ['core'],
+    includeNestedDirs: ['core', 'engines'],
   });
 
   let updated = false;

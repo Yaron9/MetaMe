@@ -234,7 +234,7 @@ test('memory-extract records codex provenance when no claude sessions exist', ()
   assert.equal(rows.facts[0].source_id, rows.sources[0].id);
 });
 
-test('skill-evolution keeps signals when haiku output is malformed', () => {
+test('skill-evolution keeps signals and exits nonzero when haiku output is malformed', () => {
   const home = mkHome();
   const env = installFakeClaude(home, 'echo "NOT_JSON_BLOCK"');
   const skillDir = path.join(home, '.claude', 'skills', 'demo-skill');
@@ -249,12 +249,16 @@ test('skill-evolution keeps signals when haiku output is malformed', () => {
   ];
   fs.writeFileSync(sigFile, signals.map(s => JSON.stringify(s)).join('\n') + '\n', 'utf8');
 
-  runNode(home, `
-    const se = require('./scripts/skill-evolution');
-    (async () => {
-      await se.distillSkills();
-    })().then(() => process.exit(0)).catch(() => process.exit(1));
-  `, env);
+  assert.throws(
+    () => execFileSync(process.execPath, ['scripts/skill-evolution.js'], {
+      cwd: ROOT,
+      env: { ...process.env, ...homeEnv(home), ...env },
+      encoding: 'utf8',
+      timeout: 30000,
+    }),
+    (error) => error.status === 1
+      && /Skill evolution error:/.test(String(error.stderr || '')),
+  );
 
   const lines = fs.readFileSync(sigFile, 'utf8').split('\n').filter(Boolean);
   assert.equal(lines.length, 3);

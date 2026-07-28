@@ -15,6 +15,42 @@ function writeCodexRollout(filePath, events) {
 }
 
 describe('daemon-session-store codex metadata', () => {
+  it('keeps target-engine slots isolated and restores the original slot after switching back', () => {
+    const state = {
+      sessions: {
+        'chat-switch': {
+          cwd: '/tmp/project',
+          engines: {
+            claude: { id: 'claude-thread', started: true },
+            codex: { id: 'codex-thread', started: true },
+          },
+        },
+      },
+    };
+    const store = createSessionStore({
+      fs,
+      path,
+      HOME: os.tmpdir(),
+      loadState: () => state,
+      saveState: next => {
+        state.sessions = next.sessions;
+      },
+      log: () => {},
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+
+    const codex = store.getSessionForEngine('chat-switch', 'codex');
+    assert.equal(codex.engine, 'codex');
+    assert.equal(codex.id, 'codex-thread');
+    assert.notEqual(codex.id, 'claude-thread');
+
+    const claude = store.getSessionForEngine('chat-switch', 'claude');
+    assert.equal(claude.engine, 'claude');
+    assert.equal(claude.id, 'claude-thread');
+    assert.equal(state.sessions['chat-switch'].engines.codex.id, 'codex-thread');
+  });
+
   it('preserves codex sandbox profile in engine slot', () => {
     const state = { sessions: {} };
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-session-store-'));

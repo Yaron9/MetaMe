@@ -1847,6 +1847,19 @@ const getEngineRuntime = createEngineRuntimeFactory({
   execSync,
   CLAUDE_BIN,
   getActiveProviderEnv,
+  log,
+  validateNativeSession: isEngineSessionValid,
+  claudeSessionPolicy: {
+    fs,
+    findSessionFile,
+    listRecentSessions,
+    autoSyncMinGapMs: 60_000,
+    stripThinkingSignatures,
+  },
+  codexSessionPolicy: {
+    getSessionSandboxProfile: getCodexSessionSandboxProfile,
+    getSessionPermissionMode: getCodexSessionPermissionMode,
+  },
 });
 const backgroundRunner = createBackgroundRunner({ getEngineRuntime });
 
