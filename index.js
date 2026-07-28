@@ -16,6 +16,7 @@ const {
   isTestScriptFile,
 } = require('./scripts/deploy-manifest');
 const { ensureAgyPlugin } = require('./scripts/agy-plugin-installer');
+const { syncBundledSkills } = require('./scripts/skill-registry-sync');
 const {
   findClaudeOnlyPluginHooks,
   disablePluginSections,
@@ -701,40 +702,29 @@ if (daemonCodeUpdated && shouldAutoRestartAfterDeploy) {
 }
 
 // ---------------------------------------------------------
-// Deploy bundled skills to ~/.claude/skills/
-// Only installs if not already present — never overwrites user customizations.
+// Deploy bundled skills to ~/.claude/skills/.
+// Exact MetaMe-managed copies upgrade in place; customized copies are preserved.
 // ---------------------------------------------------------
 const CLAUDE_SKILLS_DIR = path.join(HOME_DIR, '.claude', 'skills');
 const bundledSkillsDir = path.join(__dirname, 'skills');
 if (fs.existsSync(bundledSkillsDir)) {
   try {
-    if (!fs.existsSync(CLAUDE_SKILLS_DIR)) {
-      fs.mkdirSync(CLAUDE_SKILLS_DIR, { recursive: true });
+    const skillSync = syncBundledSkills({
+      bundledSkillsDir,
+      installedSkillsDir: CLAUDE_SKILLS_DIR,
+      stateFile: path.join(METAME_DIR, 'skill-registry.json'),
+    });
+    if (skillSync.installed.length > 0) {
+      console.log(`${icon("brain")} Skills installed: ${skillSync.installed.join(', ')}`);
     }
-    const skillsInstalled = [];
-    for (const skillName of fs.readdirSync(bundledSkillsDir)) {
-      const srcSkill = path.join(bundledSkillsDir, skillName);
-      const destSkill = path.join(CLAUDE_SKILLS_DIR, skillName);
-      if (!fs.statSync(srcSkill).isDirectory()) continue;
-      if (fs.existsSync(destSkill)) continue; // already installed, respect user's version
-      // Copy skill directory recursively
-      const copyDir = (src, dest) => {
-        fs.mkdirSync(dest, { recursive: true });
-        for (const entry of fs.readdirSync(src)) {
-          const s = path.join(src, entry);
-          const d = path.join(dest, entry);
-          if (fs.statSync(s).isDirectory()) copyDir(s, d);
-          else fs.copyFileSync(s, d);
-        }
-      };
-      copyDir(srcSkill, destSkill);
-      skillsInstalled.push(skillName);
+    if (skillSync.updated.length > 0) {
+      console.log(`${icon("reload")} Skills updated: ${skillSync.updated.join(', ')}`);
     }
-    if (skillsInstalled.length > 0) {
-      console.log(`${icon("brain")} Skills installed: ${skillsInstalled.join(', ')}`);
+    if (skillSync.retired.length > 0) {
+      console.log(`${icon("stop")} Skills retired: ${skillSync.retired.join(', ')}`);
     }
-  } catch {
-    // Non-fatal
+  } catch (error) {
+    console.log(`${icon("warn")} Skill registry sync skipped: ${error.message}`);
   }
 }
 

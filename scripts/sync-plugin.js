@@ -8,6 +8,7 @@ const {
   isDeployableManagedFile,
   isTestScriptFile,
 } = require('./deploy-manifest');
+const { fingerprintDirectory } = require('./skill-registry-sync');
 
 // Files whose extension we consider "managed" by the sync flow. Stale-dest
 // cleanup only ever deletes files matching this pattern, so unrelated dest
@@ -95,6 +96,39 @@ function syncPluginManifest(projectRoot = process.cwd()) {
   return writeJsonIfChanged(manifestPath, next);
 }
 
+function pathExists(target) {
+  try {
+    fs.lstatSync(target);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function syncProjectSkillEntrypoints(projectRoot = process.cwd()) {
+  const sourceRoot = path.join(projectRoot, '.claude', 'skills');
+  const destinationRoot = path.join(projectRoot, '.agents', 'skills');
+  const projectSkills = ['metame-release'];
+  let updated = false;
+
+  for (const skillName of projectSkills) {
+    const source = path.join(sourceRoot, skillName);
+    const destination = path.join(destinationRoot, skillName);
+    if (!pathExists(source)) continue;
+    const destinationIsCurrent = pathExists(destination)
+      && !fs.lstatSync(destination).isSymbolicLink()
+      && fingerprintDirectory(source) === fingerprintDirectory(destination);
+    if (destinationIsCurrent) continue;
+    if (pathExists(destination)) fs.rmSync(destination, { recursive: true, force: false });
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.cpSync(source, destination, { recursive: true });
+    updated = true;
+  }
+
+  return updated;
+}
+
 function syncPluginScripts(projectRoot = process.cwd()) {
   const scriptsDir = path.join(projectRoot, 'scripts');
   const pluginScriptsDir = path.join(projectRoot, 'plugin', 'scripts');
@@ -123,6 +157,7 @@ function syncPluginScripts(projectRoot = process.cwd()) {
     cleanupStale: true,
   }) || updated;
   updated = syncPluginManifest(projectRoot) || updated;
+  updated = syncProjectSkillEntrypoints(projectRoot) || updated;
   return updated;
 }
 
@@ -135,4 +170,5 @@ module.exports = {
   syncPluginScripts,
   syncDirFiles,
   syncPluginManifest,
+  syncProjectSkillEntrypoints,
 };

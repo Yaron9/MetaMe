@@ -27,7 +27,7 @@ def list_skills(skills_root):
             
         skill_md = os.path.join(skill_dir, "SKILL.md")
         skill_type = "Standard"
-        version = "0.1.0"
+        version = "—"
         description = "No description"
         
         if os.path.exists(skill_md):
@@ -37,9 +37,19 @@ def list_skills(skills_root):
                 parts = content.split("---")
                 if len(parts) >= 3:
                     meta = yaml.safe_load(parts[1])
+                    if not isinstance(meta, dict):
+                        continue
                     if "github_url" in meta:
                         skill_type = "GitHub"
-                    version = str(meta.get("version", "0.1.0"))
+                    metadata = meta.get("metadata")
+                    metadata_version = (
+                        metadata.get("version")
+                        if isinstance(metadata, dict)
+                        else None
+                    )
+                    declared_version = meta.get("version", metadata_version)
+                    if declared_version is not None:
+                        version = str(declared_version)
                     description = meta.get("description", "No description").replace('\n', ' ')
             except:
                 pass

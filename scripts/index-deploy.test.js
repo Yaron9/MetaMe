@@ -38,6 +38,13 @@ describe('index.js deploy command', () => {
     fs.writeFileSync(path.join(metameDir, '.last-good', 'verify-reactive-claude-md.js'), '// stale backup verifier\n', 'utf8');
     fs.writeFileSync(path.join(metameDir, 'core', 'file-map-mole.js'), '// retired adapter\n', 'utf8');
     fs.writeFileSync(path.join(metameDir, 'hooks', 'test-stop-hook.js'), '// stale test hook\n', 'utf8');
+    const customizedSkill = path.join(home, '.claude', 'skills', 'skill-manager');
+    fs.mkdirSync(customizedSkill, { recursive: true });
+    fs.writeFileSync(
+      path.join(customizedSkill, 'SKILL.md'),
+      'custom skill manager instructions\n',
+      'utf8',
+    );
 
     const output = execFileSync(process.execPath, [path.join(ROOT, 'index.js'), 'deploy'], {
       cwd: ROOT,
@@ -63,5 +70,15 @@ describe('index.js deploy command', () => {
     assert.equal(fs.existsSync(path.join(home, '.metame', 'hooks', 'test-stop-hook.js')), false);
     assert.equal(fs.existsSync(path.join(home, '.metame', '.DS_Store')), false);
     assert.equal(fs.existsSync(path.join(home, '.metame', 'memory', '.DS_Store')), false);
+    assert.equal(
+      fs.readFileSync(path.join(customizedSkill, 'SKILL.md'), 'utf8'),
+      'custom skill manager instructions\n',
+    );
+    const skillRegistry = JSON.parse(
+      fs.readFileSync(path.join(home, '.metame', 'skill-registry.json'), 'utf8'),
+    );
+    assert.equal(skillRegistry.schemaVersion, 1);
+    assert.equal(skillRegistry.skills['skill-manager'], undefined);
+    assert.equal(typeof skillRegistry.skills['agent-browser']?.managedHash, 'string');
   });
 });

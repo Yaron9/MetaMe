@@ -44,6 +44,8 @@ upload/
 
 # Generated test files
 metame-*/
+!.agents/skills/metame-release/
+!.agents/skills/metame-release/SKILL.md
 test_daemon.js
 scripts/test_daemon.js
 run_test.js

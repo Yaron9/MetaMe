@@ -6,8 +6,14 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 
-const { syncPluginManifest, syncPluginScripts } = require('./sync-plugin');
+const {
+  syncPluginManifest,
+  syncPluginScripts,
+  syncProjectSkillEntrypoints,
+} = require('./sync-plugin');
 const { mkdtempForTest } = require('./test-support/test-utils');
+
+const ROOT = path.join(__dirname, '..');
 
 function makeProjectTree() {
   const root = mkdtempForTest('metame-sync-plugin-');
@@ -45,6 +51,35 @@ function makeProjectTree() {
 }
 
 describe('syncPluginScripts', () => {
+  it('commits the project skill compatibility entry as a real directory', () => {
+    const claudeSkill = path.join(ROOT, '.claude', 'skills', 'metame-release', 'SKILL.md');
+    const agentsSkillDir = path.join(ROOT, '.agents', 'skills', 'metame-release');
+    const agentsSkill = path.join(agentsSkillDir, 'SKILL.md');
+
+    assert.equal(fs.lstatSync(agentsSkillDir).isSymbolicLink(), false);
+    assert.equal(fs.readFileSync(agentsSkill, 'utf8'), fs.readFileSync(claudeSkill, 'utf8'));
+  });
+
+  it('materializes project skill entrypoints as Windows-safe directories', () => {
+    const root = makeProjectTree();
+    const claudeSkill = path.join(root, '.claude', 'skills', 'metame-release');
+    const agentsSkill = path.join(root, '.agents', 'skills', 'metame-release');
+    fs.mkdirSync(claudeSkill, { recursive: true });
+    fs.mkdirSync(path.dirname(agentsSkill), { recursive: true });
+    fs.writeFileSync(path.join(claudeSkill, 'SKILL.md'), 'release instructions\n', 'utf8');
+    // Git with core.symlinks=false materializes a committed symlink as this
+    // plain text file. The sync must replace it with a discoverable directory.
+    fs.writeFileSync(agentsSkill, '../../.claude/skills/metame-release', 'utf8');
+
+    assert.equal(syncProjectSkillEntrypoints(root), true);
+    assert.equal(fs.lstatSync(agentsSkill).isSymbolicLink(), false);
+    assert.equal(
+      fs.readFileSync(path.join(agentsSkill, 'SKILL.md'), 'utf8'),
+      'release instructions\n',
+    );
+    assert.equal(syncProjectSkillEntrypoints(root), false);
+  });
+
   it('syncs top-level, nested core/bin files, and hooks into plugin/scripts', () => {
     const root = makeProjectTree();
     const updated = syncPluginScripts(root);
