@@ -68,3 +68,71 @@ describe('daemon-notify notifyAdmin', () => {
     assert.deepEqual(sent, [{ chatId: 'tg_first', message: 'ready' }]);
   });
 });
+
+describe('daemon-notify project receipts', () => {
+  it('strictly targets the bound Feishu project and returns delivery evidence', async () => {
+    const sent = [];
+    const notifier = createNotifier({
+      log: () => {},
+      getConfig: () => ({
+        feishu: {
+          allowed_chat_ids: ['chat-scientist', 'chat-other'],
+          chat_agent_map: {
+            'chat-scientist': 'scientist',
+            'chat-other': 'other',
+          },
+        },
+        telegram: { allowed_chat_ids: ['tg-admin'] },
+      }),
+      getBridges: () => ({
+        feishuBridge: {
+          bot: {
+            sendCard: async (chatId, card) => sent.push({ chatId, card }),
+          },
+        },
+        telegramBridge: {
+          bot: {
+            sendMarkdown: async () => {
+              throw new Error('telegram must not be used');
+            },
+          },
+        },
+      }),
+    });
+    const receipt = await notifier.notify('radar', {
+      key: 'scientist',
+      name: '科研总监',
+      icon: '🔬',
+      color: 'blue',
+      notificationChannel: 'feishu',
+      strictNotifyTarget: true,
+    });
+
+    assert.equal(receipt.attempted, 1);
+    assert.equal(receipt.delivered, 1);
+    assert.deepEqual(receipt.errors, []);
+    assert.equal(sent[0].chatId, 'chat-scientist');
+  });
+
+  it('does not fall back when a strict project has no matching chat', async () => {
+    const notifier = createNotifier({
+      log: () => {},
+      getConfig: () => ({
+        feishu: {
+          allowed_chat_ids: ['chat-other'],
+          chat_agent_map: { 'chat-other': 'other' },
+        },
+      }),
+      getBridges: () => ({
+        feishuBridge: { bot: { sendMessage: async () => {} } },
+      }),
+    });
+    const receipt = await notifier.notify('radar', {
+      key: 'scientist',
+      notificationChannel: 'feishu',
+      strictNotifyTarget: true,
+    });
+    assert.equal(receipt.attempted, 0);
+    assert.equal(receipt.delivered, 0);
+  });
+});

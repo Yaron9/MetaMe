@@ -177,6 +177,20 @@ describe('daemon-task-scheduler private helpers', () => {
     );
   });
 
+  it('parses the research radar envelope without exposing raw JSON as output', () => {
+    const envelope = {
+      taskContractVersion: 1,
+      taskType: 'research-radar-delivery',
+      status: 'success',
+      summary: '今日 2 项',
+      messages: [{ kind: 'terminal', text: 'done' }],
+    };
+    const parsed = parseScriptTaskOutput(JSON.stringify(envelope));
+    assert.equal(parsed.skipped, false);
+    assert.equal(parsed.output, '今日 2 项');
+    assert.deepEqual(parsed.envelope, envelope);
+  });
+
   it('closes skipped and thrown claims without advancing last_run for a skip', () => {
     const skipped = { tasks: { scan: { status: 'running', execution_boot_id: 'boot-a', last_run: '2026-07-14T00:00:00.000Z' } } };
     assert.equal(finalizeScheduledClaim(skipped, 'scan', 'boot-a', {
@@ -199,6 +213,18 @@ describe('daemon-task-scheduler private helpers', () => {
       now, 60, 1,
     );
     assert.equal(next, Date.parse('2026-07-15T10:30:00.000Z'));
+  });
+
+  it('does not reschedule a terminal one-shot task after restart', () => {
+    const next = computeInitialNextRun(
+      { name: 'first-report', one_shot: true },
+      { mode: 'clock', hour: 21, minute: 30 },
+      { tasks: { 'first-report': { status: 'success', last_run: '2026-07-15T13:30:00.000Z' } } },
+      Date.parse('2026-07-16T10:00:00.000Z'),
+      60,
+      1,
+    );
+    assert.equal(next, Number.POSITIVE_INFINITY);
   });
 
   it('prefers task then project engine over the daemon default', () => {
@@ -635,5 +661,93 @@ describe('subconscious retry and notification integration', () => {
     assert.equal(store.get().tasks['memory-extract'].status, 'error');
     assert.equal(notifications.length, 1);
     assert.match(notifications[0], /DAEMON_RESTARTED/);
+  });
+});
+
+describe('research radar envelope delivery integration', () => {
+  it('sends split messages to the project and writes a success receipt', async (t) => {
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-radar-envelope-'));
+    t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+    let state = { tasks: {} };
+    const receiptPath = path.join(
+      home,
+      '.metame',
+      'research-radar',
+      'delivery-receipts',
+      'run-1.json',
+    );
+    const envelope = {
+      taskContractVersion: 1,
+      taskType: 'research-radar-delivery',
+      status: 'success',
+      summary: '2 messages',
+      target: {
+        kind: 'existing-feishu-chat',
+        alias: '科研总管',
+        mentions: [],
+      },
+      messages: [
+        { kind: 'result', text: 'one' },
+        { kind: 'terminal', text: 'done' },
+      ],
+      receipt: {
+        path: receiptPath,
+        payload: {
+          receiptId: 'receipt-1',
+          runId: 'run-1',
+          targetAlias: '科研总管',
+          scanStatus: 'success',
+          entries: [],
+        },
+      },
+    };
+    const sent = [];
+    const scheduler = createTaskScheduler({
+      fs, path, HOME: home,
+      execSync: () => JSON.stringify(envelope),
+      parseInterval: () => 3600,
+      loadState: () => structuredClone(state),
+      saveState: next => { state = structuredClone(next); },
+      checkBudget: () => true,
+      recordTokens: () => {},
+      log: () => {},
+      physiologicalHeartbeat: () => {},
+      isUserIdle: () => false,
+      isInSleepMode: () => false,
+      setSleepMode: () => {},
+    });
+    const timer = scheduler.startHeartbeat({
+      daemon: { heartbeat_check_interval: 0.005 },
+      projects: {
+        scientist: {
+          name: '科研总监',
+          notification_channel: 'feishu',
+          strict_notify_target: true,
+          heartbeat_tasks: [{
+            name: 'research-radar-first-report',
+            type: 'script',
+            command: 'node production-run.js',
+            interval: '1h',
+            notify: true,
+            enabled: true,
+          }],
+        },
+      },
+    }, async (message, project) => {
+      sent.push({ message, project });
+      return { attempted: 1, delivered: 1, errors: [] };
+    });
+    t.after(() => clearInterval(timer));
+    await new Promise(resolve => setTimeout(resolve, 35));
+
+    assert.deepEqual(sent.map(item => item.message), ['one', 'done']);
+    assert.equal(sent[0].project.key, 'scientist');
+    assert.equal(state.tasks['research-radar-first-report'].status, 'success');
+    const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+    assert.equal(receipt.deliveryStatus, 'success');
+    assert.equal(receipt.sentMessageCount, 2);
   });
 });

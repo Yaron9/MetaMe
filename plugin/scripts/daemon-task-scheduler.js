@@ -16,6 +16,7 @@ const MODEL_BACKED_SCRIPT_TASKS = new Set([
 ]);
 const MODEL_RETRY_DELAYS_MS = Object.freeze([60_000, 5 * 60_000]);
 const SCRIPT_SKIP_MARKER = '__METAME_TASK_SKIPPED__:';
+const TASK_ENVELOPE_VERSION = 1;
 
 function isModelBackedTask(task = {}) {
   if (task.model_backed === false) return false;
@@ -35,10 +36,24 @@ function compactTaskMessage(value, limit = 300) {
 function parseScriptTaskOutput(value) {
   const lines = String(value || '').split('\n');
   const marker = lines.find(line => line.startsWith(SCRIPT_SKIP_MARKER));
+  const output = lines.filter(line => !line.startsWith(SCRIPT_SKIP_MARKER)).join('\n').trim();
+  let envelope = null;
+  if (!marker && output.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(output);
+      if (parsed && parsed.taskContractVersion === TASK_ENVELOPE_VERSION &&
+          parsed.taskType === 'research-radar-delivery') {
+        envelope = parsed;
+      }
+    } catch {
+      // Ordinary script output may start with "{". Keep it as plain output.
+    }
+  }
   return {
     skipped: !!marker,
     skipReason: marker ? marker.slice(SCRIPT_SKIP_MARKER.length).trim() || 'no_input' : '',
-    output: lines.filter(line => !line.startsWith(SCRIPT_SKIP_MARKER)).join('\n').trim(),
+    output: envelope ? String(envelope.summary || '').trim() : output,
+    ...(envelope ? { envelope } : {}),
   };
 }
 
@@ -203,6 +218,9 @@ function nextRunAfter(schedule, fromMs) {
 
 function computeInitialNextRun(task, schedule, state, nowMs, checkIntervalSec, newTaskIndex) {
   const taskState = state.tasks[task.name] || {};
+  if (task.one_shot === true && ['success', 'error', 'skipped'].includes(taskState.status)) {
+    return Number.POSITIVE_INFINITY;
+  }
   if (isModelBackedTask(task) && taskState.status === 'retry_pending' && taskState.next_retry_at) {
     const retryAt = new Date(taskState.next_retry_at).getTime();
     if (Number.isFinite(retryAt)) return Math.max(nowMs, retryAt);
@@ -581,16 +599,27 @@ function createTaskScheduler(deps) {
           recordTokens(state, scriptTokens, { category: classifyTaskUsage(task) });
         }
 
+        const envelopeFailed = taskOutput.envelope && taskOutput.envelope.status === 'failed';
         state.tasks[task.name] = {
           ...(state.tasks[task.name] || {}),
           last_run: new Date().toISOString(),
-          status: 'success',
+          status: envelopeFailed ? 'error' : 'success',
           output_preview: output.slice(0, 200),
+          ...(envelopeFailed ? { error: (output || 'research radar scan failed').slice(0, 200) } : {}),
         };
         saveTaskScopedState(state, task.name);
         if (output) log('INFO', `Script task ${task.name} completed (${scriptTokens} tokens): ${output.slice(0, 300)}`);
         else log('INFO', `Script task ${task.name} completed`);
-        return { success: true, output, tokens: scriptTokens, durationMs: Date.now() - startedAt, engine };
+        return {
+          success: !envelopeFailed,
+          output,
+          error: envelopeFailed ? output || 'research radar scan failed' : '',
+          errorCode: envelopeFailed ? 'RESEARCH_RADAR_SCAN_FAILED' : '',
+          tokens: scriptTokens,
+          durationMs: Date.now() - startedAt,
+          engine,
+          taskEnvelope: taskOutput.envelope,
+        };
       } catch (e) {
         log('ERROR', `Script task ${task.name} failed: ${e.message}`);
         state.tasks[task.name] = {
@@ -839,7 +868,14 @@ function createTaskScheduler(deps) {
     for (const [key, proj] of Object.entries(cfg.projects || {})) {
       for (const t of (proj.heartbeat_tasks || [])) {
         if (generalNames.has(t.name)) log('WARN', `Duplicate task name "${t.name}" in project "${key}" and general heartbeat`);
-        project.push({ ...t, _project: { key, name: proj.name || key, color: proj.color || 'blue', icon: proj.icon || '🤖' } });
+        project.push({ ...t, _project: {
+          key,
+          name: proj.name || key,
+          color: proj.color || 'blue',
+          icon: proj.icon || '🤖',
+          notificationChannel: proj.notification_channel || 'all',
+          strictNotifyTarget: proj.strict_notify_target === true,
+        } });
       }
     }
     return { general, project, all: [...general, ...project] };
@@ -854,7 +890,9 @@ function createTaskScheduler(deps) {
   function startHeartbeat(config, notifyFn, notifyPersonalFn, adminNotifyFn) {
     const { all: tasks } = getAllTasks(config);
 
-    const enabledTasks = tasks.filter(t => t.enabled !== false);
+    const enabledTasks = tasks.filter(t => (
+      t.enabled !== false && t.schedule_enabled !== false
+    ));
     const checkIntervalSec = (config.daemon && config.daemon.heartbeat_check_interval) || 60;
 
     // Helper: compute next run time, falling back to 2-tick backoff on error.
@@ -911,8 +949,93 @@ function createTaskScheduler(deps) {
     // Tracks tasks currently running (prevents concurrent runs of the same task)
     const runningTasks = new Set();
 
+    function writeTaskReceipt(envelope, delivery) {
+      const requested = envelope && envelope.receipt && envelope.receipt.path;
+      const receiptRoot = path.join(HOME, '.metame', 'research-radar', 'delivery-receipts');
+      const receiptPath = path.resolve(String(requested || ''));
+      if (!requested || (!receiptPath.startsWith(`${receiptRoot}${path.sep}`))) {
+        throw new Error('research radar receipt path is outside the allowed runtime directory');
+      }
+      fs.mkdirSync(receiptRoot, { recursive: true, mode: 0o700 });
+      const body = {
+        payload: envelope.receipt.payload || {},
+        deliveryStatus: delivery.success ? 'success' : 'failed',
+        deliveredAt: new Date().toISOString(),
+        sentMessageCount: delivery.sentMessageCount,
+        weeklyMessageCount: delivery.weeklyMessageCount,
+        error: delivery.error || '',
+      };
+      const tempPath = `${receiptPath}.tmp-${process.pid}`;
+      fs.writeFileSync(tempPath, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
+      fs.renameSync(tempPath, receiptPath);
+      return receiptPath;
+    }
+
+    async function deliverTaskEnvelope(envelope, sendFn, proj) {
+      if (!envelope || envelope.taskContractVersion !== TASK_ENVELOPE_VERSION ||
+          envelope.taskType !== 'research-radar-delivery') {
+        throw new Error('invalid research radar task envelope');
+      }
+      if (!envelope.target || envelope.target.alias !== '科研总管' ||
+          !Array.isArray(envelope.target.mentions) ||
+          envelope.target.mentions.length !== 0) {
+        throw new Error('research radar target must be existing 科研总管 without mentions');
+      }
+      let sentMessageCount = 0;
+      let weeklyMessageCount = 0;
+      let error = '';
+      for (const message of envelope.messages || []) {
+        if (/<at\b|@群主|@所有人/i.test(message.text || '')) {
+          error = 'research radar message contains a forbidden mention';
+          break;
+        }
+        try {
+          const receipt = await sendFn(String(message.text || ''), proj);
+          if (receipt && Array.isArray(receipt.errors) && receipt.errors.length > 0) {
+            throw new Error(receipt.errors.map(item => item.error || item).join('; '));
+          }
+          if (receipt && receipt.attempted === 0) {
+            throw new Error('no matching notification target');
+          }
+          sentMessageCount++;
+          if (message.kind === 'weekly') weeklyMessageCount++;
+        } catch (err) {
+          error = err.message;
+          break;
+        }
+      }
+      const delivery = {
+        success: !error,
+        sentMessageCount,
+        weeklyMessageCount,
+        error,
+      };
+      writeTaskReceipt(envelope, delivery);
+      return delivery;
+    }
+
     function notifyTaskCompletion(task, result, taskState) {
       if (result.skipped) return;
+      if (result.taskEnvelope && task.notify && notifyFn) {
+        const proj = task._project || null;
+        const sendFn = proj ? notifyFn : (adminNotifyFn || notifyFn);
+        Promise.resolve(deliverTaskEnvelope(result.taskEnvelope, sendFn, proj))
+          .then((delivery) => {
+            if (delivery.success) return;
+            const stateAfterDelivery = loadState();
+            stateAfterDelivery.tasks = stateAfterDelivery.tasks || {};
+            stateAfterDelivery.tasks[task.name] = {
+              ...(stateAfterDelivery.tasks[task.name] || {}),
+              status: 'delivery_error',
+              error: delivery.error.slice(0, 200),
+              delivery_status: 'failed',
+            };
+            saveState(stateAfterDelivery);
+            log('ERROR', `Task ${task.name} delivery failed: ${delivery.error}`);
+          })
+          .catch((err) => log('ERROR', `Task ${task.name} envelope failed: ${err.message}`));
+        return;
+      }
       if (isModelBackedTask(task)) {
         if (!adminNotifyFn) return;
         Promise.resolve(adminNotifyFn(formatModelTaskNotification(task, result, taskState)))
@@ -960,6 +1083,7 @@ function createTaskScheduler(deps) {
         log('WARN', `Task ${task.name} attempt ${taskState.attempt}/3 failed — retry at ${taskState.next_retry_at}`);
         return;
       }
+      if (task.one_shot === true) nextRun[task.name] = Number.POSITIVE_INFINITY;
       notifyTaskCompletion(task, result, taskState);
     }
 
@@ -1128,6 +1252,7 @@ module.exports = {
     isModelBackedTask,
     formatModelTaskNotification,
     parseScriptTaskOutput,
+    TASK_ENVELOPE_VERSION,
     MODEL_RETRY_DELAYS_MS,
   },
 };

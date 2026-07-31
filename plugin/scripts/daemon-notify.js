@@ -13,18 +13,23 @@ function createNotifier(deps) {
   async function notify(message, project = null) {
     const config = getConfig();
     const { telegramBridge, feishuBridge } = getBridges();
+    const receipt = { attempted: 0, delivered: 0, errors: [] };
 
-    if (feishuBridge && feishuBridge.bot) {
+    if (feishuBridge && feishuBridge.bot &&
+        (!project || project.notificationChannel !== 'telegram')) {
       const chatAgentMap = (config.feishu && config.feishu.chat_agent_map) || {};
       const fsIds = (config.feishu && config.feishu.allowed_chat_ids) || [];
       let targetIds;
       if (project) {
         targetIds = fsIds.filter(id => chatAgentMap[id] === project.key);
-        if (targetIds.length === 0) targetIds = fsIds.slice(0, 1);
+        if (targetIds.length === 0 && !project.strictNotifyTarget) {
+          targetIds = fsIds.slice(0, 1);
+        }
       } else {
         targetIds = fsIds;
       }
       for (const chatId of targetIds) {
+        receipt.attempted++;
         try {
           if (project && feishuBridge.bot.sendCard) {
             await feishuBridge.bot.sendCard(chatId, {
@@ -35,20 +40,29 @@ function createNotifier(deps) {
           } else {
             await feishuBridge.bot.sendMessage(chatId, message);
           }
+          receipt.delivered++;
         } catch (e) {
+          receipt.errors.push({ channel: 'feishu', error: e.message });
           log('ERROR', `Feishu notify failed ${chatId}: ${e.message}`);
         }
       }
     }
 
-    if (telegramBridge && telegramBridge.bot) {
+    if (telegramBridge && telegramBridge.bot &&
+        (!project || project.notificationChannel !== 'feishu')) {
       const tgIds = (config.telegram && config.telegram.allowed_chat_ids) || [];
       for (const chatId of tgIds) {
-        try { await telegramBridge.bot.sendMarkdown(chatId, message); } catch (e) {
+        receipt.attempted++;
+        try {
+          await telegramBridge.bot.sendMarkdown(chatId, message);
+          receipt.delivered++;
+        } catch (e) {
+          receipt.errors.push({ channel: 'telegram', error: e.message });
           log('ERROR', `Telegram notify failed ${chatId}: ${e.message}`);
         }
       }
     }
+    return receipt;
   }
 
   async function notifyAdmin(message) {
