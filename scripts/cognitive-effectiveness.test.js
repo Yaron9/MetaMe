@@ -23,6 +23,7 @@ test('collectReport audits existing assets against the four-stage consumption ch
       engine TEXT, consumer_type TEXT, agent_key TEXT
     );
     INSERT INTO memory_items VALUES ('f1','insight','active');
+    INSERT INTO memory_items VALUES ('session1','episode','active');
     INSERT INTO wiki_pages VALUES ('w1','memory','active');
     INSERT INTO recall_audit VALUES (datetime('now'),'observe',1,NULL,NULL,NULL,NULL);
     INSERT INTO recall_audit VALUES (datetime('now'),'consume',0,'delivered','codex','mcp',NULL);

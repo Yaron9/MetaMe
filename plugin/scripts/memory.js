@@ -111,6 +111,7 @@ function getDb() {
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_kind_state ON memory_items(kind, state)'); } catch { }
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_project ON memory_items(project)'); } catch { }
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_scope ON memory_items(scope)'); } catch { }
+  try { _db.exec('ALTER TABLE memory_items ADD COLUMN supersedes_id TEXT'); } catch { /* column already exists */ }
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_supersedes ON memory_items(supersedes_id)'); } catch { }
 
   // Migration: add relation column if not present (existing DBs)

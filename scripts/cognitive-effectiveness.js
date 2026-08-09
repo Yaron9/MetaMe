@@ -20,7 +20,7 @@ function collectReport({ dbPath, skillsDir, days = 30 }) {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
     const since = `-${Math.max(1, Math.floor(days))} days`;
-    const facts = safeGet(db, `SELECT COUNT(*) AS n FROM memory_items WHERE state='active' AND kind!='profile'`).n || 0;
+    const facts = safeGet(db, `SELECT COUNT(*) AS n FROM memory_items WHERE state='active' AND kind IN ('insight','convention')`).n || 0;
     const wiki = safeGet(db, `SELECT COUNT(*) AS n FROM wiki_pages WHERE source_type!='managed_redirect' AND COALESCE(artifact_status,'active')='active'`).n || 0;
     let skills = 0;
     try {
