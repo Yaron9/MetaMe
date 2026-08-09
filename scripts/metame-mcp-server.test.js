@@ -68,6 +68,7 @@ describe('metame-mcp-server tools', () => {
     assert.equal(seen.q, 'daemon');
     assert.equal(seen.opts.trackSearch, false, 'external reads must not inflate promotion counters');
     assert.deepEqual(seen.opts.scopeKeys, ['metame']);
+    assert.equal(seen.opts.projectKey, 'MetaMe');
     assert.deepEqual(out.results.map(item => item.type), ['fact', 'wiki']);
     assert.match(out.trace_id, /^mcp_/);
     assert.equal(audits.length, 2, 'each delivered asset has one auditable event');

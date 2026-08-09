@@ -187,6 +187,7 @@ const handlers = {
     const limit = Math.min(Math.max(Number(args.limit) || 5, 1), 20);
     const hybrid = await memory.hybridSearchWiki(String(args.query || ''), {
       scopeKeys: scopeKeys(args.project),
+      projectKey: args.project || null,
       trackSearch: false,
     });
     const assembled = assembleSearchResults(hybrid, { limit, maxChars: args.max_chars });

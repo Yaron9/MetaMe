@@ -23,7 +23,12 @@ test('legacy memory DB migrates supersedes_id and direct fact opens exclude epis
       tags TEXT, created_at TEXT, updated_at TEXT
     );
     INSERT INTO memory_items VALUES
-      ('fact1','fact','active','Fact','current value',NULL,0.9,'metame',NULL,NULL,NULL,NULL,'manual','s1','primary',NULL,0,NULL,'[]',datetime('now'),datetime('now')),
+      ('fact1','fact','active','Fact','current value',NULL,0.9,'metame','workspace-a',NULL,NULL,NULL,'manual','s1','primary',NULL,0,NULL,'[]',datetime('now'),datetime('now')),
+      ('other1','fact','active','Other','other project',NULL,0.9,'other','metame',NULL,NULL,NULL,'manual','s2','primary',NULL,0,NULL,'[]',datetime('now'),datetime('now')),
+      ('global1','fact','active','Global','global fact',NULL,0.9,'*',NULL,NULL,NULL,NULL,'manual','s3','primary',NULL,0,NULL,'[]',datetime('now'),datetime('now')),
+      ('globalScoped','fact','active','Scoped global','scoped global fact',NULL,0.9,'*','workspace-b',NULL,NULL,NULL,'manual','s4','primary',NULL,0,NULL,'[]',datetime('now'),datetime('now')),
+      ('legacyScoped','fact','active','Legacy scoped','legacy scoped fact',NULL,0.9,NULL,'metame',NULL,NULL,NULL,'manual','s5','primary',NULL,0,NULL,'[]',datetime('now'),datetime('now')),
+      ('legacyGlobal','fact','active','Legacy global','legacy global fact',NULL,0.9,NULL,'*',NULL,NULL,NULL,'manual','s6','primary',NULL,0,NULL,'[]',datetime('now'),datetime('now')),
       ('episode1','episode','active','Session','session summary',NULL,0.7,'metame',NULL,NULL,'session1',NULL,'session','session1','primary',NULL,0,NULL,'[]',datetime('now'),datetime('now'));
     CREATE VIRTUAL TABLE memory_items_fts USING fts5(
       title, content, tags, content=memory_items, content_rowid=rowid, tokenize='trigram'
@@ -39,6 +44,11 @@ test('legacy memory DB migrates supersedes_id and direct fact opens exclude epis
   try {
     memory.acquire();
     assert.equal(memory.getCognitiveAsset('fact', 'fact1', { project: 'metame' }).id, 'fact1');
+    assert.equal(memory.getCognitiveAsset('fact', 'other1', { project: 'metame' }), null);
+    assert.equal(memory.getCognitiveAsset('fact', 'global1', { project: 'metame' }).id, 'global1');
+    assert.equal(memory.getCognitiveAsset('fact', 'globalScoped', { project: 'metame' }), null);
+    assert.equal(memory.getCognitiveAsset('fact', 'legacyScoped', { project: 'metame' }).id, 'legacyScoped');
+    assert.equal(memory.getCognitiveAsset('fact', 'legacyGlobal', { project: 'metame' }).id, 'legacyGlobal');
     assert.equal(memory.getCognitiveAsset('fact', 'episode1', { project: 'metame' }), null);
     assert.equal(memory.getCognitiveAsset('fact', 'episode1', { project: 'metame', history: true }), null);
     const probe = new DatabaseSync(dbPath);

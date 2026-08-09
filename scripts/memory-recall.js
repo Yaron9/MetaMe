@@ -156,6 +156,7 @@ async function _searchWiki(query, scope, search) {
       excludeSourceTypes: externalMode === 'on' ? [] : ['openwiki'],
       observeSourceTypes: externalMode === 'shadow' ? ['openwiki'] : [],
       scopeKeys: [...desired],
+      projectKey: scope.project || null,
       artifactKinds: intent.artifactKinds,
     });
     wikiPages = (result && Array.isArray(result.wikiPages)) ? result.wikiPages : [];

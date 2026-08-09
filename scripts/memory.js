@@ -610,6 +610,7 @@ async function hybridSearchWiki(query, {
   excludeSourceTypes = [],
   observeSourceTypes = [],
   scopeKeys = [],
+  projectKey = null,
   artifactKinds = [],
 } = {}) {
   try {
@@ -620,6 +621,7 @@ async function hybridSearchWiki(query, {
       excludeSourceTypes,
       observeSourceTypes,
       scopeKeys,
+      projectKey,
       artifactKinds,
     });
   } catch {
@@ -678,8 +680,12 @@ function getCognitiveAsset(type, id, { project = null, history = false } = {}) {
     const params = [id];
     let scopeSql = '';
     if (project) {
-      scopeSql = `AND (scope = '*' OR lower(scope) = lower(?) OR (scope IS NULL AND (project = '*' OR lower(project) = lower(?))))`;
-      params.push(project, project);
+      scopeSql = `AND (
+        lower(project) = lower(?)
+        OR (COALESCE(trim(project), '') = '' AND (lower(scope) = lower(?) OR scope = '*'))
+        OR (project = '*' AND (scope IS NULL OR scope = '*' OR lower(scope) = lower(?)))
+      )`;
+      params.push(project, project, project);
     }
     if (history) {
       const rows = db.prepare(`

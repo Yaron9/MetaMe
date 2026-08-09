@@ -120,20 +120,44 @@ function scopePredicate(alias, values) {
   };
 }
 
-function memoryScopePredicate(alias, values) {
+function memoryScopePredicate(alias, projectValue, values) {
+  const project = normalizeScopeKeys([projectValue]);
   const scopes = normalizeScopeKeys(values);
-  if (scopes.length === 0) return { sql: '', args: [] };
+  if (project.length === 0) {
+    if (scopes.length === 0) return { sql: '', args: [] };
+    const legacyPlaceholders = scopes.map(() => '?').join(',');
+    return {
+      sql: `AND (
+        lower(COALESCE(${alias}.scope, '')) = '*'
+        OR lower(COALESCE(${alias}.scope, '')) IN (${legacyPlaceholders})
+        OR (${alias}.scope IS NULL AND (
+          lower(COALESCE(${alias}.project, '')) = '*'
+          OR lower(COALESCE(${alias}.project, '')) IN (${legacyPlaceholders})
+        ))
+      )`,
+      args: [...scopes, ...scopes],
+    };
+  }
   const placeholders = scopes.map(() => '?').join(',');
+  const legacyScopeSql = scopes.length > 0
+    ? `OR lower(${alias}.scope) IN (${placeholders})`
+    : '';
+  const globalScopeSql = scopes.length > 0
+    ? `OR lower(${alias}.scope) IN (${placeholders})`
+    : '';
   return {
     sql: `AND (
-      lower(COALESCE(${alias}.scope, '')) = '*'
-      OR lower(COALESCE(${alias}.scope, '')) IN (${placeholders})
-      OR (${alias}.scope IS NULL AND (
-        lower(COALESCE(${alias}.project, '')) = '*'
-        OR lower(COALESCE(${alias}.project, '')) IN (${placeholders})
+      lower(COALESCE(${alias}.project, '')) = ?
+      OR (COALESCE(trim(${alias}.project), '') = '' AND (
+        lower(${alias}.scope) = ? OR lower(${alias}.scope) = '*'
+        ${legacyScopeSql}
+      ))
+      OR (lower(COALESCE(${alias}.project, '')) = '*' AND (
+        ${alias}.scope IS NULL OR lower(${alias}.scope) = '*'
+        ${globalScopeSql}
       ))
     )`,
-    args: [...scopes, ...scopes],
+    args: [...project, ...project, ...scopes, ...scopes],
   };
 }
 
@@ -396,6 +420,7 @@ async function hybridSearchWiki(db, query, {
   excludeSourceTypes = [],
   observeSourceTypes = [],
   scopeKeys = [],
+  projectKey = null,
   artifactKinds = [],
 } = {}) {
   const safeQuery = sanitizeFts5(query);
@@ -493,7 +518,7 @@ async function hybridSearchWiki(db, query, {
   try {
     const { primarySqlForDb } = require('./knowledge-eligibility');
     const eligibility = primarySqlForDb(db, 'mi');
-    const memoryScope = memoryScopePredicate('mi', scopeKeys);
+    const memoryScope = memoryScopePredicate('mi', projectKey, scopeKeys);
     const current = memoryCurrentPredicate(db, 'mi');
     const factKind = memoryFactPredicate(db, 'mi');
     facts = db.prepare(`
