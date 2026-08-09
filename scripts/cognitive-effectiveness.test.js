@@ -20,12 +20,13 @@ test('collectReport audits existing assets against the four-stage consumption ch
     CREATE TABLE wiki_pages (slug TEXT PRIMARY KEY, source_type TEXT, artifact_status TEXT);
     CREATE TABLE recall_audit (
       ts TEXT, phase TEXT, should_recall INTEGER, consumer_stage TEXT,
-      engine TEXT, consumer_type TEXT
+      engine TEXT, consumer_type TEXT, agent_key TEXT
     );
     INSERT INTO memory_items VALUES ('f1','insight','active');
     INSERT INTO wiki_pages VALUES ('w1','memory','active');
-    INSERT INTO recall_audit VALUES (datetime('now'),'observe',1,NULL,NULL,NULL);
-    INSERT INTO recall_audit VALUES (datetime('now'),'consume',0,'delivered','codex','mcp');
+    INSERT INTO recall_audit VALUES (datetime('now'),'observe',1,NULL,NULL,NULL,NULL);
+    INSERT INTO recall_audit VALUES (datetime('now'),'consume',0,'delivered','codex','mcp',NULL);
+    INSERT INTO recall_audit VALUES (datetime('now'),'consume',0,'validated','codex','mcp','acceptance-test');
   `);
   db.close();
   const report = collectReport({ dbPath, skillsDir, days: 30 });

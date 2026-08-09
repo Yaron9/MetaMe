@@ -30,8 +30,9 @@ function collectReport({ dbPath, skillsDir, days = 30 }) {
     const opportunities = safeGet(db, `SELECT COUNT(*) AS n FROM recall_audit WHERE ts >= datetime('now', ?) AND should_recall=1`, since).n || 0;
     const consumption = safeAll(db, `
       SELECT consumer_stage, COALESCE(engine, consumer_type, 'unknown') AS host, COUNT(*) AS n
-        FROM recall_audit
+       FROM recall_audit
        WHERE ts >= datetime('now', ?) AND phase='consume' AND consumer_stage IS NOT NULL
+         AND lower(COALESCE(agent_key, '')) NOT LIKE '%acceptance%'
        GROUP BY consumer_stage, COALESCE(engine, consumer_type, 'unknown')
     `, since);
     return buildEffectivenessReport({ inventory: { facts, wiki, skills }, consumption, opportunities, days });
