@@ -670,6 +670,61 @@ function getWikiTopicTags(slugs) {
   return out;
 }
 
+function getCognitiveAsset(type, id, { project = null, history = false } = {}) {
+  if (!['fact', 'wiki'].includes(type) || !id) return null;
+  const db = getDb();
+  if (type === 'fact') {
+    const params = [id];
+    let scopeSql = '';
+    if (project) {
+      scopeSql = `AND (scope = '*' OR lower(scope) = lower(?) OR (scope IS NULL AND (project = '*' OR lower(project) = lower(?))))`;
+      params.push(project, project);
+    }
+    if (history) {
+      const rows = db.prepare(`
+        WITH RECURSIVE chain(id) AS (
+          SELECT id FROM memory_items WHERE id = ?
+          UNION
+          SELECT mi.id FROM memory_items mi JOIN chain c
+            ON mi.id = (SELECT supersedes_id FROM memory_items WHERE id = c.id)
+            OR mi.supersedes_id = c.id
+        )
+        SELECT id, state, title, content, summary, confidence, project, scope, relation,
+               supersedes_id, source_type, source_id, provenance_root_id, created_at, updated_at
+          FROM memory_items
+         WHERE id IN (SELECT id FROM chain) ${scopeSql}
+         ORDER BY created_at ASC, id ASC
+      `).all(...params);
+      return rows.length > 0 ? { type: 'fact_history', requested_id: id, versions: rows } : null;
+    }
+    const row = db.prepare(`
+      SELECT id, title, content, summary, confidence, project, scope, relation,
+             source_type, source_id, provenance_root_id, updated_at
+        FROM memory_items
+       WHERE id = ? AND state = 'active' AND supersedes_id IS NULL ${scopeSql}
+    `).get(...params);
+    return row ? { type: 'fact', ...row } : null;
+  }
+  const row = db.prepare(`
+    SELECT slug AS id, title, content, staleness, page_kind, project_key AS project,
+           source_type, updated_at
+      FROM wiki_pages
+     WHERE slug = ?
+       AND source_type != 'managed_redirect'
+       AND COALESCE(artifact_status, 'active') = 'active'
+  `).get(id);
+  if (!row) return null;
+  if (project && row.project && row.project.toLowerCase() !== project.toLowerCase()) return null;
+  let provenance = [];
+  try {
+    provenance = db.prepare(`
+      SELECT evidence_type, evidence_id FROM wiki_page_evidence
+       WHERE page_slug = ? ORDER BY evidence_type, evidence_id
+    `).all(id).map(item => `${item.evidence_type}:${item.evidence_id}`);
+  } catch { /* legacy schema */ }
+  return { type: 'wiki', ...row, provenance, freshness: Number(row.staleness || 0) >= 0.3 ? 'stale' : 'current' };
+}
+
 module.exports = {
   // core
   saveMemoryItem,
@@ -685,6 +740,7 @@ module.exports = {
   hybridSearchWiki,
   getWikiPageScopes,
   getWikiTopicTags,
+  getCognitiveAsset,
   // compatibility
   saveSession,
   saveFacts,

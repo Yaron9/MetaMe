@@ -14,6 +14,8 @@ function tempDeps(overrides = {}) {
     planRecall: () => { throw new Error('planRecall not stubbed'); },
     assembleRecallContext: () => { throw new Error('assemble not stubbed'); },
     writeFact: () => { throw new Error('writeFact not stubbed'); },
+    recordAudit: () => () => {},
+    hasConsumptionStage: () => () => true,
     skillsDir: '/nonexistent',
     agentsDir: '/nonexistent',
     dbPath: '/nonexistent/memory.db',
@@ -29,7 +31,7 @@ describe('metame-mcp-server protocol', () => {
 
     const list = await handleMessage({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
     const names = list.result.tools.map(t => t.name).sort();
-    assert.deepEqual(names, ['agent_context', 'memory_recall', 'memory_search', 'memory_write', 'profile_get', 'skill_get', 'skill_list']);
+    assert.deepEqual(names, ['agent_context', 'memory_feedback', 'memory_get', 'memory_recall', 'memory_search', 'memory_write', 'profile_get', 'skill_get', 'skill_list']);
     for (const tool of list.result.tools) {
       assert.ok(tool.description.length > 20, `${tool.name} needs a real description`);
       assert.equal(tool.inputSchema.type, 'object');
@@ -48,26 +50,78 @@ describe('metame-mcp-server protocol', () => {
 });
 
 describe('metame-mcp-server tools', () => {
-  it('memory_search wraps searchFactsAsync with clamped limit', async () => {
+  it('memory_search reuses hybrid facts/wiki search with typed budgeted results', async () => {
     let seen = null;
+    const audits = [];
     const deps = tempDeps({
       memory: () => ({
-        searchFactsAsync: async (q, opts) => { seen = { q, opts }; return [{ id: '1', entity: 'A.b', relation: 'config_fact', value: 'c' }]; },
+        hybridSearchWiki: async (q, opts) => {
+          seen = { q, opts };
+          return {
+            facts: [{ id: '1', title: 'A.b', content: 'current config', project: 'metame' }],
+            wikiPages: [{ slug: 'config', title: 'Config guide', excerpt: 'How config works', project_key: 'metame' }],
+          };
+        },
       }),
+      recordAudit: () => row => audits.push(row),
     });
-    const out = await callTool('memory_search', { query: 'daemon', limit: 999 }, deps);
+    const out = await callTool('memory_search', { query: 'daemon', limit: 999, project: 'MetaMe', host: 'codex' }, deps);
     assert.equal(seen.q, 'daemon');
-    assert.equal(seen.opts.limit, 20, 'limit must clamp to 20');
     assert.equal(seen.opts.trackSearch, false, 'external reads must not inflate promotion counters');
-    assert.equal(out.results.length, 1);
+    assert.deepEqual(seen.opts.scopeKeys, ['metame']);
+    assert.deepEqual(out.results.map(item => item.type), ['fact', 'wiki']);
+    assert.match(out.trace_id, /^mcp_/);
+    assert.equal(audits[0].consumer_stage, 'delivered');
+    assert.equal(audits[0].engine, 'codex');
   });
 
-  it('memory_recall returns no-trigger explanation or assembled hint', async () => {
+  it('memory_get opens one active asset and records opened audit', async () => {
+    const audits = [];
+    const deps = tempDeps({
+      memory: () => ({ getCognitiveAsset: () => ({ type: 'fact', id: 'f1', content: 'detail' }) }),
+      recordAudit: () => row => audits.push(row),
+    });
+    const out = await callTool('memory_get', { type: 'fact', id: 'f1', trace_id: 'trace-1' }, deps);
+    assert.equal(out.found, true);
+    assert.equal(out.asset.content, 'detail');
+    assert.equal(audits[0].consumer_stage, 'opened');
+    assert.equal(audits[0].trace_id, 'trace-1');
+  });
+
+  it('memory_get rejects assets not delivered by the same trace', async () => {
+    const deps = tempDeps({ hasConsumptionStage: () => () => false });
+    const out = await callTool('memory_get', { type: 'fact', id: 'f1', trace_id: 'trace-wrong' }, deps);
+    assert.equal(out.found, false);
+    assert.match(out.error, /not delivered/);
+  });
+
+  it('memory_get exposes fact history only when explicitly requested', async () => {
+    let options = null;
+    const deps = tempDeps({
+      memory: () => ({
+        getCognitiveAsset: (type, id, received) => {
+          options = received;
+          return { type: 'fact_history', requested_id: id, versions: [{ id: 'old' }, { id: 'new' }] };
+        },
+      }),
+    });
+    const out = await callTool('memory_get', { type: 'fact', id: 'new', history: true, trace_id: 'trace-history' }, deps);
+    assert.equal(options.history, true);
+    assert.deepEqual(out.asset.versions.map(item => item.id), ['old', 'new']);
+  });
+
+  it('memory_recall treats an explicit MCP call as demand', async () => {
+    let seenPlan = null;
     const deps = tempDeps({
       planRecall: () => () => ({ shouldRecall: false }),
+      assembleRecallContext: () => async ({ plan }) => {
+        seenPlan = plan;
+        return { text: '[Recall context: prior decision]', sources: [] };
+      },
     });
-    const miss = await callTool('memory_recall', { text: '你好' }, deps);
-    assert.equal(miss.recalled, false);
+    const explicit = await callTool('memory_recall', { text: 'ordinary search terms' }, deps);
+    assert.equal(explicit.recalled, true);
+    assert.equal(seenPlan.reason, 'explicit-mcp');
 
     const deps2 = tempDeps({
       planRecall: () => () => ({ shouldRecall: true, reason: 'anchor-match', anchors: [], modes: ['facts'] }),
@@ -90,6 +144,31 @@ describe('metame-mcp-server tools', () => {
     const bad = await callTool('memory_write', { entity: 'A', relation: 'config_fact', value: 'short' }, deps2);
     assert.equal(bad.saved, false);
     assert.deepEqual(bad.errors, ['value too short']);
+  });
+
+  it('memory_feedback records applied/validated evidence without content', async () => {
+    const audits = [];
+    const deps = tempDeps({ recordAudit: () => row => audits.push(row) });
+    const out = await callTool('memory_feedback', {
+      trace_id: 'trace-1', stage: 'validated', asset_ids: ['fact:f1'], outcome: 'used', evidence: 'tests-passed',
+    }, deps);
+    assert.equal(out.recorded, true);
+    assert.equal(audits[0].consumer_stage, 'validated');
+    assert.deepEqual(audits[0].source_refs, ['fact:f1']);
+    assert.equal(audits[0].evidence_class, 'tests-passed');
+  });
+
+  it('memory_feedback enforces ordered evidence transitions', async () => {
+    const deps = tempDeps({ hasConsumptionStage: () => (traceId, stage) => stage === 'opened' });
+    const applied = await callTool('memory_feedback', {
+      trace_id: 'trace-1', stage: 'applied', asset_ids: ['fact:f1'],
+    }, deps);
+    assert.equal(applied.recorded, true);
+    const validated = await callTool('memory_feedback', {
+      trace_id: 'trace-1', stage: 'validated', asset_ids: ['fact:f1'],
+    }, deps);
+    assert.equal(validated.recorded, false);
+    assert.match(validated.error, /reached applied/);
   });
 
   it('skill_list/skill_get read the skills directory and sanitize names', async () => {

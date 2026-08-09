@@ -33,6 +33,12 @@ const RECALL_AUDIT_DDL = `
     external_shadow_hits INTEGER DEFAULT 0,
     outcome         TEXT DEFAULT 'unknown'
                     CHECK (outcome IN ('unknown','planned','injected','used','ignored','corrected','harmful')),
+    consumer_stage  TEXT CHECK (consumer_stage IN ('delivered','opened','applied','validated')),
+    consumer_type   TEXT,
+    trace_id        TEXT,
+    latency_ms      INTEGER DEFAULT 0,
+    token_count     INTEGER DEFAULT 0,
+    evidence_class  TEXT,
     error_message  TEXT
   )
 `;
@@ -41,6 +47,7 @@ const RECALL_AUDIT_INDEXES = [
   'CREATE INDEX IF NOT EXISTS idx_recall_audit_ts      ON recall_audit(ts)',
   'CREATE INDEX IF NOT EXISTS idx_recall_audit_phase   ON recall_audit(phase, ts)',
   'CREATE INDEX IF NOT EXISTS idx_recall_audit_project ON recall_audit(project, scope, ts)',
+  'CREATE INDEX IF NOT EXISTS idx_recall_audit_trace   ON recall_audit(trace_id, consumer_stage, ts)',
 ];
 
 // Single-row state table for monotonic counters that must survive daemon

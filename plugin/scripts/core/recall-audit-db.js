@@ -49,6 +49,13 @@ function _openDb() {
     db.exec('PRAGMA busy_timeout = 3000');
     db.exec(RECALL_AUDIT_DDL);
     try { db.exec('ALTER TABLE recall_audit ADD COLUMN external_shadow_hits INTEGER DEFAULT 0'); } catch { }
+    for (const [name, type] of [
+      ['consumer_stage', 'TEXT'], ['consumer_type', 'TEXT'], ['trace_id', 'TEXT'],
+      ['latency_ms', 'INTEGER DEFAULT 0'], ['token_count', 'INTEGER DEFAULT 0'],
+      ['evidence_class', 'TEXT'],
+    ]) {
+      try { db.exec(`ALTER TABLE recall_audit ADD COLUMN ${name} ${type}`); } catch { }
+    }
     db.exec(RECALL_AUDIT_STATE_DDL);
     db.prepare(
       `INSERT OR IGNORE INTO recall_audit_state (key, value) VALUES ('dropped_count', 0)`
@@ -111,13 +118,14 @@ function recordAudit(row) {
     if (!row || typeof row !== 'object' || typeof row.id !== 'string' || row.id.length === 0) return;
     db = _openDb();
     if (!db) return;
-    const phase = row.phase === 'inject' ? 'inject' : 'observe';
+    const phase = ['inject', 'consume'].includes(row.phase) ? row.phase : 'observe';
     db.prepare(
       `INSERT INTO recall_audit
          (id, phase, chat_id, project, scope, agent_key, engine, session_started,
           should_recall, router_reason, query_hashes, anchor_labels, modes,
-          source_refs, injected_chars, truncated, wiki_dropped, external_shadow_hits, outcome, error_message)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          source_refs, injected_chars, truncated, wiki_dropped, external_shadow_hits, outcome,
+          consumer_stage, consumer_type, trace_id, latency_ms, token_count, evidence_class, error_message)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       row.id,
       phase,
@@ -138,6 +146,12 @@ function recordAudit(row) {
       row.wiki_dropped ? 1 : 0,
       Number.isFinite(row.external_shadow_hits) ? row.external_shadow_hits : 0,
       row.outcome || 'unknown',
+      row.consumer_stage || null,
+      row.consumer_type || null,
+      row.trace_id || null,
+      Number.isFinite(row.latency_ms) ? row.latency_ms : 0,
+      Number.isFinite(row.token_count) ? row.token_count : 0,
+      row.evidence_class || null,
       row.error_message || null,
     );
   } catch {
@@ -160,6 +174,23 @@ function getDroppedCount() {
   return _droppedCount;
 }
 
+function hasConsumptionStage(traceId, stage, assetId) {
+  if (!traceId || !stage || !assetId) return false;
+  try {
+    const db = _openDb();
+    if (!db) return false;
+    const rows = db.prepare(`
+      SELECT source_refs FROM recall_audit
+       WHERE phase='consume' AND trace_id=? AND consumer_stage=?
+    `).all(traceId, stage);
+    return rows.some(row => {
+      try { return JSON.parse(row.source_refs || '[]').includes(assetId); } catch { return false; }
+    });
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Aggregate the audit trail for diagnostics (recall-report CLI).
  * Read-only; returns null when the DB is unavailable.
@@ -175,8 +206,8 @@ function summarizeAudit({ days = 30 } = {}) {
        COALESCE(SUM(should_recall), 0) AS triggered,
        COALESCE(SUM(CASE WHEN phase = 'inject' THEN 1 ELSE 0 END), 0) AS injected,
        COALESCE(SUM(truncated), 0) AS truncated,
-       CAST(COALESCE(AVG(CASE WHEN injected_chars > 0 THEN injected_chars END), 0) AS INTEGER) AS avg_injected_chars
-     FROM recall_audit WHERE ts >= datetime('now', ?)`
+       CAST(COALESCE(AVG(CASE WHEN phase = 'inject' AND injected_chars > 0 THEN injected_chars END), 0) AS INTEGER) AS avg_injected_chars
+     FROM recall_audit WHERE ts >= datetime('now', ?) AND phase != 'consume'`
   );
   const reasons = all(
     `SELECT COALESCE(router_reason, '(none)') AS reason, COUNT(*) AS n
@@ -188,7 +219,16 @@ function summarizeAudit({ days = 30 } = {}) {
      FROM recall_audit WHERE ts >= datetime('now', ?) AND phase = 'inject'
      GROUP BY outcome ORDER BY n DESC`
   );
-  return { days, totals, reasons, outcomes, dropped: getDroppedCount() };
+  const consumption = all(
+    `SELECT consumer_stage AS stage, COALESCE(engine, consumer_type, '(unknown)') AS host,
+            COUNT(*) AS n, COALESCE(SUM(injected_chars), 0) AS chars,
+            CAST(COALESCE(AVG(NULLIF(latency_ms, 0)), 0) AS INTEGER) AS avg_latency_ms
+       FROM recall_audit
+      WHERE ts >= datetime('now', ?) AND phase = 'consume' AND consumer_stage IS NOT NULL
+      GROUP BY consumer_stage, COALESCE(engine, consumer_type, '(unknown)')
+      ORDER BY consumer_stage, host`
+  );
+  return { days, totals, reasons, outcomes, consumption, dropped: getDroppedCount() };
 }
 
 function _resetForTesting() {
@@ -203,4 +243,4 @@ function _getDbForTesting() {
   return _db;
 }
 
-module.exports = { recordAudit, getDroppedCount, summarizeAudit, _resetForTesting, _getDbForTesting };
+module.exports = { recordAudit, getDroppedCount, hasConsumptionStage, summarizeAudit, _resetForTesting, _getDbForTesting };

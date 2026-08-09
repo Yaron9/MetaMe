@@ -347,6 +347,13 @@ function applyWikiSchema(db) {
   const { RECALL_AUDIT_DDL, RECALL_AUDIT_INDEXES, RECALL_AUDIT_STATE_DDL } = require('./core/recall-audit-ddl');
   db.exec(RECALL_AUDIT_DDL);
   try { db.exec('ALTER TABLE recall_audit ADD COLUMN external_shadow_hits INTEGER DEFAULT 0'); } catch { }
+  for (const [name, type] of [
+      ['consumer_stage', 'TEXT'], ['consumer_type', 'TEXT'], ['trace_id', 'TEXT'],
+      ['latency_ms', 'INTEGER DEFAULT 0'], ['token_count', 'INTEGER DEFAULT 0'],
+      ['evidence_class', 'TEXT'],
+  ]) {
+    try { db.exec(`ALTER TABLE recall_audit ADD COLUMN ${name} ${type}`); } catch { }
+  }
   for (const idx of RECALL_AUDIT_INDEXES) db.exec(idx);
   db.exec(RECALL_AUDIT_STATE_DDL);
 

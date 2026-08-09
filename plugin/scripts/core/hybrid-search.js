@@ -120,6 +120,49 @@ function scopePredicate(alias, values) {
   };
 }
 
+function memoryScopePredicate(alias, values) {
+  const scopes = normalizeScopeKeys(values);
+  if (scopes.length === 0) return { sql: '', args: [] };
+  const placeholders = scopes.map(() => '?').join(',');
+  return {
+    sql: `AND (
+      lower(COALESCE(${alias}.scope, '')) = '*'
+      OR lower(COALESCE(${alias}.scope, '')) IN (${placeholders})
+      OR (${alias}.scope IS NULL AND (
+        lower(COALESCE(${alias}.project, '')) = '*'
+        OR lower(COALESCE(${alias}.project, '')) IN (${placeholders})
+      ))
+    )`,
+    args: [...scopes, ...scopes],
+  };
+}
+
+function memoryCurrentPredicate(db, alias) {
+  try {
+    const hasSupersedes = db.prepare(`PRAGMA table_info(memory_items)`).all()
+      .some(column => column.name === 'supersedes_id');
+    return hasSupersedes ? `AND ${alias}.supersedes_id IS NULL` : '';
+  } catch {
+    return '';
+  }
+}
+
+function attachWikiProvenance(db, pages) {
+  if (pages.length === 0) return pages;
+  const refs = new Map(pages.map(page => [page.slug, []]));
+  try {
+    const placeholders = pages.map(() => '?').join(',');
+    const rows = db.prepare(`
+      SELECT page_slug, evidence_type, evidence_id
+        FROM wiki_page_evidence
+       WHERE page_slug IN (${placeholders})
+       ORDER BY page_slug, evidence_type, evidence_id
+    `).all(...pages.map(page => page.slug));
+    for (const row of rows) refs.get(row.page_slug)?.push(`${row.evidence_type}:${row.evidence_id}`);
+  } catch { /* additive evidence schema may not exist on legacy databases */ }
+  return pages.map(page => ({ ...page, provenance: refs.get(page.slug) || [] }));
+}
+
 function ftsSearch(db, safeQuery, excludedSourceTypes = [], scopeKeys = [], artifactKinds = []) {
   const excluded = normalizeSourceTypes(excludedSourceTypes);
   const sourceClause = excluded.length > 0
@@ -425,7 +468,7 @@ async function hybridSearchWiki(db, query, {
   }
 
   // 4. RRF fusion + normalize
-  const wikiPages = filterScopeEligible(db, rrfFuse(merged), scopeKeys);
+  const wikiPages = attachWikiProvenance(db, filterScopeEligible(db, rrfFuse(merged), scopeKeys));
   normalizeScores(wikiPages);
   const requestedArtifactKinds = new Set(normalizeArtifactKinds(artifactKinds));
   if (requestedArtifactKinds.size > 0) {
@@ -440,18 +483,22 @@ async function hybridSearchWiki(db, query, {
   try {
     const { primarySqlForDb } = require('./knowledge-eligibility');
     const eligibility = primarySqlForDb(db, 'mi');
+    const memoryScope = memoryScopePredicate('mi', scopeKeys);
+    const current = memoryCurrentPredicate(db, 'mi');
     facts = db.prepare(`
-      SELECT mi.id, mi.title, mi.content, mi.kind, mi.confidence,
+      SELECT mi.*,
              snippet(memory_items_fts, 1, '<b>', '</b>', '...', 20) as excerpt,
              rank as score
       FROM memory_items_fts
       JOIN memory_items mi ON memory_items_fts.rowid = mi.rowid
       WHERE memory_items_fts MATCH ?
         AND mi.state = 'active'
+        ${current}
         AND ${eligibility.sql}
+        ${memoryScope.sql}
       ORDER BY rank
       LIMIT 10
-    `).all(safeQuery);
+    `).all(safeQuery, ...memoryScope.args);
   } catch {
     facts = [];
   }
@@ -499,5 +546,8 @@ module.exports = {
     normalizeScores,
     hasStoredEmbeddings,
     countFtsSourceMatches,
+    attachWikiProvenance,
+    memoryScopePredicate,
+    memoryCurrentPredicate,
   },
 };
