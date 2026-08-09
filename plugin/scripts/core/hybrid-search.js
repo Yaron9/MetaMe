@@ -147,6 +147,16 @@ function memoryCurrentPredicate(db, alias) {
   }
 }
 
+function memoryFactPredicate(db, alias) {
+  try {
+    const hasKind = db.prepare(`PRAGMA table_info(memory_items)`).all()
+      .some(column => column.name === 'kind');
+    return hasKind ? `AND ${alias}.kind IN ('insight','convention')` : '';
+  } catch {
+    return '';
+  }
+}
+
 function attachWikiProvenance(db, pages) {
   if (pages.length === 0) return pages;
   const refs = new Map(pages.map(page => [page.slug, []]));
@@ -485,6 +495,7 @@ async function hybridSearchWiki(db, query, {
     const eligibility = primarySqlForDb(db, 'mi');
     const memoryScope = memoryScopePredicate('mi', scopeKeys);
     const current = memoryCurrentPredicate(db, 'mi');
+    const factKind = memoryFactPredicate(db, 'mi');
     facts = db.prepare(`
       SELECT mi.*,
              snippet(memory_items_fts, 1, '<b>', '</b>', '...', 20) as excerpt,
@@ -494,6 +505,7 @@ async function hybridSearchWiki(db, query, {
       WHERE memory_items_fts MATCH ?
         AND mi.state = 'active'
         ${current}
+        ${factKind}
         AND ${eligibility.sql}
         ${memoryScope.sql}
       ORDER BY rank
@@ -549,5 +561,6 @@ module.exports = {
     attachWikiProvenance,
     memoryScopePredicate,
     memoryCurrentPredicate,
+    memoryFactPredicate,
   },
 };

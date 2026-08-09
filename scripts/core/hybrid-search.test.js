@@ -224,11 +224,13 @@ describe('hybrid-search internals', () => {
       CREATE VIRTUAL TABLE memory_items_fts USING fts5(title,content,content='memory_items',content_rowid='rowid');
       INSERT INTO memory_items VALUES ('primary','fact','needle primary','insight',0.9,'active','primary','observed','s1',0);
       INSERT INTO memory_items VALUES ('derived','fact','needle derived','insight',0.9,'active','derived','synthesized_insight','nightly-reflect-x',0);
+      INSERT INTO memory_items VALUES ('episode','session','needle episode','episode',0.9,'active','primary',NULL,'session-x',0);
       INSERT INTO memory_items_fts(memory_items_fts) VALUES('rebuild');
     `);
     const result = await hybridSearchWiki(db, 'needle', { ftsOnly: true, trackSearch: true });
     assert.deepEqual(result.facts.map(fact => fact.id), ['primary']);
     assert.equal(db.prepare("SELECT search_count FROM memory_items WHERE id='derived'").get().search_count, 0);
+    assert.equal(db.prepare("SELECT search_count FROM memory_items WHERE id='episode'").get().search_count, 0);
     db.close();
   });
 });
