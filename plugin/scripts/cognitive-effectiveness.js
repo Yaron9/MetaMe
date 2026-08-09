@@ -29,11 +29,13 @@ function collectReport({ dbPath, skillsDir, days = 30 }) {
     } catch { /* unavailable skill directory */ }
     const opportunities = safeGet(db, `SELECT COUNT(*) AS n FROM recall_audit WHERE ts >= datetime('now', ?) AND should_recall=1`, since).n || 0;
     const consumption = safeAll(db, `
-      SELECT consumer_stage, COALESCE(engine, consumer_type, 'unknown') AS host, COUNT(*) AS n
-       FROM recall_audit
+      SELECT consumer_stage, COALESCE(engine, consumer_type, 'unknown') AS host,
+             CASE WHEN instr(j.value, ':') > 0 THEN substr(j.value, 1, instr(j.value, ':') - 1) ELSE '' END AS asset_type,
+             COUNT(*) AS n
+        FROM recall_audit, json_each(COALESCE(source_refs, '[]')) AS j
        WHERE ts >= datetime('now', ?) AND phase='consume' AND consumer_stage IS NOT NULL
          AND lower(COALESCE(agent_key, '')) NOT LIKE '%acceptance%'
-       GROUP BY consumer_stage, COALESCE(engine, consumer_type, 'unknown')
+       GROUP BY consumer_stage, COALESCE(engine, consumer_type, 'unknown'), asset_type
     `, since);
     return buildEffectivenessReport({ inventory: { facts, wiki, skills }, consumption, opportunities, days });
   } finally {
@@ -49,6 +51,7 @@ function render(report) {
     `opportunities=${report.opportunities}`,
   ];
   if (report.broken_stage) lines.push(`broken_stage=${report.broken_stage}`);
+  for (const [type, stage] of Object.entries(report.broken_stages)) lines.push(`  ${type}: ${stage || 'healthy'}`);
   if (report.pause_candidates.length > 0) lines.push(`backpressure: pause candidates=${report.pause_candidates.join(',')}`);
   return lines.join('\n');
 }

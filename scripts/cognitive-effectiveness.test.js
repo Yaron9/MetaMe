@@ -20,19 +20,21 @@ test('collectReport audits existing assets against the four-stage consumption ch
     CREATE TABLE wiki_pages (slug TEXT PRIMARY KEY, source_type TEXT, artifact_status TEXT);
     CREATE TABLE recall_audit (
       ts TEXT, phase TEXT, should_recall INTEGER, consumer_stage TEXT,
-      engine TEXT, consumer_type TEXT, agent_key TEXT
+      engine TEXT, consumer_type TEXT, agent_key TEXT, source_refs TEXT
     );
     INSERT INTO memory_items VALUES ('f1','insight','active');
     INSERT INTO memory_items VALUES ('session1','episode','active');
     INSERT INTO wiki_pages VALUES ('w1','memory','active');
-    INSERT INTO recall_audit VALUES (datetime('now'),'observe',1,NULL,NULL,NULL,NULL);
-    INSERT INTO recall_audit VALUES (datetime('now'),'consume',0,'delivered','codex','mcp',NULL);
-    INSERT INTO recall_audit VALUES (datetime('now'),'consume',0,'validated','codex','mcp','acceptance-test');
+    INSERT INTO recall_audit VALUES (datetime('now'),'observe',1,NULL,NULL,NULL,NULL,'[]');
+    INSERT INTO recall_audit VALUES (datetime('now'),'consume',0,'delivered','codex','mcp',NULL,'["fact:f1"]');
+    INSERT INTO recall_audit VALUES (datetime('now'),'consume',0,'validated','codex','mcp','acceptance-test','["fact:f1"]');
   `);
   db.close();
   const report = collectReport({ dbPath, skillsDir, days: 30 });
   assert.deepEqual(report.inventory, { facts: 1, wiki: 1, skills: 1 });
-  assert.equal(report.broken_stage, 'opening');
+  assert.equal(report.broken_stage, 'delivery');
+  assert.equal(report.broken_stages.facts, 'opening');
+  assert.equal(report.asset_stages.fact.delivered, 1);
   assert.match(render(report), /funnel delivered=1/);
   fs.rmSync(root, { recursive: true, force: true });
 });

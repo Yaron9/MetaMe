@@ -23,9 +23,20 @@ test('does not recommend backpressure without observed demand', () => {
 
 test('tracks four consumption stages per host and recognizes a complete chain', () => {
   const consumption = ['delivered', 'opened', 'applied', 'validated']
-    .map(consumer_stage => ({ consumer_stage, host: 'codex', n: 1 }));
+    .map(consumer_stage => ({ consumer_stage, host: 'codex', asset_type: 'fact', n: 1 }));
   const report = buildEffectivenessReport({ inventory: { facts: 1 }, consumption });
   assert.equal(report.status, 'healthy');
   assert.equal(report.broken_stage, null);
   assert.equal(report.hosts.codex.validated, 1);
+});
+
+test('keeps producer backpressure isolated by asset type', () => {
+  const consumption = ['delivered', 'opened', 'applied', 'validated']
+    .map(consumer_stage => ({ consumer_stage, host: 'codex', asset_type: 'fact', n: 1 }));
+  const report = buildEffectivenessReport({
+    inventory: { facts: 3, wiki: 2, skills: 1 }, opportunities: 2, consumption,
+  });
+  assert.equal(report.broken_stages.facts, null);
+  assert.equal(report.broken_stages.wiki, 'delivery');
+  assert.deepEqual(report.pause_candidates, ['wiki-reflect', 'skill-evolve']);
 });

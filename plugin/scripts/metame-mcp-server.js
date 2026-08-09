@@ -123,14 +123,22 @@ const TOOLS = [
   {
     name: 'skill_list',
     description: 'List installed MetaMe skills with their descriptions, so any agent can discover available capabilities.',
-    inputSchema: { type: 'object', properties: {} },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        host: { type: 'string' }, agent_key: { type: 'string' }, project: { type: 'string' },
+      },
+    },
   },
   {
     name: 'skill_get',
     description: 'Read the full SKILL.md instructions of a named skill.',
     inputSchema: {
       type: 'object',
-      properties: { name: { type: 'string', description: 'Skill name from skill_list' } },
+      properties: {
+        name: { type: 'string', description: 'Skill name from skill_list' },
+        trace_id: { type: 'string' }, host: { type: 'string' }, agent_key: { type: 'string' }, project: { type: 'string' },
+      },
       required: ['name'],
     },
   },
@@ -305,14 +313,30 @@ const handlers = {
         .map(e => readSkillMeta(deps.skillsDir, e.name))
         .filter(Boolean);
     } catch { /* skills dir missing */ }
-    return { skills: entries };
+    const traceId = `mcp_${crypto.randomUUID()}`;
+    for (const entry of entries) {
+      deps.recordAudit()({
+        id: `ca_${crypto.randomUUID()}`, phase: 'consume', consumer_stage: 'delivered', consumer_type: 'mcp',
+        trace_id: traceId, engine: args.host || null, agent_key: args.agent_key || null,
+        project: args.project || null, source_refs: [`skill:${entry.name}`],
+        injected_chars: JSON.stringify(entry).length, outcome: 'injected',
+      });
+    }
+    return { trace_id: traceId, skills: entries };
   },
 
   async skill_get(args, deps) {
     const name = String(args.name || '').replace(/[^a-zA-Z0-9_-]/g, '');
     if (!name) return { error: 'invalid skill name' };
     try {
-      return { name, content: fs.readFileSync(path.join(deps.skillsDir, name, 'SKILL.md'), 'utf8') };
+      const content = fs.readFileSync(path.join(deps.skillsDir, name, 'SKILL.md'), 'utf8');
+      const traceId = String(args.trace_id || `mcp_${crypto.randomUUID()}`);
+      deps.recordAudit()({
+        id: `ca_${crypto.randomUUID()}`, phase: 'consume', consumer_stage: 'opened', consumer_type: 'mcp',
+        trace_id: traceId, engine: args.host || null, agent_key: args.agent_key || null,
+        project: args.project || null, source_refs: [`skill:${name}`], injected_chars: content.length, outcome: 'used',
+      });
+      return { name, trace_id: traceId, content };
     } catch {
       return { error: `skill not found: ${name}` };
     }

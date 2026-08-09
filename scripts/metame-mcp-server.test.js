@@ -177,15 +177,19 @@ describe('metame-mcp-server tools', () => {
     fs.mkdirSync(path.join(dir, 'demo-skill'));
     fs.writeFileSync(path.join(dir, 'demo-skill', 'SKILL.md'), '---\nname: demo-skill\ndescription: A demo skill for unit tests of the MCP surface.\n---\n\n# Demo\nBody.\n', 'utf8');
     fs.mkdirSync(path.join(dir, '_drafts'));
-    const deps = tempDeps({ skillsDir: dir });
+    const audits = [];
+    const deps = tempDeps({ skillsDir: dir, recordAudit: () => row => audits.push(row) });
 
     const list = await callTool('skill_list', {}, deps);
     assert.equal(list.skills.length, 1, 'draft/underscore dirs excluded');
     assert.equal(list.skills[0].name, 'demo-skill');
     assert.match(list.skills[0].description, /demo skill/i);
+    assert.match(list.trace_id, /^mcp_/);
+    assert.deepEqual(audits[0].source_refs, ['skill:demo-skill']);
 
-    const got = await callTool('skill_get', { name: 'demo-skill' }, deps);
+    const got = await callTool('skill_get', { name: 'demo-skill', trace_id: list.trace_id }, deps);
     assert.match(got.content, /# Demo/);
+    assert.equal(audits[1].consumer_stage, 'opened');
     const traversal = await callTool('skill_get', { name: '../etc' }, deps);
     assert.ok(traversal.error, 'path traversal must not resolve');
     fs.rmSync(dir, { recursive: true, force: true });
