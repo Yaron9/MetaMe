@@ -450,15 +450,3 @@ test('summarizeAudit aggregates trigger/inject stats', () => {
     db.close();
   });
 });
-
-test('hasConsumptionStage binds an asset to a real trace stage', () => {
-  withTempDb((audit) => {
-    audit.recordAudit({
-      id: 'c1', phase: 'consume', consumer_stage: 'delivered', trace_id: 't1',
-      source_refs: ['fact:f1', 'wiki:w1'], outcome: 'injected',
-    });
-    assert.equal(audit.hasConsumptionStage('t1', 'delivered', 'fact:f1'), true);
-    assert.equal(audit.hasConsumptionStage('t1', 'delivered', 'fact:other'), false);
-    assert.equal(audit.hasConsumptionStage('other', 'delivered', 'fact:f1'), false);
-  });
-});

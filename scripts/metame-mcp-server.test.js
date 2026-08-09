@@ -15,7 +15,6 @@ function tempDeps(overrides = {}) {
     assembleRecallContext: () => { throw new Error('assemble not stubbed'); },
     writeFact: () => { throw new Error('writeFact not stubbed'); },
     recordAudit: () => () => {},
-    hasConsumptionStage: () => () => true,
     skillsDir: '/nonexistent',
     agentsDir: '/nonexistent',
     dbPath: '/nonexistent/memory.db',
@@ -101,11 +100,13 @@ describe('metame-mcp-server tools', () => {
     assert.equal(audits[0].trace_id, 'trace-1');
   });
 
-  it('memory_get rejects assets not delivered by the same trace', async () => {
-    const deps = tempDeps({ hasConsumptionStage: () => () => false });
-    const out = await callTool('memory_get', { type: 'fact', id: 'f1', trace_id: 'trace-wrong' }, deps);
-    assert.equal(out.found, false);
-    assert.match(out.error, /not delivered/);
+  it('memory_get does not let best-effort audit loss block a delivered asset', async () => {
+    const deps = tempDeps({
+      memory: () => ({ getCognitiveAsset: () => ({ type: 'fact', id: 'f1', content: 'detail' }) }),
+      recordAudit: () => () => {},
+    });
+    const out = await callTool('memory_get', { type: 'fact', id: 'f1', trace_id: 'trace-with-dropped-audit' }, deps);
+    assert.equal(out.found, true);
   });
 
   it('memory_get exposes fact history only when explicitly requested', async () => {
@@ -169,19 +170,6 @@ describe('metame-mcp-server tools', () => {
     assert.equal(audits[0].consumer_stage, 'validated');
     assert.deepEqual(audits[0].source_refs, ['fact:f1']);
     assert.equal(audits[0].evidence_class, 'tests-passed');
-  });
-
-  it('memory_feedback enforces ordered evidence transitions', async () => {
-    const deps = tempDeps({ hasConsumptionStage: () => (traceId, stage) => stage === 'opened' });
-    const applied = await callTool('memory_feedback', {
-      trace_id: 'trace-1', stage: 'applied', asset_ids: ['fact:f1'],
-    }, deps);
-    assert.equal(applied.recorded, true);
-    const validated = await callTool('memory_feedback', {
-      trace_id: 'trace-1', stage: 'validated', asset_ids: ['fact:f1'],
-    }, deps);
-    assert.equal(validated.recorded, false);
-    assert.match(validated.error, /reached applied/);
   });
 
   it('skill_list/skill_get read the skills directory and sanitize names', async () => {

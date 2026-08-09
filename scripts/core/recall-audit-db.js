@@ -175,23 +175,6 @@ function getDroppedCount() {
   return _droppedCount;
 }
 
-function hasConsumptionStage(traceId, stage, assetId) {
-  if (!traceId || !stage || !assetId) return false;
-  try {
-    const db = _openDb();
-    if (!db) return false;
-    const rows = db.prepare(`
-      SELECT source_refs FROM recall_audit
-       WHERE phase='consume' AND trace_id=? AND consumer_stage=?
-    `).all(traceId, stage);
-    return rows.some(row => {
-      try { return JSON.parse(row.source_refs || '[]').includes(assetId); } catch { return false; }
-    });
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Aggregate the audit trail for diagnostics (recall-report CLI).
  * Read-only; returns null when the DB is unavailable.
@@ -244,4 +227,4 @@ function _getDbForTesting() {
   return _db;
 }
 
-module.exports = { recordAudit, getDroppedCount, hasConsumptionStage, summarizeAudit, _resetForTesting, _getDbForTesting };
+module.exports = { recordAudit, getDroppedCount, summarizeAudit, _resetForTesting, _getDbForTesting };

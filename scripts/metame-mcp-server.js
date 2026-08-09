@@ -154,7 +154,6 @@ function defaultDeps() {
     assembleRecallContext: () => require('./memory-recall').assembleRecallContext,
     writeFact: () => require('./memory-write').writeFact,
     recordAudit: () => require('./core/recall-audit-db').recordAudit,
-    hasConsumptionStage: () => require('./core/recall-audit-db').hasConsumptionStage,
     skillsDir: SKILLS_DIR,
     agentsDir: AGENTS_DIR,
     dbPath: DB_PATH,
@@ -206,9 +205,7 @@ const handlers = {
   async memory_get(args, deps) {
     const traceId = String(args.trace_id || '').trim();
     const assetRef = `${args.type}:${args.id}`;
-    if (!traceId || !deps.hasConsumptionStage()(traceId, 'delivered', assetRef)) {
-      return { found: false, error: 'asset was not delivered in this trace' };
-    }
+    if (!traceId) return { found: false, error: 'trace_id is required' };
     const memory = deps.memory();
     const asset = memory.getCognitiveAsset(String(args.type || ''), String(args.id || ''), {
       project: args.project || null,
@@ -269,10 +266,6 @@ const handlers = {
     if (!stage || !traceId || assetIds.length === 0) return { recorded: false, error: 'trace_id, valid stage, and asset_ids are required' };
     const allowedOutcomes = new Set(['used', 'ignored', 'corrected', 'harmful']);
     const outcome = allowedOutcomes.has(args.outcome) ? args.outcome : (stage === 'validated' ? 'used' : 'planned');
-    const previousStage = stage === 'validated' ? 'applied' : 'opened';
-    if (!assetIds.every(assetId => deps.hasConsumptionStage()(traceId, previousStage, assetId))) {
-      return { recorded: false, error: `assets must have reached ${previousStage} in this trace` };
-    }
     deps.recordAudit()({
       id: `ca_${crypto.randomUUID()}`,
       phase: 'consume',
