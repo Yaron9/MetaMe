@@ -184,21 +184,22 @@ const handlers = {
     });
     const assembled = assembleSearchResults(hybrid, { limit, maxChars: args.max_chars });
     const traceId = `mcp_${crypto.randomUUID()}`;
-    const sourceRefs = assembled.results.map(item => `${item.type}:${item.id}`);
-    deps.recordAudit()({
-      id: `ca_${crypto.randomUUID()}`,
-      phase: 'consume',
-      consumer_stage: 'delivered',
-      consumer_type: 'mcp',
-      trace_id: traceId,
-      engine: args.host || null,
-      agent_key: args.agent_key || null,
-      project: args.project || null,
-      source_refs: sourceRefs,
-      injected_chars: assembled.usedChars,
-      latency_ms: Date.now() - startedAt,
-      outcome: 'injected',
-    });
+    for (const item of assembled.results) {
+      deps.recordAudit()({
+        id: `ca_${crypto.randomUUID()}`,
+        phase: 'consume',
+        consumer_stage: 'delivered',
+        consumer_type: 'mcp',
+        trace_id: traceId,
+        engine: args.host || null,
+        agent_key: args.agent_key || null,
+        project: args.project || null,
+        source_refs: [`${item.type}:${item.id}`],
+        injected_chars: JSON.stringify(item).length,
+        latency_ms: Date.now() - startedAt,
+        outcome: 'injected',
+      });
+    }
     return { trace_id: traceId, ...assembled };
   },
 

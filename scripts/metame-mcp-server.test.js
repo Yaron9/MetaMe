@@ -71,8 +71,21 @@ describe('metame-mcp-server tools', () => {
     assert.deepEqual(seen.opts.scopeKeys, ['metame']);
     assert.deepEqual(out.results.map(item => item.type), ['fact', 'wiki']);
     assert.match(out.trace_id, /^mcp_/);
+    assert.equal(audits.length, 2, 'each delivered asset has one auditable event');
     assert.equal(audits[0].consumer_stage, 'delivered');
     assert.equal(audits[0].engine, 'codex');
+    assert.deepEqual(audits.map(row => row.source_refs), [['fact:1'], ['wiki:config']]);
+  });
+
+  it('memory_search does not record a delivery for an empty result', async () => {
+    const audits = [];
+    const deps = tempDeps({
+      memory: () => ({ hybridSearchWiki: async () => ({ facts: [], wikiPages: [] }) }),
+      recordAudit: () => row => audits.push(row),
+    });
+    const out = await callTool('memory_search', { query: 'nothing' }, deps);
+    assert.deepEqual(out.results, []);
+    assert.deepEqual(audits, []);
   });
 
   it('memory_get opens one active asset and records opened audit', async () => {
