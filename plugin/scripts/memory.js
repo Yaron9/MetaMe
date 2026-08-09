@@ -701,7 +701,8 @@ function getCognitiveAsset(type, id, { project = null, history = false } = {}) {
       SELECT id, title, content, summary, confidence, project, scope, relation,
              source_type, source_id, provenance_root_id, updated_at
         FROM memory_items
-       WHERE id = ? AND state = 'active' AND supersedes_id IS NULL ${scopeSql}
+       WHERE id = ? AND kind IN ('insight','convention')
+         AND state = 'active' AND supersedes_id IS NULL ${scopeSql}
     `).get(...params);
     return row ? { type: 'fact', ...row } : null;
   }
