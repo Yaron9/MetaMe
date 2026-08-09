@@ -23,6 +23,7 @@ test('collectReport audits existing assets against the four-stage consumption ch
       engine TEXT, consumer_type TEXT, agent_key TEXT, source_refs TEXT
     );
     INSERT INTO memory_items VALUES ('f1','insight','active');
+    INSERT INTO memory_items VALUES ('legacy1','fact','active');
     INSERT INTO memory_items VALUES ('session1','episode','active');
     INSERT INTO wiki_pages VALUES ('w1','memory','active');
     INSERT INTO recall_audit VALUES (datetime('now'),'observe',1,NULL,NULL,NULL,NULL,'[]');
@@ -31,7 +32,7 @@ test('collectReport audits existing assets against the four-stage consumption ch
   `);
   db.close();
   const report = collectReport({ dbPath, skillsDir, days: 30 });
-  assert.deepEqual(report.inventory, { facts: 1, wiki: 1, skills: 1 });
+  assert.deepEqual(report.inventory, { facts: 2, wiki: 1, skills: 1 });
   assert.equal(report.broken_stage, 'delivery');
   assert.equal(report.broken_stages.facts, 'opening');
   assert.equal(report.asset_stages.fact.delivered, 1);

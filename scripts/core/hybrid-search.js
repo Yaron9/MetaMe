@@ -151,7 +151,7 @@ function memoryFactPredicate(db, alias) {
   try {
     const hasKind = db.prepare(`PRAGMA table_info(memory_items)`).all()
       .some(column => column.name === 'kind');
-    return hasKind ? `AND ${alias}.kind IN ('insight','convention')` : '';
+    return hasKind ? `AND ${alias}.kind IN ('fact','insight','convention')` : '';
   } catch {
     return '';
   }
