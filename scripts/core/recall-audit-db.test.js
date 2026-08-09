@@ -433,6 +433,7 @@ test('summarizeAudit aggregates trigger/inject stats', () => {
     audit.recordAudit({ id: 's1', phase: 'observe', should_recall: 0 });
     audit.recordAudit({ id: 's2', phase: 'observe', should_recall: 1, router_reason: 'anchor-match' });
     audit.recordAudit({ id: 's3', phase: 'inject', should_recall: 1, router_reason: 'explicit-history', injected_chars: 1200, outcome: 'injected' });
+    audit.recordAudit({ id: 's4', phase: 'consume', consumer_stage: 'delivered', engine: 'codex', injected_chars: 300, evidence_class: 'mcp-search', outcome: 'injected' });
     const summary = audit.summarizeAudit({ days: 7 });
     assert.equal(summary.totals.turns, 3);
     assert.equal(summary.totals.triggered, 2);
@@ -443,5 +444,9 @@ test('summarizeAudit aggregates trigger/inject stats', () => {
       ['anchor-match', 'explicit-history']
     );
     assert.equal(summary.outcomes[0].outcome, 'injected');
+    assert.deepEqual(summary.consumption.map(row => [row.host, row.stage, row.n]), [['codex', 'delivered', 1]]);
+    const db = new DatabaseSync(process.env.METAME_RECALL_AUDIT_DB);
+    assert.equal(db.prepare(`SELECT evidence_class FROM recall_audit WHERE id='s4'`).get().evidence_class, 'mcp-search');
+    db.close();
   });
 });

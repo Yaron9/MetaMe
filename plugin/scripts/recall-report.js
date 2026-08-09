@@ -15,7 +15,7 @@ const { summarizeAudit } = require('./core/recall-audit-db');
 
 function formatReport(summary) {
   if (!summary) return 'recall_audit 不可用（memory.db 缺失或被锁）';
-  const { totals, reasons, outcomes } = summary;
+  const { totals, reasons, outcomes, consumption = [] } = summary;
   const rate = totals.turns > 0 ? ((100 * totals.triggered) / totals.turns).toFixed(1) : '0.0';
   const lines = [
     `📡 Recall 审计报告（近 ${summary.days} 天）`,
@@ -26,6 +26,9 @@ function formatReport(summary) {
   }
   if (outcomes.length > 0) {
     lines.push(`注入结局: ${outcomes.map(o => `${o.outcome}=${o.n}`).join(', ')}`);
+  }
+  if (consumption.length > 0) {
+    lines.push(`消费漏斗: ${consumption.map(item => `${item.host}/${item.stage}=${item.n}`).join(', ')}`);
   }
   if (totals.triggered > 0 && totals.injected === 0) {
     lines.push('提示: 有触发但从未注入 — memory_recall_enabled 仍处 observe 模式，可按 project 灰度开启。');

@@ -21,6 +21,8 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
+const { assembleSearchResults, scopeKeys } = require('./core/cognitive-consumption');
 
 const HOME = os.homedir();
 const SKILLS_DIR = path.join(HOME, '.claude', 'skills');
@@ -42,8 +44,28 @@ const TOOLS = [
         query: { type: 'string', description: 'Search query (keywords, file names, topics)' },
         limit: { type: 'number', description: 'Max results (default 5)' },
         project: { type: 'string', description: 'Optional project filter' },
+        max_chars: { type: 'number', description: 'Maximum serialized result characters (default 4000)' },
+        host: { type: 'string', description: 'Optional consuming host name for audit' },
+        agent_key: { type: 'string', description: 'Optional consuming agent key for audit' },
       },
       required: ['query'],
+    },
+  },
+  {
+    name: 'memory_get',
+    description: 'Open one typed memory_search result by type and id. Records an opened consumption event without changing memory promotion counters.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['fact', 'wiki'] },
+        id: { type: 'string' },
+        project: { type: 'string' },
+        trace_id: { type: 'string' },
+        history: { type: 'boolean', description: 'For facts, explicitly return the supersession history instead of only the current value' },
+        host: { type: 'string' },
+        agent_key: { type: 'string' },
+      },
+      required: ['type', 'id', 'trace_id'],
     },
   },
   {
@@ -76,6 +98,24 @@ const TOOLS = [
     },
   },
   {
+    name: 'memory_feedback',
+    description: 'Record evidence that previously delivered memory was applied or validated. Does not change promotion or ranking counters.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        trace_id: { type: 'string' },
+        stage: { type: 'string', enum: ['applied', 'validated'] },
+        asset_ids: { type: 'array', items: { type: 'string' } },
+        outcome: { type: 'string', enum: ['used', 'ignored', 'corrected', 'harmful'] },
+        host: { type: 'string' },
+        agent_key: { type: 'string' },
+        project: { type: 'string' },
+        evidence: { type: 'string', description: 'Short evidence class, never prompt or full result text' },
+      },
+      required: ['trace_id', 'stage', 'asset_ids'],
+    },
+  },
+  {
     name: 'profile_get',
     description: "Read the user's cognitive profile sections (identity, preferences, cognition, competence map) mirrored from the distill pipeline.",
     inputSchema: { type: 'object', properties: {} },
@@ -83,14 +123,22 @@ const TOOLS = [
   {
     name: 'skill_list',
     description: 'List installed MetaMe skills with their descriptions, so any agent can discover available capabilities.',
-    inputSchema: { type: 'object', properties: {} },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        host: { type: 'string' }, agent_key: { type: 'string' }, project: { type: 'string' },
+      },
+    },
   },
   {
     name: 'skill_get',
     description: 'Read the full SKILL.md instructions of a named skill.',
     inputSchema: {
       type: 'object',
-      properties: { name: { type: 'string', description: 'Skill name from skill_list' } },
+      properties: {
+        name: { type: 'string', description: 'Skill name from skill_list' },
+        trace_id: { type: 'string' }, host: { type: 'string' }, agent_key: { type: 'string' }, project: { type: 'string' },
+      },
       required: ['name'],
     },
   },
@@ -113,6 +161,7 @@ function defaultDeps() {
     planRecall: () => require('./core/recall-plan').planRecall,
     assembleRecallContext: () => require('./memory-recall').assembleRecallContext,
     writeFact: () => require('./memory-write').writeFact,
+    recordAudit: () => require('./core/recall-audit-db').recordAudit,
     skillsDir: SKILLS_DIR,
     agentsDir: AGENTS_DIR,
     dbPath: DB_PATH,
@@ -133,30 +182,71 @@ function readSkillMeta(dir, name) {
 
 const handlers = {
   async memory_search(args, deps) {
+    const startedAt = Date.now();
     const memory = deps.memory();
     const limit = Math.min(Math.max(Number(args.limit) || 5, 1), 20);
-    const facts = await memory.searchFactsAsync(String(args.query || ''), {
-      limit,
-      project: args.project || null,
+    const hybrid = await memory.hybridSearchWiki(String(args.query || ''), {
+      scopeKeys: scopeKeys(args.project),
+      projectKey: args.project || null,
       trackSearch: false,
     });
-    // searchFacts returns the legacy fact shape: entity/relation/value.
-    return {
-      results: (facts || []).map(f => ({
-        id: f.id,
-        entity: f.entity,
-        relation: f.relation,
-        value: f.value,
-        confidence: f.confidence,
-        project: f.project,
-        tags: f.tags,
-      })),
-    };
+    const assembled = assembleSearchResults(hybrid, { limit, maxChars: args.max_chars });
+    const traceId = `mcp_${crypto.randomUUID()}`;
+    for (const item of assembled.results) {
+      deps.recordAudit()({
+        id: `ca_${crypto.randomUUID()}`,
+        phase: 'consume',
+        consumer_stage: 'delivered',
+        consumer_type: 'mcp',
+        trace_id: traceId,
+        engine: args.host || null,
+        agent_key: args.agent_key || null,
+        project: args.project || null,
+        source_refs: [`${item.type}:${item.id}`],
+        injected_chars: JSON.stringify(item).length,
+        latency_ms: Date.now() - startedAt,
+        outcome: 'injected',
+      });
+    }
+    return { trace_id: traceId, ...assembled };
+  },
+
+  async memory_get(args, deps) {
+    const traceId = String(args.trace_id || '').trim();
+    const assetRef = `${args.type}:${args.id}`;
+    if (!traceId) return { found: false, error: 'trace_id is required' };
+    const memory = deps.memory();
+    const asset = memory.getCognitiveAsset(String(args.type || ''), String(args.id || ''), {
+      project: args.project || null,
+      history: args.history === true,
+    });
+    if (!asset) return { found: false };
+    deps.recordAudit()({
+      id: `ca_${crypto.randomUUID()}`,
+      phase: 'consume',
+      consumer_stage: 'opened',
+      consumer_type: 'mcp',
+      trace_id: traceId,
+      engine: args.host || null,
+      agent_key: args.agent_key || null,
+      project: args.project || null,
+      source_refs: [assetRef],
+      injected_chars: JSON.stringify(asset).length,
+      outcome: 'used',
+    });
+    return { found: true, trace_id: traceId, asset };
   },
 
   async memory_recall(args, deps) {
-    const plan = deps.planRecall()({ text: String(args.text || '') });
-    if (!plan.shouldRecall) return { recalled: false, reason: 'no trigger — message does not reference past context' };
+    const text = String(args.text || '').trim();
+    const planned = deps.planRecall()({ text });
+    const plan = planned.shouldRecall ? planned : {
+      shouldRecall: true,
+      reason: 'explicit-mcp',
+      anchors: [`query:${text}`],
+      modes: ['facts', 'sessions', 'wiki'],
+      hintBudget: 2400,
+    };
     const ctx = await deps.assembleRecallContext()({
       plan,
       scope: { project: args.project || null, agentKey: args.agent_key || null },
@@ -176,6 +266,29 @@ const handlers = {
     });
     if (!outcome.ok && outcome.errors) return { saved: false, errors: outcome.errors };
     return { saved: outcome.ok, skipped: outcome.result ? outcome.result.skipped : 0 };
+  },
+
+  async memory_feedback(args, deps) {
+    const stage = ['applied', 'validated'].includes(args.stage) ? args.stage : null;
+    const traceId = String(args.trace_id || '').trim();
+    const assetIds = Array.isArray(args.asset_ids) ? args.asset_ids.map(String).filter(Boolean).slice(0, 20) : [];
+    if (!stage || !traceId || assetIds.length === 0) return { recorded: false, error: 'trace_id, valid stage, and asset_ids are required' };
+    const allowedOutcomes = new Set(['used', 'ignored', 'corrected', 'harmful']);
+    const outcome = allowedOutcomes.has(args.outcome) ? args.outcome : (stage === 'validated' ? 'used' : 'planned');
+    deps.recordAudit()({
+      id: `ca_${crypto.randomUUID()}`,
+      phase: 'consume',
+      consumer_stage: stage,
+      consumer_type: 'mcp',
+      trace_id: traceId,
+      engine: args.host || null,
+      agent_key: args.agent_key || null,
+      project: args.project || null,
+      source_refs: assetIds,
+      outcome,
+      evidence_class: args.evidence ? String(args.evidence).slice(0, 80) : null,
+    });
+    return { recorded: true, trace_id: traceId, stage };
   },
 
   async profile_get(args, deps) {
@@ -201,14 +314,30 @@ const handlers = {
         .map(e => readSkillMeta(deps.skillsDir, e.name))
         .filter(Boolean);
     } catch { /* skills dir missing */ }
-    return { skills: entries };
+    const traceId = `mcp_${crypto.randomUUID()}`;
+    for (const entry of entries) {
+      deps.recordAudit()({
+        id: `ca_${crypto.randomUUID()}`, phase: 'consume', consumer_stage: 'delivered', consumer_type: 'mcp',
+        trace_id: traceId, engine: args.host || null, agent_key: args.agent_key || null,
+        project: args.project || null, source_refs: [`skill:${entry.name}`],
+        injected_chars: JSON.stringify(entry).length, outcome: 'injected',
+      });
+    }
+    return { trace_id: traceId, skills: entries };
   },
 
   async skill_get(args, deps) {
     const name = String(args.name || '').replace(/[^a-zA-Z0-9_-]/g, '');
     if (!name) return { error: 'invalid skill name' };
     try {
-      return { name, content: fs.readFileSync(path.join(deps.skillsDir, name, 'SKILL.md'), 'utf8') };
+      const content = fs.readFileSync(path.join(deps.skillsDir, name, 'SKILL.md'), 'utf8');
+      const traceId = String(args.trace_id || `mcp_${crypto.randomUUID()}`);
+      deps.recordAudit()({
+        id: `ca_${crypto.randomUUID()}`, phase: 'consume', consumer_stage: 'opened', consumer_type: 'mcp',
+        trace_id: traceId, engine: args.host || null, agent_key: args.agent_key || null,
+        project: args.project || null, source_refs: [`skill:${name}`], injected_chars: content.length, outcome: 'used',
+      });
+      return { name, trace_id: traceId, content };
     } catch {
       return { error: `skill not found: ${name}` };
     }

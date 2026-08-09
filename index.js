@@ -1386,7 +1386,7 @@ try {
 // Non-session commands (daemon ops, version, help) should not show genesis message
 const _arg2 = process.argv[2];
 const _isNonSessionCmd = ['daemon', 'start', 'stop', 'status', 'logs', 'codex',
-  'sync', 'continue', 'deploy', '-v', '--version', '-h', '--help', 'distill', 'evolve'].includes(_arg2);
+  'sync', 'continue', 'deploy', 'host', 'cognition', '-v', '--version', '-h', '--help', 'distill', 'evolve'].includes(_arg2);
 
 let finalProtocol;
 if (isKnownUser) {
@@ -2217,6 +2217,32 @@ if (process.argv[2] === 'migrate' && process.argv[3] === 'perpetual') {
     console.error(`Perpetual retirement failed: ${err.message}`);
     process.exit(1);
   }
+}
+
+if (process.argv[2] === 'host') {
+  const subCmd = process.argv[3] || 'status';
+  if (!['status', 'doctor'].includes(subCmd)) {
+    console.error('Usage: metame host <status|doctor> [--json]');
+    process.exit(1);
+  }
+  const result = require('child_process').spawnSync(process.execPath, [
+    path.join(__dirname, 'scripts', 'cognitive-host-status.js'),
+    ...process.argv.slice(4),
+  ], { stdio: 'inherit', env: process.env });
+  process.exit(result.status ?? 1);
+}
+
+if (process.argv[2] === 'cognition') {
+  const subCmd = process.argv[3] || 'audit';
+  if (subCmd !== 'audit') {
+    console.error('Usage: metame cognition audit [--json] [--days=N]');
+    process.exit(1);
+  }
+  const result = require('child_process').spawnSync(process.execPath, [
+    path.join(__dirname, 'scripts', 'cognitive-effectiveness.js'),
+    ...process.argv.slice(4),
+  ], { stdio: 'inherit', env: process.env });
+  process.exit(result.status ?? 1);
 }
 
 const isDaemon = process.argv.includes('daemon');

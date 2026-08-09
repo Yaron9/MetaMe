@@ -27,7 +27,7 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { RECALL_AUDIT_DDL, RECALL_AUDIT_STATE_DDL } = require('./recall-audit-ddl');
+const { RECALL_AUDIT_DDL, RECALL_AUDIT_INDEXES, RECALL_AUDIT_STATE_DDL } = require('./recall-audit-ddl');
 
 let _db = null;
 let _droppedCount = 0;
@@ -49,6 +49,14 @@ function _openDb() {
     db.exec('PRAGMA busy_timeout = 3000');
     db.exec(RECALL_AUDIT_DDL);
     try { db.exec('ALTER TABLE recall_audit ADD COLUMN external_shadow_hits INTEGER DEFAULT 0'); } catch { }
+    for (const [name, type] of [
+      ['consumer_stage', 'TEXT'], ['consumer_type', 'TEXT'], ['trace_id', 'TEXT'],
+      ['latency_ms', 'INTEGER DEFAULT 0'], ['token_count', 'INTEGER DEFAULT 0'],
+      ['evidence_class', 'TEXT'],
+    ]) {
+      try { db.exec(`ALTER TABLE recall_audit ADD COLUMN ${name} ${type}`); } catch { }
+    }
+    for (const index of RECALL_AUDIT_INDEXES) db.exec(index);
     db.exec(RECALL_AUDIT_STATE_DDL);
     db.prepare(
       `INSERT OR IGNORE INTO recall_audit_state (key, value) VALUES ('dropped_count', 0)`
@@ -111,13 +119,14 @@ function recordAudit(row) {
     if (!row || typeof row !== 'object' || typeof row.id !== 'string' || row.id.length === 0) return;
     db = _openDb();
     if (!db) return;
-    const phase = row.phase === 'inject' ? 'inject' : 'observe';
+    const phase = ['inject', 'consume'].includes(row.phase) ? row.phase : 'observe';
     db.prepare(
       `INSERT INTO recall_audit
          (id, phase, chat_id, project, scope, agent_key, engine, session_started,
           should_recall, router_reason, query_hashes, anchor_labels, modes,
-          source_refs, injected_chars, truncated, wiki_dropped, external_shadow_hits, outcome, error_message)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          source_refs, injected_chars, truncated, wiki_dropped, external_shadow_hits, outcome,
+          consumer_stage, consumer_type, trace_id, latency_ms, token_count, evidence_class, error_message)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       row.id,
       phase,
@@ -138,6 +147,12 @@ function recordAudit(row) {
       row.wiki_dropped ? 1 : 0,
       Number.isFinite(row.external_shadow_hits) ? row.external_shadow_hits : 0,
       row.outcome || 'unknown',
+      row.consumer_stage || null,
+      row.consumer_type || null,
+      row.trace_id || null,
+      Number.isFinite(row.latency_ms) ? row.latency_ms : 0,
+      Number.isFinite(row.token_count) ? row.token_count : 0,
+      row.evidence_class || null,
       row.error_message || null,
     );
   } catch {
@@ -175,8 +190,8 @@ function summarizeAudit({ days = 30 } = {}) {
        COALESCE(SUM(should_recall), 0) AS triggered,
        COALESCE(SUM(CASE WHEN phase = 'inject' THEN 1 ELSE 0 END), 0) AS injected,
        COALESCE(SUM(truncated), 0) AS truncated,
-       CAST(COALESCE(AVG(CASE WHEN injected_chars > 0 THEN injected_chars END), 0) AS INTEGER) AS avg_injected_chars
-     FROM recall_audit WHERE ts >= datetime('now', ?)`
+       CAST(COALESCE(AVG(CASE WHEN phase = 'inject' AND injected_chars > 0 THEN injected_chars END), 0) AS INTEGER) AS avg_injected_chars
+     FROM recall_audit WHERE ts >= datetime('now', ?) AND phase != 'consume'`
   );
   const reasons = all(
     `SELECT COALESCE(router_reason, '(none)') AS reason, COUNT(*) AS n
@@ -188,7 +203,16 @@ function summarizeAudit({ days = 30 } = {}) {
      FROM recall_audit WHERE ts >= datetime('now', ?) AND phase = 'inject'
      GROUP BY outcome ORDER BY n DESC`
   );
-  return { days, totals, reasons, outcomes, dropped: getDroppedCount() };
+  const consumption = all(
+    `SELECT consumer_stage AS stage, COALESCE(engine, consumer_type, '(unknown)') AS host,
+            COUNT(*) AS n, COALESCE(SUM(injected_chars), 0) AS chars,
+            CAST(COALESCE(AVG(NULLIF(latency_ms, 0)), 0) AS INTEGER) AS avg_latency_ms
+       FROM recall_audit
+      WHERE ts >= datetime('now', ?) AND phase = 'consume' AND consumer_stage IS NOT NULL
+      GROUP BY consumer_stage, COALESCE(engine, consumer_type, '(unknown)')
+      ORDER BY consumer_stage, host`
+  );
+  return { days, totals, reasons, outcomes, consumption, dropped: getDroppedCount() };
 }
 
 function _resetForTesting() {

@@ -14,6 +14,7 @@ function tempDeps(overrides = {}) {
     planRecall: () => { throw new Error('planRecall not stubbed'); },
     assembleRecallContext: () => { throw new Error('assemble not stubbed'); },
     writeFact: () => { throw new Error('writeFact not stubbed'); },
+    recordAudit: () => () => {},
     skillsDir: '/nonexistent',
     agentsDir: '/nonexistent',
     dbPath: '/nonexistent/memory.db',
@@ -29,7 +30,7 @@ describe('metame-mcp-server protocol', () => {
 
     const list = await handleMessage({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
     const names = list.result.tools.map(t => t.name).sort();
-    assert.deepEqual(names, ['agent_context', 'memory_recall', 'memory_search', 'memory_write', 'profile_get', 'skill_get', 'skill_list']);
+    assert.deepEqual(names, ['agent_context', 'memory_feedback', 'memory_get', 'memory_recall', 'memory_search', 'memory_write', 'profile_get', 'skill_get', 'skill_list']);
     for (const tool of list.result.tools) {
       assert.ok(tool.description.length > 20, `${tool.name} needs a real description`);
       assert.equal(tool.inputSchema.type, 'object');
@@ -48,26 +49,94 @@ describe('metame-mcp-server protocol', () => {
 });
 
 describe('metame-mcp-server tools', () => {
-  it('memory_search wraps searchFactsAsync with clamped limit', async () => {
+  it('memory_search reuses hybrid facts/wiki search with typed budgeted results', async () => {
     let seen = null;
+    const audits = [];
     const deps = tempDeps({
       memory: () => ({
-        searchFactsAsync: async (q, opts) => { seen = { q, opts }; return [{ id: '1', entity: 'A.b', relation: 'config_fact', value: 'c' }]; },
+        hybridSearchWiki: async (q, opts) => {
+          seen = { q, opts };
+          return {
+            facts: [{ id: '1', title: 'A.b', content: 'current config', project: 'metame' }],
+            wikiPages: [{ slug: 'config', title: 'Config guide', excerpt: 'How config works', project_key: 'metame' }],
+          };
+        },
       }),
+      recordAudit: () => row => audits.push(row),
     });
-    const out = await callTool('memory_search', { query: 'daemon', limit: 999 }, deps);
+    const out = await callTool('memory_search', { query: 'daemon', limit: 999, project: 'MetaMe', host: 'codex' }, deps);
     assert.equal(seen.q, 'daemon');
-    assert.equal(seen.opts.limit, 20, 'limit must clamp to 20');
     assert.equal(seen.opts.trackSearch, false, 'external reads must not inflate promotion counters');
-    assert.equal(out.results.length, 1);
+    assert.deepEqual(seen.opts.scopeKeys, ['metame']);
+    assert.equal(seen.opts.projectKey, 'MetaMe');
+    assert.deepEqual(out.results.map(item => item.type), ['fact', 'wiki']);
+    assert.match(out.trace_id, /^mcp_/);
+    assert.equal(audits.length, 2, 'each delivered asset has one auditable event');
+    assert.equal(audits[0].consumer_stage, 'delivered');
+    assert.equal(audits[0].engine, 'codex');
+    assert.deepEqual(audits.map(row => row.source_refs), [['fact:1'], ['wiki:config']]);
   });
 
-  it('memory_recall returns no-trigger explanation or assembled hint', async () => {
+  it('memory_search does not record a delivery for an empty result', async () => {
+    const audits = [];
+    const deps = tempDeps({
+      memory: () => ({ hybridSearchWiki: async () => ({ facts: [], wikiPages: [] }) }),
+      recordAudit: () => row => audits.push(row),
+    });
+    const out = await callTool('memory_search', { query: 'nothing' }, deps);
+    assert.deepEqual(out.results, []);
+    assert.deepEqual(audits, []);
+  });
+
+  it('memory_get opens one active asset and records opened audit', async () => {
+    const audits = [];
+    const deps = tempDeps({
+      memory: () => ({ getCognitiveAsset: () => ({ type: 'fact', id: 'f1', content: 'detail' }) }),
+      recordAudit: () => row => audits.push(row),
+    });
+    const out = await callTool('memory_get', { type: 'fact', id: 'f1', trace_id: 'trace-1' }, deps);
+    assert.equal(out.found, true);
+    assert.equal(out.asset.content, 'detail');
+    assert.equal(audits[0].consumer_stage, 'opened');
+    assert.equal(audits[0].trace_id, 'trace-1');
+  });
+
+  it('memory_get does not let best-effort audit loss block a delivered asset', async () => {
+    const deps = tempDeps({
+      memory: () => ({ getCognitiveAsset: () => ({ type: 'fact', id: 'f1', content: 'detail' }) }),
+      recordAudit: () => () => {},
+    });
+    const out = await callTool('memory_get', { type: 'fact', id: 'f1', trace_id: 'trace-with-dropped-audit' }, deps);
+    assert.equal(out.found, true);
+  });
+
+  it('memory_get exposes fact history only when explicitly requested', async () => {
+    let options = null;
+    const deps = tempDeps({
+      memory: () => ({
+        getCognitiveAsset: (type, id, received) => {
+          options = received;
+          return { type: 'fact_history', requested_id: id, versions: [{ id: 'old' }, { id: 'new' }] };
+        },
+      }),
+    });
+    const out = await callTool('memory_get', { type: 'fact', id: 'new', history: true, trace_id: 'trace-history' }, deps);
+    assert.equal(options.history, true);
+    assert.deepEqual(out.asset.versions.map(item => item.id), ['old', 'new']);
+  });
+
+  it('memory_recall treats an explicit MCP call as demand', async () => {
+    let seenPlan = null;
     const deps = tempDeps({
       planRecall: () => () => ({ shouldRecall: false }),
+      assembleRecallContext: () => async ({ plan }) => {
+        seenPlan = plan;
+        return { text: '[Recall context: prior decision]', sources: [] };
+      },
     });
-    const miss = await callTool('memory_recall', { text: '你好' }, deps);
-    assert.equal(miss.recalled, false);
+    const explicit = await callTool('memory_recall', { text: 'ordinary search terms' }, deps);
+    assert.equal(explicit.recalled, true);
+    assert.equal(seenPlan.reason, 'explicit-mcp');
 
     const deps2 = tempDeps({
       planRecall: () => () => ({ shouldRecall: true, reason: 'anchor-match', anchors: [], modes: ['facts'] }),
@@ -92,20 +161,36 @@ describe('metame-mcp-server tools', () => {
     assert.deepEqual(bad.errors, ['value too short']);
   });
 
+  it('memory_feedback records applied/validated evidence without content', async () => {
+    const audits = [];
+    const deps = tempDeps({ recordAudit: () => row => audits.push(row) });
+    const out = await callTool('memory_feedback', {
+      trace_id: 'trace-1', stage: 'validated', asset_ids: ['fact:f1'], outcome: 'used', evidence: 'tests-passed',
+    }, deps);
+    assert.equal(out.recorded, true);
+    assert.equal(audits[0].consumer_stage, 'validated');
+    assert.deepEqual(audits[0].source_refs, ['fact:f1']);
+    assert.equal(audits[0].evidence_class, 'tests-passed');
+  });
+
   it('skill_list/skill_get read the skills directory and sanitize names', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-skills-'));
     fs.mkdirSync(path.join(dir, 'demo-skill'));
     fs.writeFileSync(path.join(dir, 'demo-skill', 'SKILL.md'), '---\nname: demo-skill\ndescription: A demo skill for unit tests of the MCP surface.\n---\n\n# Demo\nBody.\n', 'utf8');
     fs.mkdirSync(path.join(dir, '_drafts'));
-    const deps = tempDeps({ skillsDir: dir });
+    const audits = [];
+    const deps = tempDeps({ skillsDir: dir, recordAudit: () => row => audits.push(row) });
 
     const list = await callTool('skill_list', {}, deps);
     assert.equal(list.skills.length, 1, 'draft/underscore dirs excluded');
     assert.equal(list.skills[0].name, 'demo-skill');
     assert.match(list.skills[0].description, /demo skill/i);
+    assert.match(list.trace_id, /^mcp_/);
+    assert.deepEqual(audits[0].source_refs, ['skill:demo-skill']);
 
-    const got = await callTool('skill_get', { name: 'demo-skill' }, deps);
+    const got = await callTool('skill_get', { name: 'demo-skill', trace_id: list.trace_id }, deps);
     assert.match(got.content, /# Demo/);
+    assert.equal(audits[1].consumer_stage, 'opened');
     const traversal = await callTool('skill_get', { name: '../etc' }, deps);
     assert.ok(traversal.error, 'path traversal must not resolve');
     fs.rmSync(dir, { recursive: true, force: true });

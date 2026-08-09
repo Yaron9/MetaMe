@@ -223,12 +223,46 @@ describe('hybrid-search internals', () => {
       CREATE VIRTUAL TABLE wiki_pages_fts USING fts5(slug,title,content,content='wiki_pages',content_rowid='rowid');
       CREATE VIRTUAL TABLE memory_items_fts USING fts5(title,content,content='memory_items',content_rowid='rowid');
       INSERT INTO memory_items VALUES ('primary','fact','needle primary','insight',0.9,'active','primary','observed','s1',0);
+      INSERT INTO memory_items VALUES ('legacy','fact','needle legacy','fact',0.9,'active','primary','observed','s2',0);
       INSERT INTO memory_items VALUES ('derived','fact','needle derived','insight',0.9,'active','derived','synthesized_insight','nightly-reflect-x',0);
+      INSERT INTO memory_items VALUES ('episode','session','needle episode','episode',0.9,'active','primary',NULL,'session-x',0);
       INSERT INTO memory_items_fts(memory_items_fts) VALUES('rebuild');
     `);
     const result = await hybridSearchWiki(db, 'needle', { ftsOnly: true, trackSearch: true });
-    assert.deepEqual(result.facts.map(fact => fact.id), ['primary']);
+    assert.deepEqual(new Set(result.facts.map(fact => fact.id)), new Set(['primary', 'legacy']));
     assert.equal(db.prepare("SELECT search_count FROM memory_items WHERE id='derived'").get().search_count, 0);
+    assert.equal(db.prepare("SELECT search_count FROM memory_items WHERE id='episode'").get().search_count, 0);
+    db.close();
+  });
+
+  it('keeps project facts that have a finer-grained workspace scope', async () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE wiki_pages (slug TEXT PRIMARY KEY,title TEXT,content TEXT,staleness REAL,last_built_at TEXT,source_type TEXT,page_kind TEXT,project_key TEXT);
+      CREATE TABLE wiki_page_scopes (page_slug TEXT,scope_key TEXT);
+      CREATE TABLE wiki_external_sources (page_slug TEXT PRIMARY KEY,missing_count INTEGER);
+      CREATE TABLE memory_items (id TEXT PRIMARY KEY,title TEXT,content TEXT,kind TEXT,state TEXT,project TEXT,scope TEXT,origin_class TEXT,relation TEXT,source_id TEXT,search_count INTEGER DEFAULT 0);
+      CREATE VIRTUAL TABLE wiki_pages_fts USING fts5(slug,title,content,content='wiki_pages',content_rowid='rowid');
+      CREATE VIRTUAL TABLE memory_items_fts USING fts5(title,content,content='memory_items',content_rowid='rowid');
+      INSERT INTO memory_items VALUES ('scoped','fact','needle scoped','insight','active','metame','workspace-a','primary','observed','s1',0);
+      INSERT INTO memory_items VALUES ('other','fact','needle other','insight','active','other','metame','primary','observed','s2',0);
+      INSERT INTO memory_items VALUES ('global','fact','needle global','insight','active','*',NULL,'primary','observed','s3',0);
+      INSERT INTO memory_items VALUES ('global-scoped','fact','needle hidden','insight','active','*','workspace-b','primary','observed','s4',0);
+      INSERT INTO memory_items VALUES ('legacy-scoped','fact','needle legacy','insight','active',NULL,'metame','primary','observed','s5',0);
+      INSERT INTO memory_items VALUES ('legacy-global','fact','needle old global','insight','active',NULL,'*','primary','observed','s6',0);
+      INSERT INTO memory_items VALUES ('legacy-workspace','fact','needle old workspace','insight','active',NULL,'workspace-a','primary','observed','s7',0);
+      INSERT INTO memory_items_fts(memory_items_fts) VALUES('rebuild');
+    `);
+    const result = await hybridSearchWiki(db, 'needle', {
+      ftsOnly: true, projectKey: 'metame', scopeKeys: ['metame', 'workspace-a', 'agent-x'],
+    });
+    assert.deepEqual(new Set(result.facts.map(fact => fact.id)), new Set([
+      'scoped', 'global', 'legacy-scoped', 'legacy-global', 'legacy-workspace',
+    ]));
+    const legacyCall = await hybridSearchWiki(db, 'needle', { ftsOnly: true, scopeKeys: ['workspace-a'] });
+    assert.deepEqual(new Set(legacyCall.facts.map(fact => fact.id)), new Set([
+      'scoped', 'global', 'legacy-global', 'legacy-workspace',
+    ]));
     db.close();
   });
 });
