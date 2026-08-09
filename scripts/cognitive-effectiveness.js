@@ -56,11 +56,19 @@ function main(argv = process.argv.slice(2), options = {}) {
   const daysArg = argv.find(arg => /^--days=\d+$/.test(arg));
   const days = daysArg ? Number(daysArg.split('=')[1]) : 30;
   const home = options.home || os.homedir();
-  const report = collectReport({
-    dbPath: options.dbPath || path.join(home, '.metame', 'memory.db'),
-    skillsDir: options.skillsDir || path.join(home, '.claude', 'skills'),
-    days,
-  });
+  let report;
+  try {
+    report = collectReport({
+      dbPath: options.dbPath || path.join(home, '.metame', 'memory.db'),
+      skillsDir: options.skillsDir || path.join(home, '.claude', 'skills'),
+      days,
+    });
+  } catch (error) {
+    const result = { status: 'unavailable', error: error.message };
+    console.log(argv.includes('--json') ? JSON.stringify(result, null, 2) : `MetaMe cognitive effectiveness: unavailable (${error.message})`);
+    process.exitCode = 1;
+    return result;
+  }
   console.log(argv.includes('--json') ? JSON.stringify(report, null, 2) : render(report));
   process.exitCode = report.status === 'healthy' || report.status === 'empty' ? 0 : 2;
   return report;

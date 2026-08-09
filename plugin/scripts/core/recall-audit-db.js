@@ -27,7 +27,7 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { RECALL_AUDIT_DDL, RECALL_AUDIT_STATE_DDL } = require('./recall-audit-ddl');
+const { RECALL_AUDIT_DDL, RECALL_AUDIT_INDEXES, RECALL_AUDIT_STATE_DDL } = require('./recall-audit-ddl');
 
 let _db = null;
 let _droppedCount = 0;
@@ -56,6 +56,7 @@ function _openDb() {
     ]) {
       try { db.exec(`ALTER TABLE recall_audit ADD COLUMN ${name} ${type}`); } catch { }
     }
+    for (const index of RECALL_AUDIT_INDEXES) db.exec(index);
     db.exec(RECALL_AUDIT_STATE_DDL);
     db.prepare(
       `INSERT OR IGNORE INTO recall_audit_state (key, value) VALUES ('dropped_count', 0)`

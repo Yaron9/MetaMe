@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
-const { collectReport, render } = require('./cognitive-effectiveness');
+const { collectReport, main, render } = require('./cognitive-effectiveness');
 
 test('collectReport audits existing assets against the four-stage consumption chain', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cognitive-audit-'));
@@ -33,4 +33,12 @@ test('collectReport audits existing assets against the four-stage consumption ch
   assert.equal(report.broken_stage, 'opening');
   assert.match(render(report), /funnel delivered=1/);
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('main reports an unavailable database without throwing', () => {
+  const previous = process.exitCode;
+  const result = main(['--json'], { dbPath: '/missing/metame-memory.db', home: '/missing', skillsDir: '/missing' });
+  assert.equal(result.status, 'unavailable');
+  assert.equal(process.exitCode, 1);
+  process.exitCode = previous;
 });
