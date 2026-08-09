@@ -684,7 +684,7 @@ function getCognitiveAsset(type, id, { project = null, history = false } = {}) {
     if (history) {
       const rows = db.prepare(`
         WITH RECURSIVE chain(id) AS (
-          SELECT id FROM memory_items WHERE id = ?
+          SELECT id FROM memory_items WHERE id = ? AND kind IN ('fact','insight','convention')
           UNION
           SELECT mi.id FROM memory_items mi JOIN chain c
             ON mi.id = (SELECT supersedes_id FROM memory_items WHERE id = c.id)
@@ -693,7 +693,7 @@ function getCognitiveAsset(type, id, { project = null, history = false } = {}) {
         SELECT id, state, title, content, summary, confidence, project, scope, relation,
                supersedes_id, source_type, source_id, provenance_root_id, created_at, updated_at
           FROM memory_items
-         WHERE id IN (SELECT id FROM chain) ${scopeSql}
+         WHERE id IN (SELECT id FROM chain) AND kind IN ('fact','insight','convention') ${scopeSql}
          ORDER BY created_at ASC, id ASC
       `).all(...params);
       return rows.length > 0 ? { type: 'fact_history', requested_id: id, versions: rows } : null;

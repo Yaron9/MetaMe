@@ -40,6 +40,7 @@ test('legacy memory DB migrates supersedes_id and direct fact opens exclude epis
     memory.acquire();
     assert.equal(memory.getCognitiveAsset('fact', 'fact1', { project: 'metame' }).id, 'fact1');
     assert.equal(memory.getCognitiveAsset('fact', 'episode1', { project: 'metame' }), null);
+    assert.equal(memory.getCognitiveAsset('fact', 'episode1', { project: 'metame', history: true }), null);
     const probe = new DatabaseSync(dbPath);
     assert.ok(probe.prepare('PRAGMA table_info(memory_items)').all().some(column => column.name === 'supersedes_id'));
     probe.close();
