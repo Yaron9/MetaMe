@@ -430,20 +430,47 @@ function readFileBounded(filePath, fsMod, maxFileSize, pathMod, rootPath = null)
   return { stat, bytes, text: bytes.toString('utf8') };
 }
 
-function parseHeaderPrefix(parts, byteLength, newlineOffset = -1, currentChunk = null) {
-  const prefixParts = currentChunk && newlineOffset >= 0
-    ? [...parts, currentChunk.subarray(0, newlineOffset)]
-    : parts;
-  const prefixLength = currentChunk && newlineOffset >= 0
-    ? byteLength + newlineOffset
-    : byteLength;
-  if (prefixLength === 0) return null;
-  const line = Buffer.concat(prefixParts, prefixLength)
-    .toString('utf8')
-    .replace(/^\uFEFF/, '')
-    .replace(/\r$/, '');
-  const header = parseJsonLine(line);
-  return header && header.type === 'session' && typeof header.id === 'string' ? header : null;
+function parseHeaderLine(lineBytes) {
+  // Decode only complete LF-delimited bytes.  This keeps a multi-byte UTF-8
+  // sequence from being split across read chunks and decoded prematurely.
+  const line = lineBytes.toString('utf8').replace(/^\uFEFF/, '').replace(/\r$/, '');
+  if (!line.trim()) return { blank: true, header: null };
+  const record = parseJsonLine(line);
+  return {
+    blank: false,
+    header: record && record.type === 'session' && typeof record.id === 'string' ? record : null,
+  };
+}
+
+function findNewlineInParts(parts) {
+  let offset = 0;
+  for (const part of parts) {
+    const index = part.indexOf(0x0a);
+    if (index >= 0) return offset + index;
+    offset += part.length;
+  }
+  return -1;
+}
+
+function consumePartBytes(parts, count) {
+  const consumed = [];
+  let remaining = count;
+  while (remaining > 0) {
+    const part = parts[0];
+    if (!part) break;
+    const take = Math.min(remaining, part.length);
+    consumed.push(part.subarray(0, take));
+    if (take === part.length) parts.shift();
+    else parts[0] = part.subarray(take);
+    remaining -= take;
+  }
+  return consumed;
+}
+
+function parseFinalHeaderLine(parts, byteLength) {
+  if (byteLength === 0) return null;
+  const parsed = parseHeaderLine(Buffer.concat(parts, byteLength));
+  return parsed.header;
 }
 
 function readHeaderBounded(filePath, fsMod, pathMod, rootPath, maxFileSize = DEFAULT_MAX_FILE_SIZE) {
@@ -452,23 +479,51 @@ function readHeaderBounded(filePath, fsMod, pathMod, rootPath, maxFileSize = DEF
     // Discovery only needs the first record.  Validate the complete path and
     // the configured total-file cap before opening, then read a bounded prefix
     // instead of loading a multi-megabyte session into memory.
-    statFileBounded(filePath, fsMod, maxFileSize, pathMod, rootPath);
+    const stat = statFileBounded(filePath, fsMod, maxFileSize, pathMod, rootPath);
     fd = fsMod.openSync(filePath, 'r');
     const parts = [];
-    let byteLength = 0;
-    while (byteLength < MAX_HEADER_BYTES) {
-      const readLength = Math.min(HEADER_READ_CHUNK_BYTES, MAX_HEADER_BYTES - byteLength);
+    let bytesRead = 0;
+    let pendingLength = 0;
+    let pendingNewlinePosition = -1;
+    while (bytesRead < MAX_HEADER_BYTES) {
+      const readLength = Math.min(HEADER_READ_CHUNK_BYTES, MAX_HEADER_BYTES - bytesRead);
       const buffer = Buffer.allocUnsafe(readLength);
-      const count = fsMod.readSync(fd, buffer, 0, readLength, byteLength);
+      const count = fsMod.readSync(fd, buffer, 0, readLength, bytesRead);
       // Treat a short or empty read as a normal EOF; the next loop is not
       // allowed to trust bytes outside the reported count.
       if (!Number.isSafeInteger(count) || count < 0 || count > readLength) return null;
-      if (count === 0) return parseHeaderPrefix(parts, byteLength);
+      if (count === 0) return parseFinalHeaderLine(parts, pendingLength);
       const chunk = buffer.subarray(0, count);
-      const newlineOffset = chunk.indexOf(0x0a);
-      if (newlineOffset >= 0) return parseHeaderPrefix(parts, byteLength, newlineOffset, chunk);
+      const previousPendingLength = pendingLength;
       parts.push(chunk);
-      byteLength += count;
+      bytesRead += count;
+      pendingLength += count;
+      if (pendingNewlinePosition < 0) {
+        const newlineOffset = chunk.indexOf(0x0a);
+        if (newlineOffset >= 0) pendingNewlinePosition = previousPendingLength + newlineOffset;
+      }
+
+      // Consume all complete lines now available.  Blank/whitespace-only
+      // lines are harmless; the first non-empty record is the only candidate
+      // header, and an invalid candidate stops discovery safely.
+      while (pendingNewlinePosition >= 0) {
+        const lineParts = consumePartBytes(parts, pendingNewlinePosition);
+        consumePartBytes(parts, 1); // LF; a preceding CR is stripped at decode
+        pendingLength -= pendingNewlinePosition + 1;
+        const parsed = parseHeaderLine(Buffer.concat(lineParts, pendingNewlinePosition));
+        if (parsed.header) return parsed.header;
+        if (!parsed.blank) return null;
+        pendingNewlinePosition = findNewlineInParts(parts);
+      }
+
+      if (bytesRead >= MAX_HEADER_BYTES) {
+        // If stat says the bounded prefix reached EOF exactly, preserve the
+        // JSONL final-line behavior even without a trailing LF.  Otherwise a
+        // line extending past the prefix is explicitly rejected.
+        return stat.size <= MAX_HEADER_BYTES && bytesRead >= stat.size
+          ? parseFinalHeaderLine(parts, pendingLength)
+          : null;
+      }
     }
   } catch {
     return null;

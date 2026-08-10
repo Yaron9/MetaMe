@@ -160,6 +160,49 @@ test('Pi discovery reads only a bounded header prefix from large sessions', asyn
   };
   assert.equal(_internal.readHeaderBounded(largePath, failingReadFs, path, sessionDir), null);
   assert.equal(closeCalls, 1);
+
+  const leadingDir = path.join(home, 'leading');
+  fs.mkdirSync(leadingDir, { recursive: true });
+  const leadingPath = path.join(leadingDir, 'leading.jsonl');
+  const leadingHeader = {
+    type: 'session', version: 3, id: 'pi-leading', timestamp: '2026-08-01T00:00:00.000Z', cwd: home,
+  };
+  fs.writeFileSync(leadingPath, `\uFEFF\n  \t\r\n${JSON.stringify(leadingHeader)}\r\n`, 'utf8');
+  const leadingSource = createPiSessionSourceAdapter({ home, sessionDir: leadingDir });
+  const leadingRefs = await discoverAll(leadingSource);
+  assert.equal(leadingRefs.length, 1);
+  const leadingRevision = await leadingSource.inspect(leadingRefs[0]);
+  assert.equal(leadingRevision.nativeSessionId, 'pi-leading');
+  assert.equal(leadingRefs[0].nativeSessionId, leadingRevision.nativeSessionId);
+
+  const finalLinePath = path.join(leadingDir, 'final-line.jsonl');
+  const finalLineHeader = {
+    type: 'session', version: 3, id: 'pi-final-line', timestamp: '2026-08-01T00:00:00.000Z', cwd: home,
+  };
+  fs.writeFileSync(finalLinePath, JSON.stringify(finalLineHeader), 'utf8');
+  const finalLineSource = createPiSessionSourceAdapter({ home, sessionDir: leadingDir });
+  const finalLineRefs = await discoverAll(finalLineSource);
+  const finalLineRef = finalLineRefs.find(ref => ref.nativeSessionId === 'pi-final-line');
+  assert.ok(finalLineRef, 'a complete JSON final line without LF remains discoverable');
+  assert.equal((await finalLineSource.inspect(finalLineRef)).nativeSessionId, 'pi-final-line');
+
+  const utf8Path = path.join(leadingDir, 'utf8-header.jsonl');
+  const utf8Header = {
+    type: 'session', version: 3, id: 'pi-utf8-header', timestamp: '2026-08-01T00:00:00.000Z', cwd: home,
+    note: '你好世界'.repeat(20000),
+  };
+  fs.writeFileSync(utf8Path, `${JSON.stringify(utf8Header)}\n`, 'utf8');
+  const utf8Source = createPiSessionSourceAdapter({ home, sessionDir: leadingDir });
+  const utf8Refs = await discoverAll(utf8Source);
+  const utf8Ref = utf8Refs.find(ref => ref.nativeSessionId === 'pi-utf8-header');
+  assert.ok(utf8Ref, 'UTF-8 header crossing read chunks must be discoverable');
+  assert.equal((await utf8Source.inspect(utf8Ref)).nativeSessionId, 'pi-utf8-header');
+
+  const whitespacePath = path.join(leadingDir, 'whitespace.jsonl');
+  fs.writeFileSync(whitespacePath, ' \t\r\n'.repeat(Math.ceil(_internal.MAX_HEADER_BYTES / 4) + 1), 'utf8');
+  const whitespaceSource = createPiSessionSourceAdapter({ home, sessionDir: leadingDir });
+  const whitespaceRefs = await discoverAll(whitespaceSource);
+  assert.equal(whitespaceRefs.some(ref => ref.sourceLocator.relativePath === 'whitespace.jsonl'), false);
   fs.rmSync(home, { recursive: true, force: true });
 });
 
