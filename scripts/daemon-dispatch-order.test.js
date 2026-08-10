@@ -1,9 +1,29 @@
 'use strict';
 
 require('./test-support/env-setup');
-const { describe, it } = require('node:test');
+const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const originalHome = process.env.HOME;
+const testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-dispatch-order-'));
+const testMetameDir = path.join(testHome, '.metame');
+fs.mkdirSync(testMetameDir, { recursive: true });
+fs.writeFileSync(path.join(testMetameDir, 'users.yaml'), [
+  'default_role: stranger',
+  'users:',
+  '  ou_seed_admin_01: { role: admin, name: seed }',
+  '',
+].join('\n'));
+process.env.HOME = testHome;
 const { __test } = require('./daemon.js');
+
+after(() => {
+  process.env.HOME = originalHome;
+  fs.rmSync(testHome, { recursive: true, force: true });
+});
 
 describe('dispatch receiver task cards', () => {
   it('waits for the task card before streaming worker output', async () => {
