@@ -65,6 +65,30 @@ test('Claude adapter recognizes growing revisions and rejects stale reads', asyn
   );
 });
 
+test('Claude revision cursor points at the next native record after a trailing newline', async () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-append-'));
+  const sourcePath = path.join(tmpRoot, 'session.jsonl');
+  fs.writeFileSync(sourcePath, `${JSON.stringify({
+    type: 'user', sessionId: 'append-session', message: { content: 'first' },
+  })}\n`);
+  const source = createClaudeSessionSourceAdapter({ projectsRoot: tmpRoot });
+  const ref = (await discoverAll(source))[0];
+  const initial = await source.inspect(ref);
+  assert.equal(initial.cursor.sequence, 1);
+
+  fs.appendFileSync(sourcePath, `${JSON.stringify({
+    type: 'user', sessionId: 'append-session', message: { content: 'second' },
+  })}\n`);
+  const grown = await source.inspect(ref);
+  assert.equal(grown.cursor.sequence, 2);
+  const events = [];
+  for await (const event of source.read(ref, {
+    sourceRevision: grown.sourceRevision,
+    cursor: initial.cursor,
+  })) events.push(event);
+  assert.deepEqual(events.map(event => event.text), ['second']);
+});
+
 test('Claude discovery applies its cap after newest-session ordering', async () => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-order-'));
   const writeSession = (name, sessionId) => {
@@ -82,6 +106,90 @@ test('Claude discovery applies its cap after newest-session ordering', async () 
   const source = createClaudeSessionSourceAdapter({ projectsRoot: tmpRoot });
   const refs = await discoverAll(source, { limit: 1 });
   assert.deepEqual(refs.map(ref => ref.nativeSessionId), ['new-session']);
+});
+
+test('Claude discovery cursor replays a stable snapshot after files are touched', async () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-cursor-'));
+  const writeSession = (name, sessionId) => {
+    const filePath = path.join(tmpRoot, name);
+    fs.writeFileSync(filePath, `${JSON.stringify({ type: 'user', sessionId, message: { content: `session ${sessionId}` } })}\n`);
+    return filePath;
+  };
+  const oldPath = writeSession('a-old.jsonl', 'old-session');
+  const newPath = writeSession('z-new.jsonl', 'new-session');
+  const oldTime = new Date('2026-07-01T00:00:00.000Z');
+  const newTime = new Date('2026-07-02T00:00:00.000Z');
+  fs.utimesSync(oldPath, oldTime, oldTime);
+  fs.utimesSync(newPath, newTime, newTime);
+
+  const source = createClaudeSessionSourceAdapter({ projectsRoot: tmpRoot });
+  const first = await discoverAll(source, { limit: 1 });
+  assert.equal(first[0].nativeSessionId, 'new-session');
+  assert.ok(first[0].discoveryCursor);
+
+  const touchedTime = new Date('2026-07-03T00:00:00.000Z');
+  fs.utimesSync(oldPath, touchedTime, touchedTime);
+  const second = await discoverAll(source, { limit: 1, cursor: first[0].discoveryCursor });
+  assert.deepEqual(second.map(ref => ref.nativeSessionId), ['old-session']);
+  assert.equal(second[0].discoveryCursor, undefined);
+});
+
+test('Claude discovery cursor applies limit to the requested page', async () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-page-'));
+  const sameTime = new Date('2026-07-01T00:00:00.000Z');
+  for (let index = 0; index < 150; index++) {
+    const name = `session-${String(index).padStart(3, '0')}.jsonl`;
+    const filePath = path.join(tmpRoot, name);
+    fs.writeFileSync(filePath, `${JSON.stringify({
+      type: 'user', sessionId: `session-${String(index).padStart(3, '0')}`,
+      message: { content: `session ${index}` },
+    })}\n`);
+    fs.utimesSync(filePath, sameTime, sameTime);
+  }
+
+  const source = createClaudeSessionSourceAdapter({ projectsRoot: tmpRoot });
+  const first = await discoverAll(source, { limit: 100 });
+  assert.equal(first.length, 100);
+  assert.equal(first.at(-1).nativeSessionId, 'session-099');
+  assert.equal(first.at(-1).discoveryCursor.offset, 100);
+  const second = await discoverAll(source, { limit: 30, cursor: first.at(-1).discoveryCursor });
+  assert.equal(second.length, 30);
+  assert.equal(second[0].nativeSessionId, 'session-100');
+  assert.equal(second.at(-1).nativeSessionId, 'session-129');
+});
+
+test('Claude ingestion filters owned subagents before its discovery cap', async () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-owned-'));
+  const parentPath = path.join(tmpRoot, 'parent.jsonl');
+  const childDir = path.join(tmpRoot, 'parent', 'subagents');
+  fs.mkdirSync(childDir, { recursive: true });
+  fs.writeFileSync(parentPath, `${JSON.stringify({
+    type: 'user', sessionId: 'parent', timestamp: '2026-07-01T00:00:00.000Z',
+    message: { content: 'parent evidence' },
+  })}\n`);
+  const childPath = path.join(childDir, 'child.jsonl');
+  fs.writeFileSync(childPath, `${JSON.stringify({
+    type: 'user', sessionId: 'child', timestamp: '2026-07-02T00:00:00.000Z', isSidechain: true,
+    source: { subagent: { parent_thread_id: 'parent' } }, message: { content: 'child evidence' },
+  })}\n`);
+  const oldTime = new Date('2026-07-01T00:00:00.000Z');
+  const newTime = new Date('2026-07-02T00:00:00.000Z');
+  fs.utimesSync(parentPath, oldTime, oldTime);
+  fs.utimesSync(childPath, newTime, newTime);
+
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  applyWikiSchema(db);
+  const source = createClaudeSessionSourceAdapter({ projectsRoot: tmpRoot });
+  const results = await ingestDiscoveredSessions({
+    db,
+    adapter: source,
+    pipelineVersion: 't15-owned-cap',
+    discoveryRequest: { limit: 1 },
+  });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].revision.nativeSessionId, 'parent');
+  db.close();
 });
 
 test('Claude adapter redacts prefixed environment secret names', () => {

@@ -119,7 +119,8 @@ function readFileBounded(filePath, fsMod, maxFileSize) {
 function recordsFromText(text) {
   const records = [];
   let invalidLines = 0;
-  const lines = String(text || '').split('\n');
+  const value = String(text || '');
+  const lines = value.split('\n');
   lines.forEach((line, index) => {
     if (!line.trim()) return;
     const record = parseLine(line);
@@ -129,7 +130,10 @@ function recordsFromText(text) {
     }
     records.push({ record, nativeSequence: index });
   });
-  return { records, invalidLines };
+  const nextNativeSequence = value
+    ? lines.length - (value.endsWith('\n') ? 1 : 0)
+    : 0;
+  return { records, invalidLines, nextNativeSequence };
 }
 
 function extractSessionId(record) {
@@ -415,6 +419,78 @@ function sortJsonlFilesByMtime(files, fsMod) {
   });
 }
 
+const DISCOVERY_CURSOR_VERSION = 1;
+
+function discoveryQuery(request = {}) {
+  return {
+    project: stringValue(request.project || request.projectKey).trim(),
+    cwd: stringValue(request.cwd).trim(),
+    includeSubagents: request.includeSubagents !== false,
+    suppressOwnedSubagents: request.suppressOwnedSubagents === true,
+  };
+}
+
+function discoveryLimit(request = {}) {
+  return Math.min(Math.max(Number(request.limit) || DEFAULT_DISCOVERY_LIMIT, 1), DEFAULT_DISCOVERY_LIMIT);
+}
+
+function normalizeDiscoverySnapshotEntry(value, pathMod) {
+  const object = asObject(value);
+  const rawPath = object && firstDefined(object.relativePath, object.relative_path, object.path);
+  const relativePath = normalizeRelativePath(rawPath, pathMod);
+  if (!rawPath || !relativePath || relativePath === '.' || pathMod.isAbsolute(relativePath) || relativePath.startsWith('..')) {
+    throw adapterError('CLAUDE_SESSION_SOURCE_CURSOR_INVALID', 'snapshot_path');
+  }
+  return { relativePath };
+}
+
+function parseDiscoveryCursor(value, pathMod) {
+  if (value === null || value === undefined) return null;
+  let cursor = value;
+  if (typeof cursor === 'string') {
+    try { cursor = JSON.parse(cursor); } catch { throw adapterError('CLAUDE_SESSION_SOURCE_CURSOR_INVALID', 'json'); }
+  }
+  const object = asObject(cursor);
+  const version = object && Number(object.version);
+  const offset = object && Number(object.offset);
+  if (!object || version !== DISCOVERY_CURSOR_VERSION
+    || !Number.isSafeInteger(offset) || offset < 0
+    || !Array.isArray(object.snapshot)) {
+    throw adapterError('CLAUDE_SESSION_SOURCE_CURSOR_INVALID', 'snapshot_required');
+  }
+  const snapshot = object.snapshot.map(entry => normalizeDiscoverySnapshotEntry(entry, pathMod));
+  if (offset > snapshot.length) throw adapterError('CLAUDE_SESSION_SOURCE_CURSOR_INVALID', 'offset');
+  const query = asObject(object.query);
+  if (!query) throw adapterError('CLAUDE_SESSION_SOURCE_CURSOR_INVALID', 'query_required');
+  return {
+    version,
+    offset,
+    snapshot,
+    query: {
+      project: stringValue(query.project).trim(),
+      cwd: stringValue(query.cwd).trim(),
+      includeSubagents: query.includeSubagents !== false,
+      suppressOwnedSubagents: query.suppressOwnedSubagents === true,
+    },
+  };
+}
+
+function sameDiscoveryQuery(left, right) {
+  return left.project === right.project
+    && left.cwd === right.cwd
+    && left.includeSubagents === right.includeSubagents
+    && left.suppressOwnedSubagents === right.suppressOwnedSubagents;
+}
+
+function makeDiscoveryCursor(snapshot, offset, query) {
+  return {
+    version: DISCOVERY_CURSOR_VERSION,
+    offset,
+    snapshot,
+    query,
+  };
+}
+
 function createClaudeSessionSourceAdapter(options = {}) {
   const fsMod = options.fs || fsDefault;
   const pathMod = options.path || pathDefault;
@@ -442,7 +518,7 @@ function createClaudeSessionSourceAdapter(options = {}) {
       sourceHash: hashBytes(source.bytes),
       sourceRevision: hashBytes(source.bytes),
       sourceSize: source.stat.size,
-      cursor: { sequence: source.stat.size > 0 ? source.text.split('\n').length : 0 },
+      cursor: { sequence: parsed.nextNativeSequence },
       messageCount: userEvents.filter(event => event.actor === 'user' && event.kind === 'message').length,
       toolCallCount: toolCalls,
       toolErrorCount: toolErrors,
@@ -452,7 +528,7 @@ function createClaudeSessionSourceAdapter(options = {}) {
     };
   }
 
-  function refForFile(filePath, metadata = null) {
+  function refForFile(filePath, metadata = null, discoveryCursor = null) {
     const relativePath = pathMod.relative(projectsRoot, filePath);
     const info = metadata || inspectFile(filePath);
     return {
@@ -464,26 +540,85 @@ function createClaudeSessionSourceAdapter(options = {}) {
       cwd: info.cwd || null,
       parentNativeSessionId: info.parentNativeSessionId || null,
       sourceRevision: info.sourceRevision,
+      ...(discoveryCursor ? { discoveryCursor } : {}),
     };
   }
 
-  function listSessionRefs(request = {}) {
+  function freshDiscoveryEntries(query) {
     const files = sortJsonlFilesByMtime(walkJsonl(projectsRoot, fsMod, pathMod), fsMod);
-    const requestedProject = stringValue(request.project || request.projectKey).trim();
-    const requestedCwd = stringValue(request.cwd).trim();
-    const includeSubagents = request.includeSubagents !== false;
-    const limit = Math.min(Math.max(Number(request.limit) || DEFAULT_DISCOVERY_LIMIT, 1), DEFAULT_DISCOVERY_LIMIT);
-    const refs = [];
+    const inspected = [];
+    const nativeSessionIds = new Set();
     for (const filePath of files) {
       let info;
       try { info = inspectFile(filePath); } catch { continue; }
-      if (requestedProject && info.project !== requestedProject) continue;
-      if (requestedCwd && info.cwd !== requestedCwd) continue;
-      if (!includeSubagents && info.classification === 'subagent') continue;
-      refs.push(refForFile(filePath, info));
-      if (refs.length >= limit) break;
+      inspected.push({ filePath, info });
+      if (info.nativeSessionId) nativeSessionIds.add(info.nativeSessionId);
     }
-    return refs;
+    return inspected
+      .filter(({ info }) => !query.project || info.project === query.project)
+      .filter(({ info }) => !query.cwd || info.cwd === query.cwd)
+      .filter(({ info }) => query.includeSubagents || info.classification !== 'subagent')
+      .filter(({ info }) => !query.suppressOwnedSubagents
+        || !info.parentNativeSessionId
+        || !nativeSessionIds.has(info.parentNativeSessionId))
+      .slice(0, DEFAULT_DISCOVERY_LIMIT)
+      .map((entry, snapshotIndex) => ({ ...entry, snapshotIndex }));
+  }
+
+  function entriesFromSnapshot(cursor) {
+    return cursor.snapshot.map((snapshotEntry, snapshotIndex) => {
+      const filePath = pathMod.resolve(projectsRoot, snapshotEntry.relativePath);
+      if (!isPathInside(projectsRoot, filePath, pathMod)) return null;
+      let info;
+      try { info = inspectFile(filePath); } catch { return null; }
+      return { filePath, info, snapshotIndex };
+    }).filter(Boolean);
+  }
+
+  function prepareDiscovery(request = {}) {
+    const query = discoveryQuery(request);
+    const cursor = parseDiscoveryCursor(request.cursor, pathMod);
+    if (cursor) {
+      if (!sameDiscoveryQuery(cursor.query, query)) {
+        throw adapterError('CLAUDE_SESSION_SOURCE_CURSOR_INVALID', 'query_mismatch');
+      }
+      return {
+        query,
+        cursor,
+        snapshot: cursor.snapshot,
+        entries: entriesFromSnapshot(cursor),
+      };
+    }
+    const entries = freshDiscoveryEntries(query);
+    const snapshot = entries.map(entry => ({
+      relativePath: normalizeRelativePath(pathMod.relative(projectsRoot, entry.filePath), pathMod),
+    }));
+    return { query, cursor: null, snapshot, entries };
+  }
+
+  function refsForRequest(request = {}) {
+    const state = prepareDiscovery(request);
+    const limit = discoveryLimit(request);
+    const start = state.cursor ? state.cursor.offset : 0;
+    const page = [];
+    for (const entry of state.entries) {
+      if (entry.snapshotIndex < start) continue;
+      page.push(entry);
+      if (page.length >= limit) break;
+    }
+    const hasMore = page.length > 0
+      && page[page.length - 1].snapshotIndex + 1 < state.snapshot.length;
+    return page.map((entry, index) => refForFile(
+      entry.filePath,
+      entry.info,
+      hasMore && index === page.length - 1
+        ? makeDiscoveryCursor(state.snapshot, entry.snapshotIndex + 1, state.query)
+        : null,
+    ));
+  }
+
+  function listSessionRefs(request = {}) {
+    return refsForRequest(request);
   }
 
   function inspectPath(filePath) {
@@ -525,26 +660,7 @@ function createClaudeSessionSourceAdapter(options = {}) {
       };
     },
     discover: function* discover(request = {}) {
-      const files = sortJsonlFilesByMtime(walkJsonl(projectsRoot, fsMod, pathMod), fsMod);
-      const requestedProject = stringValue(request.project || request.projectKey).trim();
-      const requestedCwd = stringValue(request.cwd).trim();
-      const includeSubagents = request.includeSubagents !== false;
-      const limit = Math.min(Math.max(Number(request.limit) || DEFAULT_DISCOVERY_LIMIT, 1), DEFAULT_DISCOVERY_LIMIT);
-      let index = 0;
-      for (const filePath of files) {
-        if (index < (cursorPosition(request.cursor) || 0)) {
-          index++;
-          continue;
-        }
-        let info;
-        try { info = inspectFile(filePath); } catch { continue; }
-        if (requestedProject && info.project !== requestedProject) continue;
-        if (requestedCwd && info.cwd !== requestedCwd) continue;
-        if (!includeSubagents && info.classification === 'subagent') continue;
-        yield refForFile(filePath, info);
-        index++;
-        if (index >= limit) break;
-      }
+      for (const ref of refsForRequest(request)) yield ref;
     },
     inspect(ref) {
       const filePath = filePathFromRef(ref, projectsRoot, pathMod);

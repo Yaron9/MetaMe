@@ -141,6 +141,7 @@ function normalizeSessionRef(ref = {}, context = {}) {
         : ref.source_path !== undefined
           ? String(ref.source_path)
           : null;
+  const discoveryCursor = normalizeCursor(firstDefined(ref.discoveryCursor, ref.discovery_cursor));
   return Object.freeze({
     engineId,
     nativeSessionId,
@@ -149,6 +150,7 @@ function normalizeSessionRef(ref = {}, context = {}) {
     scope: ref.scope === undefined ? null : String(ref.scope || ''),
     cwd: ref.cwd === undefined ? null : String(ref.cwd || ''),
     parentNativeSessionId: ref.parentNativeSessionId || ref.parent_native_session_id || null,
+    ...(discoveryCursor === null ? {} : { discoveryCursor }),
   });
 }
 

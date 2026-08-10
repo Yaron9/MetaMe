@@ -190,7 +190,13 @@ async function ingestDiscoveredSessions(options) {
   requireIngestionOptions(options, { requireSessionRef: false });
   const source = wrapSessionSourceAdapter(options.adapter, { engineId: options.engineId });
   const discovered = [];
-  for await (const sessionRef of source.discover(options.discoveryRequest || {})) discovered.push(sessionRef);
+  const discoveryRequest = {
+    ...(options.discoveryRequest || {}),
+    ...(options.includeSubagents === undefined && options.discoveryRequest?.suppressOwnedSubagents === undefined
+      ? { suppressOwnedSubagents: true }
+      : {}),
+  };
+  for await (const sessionRef of source.discover(discoveryRequest)) discovered.push(sessionRef);
   const parentIds = new Set(discovered.map(ref => ref.nativeSessionId).filter(Boolean));
   const refs = options.includeSubagents === true
     ? discovered
