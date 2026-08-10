@@ -189,7 +189,9 @@ const _cliCommand = String(process.argv[2] || '').trim().toLowerCase();
 const _isDaemonStatusCommand = isDaemonStatusCommand(process.argv);
 const _isMemoryObservabilityCommand = _cliCommand === 'memory'
   && ['status', 'doctor'].includes(String(process.argv[3] || '').trim().toLowerCase());
-const _isReadOnlyCommand = _isDaemonStatusCommand || _isMemoryObservabilityCommand;
+const _isMemoryReconcileCommand = _cliCommand === 'memory'
+  && String(process.argv[3] || '').trim().toLowerCase() === 'reconcile';
+const _isReadOnlyCommand = _isDaemonStatusCommand || _isMemoryObservabilityCommand || _isMemoryReconcileCommand;
 
 // This is intentionally before the first ~/.metame mkdir, runtime sync,
 // hook install, plugin bootstrap, or local activity heartbeat.  Keep status
@@ -203,6 +205,15 @@ if (_isMemoryObservabilityCommand) {
   const command = String(process.argv[3]).toLowerCase();
   require(`./scripts/memory-${command}`).main(process.argv.slice(4));
   process.exit(process.exitCode || 0);
+}
+if (_isMemoryReconcileCommand) {
+  try {
+    require('./scripts/memory-reconcile').main(process.argv.slice(4));
+    process.exit(process.exitCode || 0);
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
 }
 
 function resolveAutoUpdateBehavior() {

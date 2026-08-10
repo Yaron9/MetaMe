@@ -25,4 +25,21 @@ describe('memory-extract dead code removal', () => {
     assert.equal(memExtract._internal.isValidExtractedFact({ ...base, relation: 'arch_convention' }), true);
     assert.equal(memExtract._internal.isValidExtractedFact({ ...base, relation: 'current_problem' }), false);
   });
+
+  it('requires strict lifecycle/key values while normalizing legacy output to task', () => {
+    const base = {
+      entity: 'MetaMe.memory',
+      relation: 'config_change',
+      value: '这是一条具有充分上下文、可以独立理解并值得长期保存的事实记录。',
+      confidence: 'high',
+    };
+    assert.equal(memExtract._internal.isValidExtractedFact({ ...base, lifecycle: 'future' }), false);
+    assert.equal(memExtract._internal.isValidExtractedFact({ ...base, canonical_key: 'bad/key' }), false);
+    assert.equal(memExtract._internal.isValidExtractedFact({ ...base, lifecycle: 'project', canonical_key: 'MetaMe.Memory.Policy' }), true);
+    assert.deepEqual(memExtract._internal.normalizeExtractedFact(base), {
+      ...base,
+      lifecycle: 'task',
+      canonical_key: null,
+    });
+  });
 });
