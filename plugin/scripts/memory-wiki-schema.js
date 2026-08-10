@@ -209,7 +209,9 @@ function applyWikiSchema(db) {
   // consume the shared SQLite user_version value.
   try {
     const { ensureSessionSourceSchema } = require('./core/session-source-db');
+    const { ensureExtractionRunSchema } = require('./core/extraction-run-db');
     ensureSessionSourceSchema(db);
+    ensureExtractionRunSchema(db);
   } catch (error) {
     // Keep the historical wiki schema initialization behavior for callers
     // that open a partial legacy database; source-aware callers retry the

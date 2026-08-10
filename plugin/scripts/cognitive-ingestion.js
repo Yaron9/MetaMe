@@ -1,20 +1,20 @@
 'use strict';
 
-const {
-  wrapSessionSourceAdapter,
-} = require('./session-source-adapter');
+const { wrapSessionSourceAdapter } = require('./engines/session-source-adapter');
 const {
   fingerprintSourceRevision,
   normalizeSessionRef,
-} = require('./session-source-revision');
+} = require('./core/session-source-revision');
+const {
+  markSessionSourceMissing,
+  updateSessionSourceProgress,
+  upsertSessionSource,
+} = require('./core/session-source-db');
 const {
   claimExtractionLease,
   completeExtractionRun,
   failExtractionRun,
-  markSessionSourceMissing,
-  updateSessionSourceProgress,
-  upsertSessionSource,
-} = require('./session-source-db');
+} = require('./core/extraction-run-db');
 
 const DEFAULT_MAX_EVENTS = 100000;
 
@@ -24,23 +24,31 @@ function ingestionError(code, detail = '') {
   return error;
 }
 
-function requireIngestionOptions(options) {
+function requireIngestionOptions(options, { requireSessionRef = true } = {}) {
   if (!options || typeof options !== 'object') throw ingestionError('session_source_ingestion_options_required');
   if (!options.db) throw ingestionError('session_source_ingestion_database_required');
   if (!options.adapter) throw ingestionError('session_source_ingestion_adapter_required');
-  if (!options.sessionRef) throw ingestionError('session_source_ingestion_ref_required');
+  if (requireSessionRef && !options.sessionRef) throw ingestionError('session_source_ingestion_ref_required');
   if (!options.pipelineVersion && !options.pipeline_version) throw ingestionError('extraction_pipeline_version_required');
 }
 
+function firstDefined(...values) {
+  return values.find(value => value !== undefined);
+}
+
 function sourceMetadata(ref, revision, validation = null) {
-  const sourceHash = revision && (revision.sourceHash || revision.sourceRevision)
-    || ref.sourceRevision
-    || ref.sourceHash
-    || fingerprintSourceRevision({
-      engineId: ref.engineId,
-      nativeSessionId: ref.nativeSessionId,
-      sourceLocator: ref.sourceLocator,
-    });
+  const sourceHash = firstDefined(
+    revision && (revision.sourceHash || revision.sourceRevision),
+    ref.sourceRevision,
+    ref.sourceHash,
+  ) || fingerprintSourceRevision({
+    engineId: ref.engineId,
+    nativeSessionId: ref.nativeSessionId,
+    sourceLocator: ref.sourceLocator,
+  });
+  const cursor = revision
+    ? firstDefined(revision.cursor, revision.appendCursor, revision.discoveryCursor)
+    : undefined;
   return {
     engineId: ref.engineId,
     nativeSessionId: ref.nativeSessionId,
@@ -56,7 +64,7 @@ function sourceMetadata(ref, revision, validation = null) {
     toolCallCount: revision && revision.toolCallCount || 0,
     toolErrorCount: revision && revision.toolErrorCount || 0,
     adapterProtocolVersion: revision && revision.adapterProtocolVersion || 1,
-    discoveryCursor: revision && revision.cursor || null,
+    discoveryCursor: cursor === undefined ? null : cursor,
     lastIngestedSequence: revision && revision.lastIngestedSequence || 0,
     parentNativeSessionId: revision && revision.parentNativeSessionId || ref.parentNativeSessionId || null,
     classification: revision && revision.classification || 'conversation',
@@ -176,7 +184,7 @@ async function ingestSessionSource(options) {
 }
 
 async function ingestDiscoveredSessions(options) {
-  requireIngestionOptions({ ...options, sessionRef: options.sessionRef || {} });
+  requireIngestionOptions(options, { requireSessionRef: false });
   const source = wrapSessionSourceAdapter(options.adapter, { engineId: options.engineId });
   const results = [];
   for await (const sessionRef of source.discover(options.discoveryRequest || {})) {
@@ -187,12 +195,5 @@ async function ingestDiscoveredSessions(options) {
 
 module.exports = {
   ingestSessionSource,
-  processSessionSource: ingestSessionSource,
-  ingestSourceRevision: ingestSessionSource,
   ingestDiscoveredSessions,
-  _internal: {
-    ingestionError,
-    requireIngestionOptions,
-    sourceMetadata,
-  },
 };

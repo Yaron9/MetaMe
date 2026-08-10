@@ -72,3 +72,19 @@ test('missing source validation is represented as a stable non-truth result', as
   assert.equal(result.errorCode, 'SOURCE_MISSING');
   assert.equal(result.detail, 'locator unavailable');
 });
+
+test('read forwards a numeric zero cursor during restart', async () => {
+  let receivedCursor = 'unset';
+  const source = fixtureAdapter({
+    read: async function* read(_ref, request) {
+      receivedCursor = request.cursor;
+      yield { actor: 'system', kind: 'checkpoint', sequence: 0 };
+    },
+  });
+  const events = [];
+  for await (const event of source.read({ nativeSessionId: 'native-1', sourceRevision: 'rev-1' }, { cursor: 0 })) {
+    events.push(event);
+  }
+  assert.equal(receivedCursor, 0);
+  assert.equal(events.length, 1);
+});

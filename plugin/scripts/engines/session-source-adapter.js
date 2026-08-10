@@ -5,8 +5,8 @@ const {
   normalizeEngineId,
   normalizeSessionRef,
   normalizeSessionRevision,
-} = require('./session-source-revision');
-const { normalizeCanonicalSessionEvent } = require('./canonical-session-event');
+} = require('../core/session-source-revision');
+const { normalizeCanonicalSessionEvent } = require('../core/canonical-session-event');
 
 const REQUIRED_OPERATIONS = Object.freeze(['probe', 'discover', 'inspect', 'read', 'validate']);
 
@@ -185,30 +185,6 @@ function createSessionSourceAdapter(adapter, options) {
   return wrapSessionSourceAdapter(adapter, options);
 }
 
-function createSessionSourceSeam(adapter, options) {
-  return wrapSessionSourceAdapter(adapter, options);
-}
-
-async function probeSessionSource(adapter, sourceContext, options) {
-  return wrapSessionSourceAdapter(adapter, options).probe(sourceContext);
-}
-
-function discoverSessionSources(adapter, discoveryRequest, options) {
-  return wrapSessionSourceAdapter(adapter, options).discover(discoveryRequest);
-}
-
-async function inspectSessionSource(adapter, sessionRef, options) {
-  return wrapSessionSourceAdapter(adapter, options).inspect(sessionRef);
-}
-
-function readSessionSource(adapter, sessionRef, readRequest, options) {
-  return wrapSessionSourceAdapter(adapter, options).read(sessionRef, readRequest);
-}
-
-async function validateSessionSource(adapter, sessionRef, options) {
-  return wrapSessionSourceAdapter(adapter, options).validate(sessionRef);
-}
-
 function runSessionSourceConformance(adapter, options = {}) {
   try {
     const seam = wrapSessionSourceAdapter(adapter, options);
@@ -228,20 +204,5 @@ module.exports = {
   REQUIRED_OPERATIONS,
   wrapSessionSourceAdapter,
   createSessionSourceAdapter,
-  createSessionSourceSeam,
-  createSessionSourceContract: createSessionSourceAdapter,
-  normalizeSessionSourceAdapter: wrapSessionSourceAdapter,
-  probeSessionSource,
-  discoverSessionSources,
-  inspectSessionSource,
-  readSessionSource,
-  validateSessionSource,
   runSessionSourceConformance,
-  _internal: {
-    adapterError,
-    iterate,
-    normalizeProbe,
-    normalizeValidation,
-    requireAdapter,
-  },
 };

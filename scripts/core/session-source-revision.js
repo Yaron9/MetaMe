@@ -49,6 +49,10 @@ function cloneJson(value, code = 'session_source_cursor_invalid') {
   }
 }
 
+function firstDefined(...values) {
+  return values.find(value => value !== undefined);
+}
+
 function stableSerialize(value) {
   return JSON.stringify(stableValue(value));
 }
@@ -58,8 +62,9 @@ function digest(value, prefix = 'ssr_') {
 }
 
 function normalizeCursor(cursor) {
-  if (cursor === null || cursor === undefined || cursor === '') return null;
+  if (cursor === null || cursor === undefined) return null;
   if (typeof cursor === 'string') return cursor;
+  if (typeof cursor === 'boolean') return cursor;
   if (typeof cursor === 'number') {
     if (!Number.isSafeInteger(cursor) || cursor < 0) throw revisionError('session_source_cursor_invalid', String(cursor));
     return cursor;
@@ -101,7 +106,7 @@ function fingerprintSourceRevision(source = {}) {
           sourceSize: source.sourceSize || source.source_size || 0,
           firstTs: source.firstTs || source.first_ts || null,
           lastTs: source.lastTs || source.last_ts || null,
-          cursor: normalizeCursor(source.cursor || source.discoveryCursor || source.discovery_cursor),
+          cursor: normalizeCursor(firstDefined(source.cursor, source.appendCursor, source.append_cursor, source.discoveryCursor, source.discovery_cursor)),
         };
   const value = Buffer.isBuffer(content) ? content : stableSerialize(content);
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -157,9 +162,13 @@ function normalizeSessionRevision(revision = {}, context = {}) {
     nativeSessionId: revision.nativeSessionId || revision.native_session_id || context.nativeSessionId,
   }, context);
   const sourceHash = fingerprintSourceRevision(revision);
-  const cursor = normalizeCursor(
-    revision.cursor || revision.appendCursor || revision.append_cursor || revision.discoveryCursor || revision.discovery_cursor,
-  );
+  const cursor = normalizeCursor(firstDefined(
+    revision.cursor,
+    revision.appendCursor,
+    revision.append_cursor,
+    revision.discoveryCursor,
+    revision.discovery_cursor,
+  ));
   const sourceSize = normalizeNonNegativeInteger(revision.sourceSize || revision.source_size, 0);
   return Object.freeze({
     ...ref,
@@ -195,8 +204,8 @@ function classifySourceRevision(previous, current) {
   const previousSize = normalizeNonNegativeInteger(previous.sourceSize || previous.source_size, 0);
   const currentSize = normalizeNonNegativeInteger(current.sourceSize || current.source_size, 0);
   if (previousHash === currentHash) {
-    const previousCursor = cursorPosition(previous.cursor || previous.appendCursor || previous.append_cursor || previous.discoveryCursor || previous.discovery_cursor);
-    const currentCursor = cursorPosition(current.cursor || current.appendCursor || current.append_cursor || current.discoveryCursor || current.discovery_cursor);
+    const previousCursor = cursorPosition(firstDefined(previous.cursor, previous.appendCursor, previous.append_cursor, previous.discoveryCursor, previous.discovery_cursor));
+    const currentCursor = cursorPosition(firstDefined(current.cursor, current.appendCursor, current.append_cursor, current.discoveryCursor, current.discovery_cursor));
     if (current.replay === true || (previousCursor !== null && currentCursor !== null && currentCursor <= previousCursor)) {
       return 'replayed';
     }
@@ -254,28 +263,11 @@ module.exports = {
   normalizeCursor,
   serializeCursor,
   fingerprintSourceRevision,
-  sourceRevisionFingerprint: fingerprintSourceRevision,
-  computeSourceRevision: fingerprintSourceRevision,
-  computeSourceHash: fingerprintSourceRevision,
   normalizeSessionRef,
   normalizeSessionRevision,
   classifySourceRevision,
-  classifyRevision: classifySourceRevision,
-  detectRevisionChange: classifySourceRevision,
   processingIdentity,
-  processingIdentityKey: processingIdentity,
-  buildProcessingIdentity: processingIdentity,
   processingId,
-  buildProcessingId: processingId,
   createProcessingIdentity,
   advanceCursor,
-  _internal: {
-    cloneJson,
-    cursorPosition,
-    digest,
-    normalizeNonNegativeInteger,
-    normalizeTimestamp,
-    stableSerialize,
-    stableValue,
-  },
 };

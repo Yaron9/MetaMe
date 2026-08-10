@@ -1,11 +1,11 @@
 'use strict';
 
-require('../test-support/env-setup');
+require('./test-support/env-setup');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { DatabaseSync } = require('node:sqlite');
-const { applyWikiSchema } = require('../memory-wiki-schema');
-const { ingestSessionSource } = require('./session-source-ingestion');
+const { applyWikiSchema } = require('./memory-wiki-schema');
+const { ingestSessionSource } = require('./cognitive-ingestion');
 
 function fixtureDb() {
   const db = new DatabaseSync(':memory:');

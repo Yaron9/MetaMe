@@ -92,6 +92,10 @@ test('session_sources table exists after applyWikiSchema', () => {
     "SELECT name FROM sqlite_master WHERE type='table' AND name='session_sources'"
   ).get();
   assert.ok(row, 'session_sources table should exist');
+  const extractionRuns = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='extraction_runs'"
+  ).get();
+  assert.ok(extractionRuns, 'extraction_runs table should exist');
   db.close();
 });
 

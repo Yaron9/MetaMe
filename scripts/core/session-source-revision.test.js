@@ -83,3 +83,24 @@ test('session refs and revisions preserve parent attribution and aliases', () =>
   assert.equal(revision.sourceSize, 32);
   assert.deepEqual(revision.cursor, { sequence: 4 });
 });
+
+test('numeric zero cursor is a present restart position, not an absent cursor', () => {
+  const revision = normalizeSessionRevision({
+    engineId: 'fixture-agent',
+    nativeSessionId: 'zero-cursor',
+    sourceHash: 'rev-zero',
+    cursor: 0,
+  });
+  assert.equal(revision.cursor, 0);
+  assert.equal(revision.appendCursor, 0);
+  assert.equal(revision.discoveryCursor, 0);
+});
+
+test('false and empty-string cursors remain present opaque positions', () => {
+  assert.equal(normalizeSessionRevision({
+    engineId: 'fixture-agent', nativeSessionId: 'false-cursor', sourceHash: 'rev-false', cursor: false,
+  }).cursor, false);
+  assert.equal(normalizeSessionRevision({
+    engineId: 'fixture-agent', nativeSessionId: 'empty-cursor', sourceHash: 'rev-empty', cursor: '',
+  }).cursor, '');
+});
