@@ -27,7 +27,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { assembleSearchResults, scopeKeys } = require('./core/cognitive-consumption');
 const { toBoundedSourceRef } = require('./core/cognitive-effectiveness');
-const { resolveAccessContext } = require('./core/context-manifest');
+const { isTrustedAccess, resolveAccessContext } = require('./core/context-manifest');
 
 const HOME = os.homedir();
 const SKILLS_DIR = path.join(HOME, '.claude', 'skills');
@@ -172,21 +172,31 @@ function defaultDeps() {
     skillsDir: SKILLS_DIR,
     agentsDir: AGENTS_DIR,
     dbPath: DB_PATH,
-    // The executable MCP boundary supplies this from the managed binding.
-    // A request's host/project/agent fields remain selectors/telemetry only.
-    accessContext: () => null,
   };
 }
 
+function normalizeLegacyAgentKey(args = {}) {
+  const raw = String(args.agent_key || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  return raw || null;
+}
+
 function resolveMcpAccess(args, deps) {
-  const hasTrustedSeam = typeof deps.accessContext === 'function';
-  let trustedContext = null;
-  if (hasTrustedSeam) {
-    try { trustedContext = deps.accessContext(); } catch { trustedContext = null; }
+  const hasAccessProvider = typeof deps.accessContext === 'function';
+  let suppliedContext = null;
+  if (hasAccessProvider) {
+    try { suppliedContext = deps.accessContext(); } catch { suppliedContext = null; }
   }
+  const hasTrustedSeam = !!(suppliedContext && isTrustedAccess(suppliedContext));
   return {
     hasTrustedSeam,
-    context: resolveAccessContext({ trustedContext, request: args }),
+    context: resolveAccessContext({
+      trustedContext: hasTrustedSeam ? suppliedContext : null,
+      request: args,
+    }),
+    // Existing direct callers predate managed binding injection. Keep their
+    // explicit agent selector working, but sanitize it and never use it when
+    // a real trusted binding is present.
+    legacyAgentKey: hasTrustedSeam ? null : normalizeLegacyAgentKey(args),
   };
 }
 
@@ -278,7 +288,7 @@ const handlers = {
       plan,
       scope: {
         project: access.context.project || null,
-        agentKey: access.context.agent_id || null,
+        agentKey: access.hasTrustedSeam ? access.context.agent_id : access.legacyAgentKey,
       },
     });
     const traceId = `mcp_${crypto.randomUUID()}`;
@@ -409,8 +419,8 @@ const handlers = {
     if (!id) return { error: 'invalid agent id' };
     // Keep the old injectable characterization seam, but the executable MCP
     // boundary must prove the requested agent is the managed principal.
-    if (typeof deps.accessContext === 'function') {
-      const access = resolveMcpAccess(args, deps);
+    const access = resolveMcpAccess(args, deps);
+    if (access.hasTrustedSeam) {
       if (!access.context.agent_id || access.context.agent_id !== id) {
         return { error: 'agent_context_unauthorized' };
       }

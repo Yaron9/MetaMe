@@ -56,3 +56,44 @@ test('adapter receives manifest and phase only; it cannot mutate host configurat
   assert.deepEqual(Object.keys(received).sort(), ['manifest', 'phase']);
   assert.equal(received.phase, 'project_switch');
 });
+
+test('failed projection does not consume the delivery revision and can be retried', () => {
+  const manifest = buildProjectContextManifest({ assets: [claim], access });
+  const ledger = {};
+  let calls = 0;
+  const adapter = {
+    projectContext() {
+      calls += 1;
+      if (calls === 1) throw new Error('transient host failure');
+      return { state: 'projected', fingerprint: 'retry-ok' };
+    },
+  };
+  const first = deliverProjectContext({ manifest, access, adapter, host: 'fixture', nativeSessionId: 'retry-1', ledger });
+  assert.equal(first.state, 'failed');
+  assert.equal(first.delivered, false);
+  assert.deepEqual(first.ledger, {});
+  const second = deliverProjectContext({ manifest, access, adapter, host: 'fixture', nativeSessionId: 'retry-1', ledger: first.ledger });
+  assert.equal(second.state, 'projected');
+  assert.equal(second.delivered, true);
+  assert.equal(calls, 2);
+});
+
+test('concurrent async projection claims one delivery per revision', async () => {
+  const manifest = buildProjectContextManifest({ assets: [claim], access });
+  const ledger = {};
+  let calls = 0;
+  const adapter = {
+    projectContext() {
+      calls += 1;
+      return new Promise(resolve => setTimeout(() => resolve({ state: 'projected', fingerprint: 'async-ok' }), 10));
+    },
+  };
+  const options = { manifest, access, adapter, host: 'fixture', nativeSessionId: 'async-1', ledger };
+  const first = deliverProjectContext(options);
+  const second = deliverProjectContext(options);
+  assert.equal(first, second);
+  const [left, right] = await Promise.all([first, second]);
+  assert.equal(left.delivered, true);
+  assert.equal(right.delivered, true);
+  assert.equal(calls, 1);
+});

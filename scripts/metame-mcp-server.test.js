@@ -153,6 +153,21 @@ describe('metame-mcp-server tools', () => {
     assert.deepEqual(hit.sources, ['fact:1']);
   });
 
+  it('keeps legacy recall agent scope when no trusted binding is injected', async () => {
+    let recallScope;
+    const deps = tempDeps({
+      // A configured provider that has no binding is still the unbound path.
+      accessContext: () => null,
+      planRecall: () => () => ({ shouldRecall: false }),
+      assembleRecallContext: () => async ({ scope }) => {
+        recallScope = scope;
+        return { text: '', sources: [] };
+      },
+    });
+    await callTool('memory_recall', { text: 'working notes', agent_key: 'jia-private' }, deps);
+    assert.deepEqual(recallScope, { project: null, agentKey: 'jia-private' });
+  });
+
   it('memory_write tags source mcp and surfaces validation errors', async () => {
     let written = null;
     const deps = tempDeps({ writeFact: () => (args) => { written = args; return { ok: true, result: { saved: 1, skipped: 0 } }; } });

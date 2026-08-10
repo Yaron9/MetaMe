@@ -14,6 +14,7 @@ const {
 } = require('./core/context-manifest');
 
 const PHASES = Object.freeze(['cold_start', 'project_switch', 'refresh']);
+const IN_FLIGHT_DELIVERIES = new Map();
 
 function buildProjectContextManifest(options = {}) {
   return buildManifest(options);
@@ -21,6 +22,26 @@ function buildProjectContextManifest(options = {}) {
 
 function unsupportedResult(reason = 'cognitive_host_unsupported') {
   return { state: 'unsupported', reason };
+}
+
+function isThenable(value) {
+  return !!value && (typeof value === 'object' || typeof value === 'function')
+    && typeof value.then === 'function';
+}
+
+function failedProjection(error, manifest) {
+  return {
+    state: 'failed',
+    error: error && error.message ? String(error.message).slice(0, 300) : 'project_context_failed',
+    manifest,
+  };
+}
+
+function normalizeProjectionResult(result, manifest) {
+  if (!result || !['projected', 'unsupported', 'failed'].includes(result.state)) {
+    return { state: 'failed', error: 'invalid_project_context_result', manifest };
+  }
+  return { ...result, manifest };
 }
 
 function projectContext(options = {}) {
@@ -31,17 +52,108 @@ function projectContext(options = {}) {
   if (!manifest || !manifest.project) return { state: 'empty', manifest };
   try {
     const result = adapter.projectContext({ manifest, phase });
-    if (!result || !['projected', 'unsupported', 'failed'].includes(result.state)) {
-      return { state: 'failed', error: 'invalid_project_context_result' };
+    if (isThenable(result)) {
+      return Promise.resolve(result)
+        .then(value => normalizeProjectionResult(value, manifest))
+        .catch(error => failedProjection(error, manifest));
     }
-    return { ...result, manifest };
+    return normalizeProjectionResult(result, manifest);
   } catch (error) {
+    return failedProjection(error, manifest);
+  }
+}
+
+function currentDeliveryLedger(options = {}) {
+  if (options.ledger && typeof options.ledger === 'object' && !Array.isArray(options.ledger)) {
+    return { ...options.ledger };
+  }
+  if (options.sessionStore && typeof options.sessionStore.getContextDeliveryLedger === 'function') {
+    try {
+      const ledger = options.sessionStore.getContextDeliveryLedger(
+        options.logicalSessionId || options.chatId,
+        options.engine || options.host,
+      );
+      if (ledger && typeof ledger === 'object' && !Array.isArray(ledger)) return { ...ledger };
+    } catch { /* keep the delivery result useful when the ledger is unavailable */ }
+  }
+  return {};
+}
+
+function deliveryAlreadyRecorded(options, key) {
+  const ledger = currentDeliveryLedger(options);
+  return {
+    recorded: Object.prototype.hasOwnProperty.call(ledger, key),
+    ledger,
+  };
+}
+
+function persistDelivery(options, key, manifest) {
+  const metadata = {
+    revision: manifest.revision,
+    project: manifest.project,
+    delivered_at: options.deliveredAt,
+  };
+  if (options.sessionStore && typeof options.sessionStore.compareAndSetContextDelivery === 'function') {
+    return options.sessionStore.compareAndSetContextDelivery(
+      options.logicalSessionId || options.chatId,
+      options.engine || options.host,
+      key,
+      metadata,
+    );
+  }
+  const { compareAndSetDelivery } = require('./core/context-manifest');
+  return compareAndSetDelivery(options.ledger || {}, key, metadata);
+}
+
+function finalizeDelivery(projected, options, manifest, key) {
+  if (!projected || projected.state !== 'projected') {
     return {
-      state: 'failed',
-      error: error && error.message ? String(error.message).slice(0, 300) : 'project_context_failed',
+      ...projected,
+      delivered: false,
+      key,
       manifest,
+      ledger: currentDeliveryLedger(options),
     };
   }
+
+  let cas;
+  try {
+    cas = persistDelivery(options, key, manifest);
+  } catch (error) {
+    return failedProjection(error, manifest);
+  }
+  if (isThenable(cas)) {
+    return Promise.resolve(cas)
+      .then(result => finalizeDeliveryResult(projected, result, manifest, key))
+      .catch(error => failedProjection(error, manifest));
+  }
+  return finalizeDeliveryResult(projected, cas, manifest, key);
+}
+
+function finalizeDeliveryResult(projected, cas, manifest, key) {
+  if (!cas || !cas.delivered) {
+    return {
+      state: 'skipped',
+      reason: 'already_delivered',
+      delivered: false,
+      key,
+      manifest,
+      ledger: cas && cas.ledger ? cas.ledger : {},
+    };
+  }
+  return { ...projected, delivered: true, key, ledger: cas.ledger };
+}
+
+function trackDelivery(key, promise, manifest) {
+  const existing = IN_FLIGHT_DELIVERIES.get(key);
+  if (existing) return existing;
+  const work = Promise.resolve(promise)
+    .catch(error => failedProjection(error, manifest))
+    .finally(() => {
+      if (IN_FLIGHT_DELIVERIES.get(key) === work) IN_FLIGHT_DELIVERIES.delete(key);
+    });
+  IN_FLIGHT_DELIVERIES.set(key, work);
+  return work;
 }
 
 function deliverProjectContext(options = {}) {
@@ -60,25 +172,29 @@ function deliverProjectContext(options = {}) {
     accessIdentity: accessIdentity(access),
     revision: manifest.revision,
   });
-  let cas;
-  if (options.sessionStore && typeof options.sessionStore.compareAndSetContextDelivery === 'function') {
-    cas = options.sessionStore.compareAndSetContextDelivery(
-      options.logicalSessionId || options.chatId,
-      options.engine || options.host,
+  const inFlight = IN_FLIGHT_DELIVERIES.get(key);
+  if (inFlight) return inFlight;
+  const prior = deliveryAlreadyRecorded(options, key);
+  if (prior.recorded) {
+    return {
+      state: 'skipped',
+      reason: 'already_delivered',
+      delivered: false,
       key,
-      { revision: manifest.revision, project: manifest.project, delivered_at: options.deliveredAt },
-    );
-  } else {
-    const { compareAndSetDelivery } = require('./core/context-manifest');
-    cas = compareAndSetDelivery(options.ledger || {}, key, {
-      revision: manifest.revision,
-      project: manifest.project,
-      delivered_at: options.deliveredAt,
-    });
+      manifest,
+      ledger: prior.ledger,
+    };
   }
-  if (!cas.delivered) return { state: 'skipped', reason: 'already_delivered', delivered: false, key, manifest, ledger: cas.ledger };
   const projected = projectContext({ adapter, manifest, phase });
-  return { ...projected, delivered: projected.state === 'projected', key, ledger: cas.ledger };
+  if (isThenable(projected)) {
+    return trackDelivery(
+      key,
+      Promise.resolve(projected).then(result => finalizeDelivery(result, options, manifest, key)),
+      manifest,
+    );
+  }
+  const finalized = finalizeDelivery(projected, options, manifest, key);
+  return isThenable(finalized) ? trackDelivery(key, finalized, manifest) : finalized;
 }
 
 module.exports = {

@@ -139,7 +139,16 @@ function _searchWorking(scope) {
       .map(s => s.trim())
       .filter(Boolean)
       .slice(0, WORKING_MAX_LINES)
-      .map(text => ({ text, source: { kind: 'working' }, source_fingerprint: `working:${scope.agentKey}` }));
+      .map((text, index) => ({
+        text,
+        source: { kind: 'working', index },
+        // The agent key + stable segment index keeps distinct snippets apart;
+        // content makes a changed segment a new source for manifest/JIT dedupe.
+        source_fingerprint: sourceFingerprint({
+          id: `${scope.agentKey}:${index}`,
+          content: text,
+        }, 'working'),
+      }));
   } catch { return []; }
 }
 

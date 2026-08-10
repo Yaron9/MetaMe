@@ -322,10 +322,13 @@ test('assembleRecallContext: working mode populates from working memory file', a
     const result = await assembleRecallContext({
       plan: TRUE_PLAN({ modes: ['working'] }),
       scope: SCOPE,
+      budget: { perItem: { working: { maxItems: 6 } } },
     });
     assert.notEqual(result.text, '');
     assert.match(result.text, /Working memory:/);
     assert.ok(result.breakdown.working > 0);
+    const workingSources = result.sources.filter(source => source.tier === 'working');
+    assert.equal(new Set(workingSources.map(source => source.source_fingerprint)).size, 3);
   });
 });
 
