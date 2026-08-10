@@ -15,15 +15,18 @@ const { createEngineRuntimeFactory } = require('../daemon-engine-runtime');
 const { createEnginePlugin } = require('./engine-plugin');
 const { getEngineDescriptor } = require('../core/engine-descriptors');
 
-function createRegistry() {
+function createRegistry(overrides = {}) {
   return createDefaultEngineRegistry({
     normalizeEngineName: value => String(value || 'claude').trim().toLowerCase(),
+    HOME: overrides.HOME,
     claude: {
       binary: '/opt/test/claude',
       getActiveProviderEnv: () => ({ ANTHROPIC_TEST: '1' }),
+      ...(overrides.claude || {}),
     },
     codex: {
       binary: '/opt/test/codex',
+      ...(overrides.codex || {}),
     },
     agy: {
       home: '/tmp/metame-adapter-test',
@@ -31,7 +34,9 @@ function createRegistry() {
       nativeBinary: '/opt/test/agy',
       adapterPath: '/opt/test/agy-adapter.js',
       pluginConfig: '/tmp/metame-adapter-test/missing-plugin.json',
+      ...(overrides.agy || {}),
     },
+    pi: { ...(overrides.pi || {}) },
   });
 }
 
@@ -62,6 +67,73 @@ test('registry exposes one deep adapter per native CLI with private session stor
   assert.equal(typeof codex.sessionSource.read, 'function');
   assert.equal(runSessionSourceConformance(claude.sessionSource).ok, true);
   assert.equal(runSessionSourceConformance(codex.sessionSource).ok, true);
+});
+
+test('registry preserves nested per-engine Session Source roots and options', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-source-registry-'));
+  const claudeRoot = path.join(root, 'claude-projects');
+  const codexRoot = path.join(root, 'codex');
+  const codexSessionsRoot = path.join(codexRoot, 'sessions');
+  const codexHistory = path.join(root, 'codex-history.jsonl');
+  const codexDb = path.join(root, 'custom-state.sqlite');
+  const codexCwd = path.join(root, 'project');
+  const daemonState = path.join(root, 'daemon-state.json');
+  const agyHome = path.join(root, 'agy');
+  const agyBrainRoot = path.join(agyHome, 'custom-brain');
+  const agyConversationsRoot = path.join(agyHome, 'custom-conversations');
+  const agyCache = path.join(root, 'agy-cache.json');
+  const piAgentDir = path.join(root, 'pi-agent');
+  const piSessionDir = path.join(root, 'pi-sessions');
+  fs.writeFileSync(codexHistory, JSON.stringify({ session_id: 'history-1', text: 'from custom history' }) + '\n');
+
+  try {
+    const registry = createRegistry({
+      HOME: root,
+      claude: { projectsRoot: claudeRoot },
+      codex: {
+        codexRoot,
+        sessionsRoot: codexSessionsRoot,
+        historyPath: codexHistory,
+        dbPath: codexDb,
+        daemonStatePath: daemonState,
+        daemonCwds: [codexCwd],
+      },
+      agy: {
+        home: agyHome,
+        agyHome,
+        brainRoot: agyBrainRoot,
+        conversationsRoot: agyConversationsRoot,
+        cachePath: agyCache,
+      },
+      pi: { agentDir: piAgentDir, sessionDir: piSessionDir },
+    });
+
+    assert.equal(
+      registry.get('claude').sessionSource.resolveSessionRefPath({
+        sourceLocator: { relativePath: 'custom.jsonl' },
+      }),
+      path.join(claudeRoot, 'custom.jsonl')
+    );
+    const codexSource = registry.get('codex').sessionSource;
+    assert.equal(codexSource.readHistory('history-1')[0].text, 'from custom history');
+    assert.deepEqual(codexSource.knownDbPaths(), [
+      codexDb,
+      path.join(codexRoot, 'state_5.sqlite'),
+      path.join(codexCwd, '.codex', 'state_5.sqlite'),
+    ]);
+    assert.equal(
+      registry.get('agy').sessionSource.resolveSessionRefPath({ nativeSessionId: 'agy-1' }),
+      path.join(agyBrainRoot, 'agy-1', '.system_generated', 'logs', 'transcript.jsonl')
+    );
+    assert.equal(
+      registry.get('pi').sessionSource.resolveSessionRefPath({
+        sourceLocator: { root: 'configured', relativePath: 'pi.jsonl' },
+      }),
+      path.join(piSessionDir, 'pi.jsonl')
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('shared Claude descriptor remains valid for explicit runtime-only plugin fixtures', () => {

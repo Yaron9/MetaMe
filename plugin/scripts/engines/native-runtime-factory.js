@@ -141,14 +141,19 @@ const piModel = Object.freeze({
   resolveLegacyModel: (value, fallback = '') => fallback,
 });
 
-function createCommonSessionSourceDeps({ deps, home }) {
+function createCommonSessionSourceDeps({ deps, home, namespace = {} }) {
+  const engineOptions = namespace && typeof namespace === 'object' ? namespace : {};
   return {
-    ...deps,
+    ...engineOptions,
     home,
     HOME: home,
-    fs: deps.fs,
-    path: deps.path,
+    fs: deps.fs || engineOptions.fs,
+    path: deps.path || engineOptions.path,
   };
+}
+
+function createCatalogSessionSourceDeps(context, namespace) {
+  return createCommonSessionSourceDeps({ ...context, namespace });
 }
 
 // `createDefaultEngineRegistry` historically accepted one nested dependency
@@ -209,7 +214,7 @@ const BUILTIN_RUNTIME_CATALOG = Object.freeze([
       validateNativeSession: deps.validateNativeSession,
     }),
     createRuntime: createClaudeCliAdapter,
-    createSessionSourceDeps: createCommonSessionSourceDeps,
+    createSessionSourceDeps: context => createCatalogSessionSourceDeps(context, context.deps.claude),
     createSessionSource: createClaudeSessionSourceAdapter,
   }),
   Object.freeze({
@@ -232,7 +237,7 @@ const BUILTIN_RUNTIME_CATALOG = Object.freeze([
       log: deps.log,
     }),
     createRuntime: createCodexCliAdapter,
-    createSessionSourceDeps: createCommonSessionSourceDeps,
+    createSessionSourceDeps: context => createCatalogSessionSourceDeps(context, context.deps.codex),
     createSessionSource: createCodexSessionSourceAdapter,
   }),
   Object.freeze({
@@ -255,7 +260,7 @@ const BUILTIN_RUNTIME_CATALOG = Object.freeze([
       validateNativeSession: deps.validateNativeSession,
     }),
     createRuntime: createAgyCliAdapter,
-    createSessionSourceDeps: createCommonSessionSourceDeps,
+    createSessionSourceDeps: context => createCatalogSessionSourceDeps(context, context.deps.agy),
     createSessionSource: createAgySessionSourceAdapter,
   }),
   Object.freeze({
@@ -279,7 +284,7 @@ const BUILTIN_RUNTIME_CATALOG = Object.freeze([
       execFileSync: deps.execFileSync,
     }),
     createRuntime: createPiCliAdapter,
-    createSessionSourceDeps: createCommonSessionSourceDeps,
+    createSessionSourceDeps: context => createCatalogSessionSourceDeps(context, context.deps.pi),
     createSessionSource: createPiSessionSourceAdapter,
   }),
 ]);
