@@ -85,7 +85,7 @@ describe('research radar task setup', () => {
       mode: 'stage-first',
       configPath,
       stateDir,
-      now: new Date('2026-07-31T13:00:00.000Z'),
+      now: new Date(2026, 6, 31, 21, 0),
     });
     assert.equal(staged.tasks['research-radar-first-report'].scheduleEnabled, true);
     assert.equal(staged.tasks['research-radar-first-report'].at, '21:02');

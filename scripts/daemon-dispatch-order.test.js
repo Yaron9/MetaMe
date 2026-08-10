@@ -320,7 +320,7 @@ describe('dispatch receiver task cards', () => {
     assert.match(card.body, /目标: 🔧 工匠 · MVP拼装/);
   });
 
-  it('builds daemon dispatch prompts with scoped now context for direct and team tasks', () => {
+  it('uses structured task envelopes without injecting retired Markdown task mirrors', () => {
     const fs = require('fs');
     const os = require('os');
     const path = require('path');
@@ -332,7 +332,7 @@ describe('dispatch receiver task cards', () => {
     const directPrompt = __test.buildDispatchPrompt('builder', {
       payload: { prompt: '修一下登录超时' },
     }, null, baseDir);
-    assert.match(directPrompt, /PRIVATE builder progress/);
+    assert.equal(directPrompt, '修一下登录超时');
     assert.doesNotMatch(directPrompt, /SHARED team progress/);
 
     const teamPrompt = __test.buildDispatchPrompt('builder', {
@@ -345,8 +345,11 @@ describe('dispatch receiver task cards', () => {
       to_agent: 'builder',
       goal: '团队继续推进登录修复',
     }, baseDir);
-    assert.match(teamPrompt, /PRIVATE builder progress/);
-    assert.match(teamPrompt, /SHARED team progress/);
+    assert.doesNotMatch(teamPrompt, /PRIVATE builder progress/);
+    assert.doesNotMatch(teamPrompt, /SHARED team progress/);
+    assert.match(teamPrompt, /任务ID: t_demo/);
+    assert.match(teamPrompt, /协作Scope: epic_auth/);
+    assert.match(teamPrompt, /任务目标: 团队继续推进登录修复/);
   });
 
   it('derives dispatch write access from source sender open_id', () => {

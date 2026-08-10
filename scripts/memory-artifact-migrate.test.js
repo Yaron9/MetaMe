@@ -83,7 +83,11 @@ test('apply atomically publishes the validated DB, source directories and vault 
     fs.writeFileSync(path.join(f.vaultRoot, name, 'stale.md'), '# stale\n');
   }
   const backupRoot = path.join(f.root, 'backup');
-  const result = applyMigration({ ...f, backupRoot });
+  const result = applyMigration({
+    ...f,
+    backupRoot,
+    _stageMigration: options => stageMigration({ ...options, drainEmbeddings: false }),
+  });
   assert.equal(result.projection.ok, true);
   assert.equal(fs.existsSync(path.join(backupRoot, 'previous-memory.db')), true);
   assert.equal(fs.existsSync(path.join(f.root, 'memory-maintenance.lock')), false);

@@ -428,7 +428,7 @@ function recoverMigration({ dbPath, memoryRoot, vaultRoot, backupRoot }) {
   return { recovered: true, backupRoot };
 }
 
-function applyMigration({ dbPath, memoryRoot, vaultRoot, backupRoot }) {
+function applyMigration({ dbPath, memoryRoot, vaultRoot, backupRoot, _stageMigration = stageMigration }) {
   const metameDir = path.dirname(dbPath);
   assertDaemonStopped(metameDir);
   fs.mkdirSync(path.dirname(backupRoot), { recursive: true });
@@ -441,7 +441,7 @@ function applyMigration({ dbPath, memoryRoot, vaultRoot, backupRoot }) {
     guardDb = new DatabaseSync(dbPath);
     guardDb.exec('PRAGMA busy_timeout=10000');
     guardDb.exec('BEGIN IMMEDIATE');
-    const staged = stageMigration({ dbPath, memoryRoot, vaultRoot, stageRoot, drainEmbeddings: true });
+    const staged = _stageMigration({ dbPath, memoryRoot, vaultRoot, stageRoot, drainEmbeddings: true });
     writePublishJournal(backupRoot, 'staged', { dbPath, memoryRoot, vaultRoot });
     if (inventoryHash(memoryRoot) !== sourceHash) throw new Error('source inventory drifted during migration');
     guardDb.exec('COMMIT');

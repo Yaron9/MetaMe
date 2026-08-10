@@ -1710,7 +1710,7 @@ const {
   getSessionName,
   writeSessionName,
   markSessionStarted,
-  watchSessionFiles,
+  watchSessionFiles: watchSessionFilesFromStore,
   isEngineSessionValid,
   getCodexSessionSandboxProfile,
   getCodexSessionPermissionMode,
@@ -1724,6 +1724,8 @@ const {
   formatRelativeTime,
   cpExtractTimestamp,
 });
+
+const watchSessionFiles = require.main === module ? watchSessionFilesFromStore : () => {};
 
 watchSessionFiles(); // 热加载：手机端新建 session 后桌面无需重启
 
@@ -2672,36 +2674,38 @@ async function main() {
   log('INFO', 'Daemon running. Send SIGTERM to stop.');
 }
 
-// Single-task mode: `node daemon.js --run <taskname>`
-if (process.argv.includes('--run')) {
-  const idx = process.argv.indexOf('--run');
-  const taskName = process.argv[idx + 1];
-  if (!taskName) {
-    console.error('Usage: node daemon.js --run <task-name>');
-    process.exit(1);
-  }
-  const config = loadConfig();
-  const task = findTask(config, taskName);
-  if (!task) {
-    const { all } = getAllTasks(config);
-    console.error(`Task "${taskName}" not found in daemon.yaml`);
-    console.error(`Available: ${all.map(t => t.name).join(', ') || '(none)'}`);
-    process.exit(1);
-  }
-  const result = executeTask(task, config);
-  if (result.success) {
-    console.log(result.output);
+if (require.main === module) {
+  // Single-task mode: `node daemon.js --run <taskname>`
+  if (process.argv.includes('--run')) {
+    const idx = process.argv.indexOf('--run');
+    const taskName = process.argv[idx + 1];
+    if (!taskName) {
+      console.error('Usage: node daemon.js --run <task-name>');
+      process.exit(1);
+    }
+    const config = loadConfig();
+    const task = findTask(config, taskName);
+    if (!task) {
+      const { all } = getAllTasks(config);
+      console.error(`Task "${taskName}" not found in daemon.yaml`);
+      console.error(`Available: ${all.map(t => t.name).join(', ') || '(none)'}`);
+      process.exit(1);
+    }
+    const result = executeTask(task, config);
+    if (result.success) {
+      console.log(result.output);
+    } else {
+      console.error(`Error: ${result.error}`);
+      process.exit(1);
+    }
   } else {
-    console.error(`Error: ${result.error}`);
-    process.exit(1);
+    main().catch(e => {
+      log('ERROR', `Fatal: ${e.message}`);
+      controlDb.close();
+      cleanPid();
+      process.exit(1);
+    });
   }
-} else {
-  main().catch(e => {
-    log('ERROR', `Fatal: ${e.message}`);
-    controlDb.close();
-    cleanPid();
-    process.exit(1);
-  });
 }
 
 // Export for testing & cross-bot dispatch
