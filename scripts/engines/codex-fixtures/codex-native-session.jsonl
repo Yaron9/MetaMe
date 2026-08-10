@@ -1,0 +1,6 @@
+{"type":"session_meta","timestamp":"2026-07-15T08:00:00.000Z","payload":{"id":"codex-fixture-parent","cwd":"/tmp/metame-codex-fixture","source":"cli","model_provider":"openai"}}
+{"type":"response_item","timestamp":"2026-07-15T08:00:01.000Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"请修复 Codex 会话摄取并保留来源证据。"}]}}
+{"type":"response_item","timestamp":"2026-07-15T08:00:02.000Z","payload":{"type":"custom_tool_call","name":"exec_command","input":{"cmd":"node --test","workdir":"/tmp/metame-codex-fixture"}}}
+{"type":"response_item","timestamp":"2026-07-15T08:00:03.000Z","payload":{"type":"custom_tool_call_output","output":"{\"exit_code\":0,\"output\":\"all tests passed\"}"}}
+{"type":"response_item","timestamp":"2026-07-15T08:00:04.000Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"修复完成，canonical pipeline 测试通过。"}]}}
+{"type":"event_msg","timestamp":"2026-07-15T08:00:05.000Z","payload":{"type":"task_complete","last_agent_message":"已完成 Codex session source 接线。"}}

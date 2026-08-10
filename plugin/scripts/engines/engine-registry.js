@@ -5,6 +5,7 @@ const { createCodexCliAdapter } = require('./codex-cli-adapter');
 const { createAgyCliAdapter } = require('./agy-cli-adapter');
 const { createPiCliAdapter } = require('./pi-cli-adapter');
 const { createClaudeSessionSourceAdapter } = require('./claude-session-source-adapter');
+const { createCodexSessionSourceAdapter } = require('./codex-session-source-adapter');
 const {
   createEnginePlugin,
   isEnginePlugin,
@@ -186,7 +187,10 @@ function createDefaultEngineRegistry(deps = {}) {
       runtime: createClaudeCliAdapter(deps.claude),
       sessionSource: createClaudeSessionSourceAdapter(deps.claude),
     },
-    { runtime: createCodexCliAdapter(deps.codex), sessionSource: null },
+    {
+      runtime: createCodexCliAdapter(deps.codex),
+      sessionSource: createCodexSessionSourceAdapter(deps.codex),
+    },
     { runtime: createAgyCliAdapter(deps.agy), sessionSource: null },
     { runtime: createPiCliAdapter(deps.pi), sessionSource: null },
   ];

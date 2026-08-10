@@ -653,7 +653,7 @@ function createClaudeSessionSourceAdapter(options = {}) {
     return filePathFromRef(ref, projectsRoot, pathMod);
   }
 
-  function readPathEvents(filePath) {
+  function readPathEvents(filePath, sourceRef = null) {
     const resolved = pathMod.resolve(filePath);
     const info = inspectPath(resolved);
     const source = readFileBounded(resolved, fsMod, maxFileSize);
@@ -665,7 +665,14 @@ function createClaudeSessionSourceAdapter(options = {}) {
       sourceRevision: info.sourceRevision,
     });
     if (events.length > maxEvents) throw adapterError('CLAUDE_SESSION_SOURCE_EVENT_LIMIT');
-    return { ref: refForFile(resolved, info), revision: info, events };
+    const ref = sourceRef && sourceRef.sourceLocator
+      ? sourceRef
+      : refForFile(resolved, info);
+    return {
+      ref,
+      revision: { ...info, sourceLocator: ref.sourceLocator },
+      events,
+    };
   }
 
   const rawAdapter = {
@@ -738,6 +745,9 @@ function createClaudeSessionSourceAdapter(options = {}) {
     inspectPath,
     resolveSessionRefPath,
     readPathEvents,
+    isTrivialSession(skeleton) {
+      return !!skeleton && skeleton.message_count < 2 && skeleton.duration_min < 1;
+    },
   });
 }
 

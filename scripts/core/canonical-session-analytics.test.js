@@ -43,6 +43,7 @@ test('canonical analytics derives bounded metrics without native record shapes',
 test('canonical evidence and significant-session detection preserve budgets', () => {
   const events = [
     event('user', 'message', '用户需求：' + 'x'.repeat(500), '2026-07-01T10:00:00.000Z'),
+    event('assistant', 'message', '执行完成，验证结果可作为后续事实提取依据。', '2026-07-01T10:00:01.000Z'),
     event('tool', 'tool_call', JSON.stringify({ command: 'git diff --stat' }), '2026-07-01T10:00:01.000Z', { tool: 'Bash' }),
     event('tool', 'tool_result', 'command failed', '2026-07-01T10:00:02.000Z', { tool: 'Bash', outcome: { error: true } }),
   ];
@@ -51,6 +52,7 @@ test('canonical evidence and significant-session detection preserve budgets', ()
     .reduce((sum, text) => sum + text.length, 0);
   assert.ok(used <= 600);
   assert.ok(evidence.file_anchors.length <= 12);
+  assert.deepEqual(evidence.key_results, ['执行完成，验证结果可作为后续事实提取依据。', 'tool_result error: command failed']);
 
   const result = detectSignificantSession({
     git_diff_lines: 61,

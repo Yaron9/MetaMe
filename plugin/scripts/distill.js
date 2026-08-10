@@ -146,8 +146,8 @@ function appendPostmortemSkillSignal(skillName, skeleton, reasons, filePath) {
   } catch { /* non-fatal */ }
 }
 
-async function maybeGeneratePostmortemArtifact(skeleton, sessionPath) {
-  if (!sessionAnalytics || !skeleton || !sessionPath) return null;
+async function maybeGeneratePostmortemArtifact(skeleton, sessionInput) {
+  if (!sessionAnalytics || !skeleton || !sessionInput) return null;
   const detector = sessionAnalytics.detectSignificantSession;
   if (typeof detector !== 'function') return null;
 
@@ -157,7 +157,7 @@ async function maybeGeneratePostmortemArtifact(skeleton, sessionPath) {
   let evidence = null;
   try {
     if (typeof sessionAnalytics.extractEvidence === 'function') {
-      evidence = sessionAnalytics.extractEvidence(sessionPath, 3200);
+      evidence = sessionAnalytics.extractEvidence(sessionInput, 3200);
     }
   } catch { /* non-fatal */ }
 
@@ -421,7 +421,7 @@ async function distill() {
     let sessionContext = '';
     let skeleton = null;
     let sessionSummary = null;
-    let targetSessionPath = null;
+    let targetSessionInput = null;
     if (sessionAnalytics) {
       try {
         let targetInput = null;
@@ -432,21 +432,16 @@ async function distill() {
           }
         } else {
           const targetSession = sessionAnalytics.findLatestUnanalyzedSession();
-          if (targetSession) {
-            targetInput = {
-              engine: 'claude',
-              path: targetSession.path,
-              skeleton: sessionAnalytics.extractSkeleton(targetSession.path),
-              evidence: sessionAnalytics.extractEvidence(targetSession.path, 3000),
-            };
+          if (targetSession && typeof sessionAnalytics.buildSessionInputBySession === 'function') {
+            targetInput = sessionAnalytics.buildSessionInputBySession(targetSession);
           }
         }
         if (targetInput) {
           skeleton = targetInput.skeleton;
-          targetSessionPath = targetInput.path;
+          targetSessionInput = targetInput;
           sessionContext = sessionAnalytics.formatForPrompt(skeleton);
           // For long sessions, extract pivot points
-          sessionSummary = sessionAnalytics.summarizeSession(skeleton, targetInput.path, targetInput.evidence);
+          sessionSummary = sessionAnalytics.summarizeSession(skeleton, targetInput, targetInput.evidence);
         }
       } catch (e) {
         console.log(`[distill] session context extraction failed: ${e.message}`);
@@ -645,13 +640,13 @@ Do NOT repeat existing unchanged values.`;
     // 7. Parse result
     if (!result || result === 'NO_UPDATE') {
       if (skeleton && sessionAnalytics) {
-        try { sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision); } catch { /* non-fatal */ }
+        try { sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision, skeleton.engine); } catch { /* non-fatal */ }
       }
       ackSignals = true;
       finalize();
       let postmortem = null;
       try {
-        postmortem = await maybeGeneratePostmortemArtifact(skeleton, targetSessionPath);
+        postmortem = await maybeGeneratePostmortemArtifact(skeleton, targetSessionInput);
       } catch { /* non-fatal */ }
       return {
         updated: false,
@@ -727,13 +722,13 @@ Do NOT repeat existing unchanged values.`;
 
       if (extractedFieldCount === 0 && !mergedCompetence.changed) {
         if (skeleton && sessionAnalytics) {
-          try { sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision); } catch { }
+          try { sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision, skeleton.engine); } catch { }
         }
         ackSignals = true;
         finalize();
         let postmortem = null;
         try {
-          postmortem = await maybeGeneratePostmortemArtifact(skeleton, targetSessionPath);
+          postmortem = await maybeGeneratePostmortemArtifact(skeleton, targetSessionInput);
         } catch { /* non-fatal */ }
         return {
           updated: false,
@@ -799,14 +794,14 @@ Do NOT repeat existing unchanged values.`;
 
       // Mark session as analyzed after successful distill
       if (skeleton && sessionAnalytics) {
-        try { sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision); } catch { }
+        try { sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision, skeleton.engine); } catch { }
       }
 
       ackSignals = true;
       finalize();
       let postmortem = null;
       try {
-        postmortem = await maybeGeneratePostmortemArtifact(skeleton, targetSessionPath);
+        postmortem = await maybeGeneratePostmortemArtifact(skeleton, targetSessionInput);
       } catch { /* non-fatal */ }
       const absorbedCount = changedFields.length;
       return {
@@ -1180,11 +1175,17 @@ function bootstrapSessionLog() {
   let count = 0;
   for (const session of allSessions) {
     try {
-      const skeleton = sessionAnalytics.extractSkeleton(session.path);
+      const input = typeof sessionAnalytics.buildSessionInputBySession === 'function'
+        ? sessionAnalytics.buildSessionInputBySession(session)
+        : null;
+      if (!input) continue;
+      const skeleton = input.skeleton || sessionAnalytics.extractSkeleton(input);
 
-      // Skip trivial sessions (< 2 messages or < 1 min)
-      if (skeleton.message_count < 2 && skeleton.duration_min < 1) {
-        sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision);
+      const isTrivial = typeof session.source?.isTrivialSession === 'function'
+        ? session.source.isTrivialSession(skeleton)
+        : skeleton.message_count < 2 && skeleton.duration_min < 1;
+      if (isTrivial) {
+        sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision, skeleton.engine);
         continue;
       }
 
@@ -1232,7 +1233,7 @@ function bootstrapSessionLog() {
         intent: facet ? facet.underlying_goal || skeleton.intent : skeleton.intent || null,
       });
 
-      sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision);
+      sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision, skeleton.engine);
       count++;
     } catch {
       // Skip individual session failures

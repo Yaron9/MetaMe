@@ -216,6 +216,9 @@ function extractEvidence(events, budget = 3000) {
   };
   for (const event of Array.isArray(events) ? events : []) {
     if (event.actor === 'user' && event.kind === 'message') add(evidence.user_messages, 'user', event.text, userBudget);
+    if (event.actor === 'assistant' && event.kind === 'message') {
+      add(evidence.key_results, 'result', event.text, resultBudget);
+    }
     if (event.kind === 'tool_call') {
       const input = parseToolText(event);
       const tool = textValue(event.tool || 'unknown');

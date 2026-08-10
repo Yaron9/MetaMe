@@ -3,7 +3,7 @@
 /**
  * memory-extract.js — Independent Memory Extraction
  *
- * Scans unanalyzed Claude Code sessions and extracts atomic facts
+ * Scans canonical Session Sources and extracts atomic facts
  * into memory.db. Runs independently of raw_signals.jsonl so that
  * pure technical sessions (no preference signals) are still captured.
  *
@@ -167,9 +167,9 @@ function statSize(filePath) {
 function saveSessionSource(memory, engine, sourcePath, skeleton, status = 'indexed', errorMessage = null) {
   if (!memory || typeof memory.saveSessionSource !== 'function' || !skeleton) return null;
   // Session Source Adapters own revision fingerprints.  The hash fallback is
-  // retained for legacy/non-adapter callers, but Claude extraction receives
-  // the adapter revision through the canonical skeleton.
-  const sourceHash = skeleton.source_revision || (engine === 'claude' ? null : hashFile(sourcePath));
+  // retained only for legacy callers; canonical inputs always carry the
+  // adapter revision and opaque locator.
+  const sourceHash = skeleton.source_revision || hashFile(sourcePath);
   if (!sourceHash) return null;
   try {
     return memory.saveSessionSource({
@@ -178,7 +178,7 @@ function saveSessionSource(memory, engine, sourcePath, skeleton, status = 'index
       project: skeleton.project || 'unknown',
       scope: skeleton.project_id || null,
       cwd: skeleton.project_path || null,
-      sourcePath: engine === 'claude' ? null : sourcePath,
+      sourcePath: null,
       sourceLocator: skeleton.source_locator || null,
       sourceHash,
       sourceSize: skeleton.source_size || statSize(sourcePath),
@@ -189,7 +189,7 @@ function saveSessionSource(memory, engine, sourcePath, skeleton, status = 'index
       toolErrorCount: skeleton.tool_error_count || 0,
       parentNativeSessionId: skeleton.parent_session_id || null,
       classification: skeleton.source === 'subagent' ? 'subagent' : 'conversation',
-      engineId: engine,
+      engineId: skeleton.engine || engine,
       status,
       errorMessage,
     });
@@ -298,24 +298,24 @@ async function run() {
 
     for (const session of sessions) {
       try {
-        const skeleton = sessionAnalytics.extractSkeleton(session.path);
-        const sourceRow = saveSessionSource(memory, 'claude', session.path, skeleton);
+        const input = sessionAnalytics.buildSessionInputBySession(session);
+        if (!input) throw new Error('session source input unavailable');
+        const skeleton = input.skeleton || sessionAnalytics.extractSkeleton(input);
+        const engine = skeleton.engine || session.engineId || session.engine || 'unknown';
+        const sourceRow = saveSessionSource(memory, engine, null, skeleton);
 
         // Skip trivial sessions
-        if (skeleton.message_count < 2 && skeleton.duration_min < 1) {
-          if (sourceRow) saveSessionSource(memory, 'claude', session.path, skeleton, 'archived');
-          sessionAnalytics.markFactsExtracted(skeleton.session_id, skeleton.source_revision);
+        if (typeof session.source.isTrivialSession === 'function' && session.source.isTrivialSession(skeleton)) {
+          if (sourceRow) saveSessionSource(memory, engine, null, skeleton, 'archived');
+          sessionAnalytics.markFactsExtracted(skeleton.session_id, skeleton.source_revision, engine);
           continue;
         }
 
-        let evidence = null;
-        try {
-          evidence = sessionAnalytics.extractEvidence(session.path, 3000);
-        } catch { /* non-fatal */ }
+        const evidence = input.evidence || sessionAnalytics.extractEvidence(input, 3000);
 
         const { ok, facts, session_name } = await extractFacts(skeleton, evidence, distillEnv);
         if (!ok) {
-          if (sourceRow) saveSessionSource(memory, 'claude', session.path, skeleton, 'error', 'fact extraction failed');
+          if (sourceRow) saveSessionSource(memory, engine, null, skeleton, 'error', 'fact extraction failed');
           console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)}: extraction failed, will retry later`);
           failed++;
           continue;
@@ -329,7 +329,11 @@ async function run() {
             skeleton.session_id,
             skeleton.project || 'unknown',
             facts,
-            { scope: skeleton.project_id || fallbackScope, source_id: sourceRow ? sourceRow.id : skeleton.session_id }
+            {
+              scope: skeleton.project_id || fallbackScope,
+              source_type: engine,
+              source_id: sourceRow ? sourceRow.id : skeleton.session_id,
+            }
           );
           totalSaved += saved;
           totalSkipped += skipped;
@@ -339,7 +343,7 @@ async function run() {
           console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)} (${session_name}): no facts extracted`);
         }
 
-        sessionAnalytics.markFactsExtracted(skeleton.session_id, skeleton.source_revision);
+        sessionAnalytics.markFactsExtracted(skeleton.session_id, skeleton.source_revision, engine);
 
         // Persist session summary to memory.db sessions table (makes sessions searchable)
         try {
@@ -356,7 +360,7 @@ async function run() {
 
         // P2-A: persist session name + tags to session_tags.json
         saveSessionTag(skeleton.session_id, session_name, facts);
-        if (sourceRow) saveSessionSource(memory, 'claude', session.path, skeleton, 'extracted');
+        if (sourceRow) saveSessionSource(memory, engine, null, skeleton, 'extracted');
 
         processed++;
       } catch (e) {
@@ -364,80 +368,6 @@ async function run() {
         failed++;
       }
     }
-
-    // ── Codex sessions ──────────────────────────────────────────────────────
-    // Same pipeline, different source: reads ~/.codex/sessions rollout files
-    // (first 2KB only) + history.jsonl for user messages.
-    const codexSessions = sessionAnalytics.findAllUnextractedCodexSessions(3);
-    if (codexSessions.length > 0) {
-      // Pass session IDs so loadCodexHistory only parses relevant entries
-      // (history.jsonl grows unbounded; no need to load the full file)
-      const historyMap = sessionAnalytics.loadCodexHistory(codexSessions.map(cs => cs.session_id));
-      for (const cs of codexSessions) {
-        try {
-          const { skeleton, evidence } = sessionAnalytics.buildCodexInput(cs.path, historyMap);
-          const sourceRow = saveSessionSource(memory, 'codex', cs.path, skeleton);
-
-          // Skip trivial sessions with no user messages
-          if (skeleton.message_count < 1) {
-            if (sourceRow) saveSessionSource(memory, 'codex', cs.path, skeleton, 'archived');
-            sessionAnalytics.markCodexFactsExtracted(cs.session_id);
-            continue;
-          }
-
-          const { ok, facts, session_name } = await extractFacts(skeleton, evidence, distillEnv);
-          if (!ok) {
-            if (sourceRow) saveSessionSource(memory, 'codex', cs.path, skeleton, 'error', 'fact extraction failed');
-            console.log(`[memory-extract] Codex ${cs.session_id.slice(0, 8)}: extraction failed, will retry later`);
-            failed++;
-            continue;
-          }
-
-          if (facts.length > 0) {
-            const fallbackScope = `codex_${String(cs.session_id).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24)}`;
-            const { saved, skipped, superseded } = memory.saveFacts(
-              cs.session_id,
-              skeleton.project || 'unknown',
-              facts,
-              {
-                scope: skeleton.project_id || fallbackScope,
-                source_type: 'codex',
-                source_id: sourceRow ? sourceRow.id : cs.session_id,
-              }
-            );
-            totalSaved += saved;
-            totalSkipped += skipped;
-            const superMsg = superseded > 0 ? `, ${superseded} superseded` : '';
-            console.log(`[memory-extract] Codex ${cs.session_id.slice(0, 8)} (${session_name}): ${saved} facts saved${superMsg}`);
-
-            // Persist Codex session summary to memory.db sessions table
-            try {
-              const keywords = facts.flatMap(f => Array.isArray(f.tags) ? f.tags : [])
-                .filter((v, i, a) => a.indexOf(v) === i).slice(0, 10).join(',');
-              memory.saveSession({
-                sessionId: cs.session_id,
-                project: skeleton.project || 'unknown',
-                scope: skeleton.project_id || null,
-                summary: `[${session_name}] ${facts.map(f => f.value).join(' | ').slice(0, 2000)}`,
-                keywords,
-              });
-            } catch { /* non-fatal */ }
-
-            saveSessionTag(cs.session_id, session_name, facts);
-          } else {
-            console.log(`[memory-extract] Codex ${cs.session_id.slice(0, 8)} (${session_name}): no facts extracted`);
-          }
-
-          sessionAnalytics.markCodexFactsExtracted(cs.session_id);
-          if (sourceRow) saveSessionSource(memory, 'codex', cs.path, skeleton, 'extracted');
-          processed++;
-        } catch (e) {
-          console.log(`[memory-extract] Codex session error: ${e.message}`);
-          failed++;
-        }
-      }
-    }
-    // ── end Codex ────────────────────────────────────────────────────────────
 
     memory.close();
     return {

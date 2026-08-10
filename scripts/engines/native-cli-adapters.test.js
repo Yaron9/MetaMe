@@ -10,6 +10,7 @@ const { createDefaultEngineRegistry, createEngineRegistry } = require('./engine-
 const { defineNativeCliAdapter } = require('./native-cli-adapter');
 const { createClaudeCliAdapter } = require('./claude-cli-adapter');
 const { createCodexCliAdapter } = require('./codex-cli-adapter');
+const { runSessionSourceConformance } = require('./session-source-adapter');
 const { createEngineRuntimeFactory } = require('../daemon-engine-runtime');
 const { createEnginePlugin } = require('./engine-plugin');
 const { getEngineDescriptor } = require('../core/engine-descriptors');
@@ -54,6 +55,13 @@ test('registry exposes one deep adapter per native CLI with private session stor
   assert.equal(typeof claude.sessionSource.discover, 'function');
   assert.equal(typeof claude.sessionSource.inspect, 'function');
   assert.equal(typeof claude.sessionSource.read, 'function');
+  const codex = registry.get('codex');
+  assert.equal(codex.descriptor.capabilities.sessionSource.state, 'verified');
+  assert.equal(typeof codex.sessionSource.discover, 'function');
+  assert.equal(typeof codex.sessionSource.inspect, 'function');
+  assert.equal(typeof codex.sessionSource.read, 'function');
+  assert.equal(runSessionSourceConformance(claude.sessionSource).ok, true);
+  assert.equal(runSessionSourceConformance(codex.sessionSource).ok, true);
 });
 
 test('shared Claude descriptor remains valid for explicit runtime-only plugin fixtures', () => {
