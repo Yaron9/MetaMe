@@ -36,6 +36,7 @@ const MAX_DISCOVERY_SNAPSHOT_ENTRIES = DEFAULT_DISCOVERY_LIMIT * 100;
 const DISCOVERY_CURSOR_VERSION = 1;
 const CODEX_STATE_DB_NAME = 'state_5.sqlite';
 const CODEX_ROLLOUT_PATTERN = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)\.jsonl$/;
+const PROCESS_EXECUTION_TOOLS = new Set(['exec_command']);
 
 function adapterError(code, detail = '') {
   const normalizedCode = String(code || '').startsWith('CODEX_')
@@ -367,7 +368,11 @@ function nativeExitCodeFromText(value) {
   return Number.isSafeInteger(code) ? code : null;
 }
 
-function normalizedToolOutcome(payload, outputText = '') {
+function isProcessExecutionTool(toolName) {
+  return PROCESS_EXECUTION_TOOLS.has(String(toolName || '').trim().toLowerCase());
+}
+
+function normalizedToolOutcome(payload, outputText = '', resolvedToolName = '') {
   const object = asObject(payload) || {};
   let parsed = object.output;
   if (typeof parsed === 'string') {
@@ -381,7 +386,9 @@ function normalizedToolOutcome(payload, outputText = '') {
     object.exit_code,
     object.exitCode,
     object.code,
-    nativeExitCodeFromText(typeof object.output === 'string' ? object.output : outputText),
+    isProcessExecutionTool(resolvedToolName)
+      ? nativeExitCodeFromText(typeof object.output === 'string' ? object.output : outputText)
+      : null,
   );
   const explicitError = firstDefined(result.is_error, result.isError, object.is_error, object.isError);
   const numericCode = code !== undefined && code !== null && code !== '' && Number.isFinite(Number(code))
@@ -469,10 +476,11 @@ function projectCanonicalRecords(records, metadata, history = [], options = {}) 
 
     if (type === 'response_item' && ['custom_tool_call_output', 'function_call_output'].includes(payloadType)) {
       const callId = nativeCallId(payload, record);
+      const resolvedToolName = callId ? toolCallNames.get(callId) || '' : '';
       const rawOutput = typeof payload.output === 'string' ? payload.output : compactJson(payload.output || '');
       const outputText = cleanText(rawOutput, maxToolText, { allowInternal: true }) || '';
       appendMessage('tool', 'tool_result', outputText, record, item.nativeSequence, {
-        outcome: normalizedToolOutcome(payload, outputText),
+        outcome: normalizedToolOutcome(payload, outputText, resolvedToolName),
         tool: stringValue(payload.name || payload.tool_name || (callId && toolCallNames.get(callId)) || '').trim() || null,
         ...(callId ? { provenance: { callId } } : {}),
       });
@@ -1174,5 +1182,7 @@ module.exports = {
     normalizeLocator,
     sourceRevisionBytes,
     looksLikeInternalCodexPrompt,
+    nativeExitCodeFromText,
+    isProcessExecutionTool,
   },
 };

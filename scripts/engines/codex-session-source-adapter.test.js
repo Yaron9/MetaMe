@@ -12,6 +12,7 @@ const { ingestDiscoveredSessions } = require('../cognitive-ingestion');
 const { extractEvidence } = require('../core/canonical-session-analytics');
 const {
   createCodexSessionSourceAdapter,
+  projectCanonicalRecords,
 } = require('./codex-session-source-adapter');
 
 const FIXTURE = path.join(__dirname, 'codex-fixtures', 'codex-native-session.jsonl');
@@ -100,34 +101,85 @@ test('Codex adapter uses state_5.sqlite authority and enriches canonical events 
   const input = source.readPathEvents(rolloutPath, refs[0]);
   assert.equal(input.revision.sourceLocator.authority, 'state_5.sqlite');
   assert.equal(revision.classification, 'conversation');
-  assert.equal(revision.toolCallCount, 3);
+  assert.equal(revision.toolCallCount, 4);
   assert.equal(revision.toolErrorCount, 1);
   const events = await readAll(source, refs[0], { sourceRevision: revision.sourceRevision });
   assert.deepEqual(events.map(event => `${event.actor}:${event.kind}`), [
     'user:message', 'tool:tool_call', 'tool:tool_result', 'tool:tool_call', 'tool:tool_result',
-    'tool:tool_call', 'tool:tool_result', 'assistant:message', 'assistant:message',
+    'tool:tool_call', 'tool:tool_result', 'tool:tool_call', 'tool:tool_result', 'assistant:message',
+    'assistant:message',
   ]);
   assert.equal(events[0].text, '从 history 索引补充的用户请求。');
   assert.equal(events[1].tool, 'exec_command');
   assert.equal(events[2].outcome.error, false);
   assert.equal(events[2].outcome.exitCode, 0);
-  assert.equal(events[3].tool, 'apply_patch');
-  assert.equal(events[3].provenance.callId, 'call-function-1');
-  assert.equal(events[4].tool, 'apply_patch');
-  assert.equal(events[4].provenance.callId, 'call-function-1');
-  assert.equal(events[4].outcome.exitCode, 1);
-  assert.equal(events[4].outcome.error, true);
-  assert.equal(events[5].tool, 'read_file');
-  assert.equal(events[5].provenance.callId, 'call-function-2');
-  assert.equal(events[6].tool, 'read_file');
-  assert.equal(events[6].provenance.callId, 'call-function-2');
-  assert.equal(events[6].outcome.error, false);
-  assert.equal(Object.hasOwn(events[6].outcome, 'exitCode'), false);
+  assert.equal(events[3].tool, 'exec_command');
+  assert.equal(events[3].provenance.callId, 'call-function-0');
+  assert.equal(events[4].outcome.error, false);
+  assert.equal(events[4].outcome.exitCode, 0);
+  assert.equal(events[5].tool, 'exec_command');
+  assert.equal(events[5].provenance.callId, 'call-function-1');
+  assert.equal(events[6].tool, 'exec_command');
+  assert.equal(events[6].provenance.callId, 'call-function-1');
+  assert.equal(events[6].outcome.exitCode, 1);
+  assert.equal(events[6].outcome.error, true);
+  assert.equal(events[7].tool, 'read_file');
+  assert.equal(events[7].provenance.callId, 'call-function-2');
+  assert.equal(events[8].tool, 'read_file');
+  assert.equal(events[8].provenance.callId, 'call-function-2');
+  assert.equal(events[8].outcome.error, false);
+  assert.equal(Object.hasOwn(events[8].outcome, 'exitCode'), false);
   const evidence = extractEvidence(events, 3000);
-  assert.ok(evidence.tool_traces.some(trace => trace.startsWith('apply_patch ')));
+  assert.ok(evidence.tool_traces.some(trace => trace.startsWith('exec_command ')));
   assert.ok(evidence.key_results.some(result => result.includes('Process exited with code 1')));
   assert.ok(events.every(event => event.engineId === 'codex'));
   assert.ok(events.every(event => event.sourceRevision === revision.sourceRevision));
+});
+
+test('Codex textual exit status fallback requires a resolved process tool', () => {
+  const records = [
+    {
+      nativeSequence: 0,
+      record: {
+        type: 'response_item',
+        payload: { type: 'function_call', name: 'read_file', arguments: '{}', call_id: 'read-json' },
+      },
+    },
+    {
+      nativeSequence: 1,
+      record: {
+        type: 'response_item',
+        payload: {
+          type: 'function_call_output',
+          call_id: 'read-json',
+          output: '{"exit_code":1,"output":"read failed"}',
+        },
+      },
+    },
+    {
+      nativeSequence: 2,
+      record: {
+        type: 'response_item',
+        payload: {
+          type: 'function_call_output',
+          call_id: 'unknown-call',
+          output: 'Process exited with code 1',
+        },
+      },
+    },
+  ];
+  const events = projectCanonicalRecords(records, {
+    classification: 'conversation',
+    parentNativeSessionId: null,
+    model: null,
+  });
+  const explicitJson = events.find(event => event.provenance.callId === 'read-json' && event.kind === 'tool_result');
+  const unknownCall = events.find(event => event.provenance.callId === 'unknown-call');
+  assert.equal(explicitJson.tool, 'read_file');
+  assert.equal(explicitJson.outcome.exitCode, 1);
+  assert.equal(explicitJson.outcome.error, true);
+  assert.equal(unknownCall.outcome.error, false);
+  assert.equal(Object.hasOwn(unknownCall.outcome, 'exitCode'), false);
 });
 
 test('Codex fallback discovers rollout files when state_5.sqlite is unavailable', () => {
