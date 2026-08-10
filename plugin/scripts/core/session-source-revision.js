@@ -172,6 +172,14 @@ function normalizeSessionRevision(revision = {}, context = {}) {
     revision.discovery_cursor,
   ));
   const sourceSize = normalizeNonNegativeInteger(revision.sourceSize || revision.source_size, 0);
+  const optionalMetadata = {};
+  for (const key of [
+    'eventCount', 'invalidLineCount', 'unknownRecordCount', 'knownRecordCount',
+    'formatDrift', 'conversationAvailable', 'ownershipAvailable', 'ownership',
+    'availability', 'lastModified', 'sourceState', 'conversationState',
+  ]) {
+    if (revision[key] !== undefined) optionalMetadata[key] = revision[key];
+  }
   return Object.freeze({
     ...ref,
     sourceHash,
@@ -195,6 +203,7 @@ function normalizeSessionRevision(revision = {}, context = {}) {
     ),
     classification: revision.classification || 'conversation',
     availability: revision.availability || revision.sourceState || revision.source_state || 'present',
+    ...optionalMetadata,
   });
 }
 

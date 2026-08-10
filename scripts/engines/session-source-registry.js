@@ -9,10 +9,12 @@
 
 const { createClaudeSessionSourceAdapter } = require('./claude-session-source-adapter');
 const { createCodexSessionSourceAdapter } = require('./codex-session-source-adapter');
+const { createAgySessionSourceAdapter } = require('./agy-session-source-adapter');
 
 const FACTORIES = Object.freeze([
   Object.freeze({ id: 'claude', create: createClaudeSessionSourceAdapter }),
   Object.freeze({ id: 'codex', create: createCodexSessionSourceAdapter }),
+  Object.freeze({ id: 'agy', create: createAgySessionSourceAdapter }),
 ]);
 
 function createBuiltinSessionSourceAdapters(options = {}) {

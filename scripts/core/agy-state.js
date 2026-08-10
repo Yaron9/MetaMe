@@ -7,6 +7,14 @@ const AGY_TOOL_TYPES = Object.freeze({
   VIEW_FILE: 'Read',
   LIST_DIRECTORY: 'Glob',
   SEARCH_WEB: 'WebSearch',
+  CODE_ACTION: 'CodeAction',
+  GREP_SEARCH: 'GrepSearch',
+  MCP_TOOL: 'McpTool',
+  READ_URL_CONTENT: 'ReadUrlContent',
+  GENERATE_IMAGE: 'GenerateImage',
+  ASK_QUESTION: 'AskQuestion',
+  GENERIC: 'Generic',
+  ERROR_MESSAGE: 'Error',
 });
 
 const AGY_EVIDENCE_TYPES = new Set([
@@ -69,10 +77,11 @@ function toolInputFromCall(call = {}) {
 // degrading into silent empty replies and recovery loops.
 const AGY_KNOWN_RECORD_TYPES = new Set([
   'USER_INPUT',
+  'CONVERSATION_HISTORY',
   'PLANNER_RESPONSE',
+  'SYSTEM_MESSAGE',
+  'CHECKPOINT',
   ...Object.keys(AGY_TOOL_TYPES),
-  'GENERIC',
-  'ERROR_MESSAGE',
 ]);
 
 function assessTranscriptFormat(records) {
@@ -245,6 +254,8 @@ function collectDescendantPids(rows, rootPid) {
 
 module.exports = {
   AGY_TOOL_TYPES,
+  AGY_EVIDENCE_TYPES,
+  AGY_KNOWN_RECORD_TYPES,
   assessTranscriptFormat,
   canonicalizeCwd,
   parseConversationCache,
