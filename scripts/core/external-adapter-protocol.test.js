@@ -2,8 +2,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const Ajv2020 = require('ajv/dist/2020');
 const {
   EXTERNAL_ADAPTER_PROTOCOL_VERSION,
+  EXTERNAL_ADAPTER_PROTOCOL_SCHEMA,
   assertProtocolRecord,
   createStrictLfFramer,
   encodeProtocolRecord,
@@ -33,12 +35,19 @@ test('external protocol schema is strict and closes record envelopes', () => {
 });
 
 test('run accepts prompt-only records but rejects records missing both input and prompt', () => {
-  assert.equal(validateProtocolRecord({
+  const promptOnly = {
     type: 'run', correlationId: 'prompt-only', prompt: 'hello',
-  }).valid, true);
-  const missing = validateProtocolRecord({ type: 'run', correlationId: 'missing-input' });
+  };
+  const missingRecord = { type: 'run', correlationId: 'missing-input' };
+  assert.equal(validateProtocolRecord(promptOnly).valid, true);
+  const missing = validateProtocolRecord(missingRecord);
   assert.equal(missing.valid, false);
-  assert.match(missing.errors[0].code, /run_input_required/);
+  assert.match(missing.errors.map(error => error.code).join(','), /run_input_required/);
+
+  const validateExportedSchema = new Ajv2020({ strict: true, allErrors: true, allowUnionTypes: true })
+    .compile(EXTERNAL_ADAPTER_PROTOCOL_SCHEMA);
+  assert.equal(validateExportedSchema(promptOnly), true);
+  assert.equal(validateExportedSchema(missingRecord), false);
 });
 
 test('strict-LF framer preserves UTF-8 split boundaries and rejects CRLF', () => {

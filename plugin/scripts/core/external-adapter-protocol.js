@@ -179,6 +179,10 @@ const EXTERNAL_ADAPTER_PROTOCOL_SCHEMA = Object.freeze({
       type: 'object',
       additionalProperties: false,
       required: ['type', 'correlationId'],
+      anyOf: [
+        { required: ['input'], properties: { input: { type: 'string' } } },
+        { required: ['prompt'], properties: { prompt: { type: 'string' } } },
+      ],
       properties: {
         type: { const: 'run' },
         correlationId: { $ref: '#/$defs/correlationId' },
@@ -410,7 +414,12 @@ function serializedProtocolError(record, limits) {
 function validateProtocolRecord(record, options = {}) {
   const limits = mergeLimits(options);
   const validSchema = !!validateProtocol(record);
-  const errors = validSchema ? protocolSemanticErrors(record) : formatAjvErrors(validateProtocol.errors);
+  const semanticErrors = record && typeof record === 'object' && !Array.isArray(record)
+    ? protocolSemanticErrors(record)
+    : [];
+  const errors = validSchema
+    ? semanticErrors
+    : [...formatAjvErrors(validateProtocol.errors), ...semanticErrors];
   if (validSchema) {
     const serializedError = serializedProtocolError(record, limits);
     if (serializedError) errors.push(serializedError);
