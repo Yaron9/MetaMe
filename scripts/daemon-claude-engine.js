@@ -179,21 +179,11 @@ function createClaudeEngine(deps) {
         getSessionPermissionMode: getCodexSessionPermissionMode,
       },
   });
-  const compatibilityValidationFallbacks = new WeakSet();
   function getEnginePlugin(engineName) {
     const selected = typeof injectedGetEngineRuntime === 'function'
       ? injectedGetEngineRuntime(engineName)
       : fallbackEngineRuntime(engineName);
-    const selectedRuntime = selected && selected.runtime ? selected.runtime : selected;
-    const plugin = resolveEnginePlugin(selected, engineName);
-    if (plugin && plugin !== selected
-      && (!selectedRuntime || (
-        typeof selectedRuntime.validateSession !== 'function'
-        && typeof selectedRuntime.validateNativeSession !== 'function'
-      ))) {
-      compatibilityValidationFallbacks.add(plugin);
-    }
-    return plugin;
+    return resolveEnginePlugin(selected, engineName);
   }
 
   function getEngineRuntime(engineName) {
@@ -213,20 +203,12 @@ function createClaudeEngine(deps) {
 
   function validateRuntimeNativeSession(plugin, engineName, session) {
     const selected = plugin && plugin.runtime ? plugin : getEnginePlugin(engineName);
-    if (selected && selected.runtime && typeof selected.runtime.validateSession === 'function'
-      && !compatibilityValidationFallbacks.has(selected)) {
-      try {
-        return selected.runtime.validateSession(session);
-      } catch {
-        return false;
-      }
+    if (!selected || !selected.runtime || typeof selected.runtime.validateSession !== 'function') return false;
+    try {
+      return selected.runtime.validateSession(session);
+    } catch {
+      return false;
     }
-    // Bare injected runtimes are an external compatibility input; native
-    // session validation still comes from the registered target plugin.
-    const targetPlugin = fallbackEngineRuntime(engineName);
-    return targetPlugin && targetPlugin.runtime && typeof targetPlugin.runtime.validateSession === 'function'
-      ? targetPlugin.runtime.validateSession(session)
-      : false;
   }
 
   function runtimeSupportsWarmPool(runtime) {
@@ -300,16 +282,16 @@ function createClaudeEngine(deps) {
   }
 
   function formatEngineSpawnError(err, runtime) {
-    const plugin = runtime && runtime.runtime
-      ? runtime
-      : getEnginePlugin(runtime && runtime.name ? runtime.name : getDefaultEngine());
-    const adapter = plugin && plugin.runtime;
-    const engineName = plugin && plugin.descriptor ? plugin.descriptor.id : getDefaultEngine();
+    const engineName = runtime && runtime.descriptor
+      ? runtime.descriptor.id
+      : getDefaultEngine();
+    const plugin = runtime ? resolveEnginePlugin(runtime, engineName) : getEnginePlugin(engineName);
+    const adapter = plugin.runtime;
     const fallback = fallbackEngineRuntime(engineName);
-    const fallbackAdapter = fallback && fallback.runtime;
-    const formatter = adapter && typeof adapter.formatSpawnError === 'function'
+    const fallbackAdapter = fallback.runtime;
+    const formatter = typeof adapter.formatSpawnError === 'function'
       ? adapter.formatSpawnError
-      : fallbackAdapter && typeof fallbackAdapter.formatSpawnError === 'function'
+      : typeof fallbackAdapter.formatSpawnError === 'function'
         ? fallbackAdapter.formatSpawnError
         : null;
     return formatter ? formatter(err) : (err && err.message ? err.message : String(err || 'Unknown spawn error'));
@@ -623,7 +605,7 @@ function createClaudeEngine(deps) {
       killSignal: 'SIGTERM',
       useProcessGroup: false,
       forceKillDelayMs: 5000,
-      formatSpawnError: (err) => formatEngineSpawnError(err, { name: 'claude' }),
+      formatSpawnError: (err) => formatEngineSpawnError(err, getEnginePlugin('claude')),
     });
   }
 
@@ -671,13 +653,11 @@ function createClaudeEngine(deps) {
         settled = true;
         resolve(payload);
       };
-      const selectedPlugin = runtime && runtime.runtime
-        ? runtime
-        : getEnginePlugin(runtime && runtime.name ? runtime.name : getDefaultEngine());
-      const rt = selectedPlugin && selectedPlugin.runtime;
-      const engineId = selectedPlugin && selectedPlugin.descriptor
-        ? selectedPlugin.descriptor.id
-        : (rt && rt.name) || getDefaultEngine();
+      const selectedPlugin = runtime
+        ? resolveEnginePlugin(runtime, runtime.descriptor && runtime.descriptor.id)
+        : getEnginePlugin(getDefaultEngine());
+      const rt = selectedPlugin.runtime;
+      const engineId = selectedPlugin.descriptor.id;
       if (!rt) {
         finalize({ output: null, error: 'engine_runtime_missing', files: [], toolUsageLog: [], usage: null, sessionId: '' });
         return;
@@ -807,22 +787,7 @@ function createClaudeEngine(deps) {
       }, 30000);
 
       function parseEventsFromLine(line) {
-        const events = parseStreamingEvents(rt.parseEvent, line);
-        return events.map((event) => {
-          if (!event || typeof event !== 'object') return event;
-          const typeMap = {
-            session_observed: 'session',
-            message_delta: 'text',
-            thinking_delta: 'thinking',
-            tool_started: 'tool_use',
-            tool_updated: 'tool_updated',
-            tool_finished: 'tool_result',
-            usage_observed: 'usage',
-            run_completed: 'done',
-            run_failed: 'error',
-          };
-          return typeMap[event.type] ? { ...event, type: typeMap[event.type] } : event;
-        });
+        return parseStreamingEvents(rt.parseEvent, line);
       }
 
       function applyContentState(event, buffered) {
@@ -842,11 +807,11 @@ function createClaudeEngine(deps) {
         if (!event || !event.type) return;
 
         const buffered = options.buffered === true;
-        if (event.type === 'usage') {
+        if (event.type === 'usage_observed') {
           finalUsage = event.usage || finalUsage;
           return;
         }
-        if (event.type === 'session' && event.sessionId) {
+        if (event.type === 'session_observed' && event.nativeSessionId) {
           observedSessionId = applyStreamingMetadata(
             { observedSessionId, classifiedError },
             event
@@ -856,7 +821,7 @@ function createClaudeEngine(deps) {
           }
           return;
         }
-        if (event.type === 'error') {
+        if (event.type === 'run_failed') {
           if (terminalState) return;
           terminalState = 'failed';
           classifiedError = applyStreamingMetadata(
@@ -865,11 +830,11 @@ function createClaudeEngine(deps) {
           ).classifiedError;
           return;
         }
-        if (event.type === 'text' && event.text) {
+        if (event.type === 'message_delta' && event.text) {
           applyContentState(event, buffered);
           return;
         }
-        if (event.type === 'done') {
+        if (event.type === 'run_completed') {
           if (terminalState) return;
           terminalState = 'completed';
           applyContentState(event, buffered);
@@ -894,7 +859,7 @@ function createClaudeEngine(deps) {
           }
           return;
         }
-        if (event.type !== 'tool_result' && event.type !== 'tool_use') return;
+        if (event.type !== 'tool_finished' && event.type !== 'tool_started') return;
 
         const toolState = applyStreamingToolState(
           { waitingForTool, toolCallCount, toolUsageLog, writtenFiles },
@@ -909,7 +874,7 @@ function createClaudeEngine(deps) {
         writtenFiles.push(...toolState.writtenFiles);
         if (!buffered && toolState.shouldUpdateWatchdog) watchdog.setWaitingForTool(toolState.watchdogWaiting);
 
-        if (event.type !== 'tool_use' || buffered) return;
+        if (event.type !== 'tool_started' || buffered) return;
 
         const overlay = buildToolOverlayPayload({
           toolName: toolState.toolName,
@@ -1028,7 +993,7 @@ function createClaudeEngine(deps) {
       child.on('error', (err) => {
         stopStreamingLifecycle(watchdog, milestoneTimer);
         clearActiveChildProcess(activeProcesses, saveActivePids, chatId);
-        finalize({ output: null, error: formatEngineSpawnError(err, rt), files: [], toolUsageLog: [], usage: null, sessionId: '' });
+        finalize({ output: null, error: formatEngineSpawnError(err, selectedPlugin), files: [], toolUsageLog: [], usage: null, sessionId: '' });
       });
 
       try {
@@ -1046,10 +1011,8 @@ function createClaudeEngine(deps) {
   }
 
   function runNativeCliTurn(enginePlugin, turn, options = {}) {
-    const plugin = enginePlugin && enginePlugin.runtime
-      ? enginePlugin
-      : resolveEnginePlugin(enginePlugin, turn.engine);
-    const runtime = plugin && plugin.runtime;
+    const plugin = resolveEnginePlugin(enginePlugin, turn.engine);
+    const runtime = plugin.runtime;
     if (!runtime) throw new Error('engine_runtime_missing');
     const candidateSession = turn.session || {};
     const sessionWasValid = runtime.validateSession(candidateSession);
@@ -2459,7 +2422,7 @@ function createClaudeEngine(deps) {
           const _agentLabel = (boundProject && boundProject.name)
             ? `[${boundProject.name}] `
             : (projectKey ? `[${projectKey}] ` : '');
-          autoNameSession(chatId, session.id, prompt, session.cwd, _agentLabel).catch(() => { });
+          Promise.resolve(autoNameSession(chatId, session.id, prompt, session.cwd, _agentLabel)).catch(() => { });
         }
 
         // Auto-refresh memory-snapshot.md for this agent on first session message (fire-and-forget)

@@ -243,7 +243,8 @@ test('registry adapters execute one logical turn and return engine-scoped sessio
     });
 
     assert.equal(result.final, `${engine} final`);
-    assert.deepEqual(observed.map(event => event.type), ['session', 'text']);
+    assert.deepEqual(observed.map(event => event.type), ['session_observed', 'message_delta']);
+    assert.equal(observed[0].nativeSessionId, `${engine}-next`);
     assert.equal(result.nativeSession.engine, engine);
     assert.equal(result.nativeSession.id, `${engine}-next`);
     assert.equal(result.nativeSession.started, true);

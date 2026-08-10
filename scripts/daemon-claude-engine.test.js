@@ -9,11 +9,78 @@ const os = require('os');
 const { PassThrough } = require('stream');
 const { EventEmitter } = require('events');
 const { createClaudeEngine } = require('./daemon-claude-engine');
-const { createEnginePlugin } = require('./engines/engine-plugin');
+const { createEnginePlugin, isEnginePlugin } = require('./engines/engine-plugin');
+const { normalizeRuntimeEvents } = require('./engines/native-cli-adapter');
 const { getEngineDescriptor } = require('./core/engine-descriptors');
 
+function createTestPlugin(engineName = 'claude', source = {}) {
+  if (isEnginePlugin(source)) return source;
+  const runtimeName = String(source.name || engineName).trim().toLowerCase();
+  const buildInvocation = typeof source.buildInvocation === 'function'
+    ? source.buildInvocation
+    : (options = {}) => {
+      const session = options.session || options.nativeSession || {};
+      const executable = source.binary || runtimeName;
+      return {
+        engine: runtimeName,
+        executable,
+        binary: executable,
+        args: typeof source.buildArgs === 'function'
+          ? source.buildArgs({ ...options, session })
+          : ['-p'],
+        env: typeof source.buildEnv === 'function'
+          ? source.buildEnv({ ...options, session })
+          : {},
+        cwd: options.cwd || session.cwd || '',
+        input: options.input === undefined ? '' : options.input,
+        killSignal: source.killSignal || 'SIGTERM',
+        timeouts: source.timeouts || {},
+      };
+    };
+  const parseEvent = typeof source.parseEvent === 'function'
+    ? source.parseEvent
+    : (line) => normalizeRuntimeEvents(
+      typeof source.parseStreamEvent === 'function' ? source.parseStreamEvent(line) : []
+    );
+  const classifyFailure = typeof source.classifyFailure === 'function'
+    ? source.classifyFailure
+    : (typeof source.classifyError === 'function' ? source.classifyError : () => null);
+  const validateSession = typeof source.validateSession === 'function'
+    ? source.validateSession
+    : (session) => {
+      if (typeof source.acceptsNativeSession === 'function' && !source.acceptsNativeSession(session)) {
+        throw new Error(`${runtimeName}_native_session_mismatch`);
+      }
+      return typeof source.validateNativeSession === 'function'
+        ? source.validateNativeSession(session)
+        : true;
+    };
+  const updateSession = typeof source.updateSession === 'function'
+    ? source.updateSession
+    : (session, observation = {}) => {
+      if (typeof source.updateNativeSession === 'function') return source.updateNativeSession(session, observation);
+      if (!observation.sessionId) return session;
+      return { ...(session || {}), engine: runtimeName, id: observation.sessionId, started: true };
+    };
+  return createEnginePlugin({
+    protocolVersion: 1,
+    descriptor: getEngineDescriptor(runtimeName),
+    runtime: {
+      ...source,
+      name: runtimeName,
+      buildInvocation,
+      parseEvent,
+      classifyFailure,
+      validateSession,
+      updateSession,
+    },
+    sessionSource: null,
+    cognitiveHost: null,
+  });
+}
+
 function createEngineWithState(state, overrides = {}) {
-  return createClaudeEngine({
+  const deps = {
     fs,
     path,
     spawn: () => { throw new Error('spawn not used in this test'); },
@@ -66,7 +133,24 @@ function createEngineWithState(state, overrides = {}) {
       timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: 2000 },
     }),
     ...overrides,
-  });
+  };
+  const injectedRuntime = deps.getEngineRuntime;
+  deps.getEngineRuntime = typeof injectedRuntime === 'function'
+    ? engineName => createTestPlugin(engineName, injectedRuntime(engineName))
+    : engineName => createTestPlugin(engineName);
+  return createClaudeEngine(deps);
+}
+
+function createClaudeEngineWithTestPlugins(deps) {
+  const nextDeps = { ...deps };
+  const injectedRuntime = nextDeps.getEngineRuntime;
+  if (typeof injectedRuntime === 'function') {
+    nextDeps.getEngineRuntime = engineName => createTestPlugin(
+      engineName,
+      injectedRuntime(engineName)
+    );
+  }
+  return createClaudeEngine(nextDeps);
 }
 
 function createFakeCodexProcess(events) {
@@ -358,7 +442,7 @@ describe('daemon-claude-engine private helpers', () => {
     // the real ~/.metame/sessions/ directory during tests.
     const testFs = { ...fs, appendFileSync: () => {}, mkdirSync: () => {}, writeFileSync: () => {} };
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs: testFs,
       path,
       spawn: () => createFakeCodexProcess([
@@ -466,7 +550,7 @@ describe('daemon-claude-engine private helpers', () => {
     };
 
     const testFs = { ...fs, appendFileSync: () => {}, mkdirSync: () => {}, writeFileSync: () => {} };
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs: testFs,
       path,
       spawn: () => createDelayedCodexProcess([
@@ -566,7 +650,7 @@ describe('daemon-claude-engine private helpers', () => {
       },
     };
     const validateCalls = [];
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: () => {
@@ -666,6 +750,10 @@ describe('daemon-claude-engine private helpers', () => {
           if (raw.kind === 'assistant') return [{ type: 'text', text: raw.text }];
           return [];
         },
+        validateSession: (session) => {
+          validateCalls.push({ engineName: 'claude', sessionId: session.id, cwd: session.cwd });
+          return true;
+        },
         classifyError: () => null,
         killSignal: 'SIGTERM',
         timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: 2000 },
@@ -720,7 +808,7 @@ describe('daemon-claude-engine private helpers', () => {
         parseEvent: line => {
           calls.push('parseEvent');
           const event = JSON.parse(line);
-          if (event.type === 'session') return [{ type: 'session_observed', sessionId: event.id }];
+          if (event.type === 'session') return [{ type: 'session_observed', nativeSessionId: event.id }];
           if (event.type === 'done') return [{ type: 'run_completed', result: event.result }];
           return [];
         },
@@ -791,7 +879,7 @@ describe('daemon-claude-engine private helpers', () => {
       },
     };
     const logs = [];
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: () => createFakeCodexProcess([
@@ -997,7 +1085,10 @@ describe('daemon-claude-engine private helpers', () => {
   it('formats codex ENOENT into actionable hint', () => {
     const state = { sessions: {} };
     const engine = createEngineWithState(state);
-    const msg = engine._private.formatEngineSpawnError({ code: 'ENOENT', message: 'spawn codex ENOENT' }, { name: 'codex' });
+    const msg = engine._private.formatEngineSpawnError(
+      { code: 'ENOENT', message: 'spawn codex ENOENT' },
+      createTestPlugin('codex')
+    );
     assert.match(msg, /Codex CLI 未安装/);
     assert.match(msg, /@openai\/codex/);
   });
@@ -1083,7 +1174,7 @@ describe('daemon-claude-engine private helpers', () => {
 
   it('does not treat stale stored codex permission metadata as a forced fresh-session signal when actual runtime matches', () => {
     const state = { sessions: {} };
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: () => { throw new Error('spawn not used in this test'); },
@@ -1145,7 +1236,7 @@ describe('daemon-claude-engine private helpers', () => {
 
   it('treats lower actual runtime codex privilege as a fallback need instead of a pre-spawn fresh-session signal', () => {
     const state = { sessions: {} };
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: () => { throw new Error('spawn not used in this test'); },
@@ -1258,7 +1349,7 @@ describe('daemon-claude-engine private helpers', () => {
     const sessionFile = path.join(tempDir, 'session.jsonl');
     fs.writeFileSync(sessionFile, `${JSON.stringify({ message: { model: 'gpt-5', cwd: '/tmp/project' } })}\n`, 'utf8');
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: () => { throw new Error('spawn not used in this test'); },
@@ -1319,7 +1410,7 @@ describe('daemon-claude-engine private helpers', () => {
     const sessionFile = path.join(tempDir, 'session.jsonl');
     fs.writeFileSync(sessionFile, `${JSON.stringify({ message: { model: 'claude-sonnet-4-20250514', cwd: '/tmp/project' } })}\n`, 'utf8');
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: () => { throw new Error('spawn not used in this test'); },
@@ -1388,7 +1479,7 @@ describe('daemon-claude-engine private helpers', () => {
 
   it('reads actual codex permission profile from store helper', () => {
     const state = { sessions: {} };
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: () => { throw new Error('spawn not used in this test'); },
@@ -1511,7 +1602,7 @@ describe('daemon-claude-engine private helpers', () => {
     let createSeq = 0;
     let spawnSeq = 0;
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: (_cmd, args) => {
@@ -1651,7 +1742,7 @@ describe('daemon-claude-engine private helpers', () => {
     let createCount = 0;
     let spawnSeq = 0;
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: (_cmd, args) => {
@@ -1771,7 +1862,7 @@ describe('daemon-claude-engine private helpers', () => {
     const sentMessages = [];
     let createCount = 0;
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: (_cmd, args) => {
@@ -1888,7 +1979,7 @@ describe('daemon-claude-engine private helpers', () => {
     let resumeThreadReads = 0;
     let spawnSeq = 0;
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: (_cmd, args) => {
@@ -2041,7 +2132,7 @@ describe('daemon-claude-engine private helpers', () => {
     };
     let spawnSeq = 0;
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: (_cmd, args) => {
@@ -2191,7 +2282,7 @@ describe('daemon-claude-engine private helpers', () => {
     const stdinPayloads = [];
     let spawnSeq = 0;
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: (_cmd, _args) => {
@@ -2329,7 +2420,7 @@ describe('daemon-claude-engine private helpers', () => {
       releaseWarm() { releaseWarmCount += 1; },
     };
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: () => {
@@ -2454,7 +2545,7 @@ describe('daemon-claude-engine private helpers', () => {
     const idleProc = createTimeoutTestProcess([]);
     let spawnSeq = 0;
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: () => {
@@ -2529,7 +2620,7 @@ describe('daemon-claude-engine private helpers', () => {
     const idleProc = createTimeoutTestProcess([]);
     const sent = [];
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: () => {
@@ -2647,7 +2738,7 @@ describe('daemon-claude-engine private helpers', () => {
     const activeProcesses = new Map();
     const proc = createStreamingStdinFailureProcess();
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: () => proc,
@@ -2716,7 +2807,7 @@ describe('daemon-claude-engine private helpers', () => {
     const activeProcesses = new Map();
     const proc = createStreamingStdinFailureProcess();
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: () => proc,
@@ -2791,7 +2882,7 @@ describe('daemon-claude-engine private helpers', () => {
     const activeProcesses = new Map();
     const proc = createStreamingStdinFailureProcess();
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: () => proc,
@@ -2871,7 +2962,7 @@ describe('daemon-claude-engine private helpers', () => {
     const proc = createStreamingStdinFailureProcess();
     const logs = [];
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs,
       path,
       spawn: () => proc,
@@ -2976,7 +3067,7 @@ describe('auto-sync: session switch when CLI session is newer', () => {
       },
     };
 
-    const engine = createClaudeEngine({
+    const engine = createClaudeEngineWithTestPlugins({
       fs: testFs,
       path,
       spawn: () => {

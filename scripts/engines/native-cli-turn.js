@@ -1,21 +1,5 @@
 'use strict';
 
-function toCompatibilityEvent(event) {
-  if (!event || typeof event !== 'object') return event;
-  const types = {
-    session_observed: 'session',
-    message_delta: 'text',
-    thinking_delta: 'thinking',
-    tool_started: 'tool_use',
-    tool_updated: 'tool_updated',
-    tool_finished: 'tool_result',
-    usage_observed: 'usage',
-    run_completed: 'done',
-    run_failed: 'error',
-  };
-  return types[event.type] ? { ...event, type: types[event.type] } : event;
-}
-
 function collectNativeEvents(adapter, executionResult, onEvent) {
   const events = [];
   const emit = event => {
@@ -24,9 +8,9 @@ function collectNativeEvents(adapter, executionResult, onEvent) {
     if (typeof onEvent === 'function') onEvent(event);
   };
 
-  for (const event of executionResult.events || []) emit(toCompatibilityEvent(event));
+  for (const event of executionResult.events || []) emit(event);
   for (const line of executionResult.nativeLines || []) {
-    for (const event of adapter.parseEvent(line)) emit(toCompatibilityEvent(event));
+    for (const event of adapter.parseEvent(line)) emit(event);
   }
   return events;
 }
@@ -34,8 +18,8 @@ function collectNativeEvents(adapter, executionResult, onEvent) {
 function findObservedSessionId(events, executionResult) {
   if (executionResult.sessionId) return executionResult.sessionId;
   for (let index = events.length - 1; index >= 0; index -= 1) {
-    if (events[index].type === 'session' && events[index].sessionId) {
-      return events[index].sessionId;
+    if (events[index].type === 'session_observed' && events[index].nativeSessionId) {
+      return events[index].nativeSessionId;
     }
   }
   return '';
@@ -46,8 +30,8 @@ function findFinalValue(events, executionResult) {
   if (executionResult.output !== undefined) return executionResult.output;
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
-    if (event.type === 'done' && event.result !== undefined) return event.result;
-    if (event.type === 'text' && event.text !== undefined) return event.text;
+    if (event.type === 'run_completed' && event.result !== undefined) return event.result;
+    if (event.type === 'message_delta' && event.text !== undefined) return event.text;
   }
   return null;
 }

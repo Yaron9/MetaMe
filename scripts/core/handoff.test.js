@@ -761,6 +761,13 @@ describe('reduceStreamingWaitState', () => {
     );
   });
 
+  it('clears tool-waiting mode on normalized message deltas', () => {
+    assert.deepEqual(
+      reduceStreamingWaitState(true, 'message_delta'),
+      { waitingForTool: false, shouldUpdateWatchdog: true, watchdogWaiting: false }
+    );
+  });
+
   it('keeps state unchanged when no wait transition applies', () => {
     assert.deepEqual(
       reduceStreamingWaitState(false, 'session'),
@@ -789,6 +796,23 @@ describe('applyStreamingTextResult', () => {
       { finalResult: 'tool-only result', streamText: 'tool-only result' }
     );
   });
+
+  it('handles normalized message deltas and completed results', () => {
+    assert.deepEqual(
+      applyStreamingTextResult(
+        { finalResult: '', streamText: '' },
+        { eventType: 'message_delta', text: 'normalized text' }
+      ),
+      { finalResult: 'normalized text', streamText: 'normalized text' }
+    );
+    assert.deepEqual(
+      applyStreamingTextResult(
+        { finalResult: '', streamText: '' },
+        { eventType: 'run_completed', doneResult: 'normalized result' }
+      ),
+      { finalResult: 'normalized result', streamText: 'normalized result' }
+    );
+  });
 });
 
 describe('applyStreamingMetadata', () => {
@@ -810,6 +834,16 @@ describe('applyStreamingMetadata', () => {
         errorEvent
       ),
       { observedSessionId: 'sess-1', classifiedError: errorEvent }
+    );
+  });
+
+  it('keeps the native session id on normalized session events', () => {
+    assert.deepEqual(
+      applyStreamingMetadata(
+        { observedSessionId: '', classifiedError: null },
+        { type: 'session_observed', nativeSessionId: 'native-only-1' }
+      ),
+      { observedSessionId: 'native-only-1', classifiedError: null }
     );
   });
 });

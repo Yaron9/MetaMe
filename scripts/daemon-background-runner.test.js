@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const { createBackgroundRunner } = require('./daemon-background-runner');
 const { _private } = require('./daemon-engine-runtime');
 const { createEnginePlugin } = require('./engines/engine-plugin');
+const { normalizeRuntimeEvents } = require('./engines/native-cli-adapter');
 const { getEngineDescriptor } = require('./core/engine-descriptors');
 
 const result = {
@@ -13,19 +14,48 @@ const result = {
 };
 
 function runtime(name) {
-  return {
-    name,
-    binary: name,
-    defaultModel: 'auto',
-    timeouts: { idleMs: 1000 },
-    killSignal: 'SIGTERM',
-    buildArgs: name === 'codex' ? _private.buildCodexArgs : _private.buildClaudeArgs,
-    buildEnv: () => ({}),
-    parseStreamEvent: name === 'codex'
+  const buildArgs = name === 'codex' ? _private.buildCodexArgs
+    : name === 'agy' ? _private.buildAgyArgs : _private.buildClaudeArgs;
+  const parseStreamEvent = name === 'codex'
       ? _private.parseCodexStreamEvent
-      : (name === 'agy' ? _private.parseAgyStreamEvent : _private.parseClaudeStreamEvent),
-    classifyError: _private.classifyEngineError,
-  };
+      : (name === 'agy' ? _private.parseAgyStreamEvent : _private.parseClaudeStreamEvent);
+  return createEnginePlugin({
+    protocolVersion: 1,
+    descriptor: getEngineDescriptor(name),
+    runtime: {
+      name,
+      binary: name,
+      defaultModel: 'auto',
+      timeouts: { idleMs: 1000 },
+      killSignal: 'SIGTERM',
+      buildInvocation(options = {}) {
+        const session = options.session || {};
+        const invocationOptions = {
+          ...options,
+          session,
+          ...(name === 'agy' ? { adapterPath: '/tmp/agy-adapter.js' } : {}),
+        };
+        return {
+          executable: name,
+          binary: name,
+          args: buildArgs(invocationOptions),
+          env: {},
+          cwd: options.cwd || '',
+          input: options.input || '',
+          killSignal: 'SIGTERM',
+          timeouts: { idleMs: 1000 },
+        };
+      },
+      parseEvent: line => normalizeRuntimeEvents(parseStreamEvent(line)),
+      classifyFailure: _private.classifyEngineError,
+      validateSession: () => true,
+      updateSession: (session, observation) => observation.sessionId
+        ? { ...(session || {}), id: observation.sessionId, started: true, engine: name }
+        : session,
+    },
+    sessionSource: null,
+    cognitiveHost: null,
+  });
 }
 
 test('background runner maps Completion Contract through Claude native output', async () => {

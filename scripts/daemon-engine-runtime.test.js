@@ -5,6 +5,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   createEngineRuntimeFactory,
+  resolveEnginePlugin,
   normalizeEngineName,
   resolveEngineModel,
   ENGINE_MODEL_CONFIG,
@@ -315,6 +316,13 @@ describe('daemon-engine-runtime error classification', () => {
 });
 
 describe('daemon-engine-runtime factory', () => {
+  it('rejects bare runtime injection instead of creating a compatibility plugin', () => {
+    assert.throws(
+      () => resolveEnginePlugin({ name: 'claude', buildArgs: () => [] }, 'claude'),
+      /engine_plugin_required:claude/
+    );
+  });
+
   it('returns immutable Engine Plugins whose runtime boundary is canonical', () => {
     const getEnginePlugin = createEngineRuntimeFactory({
       CLAUDE_BIN: '/opt/test/claude',

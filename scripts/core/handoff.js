@@ -506,10 +506,12 @@ function parseStreamingEvents(parseStreamEvent, line) {
 }
 
 function reduceStreamingWaitState(waitingForTool, eventType) {
-  if (eventType === 'tool_use') {
+  if (eventType === 'tool_use' || eventType === 'tool_started') {
     return { waitingForTool: true, shouldUpdateWatchdog: !waitingForTool, watchdogWaiting: true };
   }
-  if ((eventType === 'text' || eventType === 'done' || eventType === 'tool_result') && waitingForTool) {
+  if ((eventType === 'text' || eventType === 'message_delta'
+    || eventType === 'done' || eventType === 'run_completed'
+    || eventType === 'tool_result' || eventType === 'tool_finished') && waitingForTool) {
     return { waitingForTool: false, shouldUpdateWatchdog: true, watchdogWaiting: false };
   }
   return { waitingForTool, shouldUpdateWatchdog: false, watchdogWaiting: waitingForTool };
@@ -524,11 +526,11 @@ function applyStreamingTextResult(state, opts = {}) {
   let finalResult = state && typeof state.finalResult === 'string' ? state.finalResult : '';
   let streamText = state && typeof state.streamText === 'string' ? state.streamText : finalResult;
 
-  if (eventType === 'text' && text) {
+  if ((eventType === 'text' || eventType === 'message_delta') && text) {
     finalResult += (finalResult ? '\n\n' : '') + String(text);
     streamText = finalResult;
   }
-  if (eventType === 'done' && !finalResult && doneResult) {
+  if ((eventType === 'done' || eventType === 'run_completed') && !finalResult && doneResult) {
     finalResult = String(doneResult);
     streamText = finalResult;
   }
@@ -537,11 +539,12 @@ function applyStreamingTextResult(state, opts = {}) {
 }
 
 function applyStreamingMetadata(state, event) {
+  const sessionId = event && (event.nativeSessionId || event.sessionId);
   return {
-    observedSessionId: event && event.type === 'session' && event.sessionId
-      ? String(event.sessionId)
+    observedSessionId: event && (event.type === 'session' || event.type === 'session_observed') && sessionId
+      ? String(sessionId)
       : (state && state.observedSessionId ? state.observedSessionId : ''),
-    classifiedError: event && event.type === 'error'
+    classifiedError: event && (event.type === 'error' || event.type === 'run_failed')
       ? event
       : (state ? state.classifiedError || null : null),
   };
@@ -565,7 +568,7 @@ function applyStreamingToolState(state, event, opts = {}) {
     toolInput: event && event.toolInput ? event.toolInput : {},
   };
 
-  if (eventType !== 'tool_use') return nextState;
+  if (eventType !== 'tool_use' && eventType !== 'tool_started') return nextState;
 
   nextState.toolCallCount += 1;
   const toolState = recordToolUsage(
@@ -602,9 +605,12 @@ function applyStreamingContentState(state, event) {
     waitingForTool: waitState.waitingForTool,
     shouldUpdateWatchdog: waitState.shouldUpdateWatchdog,
     watchdogWaiting: waitState.watchdogWaiting,
-    finalUsage: eventType === 'done' ? (event.usage || null) : (state ? state.finalUsage || null : null),
-    shouldFlush: eventType === 'text' || eventType === 'done',
-    flushForce: eventType === 'done',
+    finalUsage: eventType === 'usage_observed' || eventType === 'done' || eventType === 'run_completed'
+      ? (event.usage || (state ? state.finalUsage || null : null))
+      : (state ? state.finalUsage || null : null),
+    shouldFlush: eventType === 'text' || eventType === 'message_delta'
+      || eventType === 'done' || eventType === 'run_completed',
+    flushForce: eventType === 'done' || eventType === 'run_completed',
   };
 }
 

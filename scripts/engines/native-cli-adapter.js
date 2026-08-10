@@ -23,7 +23,14 @@ function normalizeRuntimeEvents(events) {
     if (!event || typeof event !== 'object') continue;
     const raw = event.raw;
     if (event.type === 'session') {
-      normalized.push({ ...event, type: 'session_observed', nativeSessionId: event.sessionId, raw });
+      const sessionEvent = { ...event };
+      delete sessionEvent.sessionId;
+      normalized.push({
+        ...sessionEvent,
+        type: 'session_observed',
+        nativeSessionId: event.nativeSessionId || event.sessionId,
+        raw,
+      });
       continue;
     }
     if (event.type === 'text') {

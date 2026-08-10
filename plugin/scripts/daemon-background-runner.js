@@ -9,11 +9,11 @@ const { COMPLETION_SCHEMA, normalizeCompletionResult } = require('./core/complet
 const { resolveEnginePlugin } = require('./daemon-engine-runtime');
 
 function collectNativeResult(enginePlugin, output) {
-  const plugin = resolveEnginePlugin(enginePlugin, enginePlugin && enginePlugin.name);
-  const runtimeAdapter = plugin && plugin.runtime;
-  if (!runtimeAdapter || typeof runtimeAdapter.parseEvent !== 'function') {
-    return { sessionId: '', usage: null, finalValue: null, classifiedError: null, toolUseCount: 0 };
-  }
+  const plugin = resolveEnginePlugin(
+    enginePlugin,
+    enginePlugin && enginePlugin.descriptor && enginePlugin.descriptor.id
+  );
+  const runtimeAdapter = plugin.runtime;
   let sessionId = '';
   let usage = null;
   let finalValue = null;
@@ -23,23 +23,23 @@ function collectNativeResult(enginePlugin, output) {
   for (const line of String(output || '').split('\n').filter(Boolean)) {
     for (const event of runtimeAdapter.parseEvent(line)) {
       if (terminalType) continue;
-      if (event.type === 'session_observed' || event.type === 'session') {
-        sessionId = event.sessionId || event.nativeSessionId || sessionId;
+      if (event.type === 'session_observed' && event.nativeSessionId) {
+        sessionId = event.nativeSessionId;
       }
-      if (event.type === 'message_delta' || event.type === 'text') finalValue = event.text;
+      if (event.type === 'message_delta') finalValue = event.text;
       if (event.type === 'usage_observed') usage = event.usage || usage;
-      if (event.type === 'run_completed' || event.type === 'done') {
+      if (event.type === 'run_completed') {
         terminalType = 'completed';
         usage = event.usage || usage;
         finalValue = event.raw && (event.raw.structured_output || event.raw.structuredOutput)
           || event.result
           || finalValue;
       }
-      if (event.type === 'run_failed' || event.type === 'error') {
+      if (event.type === 'run_failed') {
         terminalType = 'failed';
         classifiedError = event;
       }
-      if (event.type === 'tool_started' || event.type === 'tool_use') toolUseCount += 1;
+      if (event.type === 'tool_started') toolUseCount += 1;
     }
   }
   return { sessionId, usage, finalValue, classifiedError, toolUseCount };
@@ -62,8 +62,8 @@ function createBackgroundRunner(deps = {}) {
   const activeChildren = new Set();
 
   async function runAdapterTurn(enginePlugin, request) {
-    const runtime = enginePlugin && enginePlugin.runtime;
-    if (!runtime) throw new Error('engine_runtime_missing');
+    const plugin = resolveEnginePlugin(enginePlugin, request.turn && request.turn.engine);
+    const runtime = plugin.runtime;
     const turn = request.turn || {};
     const candidateSession = request.nativeSession || {};
     const sessionWasValid = runtime.validateSession(candidateSession);
@@ -79,8 +79,8 @@ function createBackgroundRunner(deps = {}) {
     let sessionId = result.sessionId || '';
     for (let index = events.length - 1; index >= 0 && !sessionId; index -= 1) {
       const event = events[index];
-      if (event.type === 'session_observed' || event.type === 'session') {
-        sessionId = event.sessionId || event.nativeSessionId || '';
+      if (event.type === 'session_observed') {
+        sessionId = event.nativeSessionId || '';
       }
     }
     const failure = result.failure || (result.error ? runtime.classifyFailure(result.error) : null);
@@ -102,17 +102,13 @@ function createBackgroundRunner(deps = {}) {
 
   async function startTurn(options = {}) {
     const plugin = resolveEnginePlugin(deps.getEngineRuntime(options.engine), options.engine);
-    const runtime = plugin && plugin.runtime;
-    const engineName = plugin && plugin.descriptor
-      ? plugin.descriptor.id
-      : (runtime && runtime.name) || options.engine || 'unknown';
-    const timeouts = (runtime && runtime.timeouts) || {};
-    const runtimeCapability = plugin && plugin.descriptor && plugin.descriptor.capabilities
-      ? plugin.descriptor.capabilities.runtime
-      : null;
+    const runtime = plugin.runtime;
+    const engineName = plugin.descriptor.id;
+    const runtimeCapability = plugin.descriptor.capabilities.runtime;
     if (!runtime || (runtimeCapability && (runtimeCapability.supported === false || runtimeCapability.state === 'unsupported'))) {
       return { ok: false, error: `${engineName}_runtime_unsupported`, errorCode: 'CAPABILITY_UNSUPPORTED' };
     }
+    const timeouts = runtime.timeouts || {};
     if (typeof runtime.isReady === 'function' && !runtime.isReady()) {
       return { ok: false, error: `${engineName}_runtime_not_ready`, errorCode: 'RUNTIME_NOT_READY' };
     }
