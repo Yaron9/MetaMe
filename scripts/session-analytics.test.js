@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { extractSkeleton, detectSignificantSession, buildCodexInput, _internal } = require('./session-analytics');
+const { extractSkeleton, detectSignificantSession, buildCodexInput, formatForPrompt, _internal } = require('./session-analytics');
 
 function ts(baseMs, deltaSec) {
   return new Date(baseMs + deltaSec * 1000).toISOString();
@@ -43,6 +43,14 @@ test('extractSkeleton captures Step-1 numeric metrics', () => {
   assert.equal(sk.avg_pause_sec, 35);
   assert.ok(sk.retry_sequences >= 2);
   assert.ok(sk.semantic_repetition > 0);
+});
+
+test('Claude native gitBranch maps to the canonical branch prompt field', () => {
+  const fixture = path.join(__dirname, 'engines', 'fixtures', 'claude-native-session.jsonl');
+  const skeleton = extractSkeleton(fixture);
+
+  assert.equal(skeleton.branch, 'feature/login-timeout');
+  assert.match(formatForPrompt(skeleton), /Proj=metame-fixture@feature\/login-timeout/);
 });
 
 test('detectSignificantSession uses numeric-only thresholds', () => {

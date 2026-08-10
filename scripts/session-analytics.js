@@ -256,9 +256,13 @@ function getClaudeSource() {
 function canonicalInputFromPath(sessionPath) {
   const source = createClaudeSessionSourceForFile(sessionPath, { maxFileSize: MAX_FILE_SIZE });
   const input = source.readEvents();
+  const { gitBranch, ...canonicalRevisionContext } = input.revision;
   const context = {
-    ...input.revision,
+    ...canonicalRevisionContext,
     engine: 'claude',
+    // Keep native revision keys at the Claude compatibility edge. The
+    // canonical analytics core only consumes the stable `branch` field.
+    branch: gitBranch || null,
     source: input.revision.classification === 'subagent' ? 'subagent' : 'claude',
     nativeSessionId: input.ref.nativeSessionId,
     sourceRevision: input.revision.sourceRevision,

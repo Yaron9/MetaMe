@@ -1,4 +1,4 @@
-{"type":"mode","mode":"normal","sessionId":"claude-fixture-parent"}
+{"type":"mode","mode":"normal","sessionId":"claude-fixture-parent","gitBranch":"feature/login-timeout"}
 {"parentUuid":null,"isSidechain":false,"type":"user","sessionId":"claude-fixture-parent","timestamp":"2026-07-01T10:00:00.000Z","cwd":"/tmp/metame-fixture","message":{"role":"user","content":"请修复登录失败，并记录可复用的配置约定。"},"uuid":"fixture-user-1"}
 {"parentUuid":"fixture-user-1","isSidechain":false,"type":"assistant","sessionId":"claude-fixture-parent","timestamp":"2026-07-01T10:00:01.000Z","message":{"role":"assistant","model":"claude-sonnet","content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"/tmp/metame-fixture/config.js"}}]},"uuid":"fixture-assistant-1"}
 {"parentUuid":"fixture-assistant-1","isSidechain":false,"type":"user","sessionId":"claude-fixture-parent","timestamp":"2026-07-01T10:00:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","is_error":false,"content":"auth timeout; config loaded"}]},"uuid":"fixture-result-1"}
