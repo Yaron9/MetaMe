@@ -211,6 +211,15 @@ function attachPlanDigest(plan) {
   return { ...plan, plan_digest: computePlanDigest(plan) };
 }
 
+function sameSnapshot(left, right) {
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  return left.id === right.id
+    && left.kind === right.kind
+    && left.state === right.state
+    && left.content_digest === right.content_digest
+    && JSON.stringify(left.identity) === JSON.stringify(right.identity);
+}
+
 function validatePlan(plan) {
   if (!plan || typeof plan !== 'object') throw new Error('reconcile plan must be an object');
   if (plan.schema_version !== PLAN_SCHEMA_VERSION) throw new Error('unsupported reconcile plan schema_version');
@@ -227,9 +236,20 @@ function validatePlan(plan) {
     }
     if (action.preconditions.length !== 2) throw new Error('reconcile action must have two preconditions');
     if (action.survivor.id === action.duplicate.id) throw new Error('reconcile action cannot archive its survivor');
-    const ids = new Set(action.preconditions.map(item => String(item && item.id)));
-    if (!ids.has(String(action.survivor.id)) || !ids.has(String(action.duplicate.id))) {
+    const preconditionsById = new Map();
+    for (const precondition of action.preconditions) {
+      const id = String(precondition && precondition.id);
+      if (preconditionsById.has(id)) throw new Error('reconcile action preconditions contain duplicate row IDs');
+      preconditionsById.set(id, precondition);
+    }
+    const survivorPrecondition = preconditionsById.get(String(action.survivor.id));
+    const duplicatePrecondition = preconditionsById.get(String(action.duplicate.id));
+    if (!survivorPrecondition || !duplicatePrecondition) {
       throw new Error('reconcile action preconditions do not cover both rows');
+    }
+    if (!sameSnapshot(action.survivor, survivorPrecondition)
+      || !sameSnapshot(action.duplicate, duplicatePrecondition)) {
+      throw new Error('reconcile action preconditions do not match action snapshots');
     }
     if (action.survivor.content_digest !== action.duplicate.content_digest
       || JSON.stringify(action.survivor.identity) !== JSON.stringify(action.duplicate.identity)) {
@@ -260,5 +280,6 @@ module.exports = {
     identityGroups: groupBy,
     isReconcileCandidate,
     rowIdentity,
+    sameSnapshot,
   },
 };

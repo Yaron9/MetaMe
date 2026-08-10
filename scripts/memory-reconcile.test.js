@@ -15,6 +15,7 @@ const {
   parseArgs,
   readPlanFile,
 } = require('./memory-reconcile');
+const { computePlanDigest } = require('./core/memory-reconcile');
 
 function hash(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -72,6 +73,21 @@ test('dry-run and stage are read-only with a versioned bounded plan', () => {
   main(['--stage', staged], { dbPath: f.dbPath, print: false, now: '2026-08-10T12:00:00Z' });
   assert.deepEqual(readPlanFile(staged), JSON.parse(fs.readFileSync(staged, 'utf8')));
   assert.equal(hash(f.dbPath), before);
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test('crafted staged plans cannot detach action snapshots from preconditions', () => {
+  const f = fixture();
+  const staged = path.join(f.root, 'plan.json');
+  main(['--stage', staged], { dbPath: f.dbPath, print: false });
+  const forged = readPlanFile(staged);
+  const action = forged.actions[0];
+  const forgedDigest = 'f'.repeat(64);
+  action.survivor = { ...action.survivor, content_digest: forgedDigest };
+  action.duplicate = { ...action.duplicate, content_digest: forgedDigest };
+  forged.plan_digest = computePlanDigest(forged);
+  fs.writeFileSync(staged, `${JSON.stringify(forged)}\n`, 'utf8');
+  assert.throws(() => readPlanFile(staged), /preconditions do not match action snapshots/);
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 
