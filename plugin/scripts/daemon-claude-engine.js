@@ -48,7 +48,7 @@ function resolveStreamingTimeouts(engineTimeouts = {}) {
   return {
     idleMs: engineTimeouts.idleMs ?? (5 * 60 * 1000),
     toolMs: engineTimeouts.toolMs ?? (25 * 60 * 1000),
-    ceilingMs: engineTimeouts.ceilingMs ?? (60 * 60 * 1000),
+    ceilingMs: engineTimeouts.ceilingMs ?? null,
   };
 }
 

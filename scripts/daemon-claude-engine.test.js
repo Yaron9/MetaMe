@@ -225,7 +225,7 @@ describe('daemon-claude-engine private helpers', () => {
     assert.deepEqual(state.sessions.chat1.order, ['a', 'b']);
   });
 
-  it('resolves streaming timeout defaults with a one-hour hard ceiling', () => {
+  it('resolves streaming timeout defaults without a total runtime ceiling', () => {
     const state = { sessions: {} };
     const engine = createEngineWithState(state);
 
@@ -234,7 +234,7 @@ describe('daemon-claude-engine private helpers', () => {
       {
         idleMs: 5 * 60 * 1000,
         toolMs: 25 * 60 * 1000,
-        ceilingMs: 60 * 60 * 1000,
+        ceilingMs: null,
       }
     );
   });
