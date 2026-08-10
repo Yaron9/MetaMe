@@ -330,8 +330,8 @@ function buildContextEntries(items) {
 }
 
 function headerFromRecords(parsed) {
-  const headerItem = parsed.records.find(item => item.record.type === 'session');
-  if (!headerItem) throw adapterError('PI_SESSION_SOURCE_HEADER_MISSING');
+  const headerItem = parsed.records[0];
+  if (!headerItem || headerItem.record.type !== 'session') throw adapterError('PI_SESSION_SOURCE_HEADER_MISSING');
   const header = headerItem.record;
   normalizeSessionId(header.id);
   if (header.version !== undefined && Number(header.version) !== SESSION_VERSION) {
