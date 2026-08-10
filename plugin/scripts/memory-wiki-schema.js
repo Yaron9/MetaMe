@@ -204,6 +204,19 @@ function applyWikiSchema(db) {
   db.exec('CREATE INDEX IF NOT EXISTS idx_session_sources_project ON session_sources(project, scope, last_ts)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_session_sources_agent   ON session_sources(agent_key, last_ts)');
 
+  // Universal Session Source/extraction state is an additive migration owned
+  // by the core source boundary. It is deliberately idempotent and does not
+  // consume the shared SQLite user_version value.
+  try {
+    const { ensureSessionSourceSchema } = require('./core/session-source-db');
+    ensureSessionSourceSchema(db);
+  } catch (error) {
+    // Keep the historical wiki schema initialization behavior for callers
+    // that open a partial legacy database; source-aware callers retry the
+    // migration through session-source-db before using the public seam.
+    if (error && error.code === 'session_source_database_required') throw error;
+  }
+
   // ── doc_sources ───────────────────────────────────────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS doc_sources (
