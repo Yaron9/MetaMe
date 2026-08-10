@@ -92,6 +92,77 @@ test('Pi discovery is bounded newest-first and resumes a stable snapshot cursor'
   fs.rmSync(home, { recursive: true, force: true });
 });
 
+test('Pi discovery reads only a bounded header prefix from large sessions', async () => {
+  const home = makeHome();
+  const sessionDir = path.join(home, 'sessions');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const largePath = path.join(sessionDir, 'large.jsonl');
+  const header = {
+    type: 'session', version: 3, id: 'pi-large', timestamp: '2026-08-01T00:00:00.000Z', cwd: home,
+  };
+  const largeBody = JSON.stringify({
+    type: 'custom', id: 'large-body', parentId: null, payload: 'x'.repeat(_internal.MAX_HEADER_BYTES + 4096),
+  });
+  fs.writeFileSync(largePath, `${JSON.stringify(header)}\n${largeBody}\n`, 'utf8');
+  assert.ok(fs.statSync(largePath).size > _internal.MAX_HEADER_BYTES);
+
+  const readSizes = [];
+  const observedFs = {
+    ...fs,
+    readSync(fd, buffer, offset, length, position) {
+      const count = fs.readSync(fd, buffer, offset, length, position);
+      readSizes.push(count);
+      return count;
+    },
+  };
+  const source = createPiSessionSourceAdapter({ home, sessionDir, fs: observedFs });
+  const refs = await discoverAll(source);
+  assert.deepEqual(refs.map(ref => ref.nativeSessionId), ['pi-large']);
+  assert.ok(readSizes.length > 0);
+  assert.ok(readSizes.every(size => size <= _internal.MAX_HEADER_BYTES));
+  assert.ok(readSizes.reduce((total, size) => total + size, 0) <= _internal.MAX_HEADER_BYTES);
+
+  // A header crossing the read chunk boundary and using CRLF remains valid.
+  const crossReadPath = path.join(sessionDir, 'cross-read.jsonl');
+  const crossReadHeader = {
+    type: 'session', version: 3, id: 'pi-cross-read', cwd: home, padding: 'x'.repeat(70 * 1024),
+  };
+  fs.writeFileSync(crossReadPath, `${JSON.stringify(crossReadHeader)}\r\n`, 'utf8');
+  assert.equal(_internal.readHeaderBounded(crossReadPath, fs, path, sessionDir).id, 'pi-cross-read');
+
+  // A first line with no LF inside the prefix is explicitly skipped; a later
+  // valid-looking record must not be mistaken for the session header.
+  const oversizedHeaderPath = path.join(sessionDir, 'oversized-header.jsonl');
+  const oversizedHeader = {
+    type: 'session', version: 3, id: 'pi-oversized-header', cwd: home,
+    padding: 'x'.repeat(_internal.MAX_HEADER_BYTES + 64),
+  };
+  fs.writeFileSync(oversizedHeaderPath, `${JSON.stringify(oversizedHeader)}\n${JSON.stringify(header)}\n`, 'utf8');
+  assert.equal(_internal.readHeaderBounded(oversizedHeaderPath, fs, path, sessionDir), null);
+  const oversizedSource = createPiSessionSourceAdapter({ home, sessionDir });
+  const oversizedRefs = await discoverAll(oversizedSource);
+  assert.equal(oversizedRefs.some(ref => ref.nativeSessionId === 'pi-oversized-header'), false);
+
+  // Short reads still progress, and read failures close the descriptor opened
+  // for the bounded prefix.
+  const shortReadFs = {
+    ...fs,
+    readSync(fd, buffer, offset, length, position) {
+      return fs.readSync(fd, buffer, offset, Math.min(length, 7), position);
+    },
+  };
+  assert.equal(_internal.readHeaderBounded(crossReadPath, shortReadFs, path, sessionDir).id, 'pi-cross-read');
+  let closeCalls = 0;
+  const failingReadFs = {
+    ...fs,
+    readSync() { throw new Error('read failed'); },
+    closeSync(fd) { closeCalls += 1; return fs.closeSync(fd); },
+  };
+  assert.equal(_internal.readHeaderBounded(largePath, failingReadFs, path, sessionDir), null);
+  assert.equal(closeCalls, 1);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
 test('Pi revisions expose append cursor and hold an incomplete final line', async () => {
   const home = makeHome();
   const sessionDir = path.join(home, 'sessions');

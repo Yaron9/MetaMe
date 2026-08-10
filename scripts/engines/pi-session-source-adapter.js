@@ -29,6 +29,7 @@ const DEFAULT_MAX_TOOL_INPUT = 1200;
 const DEFAULT_DISCOVERY_LIMIT = 1000;
 const MAX_DISCOVERY_SNAPSHOT_ENTRIES = DEFAULT_DISCOVERY_LIMIT * 100;
 const MAX_HEADER_BYTES = 1024 * 1024;
+const HEADER_READ_CHUNK_BYTES = 64 * 1024;
 const DISCOVERY_CURSOR_VERSION = 1;
 
 const KNOWN_ENTRY_TYPES = new Set([
@@ -395,7 +396,7 @@ function metadataFromParsed(parsed, filePath, pathMod) {
   };
 }
 
-function readFileBounded(filePath, fsMod, maxFileSize, pathMod, rootPath = null) {
+function statFileBounded(filePath, fsMod, maxFileSize, pathMod, rootPath = null) {
   let stat;
   try {
     stat = fsMod.lstatSync(filePath);
@@ -417,6 +418,11 @@ function readFileBounded(filePath, fsMod, maxFileSize, pathMod, rootPath = null)
     }
   }
   if (stat.size > maxFileSize) throw adapterError('PI_SESSION_SOURCE_TOO_LARGE', String(stat.size));
+  return stat;
+}
+
+function readFileBounded(filePath, fsMod, maxFileSize, pathMod, rootPath = null) {
+  const stat = statFileBounded(filePath, fsMod, maxFileSize, pathMod, rootPath);
   let bytes;
   try { bytes = fsMod.readFileSync(filePath); } catch (error) {
     throw adapterError('PI_SESSION_SOURCE_READ_FAILED', error.code || filePath);
@@ -424,17 +430,52 @@ function readFileBounded(filePath, fsMod, maxFileSize, pathMod, rootPath = null)
   return { stat, bytes, text: bytes.toString('utf8') };
 }
 
-function readHeaderBounded(filePath, fsMod, pathMod, rootPath) {
+function parseHeaderPrefix(parts, byteLength, newlineOffset = -1, currentChunk = null) {
+  const prefixParts = currentChunk && newlineOffset >= 0
+    ? [...parts, currentChunk.subarray(0, newlineOffset)]
+    : parts;
+  const prefixLength = currentChunk && newlineOffset >= 0
+    ? byteLength + newlineOffset
+    : byteLength;
+  if (prefixLength === 0) return null;
+  const line = Buffer.concat(prefixParts, prefixLength)
+    .toString('utf8')
+    .replace(/^\uFEFF/, '')
+    .replace(/\r$/, '');
+  const header = parseJsonLine(line);
+  return header && header.type === 'session' && typeof header.id === 'string' ? header : null;
+}
+
+function readHeaderBounded(filePath, fsMod, pathMod, rootPath, maxFileSize = DEFAULT_MAX_FILE_SIZE) {
+  let fd = null;
   try {
-    const source = readFileBounded(filePath, fsMod, MAX_HEADER_BYTES, pathMod, rootPath);
-    const lines = source.text.split('\n');
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      const header = parseJsonLine(line);
-      return header && header.type === 'session' && typeof header.id === 'string' ? header : null;
+    // Discovery only needs the first record.  Validate the complete path and
+    // the configured total-file cap before opening, then read a bounded prefix
+    // instead of loading a multi-megabyte session into memory.
+    statFileBounded(filePath, fsMod, maxFileSize, pathMod, rootPath);
+    fd = fsMod.openSync(filePath, 'r');
+    const parts = [];
+    let byteLength = 0;
+    while (byteLength < MAX_HEADER_BYTES) {
+      const readLength = Math.min(HEADER_READ_CHUNK_BYTES, MAX_HEADER_BYTES - byteLength);
+      const buffer = Buffer.allocUnsafe(readLength);
+      const count = fsMod.readSync(fd, buffer, 0, readLength, byteLength);
+      // Treat a short or empty read as a normal EOF; the next loop is not
+      // allowed to trust bytes outside the reported count.
+      if (!Number.isSafeInteger(count) || count < 0 || count > readLength) return null;
+      if (count === 0) return parseHeaderPrefix(parts, byteLength);
+      const chunk = buffer.subarray(0, count);
+      const newlineOffset = chunk.indexOf(0x0a);
+      if (newlineOffset >= 0) return parseHeaderPrefix(parts, byteLength, newlineOffset, chunk);
+      parts.push(chunk);
+      byteLength += count;
     }
   } catch {
     return null;
+  } finally {
+    if (fd !== null) {
+      try { fsMod.closeSync(fd); } catch { /* close failure cannot leak into discovery */ }
+    }
   }
   return null;
 }
@@ -601,7 +642,7 @@ function createPiSessionSourceAdapter(options = {}) {
       const candidates = sortFiles(walkJsonl(root.path, fsMod, pathMod), fsMod);
       for (const filePath of candidates) {
         const relativePath = normalizeRelativePath(pathMod.relative(root.path, filePath), pathMod);
-        const header = readHeaderBounded(filePath, fsMod, pathMod, root.path);
+        const header = readHeaderBounded(filePath, fsMod, pathMod, root.path, maxFileSize);
         if (!header) continue;
         const info = projectInfo(header.cwd, pathMod);
         const parent = parentSessionId(header, pathMod);
@@ -835,5 +876,8 @@ module.exports = {
     walkJsonl,
     sortFiles,
     normalizeSessionId,
+    readHeaderBounded,
+    statFileBounded,
+    MAX_HEADER_BYTES,
   },
 };
