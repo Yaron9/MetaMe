@@ -7,9 +7,12 @@ const {
   createEnginePlugin,
   negotiateCapabilities,
   runEnginePluginConformance,
+  validateCapabilitySchema,
+  validateEnginePluginSchema,
   validateEnginePlugin,
 } = require('./engine-plugin');
 const { createEngineRegistry } = require('./engine-registry');
+const { normalizeEngineName } = require('../daemon-utils');
 
 function runtimeFixture() {
   return {
@@ -126,18 +129,94 @@ test('registry rejects malformed and duplicate plugins and distinguishes unknown
     runtime: null,
     sessionSource: null,
     cognitiveHost: null,
-  }]), /engine_id_invalid/);
+  }]), /engine_plugin_schema_invalid/);
 
   assert.equal(registry.remove('fixture-agent'), true);
   assert.equal(registry.lookup('fixture-agent'), null);
   assert.throws(() => registry.register(fixture), /engine_id_reused/);
 });
 
+test('strict lookup preserves unknown IDs when a legacy normalizer defaults to Claude', () => {
+  const claude = pluginFixture({ descriptor: {
+    id: 'claude', displayName: 'Claude', vendor: 'test', executableNames: ['claude'],
+    contextProjection: 'none', nativeSessionKind: 'fixture', configSchemaVersion: 1,
+    capabilities: { runtime: { state: 'verified' }, sessionSource: false, cognitiveHost: false },
+  } });
+  const codex = pluginFixture({ descriptor: {
+    id: 'codex', displayName: 'Codex', vendor: 'test', executableNames: ['codex'],
+    contextProjection: 'none', nativeSessionKind: 'fixture', configSchemaVersion: 1,
+    capabilities: { runtime: { state: 'verified' }, sessionSource: false, cognitiveHost: false },
+  } });
+  const registry = createEngineRegistry([claude, codex], {
+    normalizeEngineName,
+    defaultEngineId: 'claude',
+    legacyFallback: true,
+  });
+  assert.equal(registry.lookup('missing'), null);
+  assert.deepEqual(registry.resolve('missing'), {
+    requestedId: 'missing', engineId: null, plugin: null, fallback: false, reason: 'unknown_engine',
+  });
+  const fallback = registry.resolve('missing', { fallbackEngine: 'codex' });
+  assert.equal(fallback.requestedId, 'missing');
+  assert.equal(fallback.engineId, 'codex');
+  assert.equal(fallback.fallback, true);
+});
+
+test('shallow-frozen descriptors are copied into a deeply immutable contract graph', () => {
+  const descriptor = {
+    id: 'shallow-agent',
+    displayName: 'Shallow Agent',
+    vendor: 'metame-test',
+    executableNames: ['shallow-agent'],
+    contextProjection: 'none',
+    nativeSessionKind: 'fixture-session',
+    configSchemaVersion: 1,
+    capabilities: {
+      runtime: { state: 'verified' },
+      sessionSource: { state: 'unsupported' },
+      cognitiveHost: { state: 'unsupported' },
+    },
+  };
+  Object.freeze(descriptor);
+  const plugin = createEnginePlugin({
+    protocolVersion: 1,
+    descriptor,
+    runtime: runtimeFixture(),
+    sessionSource: null,
+    cognitiveHost: null,
+  });
+  assert.notEqual(plugin.descriptor, descriptor);
+  assert.ok(Object.isFrozen(plugin.descriptor.executableNames));
+  assert.ok(Object.isFrozen(plugin.descriptor.capabilities.runtime));
+  descriptor.executableNames.push('mutated');
+  descriptor.capabilities.runtime.state = 'unsupported';
+  assert.deepEqual(plugin.descriptor.executableNames, ['shallow-agent']);
+  assert.equal(plugin.descriptor.capabilities.runtime.state, 'verified');
+});
+
+test('Ajv strict schemas reject unknown public fields and malformed capability declarations', () => {
+  const plugin = pluginFixture();
+  const malformedPlugin = { ...plugin, unexpected: true };
+  const pluginResult = validateEnginePluginSchema(malformedPlugin);
+  assert.equal(pluginResult.valid, false);
+  assert.ok(pluginResult.errors.some(error => error.code === 'schema_additionalProperties'));
+  assert.equal(validateEnginePlugin(malformedPlugin).valid, false);
+
+  const capabilityResult = validateCapabilitySchema({
+    runtime: true,
+    sessionSource: false,
+    cognitiveHost: false,
+    unexpected: true,
+  });
+  assert.equal(capabilityResult.valid, false);
+  assert.ok(capabilityResult.errors.some(error => error.code === 'schema_additionalProperties'));
+});
+
 test('the deterministic public conformance seam validates a plugin without launching a Host', () => {
   const report = runEnginePluginConformance(pluginFixture());
   assert.equal(report.ok, true);
   assert.equal(report.engineId, 'fixture-agent');
-  assert.deepEqual(Object.keys(report.checks), ['immutable', 'protocolVersion', 'capabilityNegotiation']);
+  assert.deepEqual(Object.keys(report.checks), ['immutable', 'protocolVersion', 'schema', 'capabilityNegotiation']);
   assert.deepEqual(CAPABILITY_NAMES, ['runtime', 'sessionSource', 'cognitiveHost']);
   assert.equal(validateEnginePlugin(pluginFixture()).valid, true);
   assert.equal(validateEnginePlugin({}).valid, false);

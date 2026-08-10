@@ -70,8 +70,12 @@ function createEngineRegistry(plugins, options = {}) {
     // Some legacy normalizers intentionally return Claude for unknown input.
     // Preserve the raw ID when that candidate is not registered so strict
     // lookup can still distinguish an unknown Engine from fallback behavior.
+    // Case normalization is already represented by `raw`.  Do not accept a
+    // legacy normalizer's default value for an unregistered raw ID: that
+    // would turn an unknown request into a known Engine before `resolve()`
+    // can report the explicit fallback decision.
     const normalized = String(normalizeEngineName(engineName) || '').trim().toLowerCase();
-    return byId.has(normalized) ? normalized : raw;
+    return byId.has(raw) && byId.has(normalized) ? normalized : raw;
   }
 
   function lookup(engineName, { includeDisabled = true } = {}) {

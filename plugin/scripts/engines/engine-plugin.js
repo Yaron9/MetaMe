@@ -1,5 +1,7 @@
 'use strict';
 
+const Ajv2020 = require('ajv/dist/2020');
+
 /**
  * The final Engine Plugin contract.
  *
@@ -30,9 +32,8 @@ const PLUGIN_KEYS = Object.freeze([
   'protocolVersion', 'descriptor', 'runtime', 'sessionSource', 'cognitiveHost',
 ]);
 
-// This is intentionally data-only.  Function-valued adapter operations are
-// validated by createEnginePlugin(), while this schema is useful to manifest
-// and contract tests without introducing a schema-validator dependency here.
+// Function-valued adapter operations are validated by createEnginePlugin();
+// Ajv validates this versioned public manifest shape before semantic checks.
 const ENGINE_PLUGIN_SCHEMA = Object.freeze({
   $schema: 'https://json-schema.org/draft/2020-12/schema',
   $id: 'https://metame.local/schema/engine-plugin-v1.json',
@@ -43,9 +44,9 @@ const ENGINE_PLUGIN_SCHEMA = Object.freeze({
   properties: {
     protocolVersion: { const: ENGINE_PLUGIN_PROTOCOL_VERSION },
     descriptor: { $ref: '#/$defs/descriptor' },
-    runtime: { type: ['object', 'null'] },
-    sessionSource: { type: ['object', 'null'] },
-    cognitiveHost: { type: ['object', 'null'] },
+    runtime: { anyOf: [{ type: 'object' }, { type: 'null' }] },
+    sessionSource: { anyOf: [{ type: 'object' }, { type: 'null' }] },
+    cognitiveHost: { anyOf: [{ type: 'object' }, { type: 'null' }] },
   },
   $defs: {
     descriptor: {
@@ -67,7 +68,7 @@ const ENGINE_PLUGIN_SCHEMA = Object.freeze({
         name: { type: 'string', pattern: ENGINE_ID_RE.source },
         provider: { type: 'string', minLength: 1 },
         sessionStorage: { type: 'string', minLength: 1 },
-        hostHook: { type: ['string', 'null'] },
+        hostHook: { anyOf: [{ type: 'string' }, { type: 'null' }] },
       },
     },
     capabilities: {
@@ -114,10 +115,46 @@ const CAPABILITY_SCHEMA = Object.freeze({
   }])),
 });
 
+const AJV = new Ajv2020({ strict: true, allErrors: true });
+const validatePluginDocument = AJV.compile(ENGINE_PLUGIN_SCHEMA);
+const validateCapabilityDocument = AJV.compile(CAPABILITY_SCHEMA);
+
 function contractError(code, detail = '') {
   const error = new TypeError(detail ? `${code}:${detail}` : code);
   error.code = code;
   return error;
+}
+
+function formatSchemaErrors(errors) {
+  return (errors || []).map(error => ({
+    code: `schema_${error.keyword}`,
+    path: error.instancePath || '/',
+    message: error.message || 'schema validation failed',
+  }));
+}
+
+function validateSchemaDocument(validator, value) {
+  const valid = !!validator(value);
+  return {
+    valid,
+    errors: valid ? [] : formatSchemaErrors(validator.errors),
+  };
+}
+
+function validateEnginePluginSchema(value) {
+  return validateSchemaDocument(validatePluginDocument, value);
+}
+
+function validateCapabilitySchema(value) {
+  return validateSchemaDocument(validateCapabilityDocument, value);
+}
+
+function assertPluginSchema(value) {
+  const result = validateEnginePluginSchema(value);
+  if (!result.valid) {
+    const detail = result.errors.map(error => `${error.path} ${error.message}`).join('; ');
+    throw contractError('engine_plugin_schema_invalid', detail);
+  }
 }
 
 function isPlainObject(value) {
@@ -189,6 +226,35 @@ function normalizeCapabilities(value) {
   return Object.fromEntries(CAPABILITY_NAMES.map(name => [name, normalizeCapability(value[name], name)]));
 }
 
+function isDeeplyFrozen(value, seen = new Set()) {
+  if (!value || typeof value !== 'object') return true;
+  if (seen.has(value)) return true;
+  if (!Object.isFrozen(value)) return false;
+  seen.add(value);
+  return Object.keys(value).every(key => isDeeplyFrozen(value[key], seen));
+}
+
+function equivalentValue(left, right, seen = new Map()) {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  if (Array.isArray(left) !== Array.isArray(right)) return false;
+  if (seen.get(left) === right) return true;
+  seen.set(left, right);
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  if (leftKeys.length !== rightKeys.length || leftKeys.some((key, index) => key !== rightKeys[index])) return false;
+  return leftKeys.every(key => equivalentValue(left[key], right[key], seen));
+}
+
+function canReuseDescriptor(input, normalized) {
+  if (!isDeeplyFrozen(input)) return false;
+  // Compare every supplied field against the normalized contract.  This
+  // permits omitted legacy aliases while preventing booleans, duplicate
+  // executable names, or mutable nested capability values from bypassing
+  // normalization.
+  return Object.keys(input).every(key => equivalentValue(input[key], normalized[key]));
+}
+
 function normalizeDescriptor(input) {
   if (!isPlainObject(input)) throw contractError('engine_descriptor_required');
   assertKnownKeys(input, DESCRIPTOR_KEYS, 'engine_descriptor_property_unknown');
@@ -244,19 +310,7 @@ function normalizeDescriptor(input) {
   // Built-in descriptors are already immutable and are shared by legacy
   // runtime callers.  Reuse those exact objects so the migration does not
   // change descriptor identity for existing consumers.
-  if (
-    Object.isFrozen(input)
-    && Object.isFrozen(input.capabilities)
-    && input.id === id
-    && input.displayName === displayName
-    && input.vendor === vendor
-    && input.contextProjection === contextProjection
-    && input.nativeSessionKind === nativeSessionKind
-    && input.configSchemaVersion === configSchemaVersion
-    && Array.isArray(input.executableNames)
-    && input.executableNames.length === descriptor.executableNames.length
-    && input.executableNames.every((name, index) => name.trim() === descriptor.executableNames[index])
-  ) return input;
+  if (canReuseDescriptor(input, descriptor)) return input;
   return deepFreeze(descriptor);
 }
 
@@ -376,6 +430,7 @@ function addRuntimeCompatibilityAliases(plugin) {
 
 function createEnginePlugin(spec) {
   if (!isPlainObject(spec)) throw contractError('engine_plugin_required');
+  assertPluginSchema(spec);
   assertKnownKeys(spec, PLUGIN_KEYS, 'engine_plugin_property_unknown');
   if (spec.protocolVersion !== ENGINE_PLUGIN_PROTOCOL_VERSION) {
     throw contractError('engine_plugin_protocol_unsupported', String(spec.protocolVersion));
@@ -415,6 +470,8 @@ function isEnginePlugin(value) {
 }
 
 function validateEnginePlugin(value) {
+  const schemaResult = validateEnginePluginSchema(value);
+  if (!schemaResult.valid) return schemaResult;
   try {
     const plugin = createEnginePlugin(value);
     return { valid: true, errors: [], plugin };
@@ -457,6 +514,7 @@ function negotiateCapabilities(plugin, requested = CAPABILITY_NAMES) {
  * launching a Host or touching native session state.
  */
 function runEnginePluginConformance(plugin, options = {}) {
+  const schema = validateEnginePluginSchema(plugin);
   const checked = createEnginePlugin(plugin);
   const requiredCapabilities = options.requiredCapabilities || CAPABILITY_NAMES.filter(name => (
     capabilityIsSupported(checked.descriptor.capabilities[name])
@@ -467,6 +525,7 @@ function runEnginePluginConformance(plugin, options = {}) {
       && Object.isFrozen(checked.descriptor)
       && Object.isFrozen(checked.descriptor.capabilities),
     protocolVersion: checked.protocolVersion === ENGINE_PLUGIN_PROTOCOL_VERSION,
+    schema: schema.valid,
     capabilityNegotiation: negotiation.ok,
   };
   return Object.freeze({
@@ -491,9 +550,14 @@ module.exports = {
   isEnginePlugin,
   negotiateCapabilities,
   runEnginePluginConformance,
+  validateCapabilitySchema,
+  validateEnginePluginSchema,
   validateEnginePlugin,
   _internal: {
     deepFreeze,
+    isDeeplyFrozen,
+    canReuseDescriptor,
+    equivalentValue,
     normalizeCapability,
     normalizeCapabilities,
     normalizeDescriptor,
