@@ -65,6 +65,25 @@ test('Claude adapter recognizes growing revisions and rejects stale reads', asyn
   );
 });
 
+test('Claude discovery applies its cap after newest-session ordering', async () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-order-'));
+  const writeSession = (name, sessionId) => {
+    const filePath = path.join(tmpRoot, name);
+    fs.writeFileSync(filePath, `${JSON.stringify({ type: 'user', sessionId, message: { content: `session ${sessionId}` } })}\n`);
+    return filePath;
+  };
+  const oldPath = writeSession('a-old.jsonl', 'old-session');
+  const newPath = writeSession('z-new.jsonl', 'new-session');
+  const oldTime = new Date('2026-07-01T00:00:00.000Z');
+  const newTime = new Date('2026-07-02T00:00:00.000Z');
+  fs.utimesSync(oldPath, oldTime, oldTime);
+  fs.utimesSync(newPath, newTime, newTime);
+
+  const source = createClaudeSessionSourceAdapter({ projectsRoot: tmpRoot });
+  const refs = await discoverAll(source, { limit: 1 });
+  assert.deepEqual(refs.map(ref => ref.nativeSessionId), ['new-session']);
+});
+
 test('Claude adapter redacts prefixed environment secret names', () => {
   const redacted = redactSecrets('OPENAI_API_KEY=example-value AWS_SECRET_ACCESS_KEY:another-value');
   assert.equal(redacted, 'OPENAI_API_KEY=[REDACTED_SECRET] AWS_SECRET_ACCESS_KEY:[REDACTED_SECRET]');

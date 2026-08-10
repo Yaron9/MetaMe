@@ -405,6 +405,16 @@ function walkJsonl(root, fsMod, pathMod, output = []) {
   return output;
 }
 
+function sortJsonlFilesByMtime(files, fsMod) {
+  return [...files].sort((left, right) => {
+    let leftMtime = 0;
+    let rightMtime = 0;
+    try { leftMtime = fsMod.statSync(left).mtimeMs; } catch { /* keep deterministic fallback */ }
+    try { rightMtime = fsMod.statSync(right).mtimeMs; } catch { /* keep deterministic fallback */ }
+    return rightMtime - leftMtime || left.localeCompare(right);
+  });
+}
+
 function createClaudeSessionSourceAdapter(options = {}) {
   const fsMod = options.fs || fsDefault;
   const pathMod = options.path || pathDefault;
@@ -458,13 +468,13 @@ function createClaudeSessionSourceAdapter(options = {}) {
   }
 
   function listSessionRefs(request = {}) {
-    const files = walkJsonl(projectsRoot, fsMod, pathMod);
+    const files = sortJsonlFilesByMtime(walkJsonl(projectsRoot, fsMod, pathMod), fsMod);
     const requestedProject = stringValue(request.project || request.projectKey).trim();
     const requestedCwd = stringValue(request.cwd).trim();
     const includeSubagents = request.includeSubagents !== false;
     const limit = Math.min(Math.max(Number(request.limit) || DEFAULT_DISCOVERY_LIMIT, 1), DEFAULT_DISCOVERY_LIMIT);
     const refs = [];
-    for (const filePath of files.sort()) {
+    for (const filePath of files) {
       let info;
       try { info = inspectFile(filePath); } catch { continue; }
       if (requestedProject && info.project !== requestedProject) continue;
@@ -515,13 +525,13 @@ function createClaudeSessionSourceAdapter(options = {}) {
       };
     },
     discover: function* discover(request = {}) {
-      const files = walkJsonl(projectsRoot, fsMod, pathMod);
+      const files = sortJsonlFilesByMtime(walkJsonl(projectsRoot, fsMod, pathMod), fsMod);
       const requestedProject = stringValue(request.project || request.projectKey).trim();
       const requestedCwd = stringValue(request.cwd).trim();
       const includeSubagents = request.includeSubagents !== false;
       const limit = Math.min(Math.max(Number(request.limit) || DEFAULT_DISCOVERY_LIMIT, 1), DEFAULT_DISCOVERY_LIMIT);
       let index = 0;
-      for (const filePath of files.sort()) {
+      for (const filePath of files) {
         if (index < (cursorPosition(request.cursor) || 0)) {
           index++;
           continue;
@@ -641,5 +651,6 @@ module.exports = {
     nestedParentSessionId,
     isSidechainRecord,
     walkJsonl,
+    sortJsonlFilesByMtime,
   },
 };
