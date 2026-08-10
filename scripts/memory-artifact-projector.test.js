@@ -129,6 +129,21 @@ test('active projection fails closed for candidate, task-local, conflict, and le
   fs.rmSync(f.root, { recursive: true, force: true });
 });
 
+test('active projection excludes an incumbent with an unresolved conflict peer', () => {
+  const f = fixture();
+  f.db.prepare(`
+    INSERT INTO memory_items
+      (id,kind,state,content,canonical_key,project,scope,origin_class)
+    VALUES ('mi_conflict_peer','insight','conflict','peer value','metame.observed','metame','core','primary')
+  `).run();
+  fs.writeFileSync(path.join(f.capsulesDir, 'deploy.md'), artifact('playbook'));
+  const result = projectArtifacts(f.db, scanArtifacts(f));
+  assert.equal(result.ok, false);
+  assert.match(result.errors.map(error => error.error).join(' '), /ineligible/);
+  f.db.close();
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
 test('content changes require a monotonic revision chain', () => {
   const f = fixture();
   const file = path.join(f.capsulesDir, 'deploy.md');

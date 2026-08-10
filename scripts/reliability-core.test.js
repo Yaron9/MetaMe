@@ -218,7 +218,9 @@ test('memory-extract records codex provenance when no claude sessions exist', ()
       const path = require('path');
       const db = new DatabaseSync(path.join(process.env.HOME, '.metame', 'memory.db'));
       const sources = db.prepare('SELECT id, engine, session_id, status FROM session_sources').all();
-      const facts = db.prepare("SELECT source_type, source_id FROM memory_items WHERE kind IN ('convention','insight')").all();
+      const facts = sources.length > 0
+        ? db.prepare("SELECT kind, source_type, source_id FROM memory_items WHERE source_id=?").all(sources[0].id)
+        : [];
       db.close();
       console.log(JSON.stringify({ sources, facts }));
     })().then(() => process.exit(0)).catch((e) => {
@@ -232,6 +234,7 @@ test('memory-extract records codex provenance when no claude sessions exist', ()
   assert.equal(rows.sources[0].session_id, sessionId);
   assert.equal(rows.sources[0].status, 'extracted');
   assert.equal(rows.facts.length, 1);
+  assert.equal(rows.facts[0].kind, 'episode');
   assert.equal(rows.facts[0].source_type, 'codex');
   assert.equal(rows.facts[0].source_id, rows.sources[0].id);
 });

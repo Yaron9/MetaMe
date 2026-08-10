@@ -101,6 +101,8 @@ test('active synthesis accepts only active canonical non-task claims; drafts may
   assert.equal(isSynthesisEvidenceEligible(claim({ state: 'active', task_key: 'task-1' })), false);
   assert.equal(isSynthesisEvidenceEligible(claim({ state: 'conflict' })), false);
   assert.equal(isSynthesisEvidenceEligible(claim({ state: 'active', canonical_key: null })), false);
+  assert.equal(isSynthesisEvidenceEligible(claim({ state: 'active' }), { hasUnresolvedConflict: true }), false);
+  assert.equal(isSynthesisEvidenceEligible(claim({ state: 'active', has_unresolved_conflict: true })), false);
   assert.equal(isSynthesisEvidenceEligible(claim({ state: 'active', kind: 'episode' })), false);
   assert.equal(isSynthesisEvidenceEligible(claim({ state: 'active', relation: 'synthesized_insight' })), false);
   assert.equal(isSynthesisEvidenceEligible(claim({ state: 'candidate' }), { draft: true }), true);

@@ -242,8 +242,14 @@ function isCanonicalClaim(record = {}) {
     && Boolean(claimIdentity(record));
 }
 
-function isSynthesisEvidenceEligible(record = {}, { draft = false } = {}) {
+function isSynthesisEvidenceEligible(record = {}, {
+  draft = false,
+  hasUnresolvedConflict = false,
+} = {}) {
   if (!isCanonicalClaim(record) || isTaskLocalClaim(record)) return false;
+  if (hasUnresolvedConflict === true
+    || record.has_unresolved_conflict === true
+    || record.hasUnresolvedConflict === true) return false;
   if (String(record.state || '') === 'conflict') return false;
   const allowedStates = draft ? new Set(['active', 'candidate']) : new Set(['active']);
   if (!allowedStates.has(String(record.state || ''))) return false;

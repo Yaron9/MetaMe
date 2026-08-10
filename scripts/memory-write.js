@@ -163,7 +163,17 @@ function writeFact({ entity, relation, value, confidence = 'medium', project = '
   if (typeof memory.acquire === 'function') memory.acquire();
   try {
     const result = memory.saveFacts(sessionId, project, [
-      { entity, relation, value, confidence, tags: (tags || []).slice(0, 3), source_type: sourceType },
+      {
+        entity,
+        relation,
+        value,
+        confidence,
+        tags: (tags || []).slice(0, 3),
+        source_type: sourceType,
+        // This CLI is an explicit durable write. Session extraction callers
+        // omit lifecycle and therefore fail closed to task Episodes.
+        lifecycle: 'project',
+      },
     ]);
     return { ok: result.saved > 0, result };
   } catch (err) {

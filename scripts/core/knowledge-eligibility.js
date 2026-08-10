@@ -28,6 +28,24 @@ function classifyOrigin(record = {}) {
   return explicit || 'primary';
 }
 
+/**
+ * A canonical claim is not reliable while another live row with the same
+ * identity is in conflict.  The incumbent remains active by contract, so
+ * state='active' alone is not sufficient for recall eligibility.
+ */
+function unresolvedConflictSql(alias = 'mi') {
+  const prefix = alias ? `${alias}.` : '';
+  return `NOT EXISTS (
+    SELECT 1
+      FROM memory_items claim_conflict_peer
+     WHERE claim_conflict_peer.id != ${prefix}id
+       AND claim_conflict_peer.canonical_key = ${prefix}canonical_key
+       AND claim_conflict_peer.project IS ${prefix}project
+       AND claim_conflict_peer.scope IS ${prefix}scope
+       AND claim_conflict_peer.state = 'conflict'
+  )`;
+}
+
 function deriveProvenanceRootId(record = {}) {
   const explicit = String(record.provenance_root_id || '').trim();
   if (explicit) return explicit;
@@ -42,10 +60,13 @@ function deriveProvenanceRootId(record = {}) {
   return null;
 }
 
-function eligibleFor(channel, record = {}) {
+function eligibleFor(channel, record = {}, options = {}) {
   if (CLAIM_ELIGIBILITY_CHANNELS.has(channel)) {
     const { isSynthesisEvidenceEligible } = require('./claim-contract');
-    return isSynthesisEvidenceEligible(record, { draft: channel === 'synthesis_draft' });
+    return isSynthesisEvidenceEligible(record, {
+      ...options,
+      draft: channel === 'synthesis_draft',
+    });
   }
   if (!PRIMARY_ONLY_CHANNELS.has(channel)) {
     throw new Error(`unknown knowledge eligibility channel: ${channel}`);
@@ -78,7 +99,8 @@ function primarySql(alias = 'mi') {
     sql: `COALESCE(${prefix}origin_class, 'primary') != 'derived'
       AND COALESCE(${prefix}relation, '') NOT IN ('synthesized_insight','knowledge_capsule')
       AND lower(COALESCE(${prefix}source_id, '')) NOT LIKE 'nightly-reflect-%'
-      AND lower(COALESCE(${prefix}source_id, '')) NOT LIKE 'capsule-%'`,
+      AND lower(COALESCE(${prefix}source_id, '')) NOT LIKE 'capsule-%'
+      AND ${unresolvedConflictSql(alias)}`,
     args: [],
   };
 }
@@ -99,6 +121,11 @@ function primarySqlForDb(db, alias = 'mi', table = 'memory_items') {
     : "'primary'";
   const checks = [`${inferred} = 'primary'`];
   if (columns.has('origin_class')) checks.unshift(`COALESCE(${prefix}origin_class, 'primary') != 'derived'`);
+  if (table === 'memory_items'
+    && columns.has('id') && columns.has('canonical_key')
+    && columns.has('project') && columns.has('scope') && columns.has('state')) {
+    checks.push(unresolvedConflictSql(alias));
+  }
   return {
     sql: checks.join(' AND '),
     args: [],
@@ -116,4 +143,5 @@ module.exports = {
   normalizeOriginClass,
   primarySql,
   primarySqlForDb,
+  unresolvedConflictSql,
 };

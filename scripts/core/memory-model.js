@@ -158,6 +158,9 @@ function assemblePromptBlocks(allocated) {
 function shouldPromote(item) {
   if (!item || item.state !== 'candidate') return false;
   if (isTaskLocalClaim(item)) return false;
+  // Canonical Claims require an explicit state transition. Legacy rows with a
+  // null key retain the old compatibility promotion behavior.
+  if (isCanonicalClaim(item)) return false;
   // Derived relations are nightly-reflect outputs; they must never self-promote
   // without an explicit consumption signal, regardless of search/recency feedback.
   const relation = String(item.relation || '');

@@ -70,6 +70,25 @@ function scanArtifacts({ decisionsDir, capsulesDir }) {
   return { artifacts, ignored, errors };
 }
 
+function hasUnresolvedConflict(db, row) {
+  if (!row || !row.canonical_key) return false;
+  try {
+    return Boolean(db.prepare(`
+      SELECT 1
+        FROM memory_items claim_conflict_peer
+       WHERE claim_conflict_peer.id != ?
+         AND claim_conflict_peer.canonical_key = ?
+         AND claim_conflict_peer.project IS ?
+         AND claim_conflict_peer.scope IS ?
+         AND claim_conflict_peer.state = 'conflict'
+       LIMIT 1
+    `).get(row.id, row.canonical_key, row.project, row.scope));
+  } catch {
+    // A canonical row on an incomplete schema is not safe evidence.
+    return true;
+  }
+}
+
 function validateEvidence(db, artifacts) {
   const find = db.prepare(`SELECT * FROM memory_items WHERE id=?`);
   const errors = [];
@@ -78,7 +97,8 @@ function validateEvidence(db, artifacts) {
     for (const evidenceId of artifact.validation.evidenceIds) {
       const row = find.get(evidenceId);
       const draft = artifact.meta.status === 'draft';
-      if (!row || !isSynthesisEvidenceEligible(row, { draft })) {
+      const conflict = hasUnresolvedConflict(db, row);
+      if (!row || !isSynthesisEvidenceEligible(row, { draft, hasUnresolvedConflict: conflict })) {
         errors.push({ file: artifact.file, error: `missing, inactive or ineligible evidence: ${evidenceId}` });
       } else {
         roots.add(row.provenance_root_id || row.id);

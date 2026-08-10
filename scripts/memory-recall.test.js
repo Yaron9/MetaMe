@@ -109,6 +109,37 @@ test('assembleRecallContext: facts mode populates from active memory_items', asy
   });
 });
 
+test('default fact recall excludes an active incumbent with an unresolved conflict peer', async () => {
+  await withFreshMemoryHome(async memory => {
+    memory.saveMemoryItem({
+      id: 'mi_conflicted_incumbent',
+      kind: 'convention',
+      state: 'active',
+      title: 'bounded policy incumbent',
+      content: 'The bounded policy incumbent must not enter reliable recall while unresolved.',
+      canonical_key: 'metame.bounded.policy',
+      project: 'metame',
+      scope: 'main',
+    });
+    memory.saveMemoryItem({
+      id: 'mi_conflicted_peer',
+      kind: 'convention',
+      state: 'conflict',
+      title: 'bounded policy peer',
+      content: 'The bounded policy peer conflicts with the incumbent and remains unresolved.',
+      canonical_key: 'metame.bounded.policy',
+      project: 'metame',
+      scope: 'main',
+    });
+    const rows = memory.searchFacts('bounded policy', {
+      project: 'metame',
+      scope: 'main',
+      trackSearch: false,
+    });
+    assert.deepEqual(rows, []);
+  });
+});
+
 test('assembleRecallContext: forces trackSearch=false (no search_count bump on facts)', async () => {
   await withFreshMemoryHome(async (memory, assembleRecallContext) => {
     memory.saveMemoryItem({

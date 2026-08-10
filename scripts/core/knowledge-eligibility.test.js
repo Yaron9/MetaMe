@@ -7,7 +7,9 @@ const {
   deriveProvenanceRootId,
   eligibleFor,
   primarySql,
+  primarySqlForDb,
 } = require('./knowledge-eligibility');
+const { DatabaseSync } = require('node:sqlite');
 
 test('classifyOrigin fails closed for known derived generator fingerprints', () => {
   assert.equal(classifyOrigin({ origin_class: 'primary', relation: 'synthesized_insight' }), 'derived');
@@ -40,4 +42,29 @@ test('primarySql includes legacy derived fingerprints before migration', () => {
   assert.match(predicate.sql, /origin_class/);
   assert.match(predicate.sql, /nightly-reflect/);
   assert.match(predicate.sql, /knowledge_capsule/);
+  assert.match(predicate.sql, /claim_conflict_peer/);
+});
+
+test('database eligibility isolates active incumbents with unresolved conflict peers', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE memory_items (
+      id TEXT PRIMARY KEY, kind TEXT, state TEXT, content TEXT,
+      canonical_key TEXT, project TEXT, scope TEXT,
+      origin_class TEXT, relation TEXT, source_id TEXT
+    );
+    INSERT INTO memory_items VALUES
+      ('incumbent','convention','active','old value','metame.policy','metame','core','primary',NULL,'source-old'),
+      ('peer','convention','conflict','new value','metame.policy','metame','core','primary',NULL,'source-new'),
+      ('safe','convention','active','safe value','metame.safe','metame','core','primary',NULL,'source-safe'),
+      ('legacy','convention','active','legacy value',NULL,'metame','core','primary',NULL,'source-legacy');
+  `);
+  const eligibility = primarySqlForDb(db, 'mi');
+  const rows = db.prepare(`
+    SELECT mi.id FROM memory_items mi
+     WHERE mi.state='active' AND ${eligibility.sql}
+     ORDER BY mi.id
+  `).all();
+  assert.deepEqual(rows.map(row => row.id), ['legacy', 'safe']);
+  db.close();
 });

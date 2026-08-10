@@ -371,7 +371,7 @@ describe('assemblePromptBlocks', () => {
 
 describe('shouldPromote', () => {
   it('search_count=3, last_searched_at=today → true', () => {
-    const item = makeItem({ search_count: 3, last_searched_at: new Date().toISOString(), state: 'candidate' });
+    const item = makeItem({ canonical_key: null, search_count: 3, last_searched_at: new Date().toISOString(), state: 'candidate' });
     assert.strictEqual(shouldPromote(item), true);
   });
 
@@ -393,6 +393,7 @@ describe('shouldPromote', () => {
   it('high-confidence durable candidate → true even before search feedback', () => {
     const item = makeItem({
       state: 'candidate',
+      canonical_key: null,
       kind: 'convention',
       relation: 'arch_convention',
       confidence: 0.9,
@@ -407,6 +408,7 @@ describe('shouldPromote', () => {
     for (const relation of ['bug_lesson', 'project_milestone']) {
       const item = makeItem({
         state: 'candidate',
+        canonical_key: null,
         kind: relation === 'bug_lesson' ? 'convention' : 'insight',
         relation,
         confidence: 0.9,
@@ -427,6 +429,19 @@ describe('shouldPromote', () => {
       search_count: 0,
       last_searched_at: null,
       content: 'Derived nightly reflections should not self-promote without an explicit consumption signal.',
+    });
+    assert.strictEqual(shouldPromote(item), false);
+  });
+
+  it('canonical candidate never auto-promotes from confidence or search count', () => {
+    const item = makeItem({
+      state: 'candidate',
+      canonical_key: 'metame.explicit.claim',
+      relation: 'arch_convention',
+      confidence: 0.99,
+      search_count: 10,
+      last_searched_at: new Date().toISOString(),
+      content: 'Canonical claims need an explicit promotion decision before activation.',
     });
     assert.strictEqual(shouldPromote(item), false);
   });

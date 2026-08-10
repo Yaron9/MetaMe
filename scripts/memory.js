@@ -448,9 +448,10 @@ function saveFacts(sessionId, project, facts, { scope = null, source_type = null
       relation: f.relation,
       tags,
     };
-    const candidate = f.lifecycle === undefined
-      ? baseCandidate
-      : mapClaimStorage(baseCandidate, { sessionSourceId: source_id || sessionId });
+    // Admission is fail-closed: an omitted or unknown lifecycle is a
+    // task-local Episode. Durable Claims must opt in with lifecycle=project or
+    // lifecycle=global (and may provide a canonical_key).
+    const candidate = mapClaimStorage(baseCandidate, { sessionSourceId: source_id || sessionId });
 
     try {
       const replay = findSourceReplay(candidate);
@@ -735,6 +736,7 @@ function getCognitiveAsset(type, id, { project = null, history = false } = {}) {
   if (!['fact', 'wiki'].includes(type) || !id) return null;
   const db = getDb();
   if (type === 'fact') {
+    const { unresolvedConflictSql } = require('./core/knowledge-eligibility');
     const params = [id];
     let scopeSql = '';
     if (project) {
@@ -767,7 +769,8 @@ function getCognitiveAsset(type, id, { project = null, history = false } = {}) {
              source_type, source_id, provenance_root_id, updated_at
         FROM memory_items
        WHERE id = ? AND kind IN ('fact','insight','convention')
-         AND state = 'active' AND supersedes_id IS NULL ${scopeSql}
+         AND state = 'active' AND supersedes_id IS NULL
+         AND ${unresolvedConflictSql('memory_items')} ${scopeSql}
     `).get(...params);
     return row ? { type: 'fact', ...row } : null;
   }
