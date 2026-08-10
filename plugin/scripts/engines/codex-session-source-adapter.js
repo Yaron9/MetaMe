@@ -409,6 +409,7 @@ function projectCanonicalRecords(records, metadata, history = [], options = {}) 
   const candidates = [];
   const hasHistory = history.length > 0 && metadata.classification !== 'subagent';
   const toolCallNames = new Map();
+  const anonymousCustomToolNames = [];
 
   for (const item of records) {
     const record = item.record;
@@ -467,6 +468,7 @@ function projectCanonicalRecords(records, metadata, history = [], options = {}) 
         : payload.input;
       const inputText = toolInputText(input, maxToolInput);
       const tool = stringValue(payload.name || payload.tool_name || 'unknown').trim().slice(0, 120) || 'unknown';
+      if (payloadType === 'custom_tool_call' && !callId) anonymousCustomToolNames.push(tool);
       if (inputText) appendMessage('tool', 'tool_call', inputText, record, item.nativeSequence, {
         tool,
         ...(callId ? { provenance: { callId } } : {}),
@@ -476,12 +478,17 @@ function projectCanonicalRecords(records, metadata, history = [], options = {}) 
 
     if (type === 'response_item' && ['custom_tool_call_output', 'function_call_output'].includes(payloadType)) {
       const callId = nativeCallId(payload, record);
-      const resolvedToolName = callId ? toolCallNames.get(callId) || '' : '';
+      const outputToolName = stringValue(payload.name || payload.tool_name).trim();
+      const mappedToolName = callId ? toolCallNames.get(callId) || '' : '';
+      const anonymousToolName = payloadType === 'custom_tool_call_output' && !callId
+        ? anonymousCustomToolNames.shift() || ''
+        : '';
+      const resolvedToolName = outputToolName || mappedToolName || anonymousToolName;
       const rawOutput = typeof payload.output === 'string' ? payload.output : compactJson(payload.output || '');
       const outputText = cleanText(rawOutput, maxToolText, { allowInternal: true }) || '';
       appendMessage('tool', 'tool_result', outputText, record, item.nativeSequence, {
         outcome: normalizedToolOutcome(payload, outputText, resolvedToolName),
-        tool: stringValue(payload.name || payload.tool_name || (callId && toolCallNames.get(callId)) || '').trim() || null,
+        tool: resolvedToolName || null,
         ...(callId ? { provenance: { callId } } : {}),
       });
       continue;

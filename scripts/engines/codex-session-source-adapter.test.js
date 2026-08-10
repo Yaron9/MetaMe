@@ -182,6 +182,79 @@ test('Codex textual exit status fallback requires a resolved process tool', () =
   assert.equal(Object.hasOwn(unknownCall.outcome, 'exitCode'), false);
 });
 
+test('Codex anonymous custom outputs use FIFO without mixing function calls', () => {
+  const records = [
+    {
+      nativeSequence: 0,
+      record: {
+        type: 'response_item',
+        payload: { type: 'custom_tool_call', name: 'exec_command', input: { cmd: 'first' } },
+      },
+    },
+    {
+      nativeSequence: 1,
+      record: {
+        type: 'response_item',
+        payload: { type: 'custom_tool_call', name: 'read_file', input: { path: '/tmp/result' } },
+      },
+    },
+    {
+      nativeSequence: 2,
+      record: {
+        type: 'response_item',
+        payload: { type: 'custom_tool_call_output', output: 'Process exited with code 1' },
+      },
+    },
+    {
+      nativeSequence: 3,
+      record: {
+        type: 'response_item',
+        payload: { type: 'custom_tool_call_output', output: 'Process exited with code 1' },
+      },
+    },
+    {
+      nativeSequence: 4,
+      record: {
+        type: 'response_item',
+        payload: { type: 'custom_tool_call_output', output: 'Process exited with code 1' },
+      },
+    },
+    {
+      nativeSequence: 5,
+      record: {
+        type: 'response_item',
+        payload: { type: 'function_call', name: 'exec_command', arguments: '{}', call_id: 'function-without-output-id' },
+      },
+    },
+    {
+      nativeSequence: 6,
+      record: {
+        type: 'response_item',
+        payload: { type: 'function_call_output', output: 'Process exited with code 1' },
+      },
+    },
+  ];
+  const events = projectCanonicalRecords(records, {
+    classification: 'conversation',
+    parentNativeSessionId: null,
+    model: null,
+  });
+  const results = events.filter(event => event.kind === 'tool_result');
+  assert.equal(results.length, 4);
+  assert.equal(results[0].tool, 'exec_command');
+  assert.equal(results[0].outcome.error, true);
+  assert.equal(results[0].outcome.exitCode, 1);
+  assert.equal(results[1].tool, 'read_file');
+  assert.equal(results[1].outcome.error, false);
+  assert.equal(Object.hasOwn(results[1].outcome, 'exitCode'), false);
+  assert.equal(results[2].tool, null);
+  assert.equal(results[2].outcome.error, false);
+  assert.equal(Object.hasOwn(results[2].outcome, 'exitCode'), false);
+  assert.equal(results[3].tool, null);
+  assert.equal(results[3].outcome.error, false);
+  assert.equal(Object.hasOwn(results[3].outcome, 'exitCode'), false);
+});
+
 test('Codex fallback discovers rollout files when state_5.sqlite is unavailable', () => {
   const home = makeHome();
   const sessionId = 'codex-fallback-session';
