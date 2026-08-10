@@ -42,31 +42,33 @@ function resolveNodeEntry(cmdPath) {
   return null;
 }
 
-function spawnViaNode(cmd, args, options) {
-  if (process.platform !== 'win32') return spawn(cmd, args, options);
+function _spawnWin32LookupAndSpawn(isClaudeNotCodex, args, options) {
+  const bin = isClaudeNotCodex ? 'claude' : 'codex';
   try {
-    const { execSync: _es } = require('child_process');
-    const lines = _es(`where ${cmd}`, { encoding: 'utf8', timeout: 3000 })
+    const { execFileSync: _es } = require('child_process');
+    const lines = _es('where', [bin], { encoding: 'utf8', timeout: 3000 })
       .split('\n').map(l => l.trim()).filter(Boolean);
-    const cmdFile = lines.find(l => l.toLowerCase().endsWith(`${cmd}.cmd`)) || lines[0];
+    const cmdFile = lines.find(l => l.toLowerCase().endsWith(`${bin}.cmd`)) || lines[0];
     if (cmdFile) {
       const entry = resolveNodeEntry(cmdFile);
       if (entry) return spawn(process.execPath, [entry, ...args], { ...options, windowsHide: true });
       return spawn(cmdFile, args, { ...options, shell: process.env.COMSPEC || true, windowsHide: true });
     }
   } catch { /* ignore */ }
-  return spawn(cmd, args, { ...options, shell: process.env.COMSPEC || true, windowsHide: true });
+  return spawn(bin, args, { ...options, shell: process.env.COMSPEC || true, windowsHide: true });
 }
 
 function spawnClaude(args, options) {
-  return spawnViaNode('claude', args, options);
+  if (process.platform !== 'win32') return spawn('claude', args, options);
+  return _spawnWin32LookupAndSpawn(true, args, options);
 }
 
 function spawnCodex(args, options) {
   // Sanitize env: unset CODEX_HOME if it points to a non-existent path (corrupted registry value)
   const env = { ...(options && options.env ? options.env : process.env) };
   if (env.CODEX_HOME && !fs.existsSync(env.CODEX_HOME)) delete env.CODEX_HOME;
-  return spawnViaNode('codex', args, { ...options, env });
+  if (process.platform !== 'win32') return spawn('codex', args, { ...options, env });
+  return _spawnWin32LookupAndSpawn(false, args, { ...options, env });
 }
 
 function mergeReflectionDisplayEntries(entries) {
@@ -2417,17 +2419,9 @@ if (isDaemon) {
         try {
           const { spawn: _spawn } = require('child_process');
           const platform = process.platform;
-          const cmd = platform === 'darwin'
-            ? 'open'
-            : platform === 'win32'
-              ? 'cmd'
-              : 'xdg-open';
-          const args = platform === 'win32' ? ['/c', 'start', '""', url] : [url];
-          const child = _spawn(cmd, args, {
-            stdio: 'ignore',
-            detached: true,
-            ...(platform === 'win32' ? { shell: false, windowsHide: true } : {}),
-          });
+          const child = platform === 'win32'
+            ? _spawn('cmd', ['/c', 'start', '""', url], { stdio: 'ignore', detached: true, shell: false, windowsHide: true })
+            : _spawn(platform === 'darwin' ? 'open' : 'xdg-open', [url], { stdio: 'ignore', detached: true });
           child.on('error', () => { /* GUI unavailable, ignore */ });
           child.unref();
           return true;
