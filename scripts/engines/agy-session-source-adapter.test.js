@@ -97,6 +97,33 @@ test('agy revisions and cursors detect append/change and resume after the prior 
   fs.rmSync(home, { recursive: true, force: true });
 });
 
+test('agy defers an unterminated final JSONL record without losing its cursor position', async () => {
+  const home = makeHome();
+  const { transcript } = writeSession(home, 'agy-partial');
+  const first = { type: 'USER_INPUT', source: 'USER_EXPLICIT', content: 'first' };
+  const second = { type: 'USER_INPUT', source: 'USER_EXPLICIT', content: 'second' };
+  const encodedSecond = JSON.stringify(second);
+  const splitAt = Math.floor(encodedSecond.length / 2);
+  fs.writeFileSync(transcript, `${JSON.stringify(first)}\n${encodedSecond.slice(0, splitAt)}`);
+  const source = createAgySessionSourceAdapter({ home });
+  const ref = (await discoverAll(source))[0];
+  const partial = await source.inspect(ref);
+  assert.equal(partial.partialFinalLine, true);
+  assert.equal(partial.cursor.sequence, 1);
+  assert.equal((await source.validate(ref)).valid, true);
+
+  fs.appendFileSync(transcript, `${encodedSecond.slice(splitAt)}\n`);
+  const complete = await source.inspect(ref);
+  assert.equal(complete.partialFinalLine, false);
+  const resumed = [];
+  for await (const event of source.read(ref, {
+    sourceRevision: complete.sourceRevision,
+    cursor: partial.cursor,
+  })) resumed.push(event);
+  assert.deepEqual(resumed.map(event => event.text), ['second']);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
 test('agy discovery cursor replays a stable newest-first snapshot', async () => {
   const home = makeHome();
   const first = writeSession(home, 'agy-old');

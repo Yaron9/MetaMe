@@ -120,6 +120,7 @@ function readFileBounded(filePath, fsMod, maxFileSize) {
 function recordsFromText(text) {
   const records = [];
   let invalidLineCount = 0;
+  let partialFinalLine = false;
   const value = String(text || '');
   const lines = value.split('\n');
   lines.forEach((line, index) => {
@@ -129,13 +130,19 @@ function recordsFromText(text) {
       if (!record || typeof record !== 'object' || Array.isArray(record)) throw new Error('record');
       records.push({ record, nativeSequence: index });
     } catch {
-      invalidLineCount += 1;
+      const isUnterminatedFinalLine = index === lines.length - 1 && !value.endsWith('\n');
+      if (isUnterminatedFinalLine) partialFinalLine = true;
+      else invalidLineCount += 1;
     }
   });
+  const nextNativeSequence = value
+    ? lines.length - (value.endsWith('\n') || partialFinalLine ? 1 : 0)
+    : 0;
   return {
     records,
     invalidLineCount,
-    nextNativeSequence: value ? lines.length - (value.endsWith('\n') ? 1 : 0) : 0,
+    partialFinalLine,
+    nextNativeSequence,
   };
 }
 
@@ -513,6 +520,7 @@ function createAgySessionSourceAdapter(options = {}) {
       eventCount: events.length,
       eventLimitExceeded: events.length > maxEvents,
       invalidLineCount: parsed.invalidLineCount,
+      partialFinalLine: parsed.partialFinalLine,
       firstTs: timestamps[0] || metadata.firstTs,
       lastTs: timestamps.at(-1) || metadata.lastTs,
       lastModified: source.stat.mtime instanceof Date
@@ -682,12 +690,23 @@ function createAgySessionSourceAdapter(options = {}) {
           return { valid: false, errorCode: 'SOURCE_MALFORMED', detail: 'no valid canonical evidence' };
         }
         if (revision.eventCount === 0) {
-          return { valid: false, errorCode: 'SOURCE_EMPTY', detail: 'transcript has no canonical evidence' };
+          return {
+            valid: false,
+            errorCode: revision.partialFinalLine ? 'SOURCE_PARTIAL' : 'SOURCE_EMPTY',
+            detail: revision.partialFinalLine
+              ? 'transcript ends with an incomplete JSONL record'
+              : 'transcript has no canonical evidence',
+          };
         }
         return {
           valid: true,
           state: 'valid',
-          ...(revision.unknownRecordCount > 0 ? { detail: `${revision.unknownRecordCount} unknown records ignored` } : {}),
+          ...((revision.unknownRecordCount > 0 || revision.partialFinalLine) ? {
+            detail: [
+              revision.unknownRecordCount > 0 ? `${revision.unknownRecordCount} unknown records ignored` : '',
+              revision.partialFinalLine ? 'incomplete final JSONL record deferred' : '',
+            ].filter(Boolean).join('; '),
+          } : {}),
         };
       } catch (error) {
         return { valid: false, errorCode: error.code || 'SOURCE_INVALID', detail: error.message };
