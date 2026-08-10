@@ -320,44 +320,71 @@ async function* iterateDiscovery(source, request) {
   }
 }
 
+function createDiscoveryState(source, request, pageSize) {
+  return {
+    source,
+    request: { ...(request || {}) },
+    pageSize: boundedDiscoveryValue(pageSize, DEFAULT_DISCOVERY_PAGE_SIZE, 1, MAX_DISCOVERY_PAGE_SIZE),
+    cursor: request && request.cursor,
+    visitedCursors: new Set(),
+    scanned: 0,
+    exhausted: false,
+  };
+}
+
+async function readDiscoveryPage(state, scanBudget) {
+  if (!state || state.exhausted || scanBudget <= 0) return { refs: [], scanned: 0 };
+  const currentKey = cursorKey(state.cursor);
+  if (state.visitedCursors.has(currentKey)) {
+    state.exhausted = true;
+    return { refs: [], scanned: 0 };
+  }
+  state.visitedCursors.add(currentKey);
+
+  const limit = Math.min(state.pageSize, scanBudget);
+  const pageRequest = { ...state.request, limit };
+  if (state.cursor === undefined || state.cursor === null || state.cursor === '') delete pageRequest.cursor;
+  else pageRequest.cursor = state.cursor;
+
+  const refs = [];
+  for await (const ref of iterateDiscovery(state.source, pageRequest)) {
+    refs.push(ref);
+    state.scanned += 1;
+    if (refs.length >= limit) break;
+  }
+  if (refs.length === 0) {
+    state.exhausted = true;
+    return { refs, scanned: 0 };
+  }
+
+  const currentCursorKey = currentKey;
+  const last = refs.at(-1) || {};
+  const nextCursor = last.discoveryCursor
+    ?? last.discovery_cursor
+    ?? last.cursor;
+  if (nextCursor === undefined || nextCursor === null || nextCursor === ''
+    || cursorKey(nextCursor) === currentCursorKey) {
+    state.exhausted = true;
+  } else {
+    state.cursor = nextCursor;
+  }
+  return { refs, scanned: refs.length };
+}
+
 async function walkDiscoveredRefs(source, request, options = {}) {
   const pageSize = boundedDiscoveryValue(options.pageSize, DEFAULT_DISCOVERY_PAGE_SIZE, 1, MAX_DISCOVERY_PAGE_SIZE);
   const scanBudget = boundedDiscoveryValue(options.scanBudget, DEFAULT_DISCOVERY_SCAN_BUDGET, 1, MAX_DISCOVERY_SCAN_BUDGET);
-  let cursor = request && request.cursor;
-  const visitedCursors = new Set();
+  const state = createDiscoveryState(source, request, pageSize);
   let scanned = 0;
 
-  while (scanned < scanBudget) {
-    const currentKey = cursorKey(cursor);
-    if (visitedCursors.has(currentKey)) break;
-    visitedCursors.add(currentKey);
-
-    const pageRequest = { ...(request || {}), limit: Math.min(pageSize, scanBudget - scanned) };
-    if (cursor === undefined || cursor === null || cursor === '') delete pageRequest.cursor;
-    else pageRequest.cursor = cursor;
-
-    const page = [];
-    for await (const ref of iterateDiscovery(source, pageRequest)) {
-      page.push(ref);
-      scanned += 1;
-      if (page.length >= pageRequest.limit || scanned >= scanBudget) break;
-    }
-    if (page.length === 0) break;
-
-    for (const ref of page) {
+  while (!state.exhausted && scanned < scanBudget) {
+    const page = await readDiscoveryPage(state, scanBudget - scanned);
+    scanned += page.scanned;
+    for (const ref of page.refs) {
       if (typeof options.onRef === 'function' && await options.onRef(ref)) {
         return { scanned, stopped: true };
       }
     }
-    if (scanned >= scanBudget) break;
-
-    const last = page.at(-1) || {};
-    const nextCursor = last.discoveryCursor
-      ?? last.discovery_cursor
-      ?? last.cursor;
-    if (nextCursor === undefined || nextCursor === null || nextCursor === '') break;
-    if (cursorKey(nextCursor) === currentKey) break;
-    cursor = nextCursor;
   }
   return { scanned, stopped: false };
 }
@@ -367,44 +394,63 @@ async function listCanonicalSessions(kind = 'analyzed', limit = 30, options = {}
   const rows = [];
   const pageSize = discoveryPageSize(max, options);
   const scanBudget = discoveryScanBudget(options);
-  const sourceEntries = [...getSessionSources()];
-  let remainingScanBudget = scanBudget;
-  for (const [sourceIndex, [engineId, source]] of sourceEntries.entries()) {
-    if (remainingScanBudget <= 0) break;
-    const sourcesLeft = sourceEntries.length - sourceIndex;
-    const sourceScanBudget = Math.min(
-      remainingScanBudget,
-      Math.max(1, Math.ceil(remainingScanBudget / sourcesLeft)),
-    );
-    const sourceRows = [];
-    const scan = await walkDiscoveredRefs(source, {
+  const sourceEntries = [...getSessionSources()].map(([engineId, source]) => ({
+    engineId,
+    source,
+    rows: [],
+    state: null,
+  }));
+  const discoveryRequest = {
       ...(options.discoveryRequest || {}),
       includeSubagents: options.includeSubagents !== false,
       suppressOwnedSubagents: options.suppressOwnedSubagents !== false,
-    }, {
-      pageSize,
-      scanBudget: sourceScanBudget,
-      onRef: async ref => {
-      const inspected = await inspectSourceSession(engineId, source, ref);
-      if (!inspected) return false;
-      const sourceRevision = sourceRevisionOf(ref, inspected.revision);
-      if (!sourceRevision || isProcessed(kind, ref.nativeSessionId, sourceRevision, CANONICAL_PIPELINE_VERSION, engineId)) return false;
-      sourceRows.push({
-        engine: engineId,
-        engineId,
-        session_id: ref.nativeSessionId,
-        nativeSessionId: ref.nativeSessionId,
-        ref,
-        revision: inspected.revision,
-        source,
-        mtime: inspected.revision.lastModified ? Date.parse(inspected.revision.lastModified) : 0,
-        path: inspected.filePath || null,
-      });
-      return sourceRows.length >= max;
-      },
-    });
-    remainingScanBudget -= scan.scanned;
-    rows.push(...sourceRows);
+  };
+  for (const entry of sourceEntries) {
+    entry.state = createDiscoveryState(entry.source, discoveryRequest, pageSize);
+  }
+
+  let scanned = 0;
+  let active = sourceEntries.length;
+  while (scanned < scanBudget && active > 0) {
+    let progressed = false;
+    for (const entry of sourceEntries) {
+      if (scanned >= scanBudget) break;
+      if (entry.state.exhausted || entry.rows.length >= max) continue;
+      const page = await readDiscoveryPage(entry.state, scanBudget - scanned);
+      scanned += page.scanned;
+      if (page.scanned > 0) progressed = true;
+      for (const ref of page.refs) {
+        if (entry.rows.length >= max) break;
+        const inspected = await inspectSourceSession(entry.engineId, entry.source, ref);
+        if (!inspected) continue;
+        const sourceRevision = sourceRevisionOf(ref, inspected.revision);
+        if (!sourceRevision || isProcessed(kind, ref.nativeSessionId, sourceRevision, CANONICAL_PIPELINE_VERSION, entry.engineId)) continue;
+        entry.rows.push({
+          engine: entry.engineId,
+          engineId: entry.engineId,
+          session_id: ref.nativeSessionId,
+          nativeSessionId: ref.nativeSessionId,
+          ref,
+          revision: inspected.revision,
+          source: entry.source,
+          mtime: inspected.revision.lastModified ? Date.parse(inspected.revision.lastModified) : 0,
+          path: inspected.filePath || null,
+        });
+      }
+    }
+    active = sourceEntries.reduce(
+      (count, entry) => count + (entry.state.exhausted || entry.rows.length >= max ? 0 : 1),
+      0,
+    );
+    if (!progressed && active > 0) {
+      for (const entry of sourceEntries) {
+        if (!entry.state.exhausted && entry.rows.length < max) entry.state.exhausted = true;
+      }
+      break;
+    }
+  }
+  for (const entry of sourceEntries) {
+    rows.push(...entry.rows);
   }
   rows.sort((left, right) => right.mtime - left.mtime || left.engineId.localeCompare(right.engineId) || left.session_id.localeCompare(right.session_id));
   return rows.slice(0, max);
