@@ -1,0 +1,16 @@
+{"type":"session","version":3,"id":"pi-fixture-session","timestamp":"2026-08-01T10:00:00.000Z","cwd":"/tmp/metame-pi-fixture"}
+{"type":"message","id":"u-root","parentId":null,"timestamp":"2026-08-01T10:00:01.000Z","message":{"role":"user","content":"Investigate the fixture behavior"}}
+{"type":"message","id":"a-root","parentId":"u-root","timestamp":"2026-08-01T10:00:02.000Z","message":{"role":"assistant","provider":"fixture","model":"fixture-model","content":[{"type":"text","text":"I will inspect the fixture."},{"type":"toolCall","id":"tc-read","name":"read","arguments":{"path":"README.md"}}]}}
+{"type":"message","id":"tr-read","parentId":"a-root","timestamp":"2026-08-01T10:00:03.000Z","message":{"role":"toolResult","toolCallId":"tc-read","toolName":"read","content":[{"type":"text","text":"fixture contents"}],"isError":false}}
+{"type":"custom","id":"custom-state","parentId":"tr-read","timestamp":"2026-08-01T10:00:04.000Z","customType":"fixture_state","data":{"ignored":true}}
+{"type":"custom_message","id":"custom-context","parentId":"custom-state","timestamp":"2026-08-01T10:00:05.000Z","customType":"fixture_note","content":"A bounded custom context note","display":false}
+{"type":"message","id":"u-abandoned","parentId":"u-root","timestamp":"2026-08-01T10:01:00.000Z","message":{"role":"user","content":"Abandoned branch request"}}
+{"type":"message","id":"a-abandoned","parentId":"u-abandoned","timestamp":"2026-08-01T10:01:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Abandoned branch answer"}]}}
+{"type":"message","id":"u-active","parentId":"custom-context","timestamp":"2026-08-01T10:02:00.000Z","message":{"role":"user","content":"Continue on the active branch"}}
+{"type":"message","id":"a-active","parentId":"u-active","timestamp":"2026-08-01T10:02:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"The active branch is selected."}]}}
+{"type":"branch_summary","id":"branch-summary","parentId":"a-active","timestamp":"2026-08-01T10:02:02.000Z","fromId":"a-abandoned","summary":"The abandoned branch was reviewed and set aside."}
+{"type":"compaction","id":"compact-1","parentId":"branch-summary","timestamp":"2026-08-01T10:03:00.000Z","summary":"The fixture investigation reached a stable checkpoint.","firstKeptEntryId":"u-root","tokensBefore":512}
+{"type":"message","id":"u-after","parentId":"compact-1","timestamp":"2026-08-01T10:03:01.000Z","message":{"role":"user","content":[{"type":"text","text":"Record the accepted result"}]}}
+{"type":"message","id":"a-after","parentId":"u-after","timestamp":"2026-08-01T10:03:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"private reasoning is not evidence"},{"type":"text","text":"Accepted result recorded."}]}}
+{"type":"session_info","id":"info-1","parentId":"a-after","timestamp":"2026-08-01T10:03:03.000Z","name":"Fixture session"}
+{"type":"future_record","id":"unknown-1","parentId":"info-1","timestamp":"2026-08-01T10:03:04.000Z","payload":"ignore safely"}

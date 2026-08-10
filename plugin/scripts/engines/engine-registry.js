@@ -7,6 +7,7 @@ const { createPiCliAdapter } = require('./pi-cli-adapter');
 const { createClaudeSessionSourceAdapter } = require('./claude-session-source-adapter');
 const { createCodexSessionSourceAdapter } = require('./codex-session-source-adapter');
 const { createAgySessionSourceAdapter } = require('./agy-session-source-adapter');
+const { createPiSessionSourceAdapter } = require('./pi-session-source-adapter');
 const {
   createEnginePlugin,
   isEnginePlugin,
@@ -196,7 +197,10 @@ function createDefaultEngineRegistry(deps = {}) {
       runtime: createAgyCliAdapter(deps.agy),
       sessionSource: createAgySessionSourceAdapter(deps.agy),
     },
-    { runtime: createPiCliAdapter(deps.pi), sessionSource: null },
+    {
+      runtime: createPiCliAdapter(deps.pi),
+      sessionSource: createPiSessionSourceAdapter(deps.pi),
+    },
   ];
   const plugins = adapters.map(({ runtime, sessionSource }) => {
     const descriptor = sessionSource
