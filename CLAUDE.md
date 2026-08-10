@@ -95,3 +95,13 @@
 - 历史踩坑复盘
 
 日常编码与普通问答，不需要默认加载项目维护手册。
+
+## Agent skills
+
+### Issue tracker
+
+Specs and implementation tickets live in GitHub Issues for `Yaron9/MetaMe-private`. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+This is a single-context repository. Read `CONTEXT.md` and relevant ADRs under `scripts/docs/adr/` before architecture work. See `docs/agents/domain.md`.

@@ -37,6 +37,10 @@ SOUL.md
 
 # Local working dirs (never push)
 docs/
+!docs/
+docs/*
+!docs/agents/
+!docs/agents/**
 !scripts/docs/
 task/
 tasks/

@@ -23,6 +23,7 @@
 - 热重载安全机制：`scripts/daemon-runtime-lifecycle.js`（语法预检、last-good 备份、crash-loop 自愈）
 - 打包工具：`scripts/deploy-manifest.js`（部署清单）、`scripts/sync-plugin.js`（plugin 镜像同步）
 - 维护手册：`scripts/docs/maintenance-manual.md`
+- 通用 Agent CLI 基础设施目标架构：`scripts/docs/universal-agent-cli-infrastructure.md`；统一语言：`CONTEXT.md`；核心边界决策：`scripts/docs/adr/0001-separate-agent-runtime-session-and-cognitive-adapters.md`
 - 文件地图、原生维护扫描与 typed-action 清理：`scripts/docs/file-map-maintenance.md`
 
 ## 多引擎（Claude/Codex）定位
