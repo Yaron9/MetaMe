@@ -4,6 +4,7 @@ const { createClaudeCliAdapter } = require('./claude-cli-adapter');
 const { createCodexCliAdapter } = require('./codex-cli-adapter');
 const { createAgyCliAdapter } = require('./agy-cli-adapter');
 const { createPiCliAdapter } = require('./pi-cli-adapter');
+const { createClaudeSessionSourceAdapter } = require('./claude-session-source-adapter');
 const {
   createEnginePlugin,
   isEnginePlugin,
@@ -181,16 +182,19 @@ function createEngineRegistry(plugins, options = {}) {
 
 function createDefaultEngineRegistry(deps = {}) {
   const adapters = [
-    createClaudeCliAdapter(deps.claude),
-    createCodexCliAdapter(deps.codex),
-    createAgyCliAdapter(deps.agy),
-    createPiCliAdapter(deps.pi),
+    {
+      runtime: createClaudeCliAdapter(deps.claude),
+      sessionSource: createClaudeSessionSourceAdapter(deps.claude),
+    },
+    { runtime: createCodexCliAdapter(deps.codex), sessionSource: null },
+    { runtime: createAgyCliAdapter(deps.agy), sessionSource: null },
+    { runtime: createPiCliAdapter(deps.pi), sessionSource: null },
   ];
-  const plugins = adapters.map(runtime => createEnginePlugin({
+  const plugins = adapters.map(({ runtime, sessionSource }) => createEnginePlugin({
     protocolVersion: 1,
     descriptor: runtime.descriptor,
     runtime,
-    sessionSource: null,
+    sessionSource,
     cognitiveHost: null,
   }));
   return createEngineRegistry(plugins, {

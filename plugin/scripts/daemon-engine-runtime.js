@@ -257,6 +257,7 @@ function createEngineRuntimeFactory(deps = {}) {
   const registry = createDefaultEngineRegistry({
     normalizeEngineName,
     claude: {
+      home,
       binary: claudeBin,
       defaultModel: ENGINE_MODEL_CONFIG.claude.main,
       timeouts: resolveEngineTimeouts('claude'),

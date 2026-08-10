@@ -47,6 +47,11 @@ test('registry exposes one deep adapter per native CLI with private session stor
   );
   assert.ok(adapters.every(adapter => adapter.nativeSession.opaque));
   assert.ok(adapters.every(Object.isFrozen));
+  const claude = registry.get('claude');
+  assert.equal(claude.descriptor.capabilities.sessionSource.state, 'verified');
+  assert.equal(typeof claude.sessionSource.discover, 'function');
+  assert.equal(typeof claude.sessionSource.inspect, 'function');
+  assert.equal(typeof claude.sessionSource.read, 'function');
 });
 
 test('native session guards accept legacy or same-engine slots and reject cross-engine slots', () => {

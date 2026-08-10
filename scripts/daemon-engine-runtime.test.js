@@ -346,6 +346,9 @@ describe('daemon-engine-runtime factory', () => {
       assert.ok(Array.isArray(invocation.args));
       assert.equal(invocation.shell, undefined);
     }
+    const claude = getEnginePlugin('claude');
+    assert.equal(claude.descriptor.capabilities.sessionSource.state, 'verified');
+    assert.equal(typeof claude.sessionSource.discover, 'function');
   });
 
   it('attaches the registry descriptor to every runtime', () => {

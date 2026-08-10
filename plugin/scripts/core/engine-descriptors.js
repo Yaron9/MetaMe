@@ -25,7 +25,7 @@ const ENGINE_DESCRIPTORS = Object.freeze({
     configSchemaVersion: 1,
     capabilities: Object.freeze({
       runtime: Object.freeze({ state: 'verified' }),
-      sessionSource: Object.freeze({ state: 'unsupported' }),
+      sessionSource: Object.freeze({ state: 'verified' }),
       cognitiveHost: Object.freeze({ state: 'unsupported' }),
     }),
     // Legacy aliases — do not remove without a persisted-config migration.
