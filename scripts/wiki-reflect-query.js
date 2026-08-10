@@ -150,16 +150,19 @@ function queryRelatedTopics(db, aliases) {
   if (current.size === 0) return [];
   const memoryColumns = new Set(db.prepare('PRAGMA table_info(memory_items)').all().map(row => row.name));
   const claimColumns = [
-    memoryColumns.has('canonical_key') ? 'canonical_key' : 'NULL AS canonical_key',
-    memoryColumns.has('task_key') ? 'task_key' : 'NULL AS task_key',
+    memoryColumns.has('canonical_key') ? 'mi.canonical_key AS canonical_key' : 'NULL AS canonical_key',
+    memoryColumns.has('task_key') ? 'mi.task_key AS task_key' : 'NULL AS task_key',
   ].join(', ');
   const provenanceColumns = [
-    memoryColumns.has('source_id') ? 'source_id' : "NULL AS source_id",
-    memoryColumns.has('origin_class') ? 'origin_class' : "NULL AS origin_class",
+    memoryColumns.has('source_id') ? 'mi.source_id AS source_id' : "NULL AS source_id",
+    memoryColumns.has('origin_class') ? 'mi.origin_class AS origin_class' : "NULL AS origin_class",
   ].join(', ');
+  const eligibility = claimSqlForDb(db, 'mi');
   const rows = db.prepare(`
-    SELECT id, project, scope, state, kind, relation, ${claimColumns}, ${provenanceColumns}, tags FROM memory_items
-    WHERE state='active' AND kind IN ('insight','convention')
+    SELECT mi.id, mi.project, mi.scope, mi.state, mi.kind, mi.relation,
+           ${claimColumns}, ${provenanceColumns}, mi.tags
+      FROM memory_items mi
+     WHERE ${eligibility.sql}
   `).all().map(row => {
     let tags = [];
     try { tags = [...new Set(JSON.parse(row.tags || '[]').map(normalizeTopicKey).filter(Boolean))]; } catch { /* empty */ }

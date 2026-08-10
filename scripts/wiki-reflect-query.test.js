@@ -97,6 +97,35 @@ test('queryRelatedTopics uses same-project active atomic co-occurrence with a tw
   db.close();
 });
 
+test('queryRelatedTopics excludes conflicted incumbents and keeps non-conflict legacy-shaped claims', () => {
+  const db = buildTestDb();
+  const { upsertWikiTopic } = require('./core/wiki-db');
+  upsertWikiTopic(db, 'step3', { force: true });
+  upsertWikiTopic(db, 'workflow', { force: true });
+  insertFact(db, {
+    id: 'conflicted-incumbent', tag: 'step3', project: 'MetaMe',
+    canonicalKey: 'wiki.conflicted',
+  });
+  db.prepare(`UPDATE memory_items SET tags=? WHERE id='conflicted-incumbent'`)
+    .run(JSON.stringify(['step3', 'workflow']));
+  insertFact(db, {
+    id: 'conflict-peer', tag: 'workflow', project: 'MetaMe', state: 'conflict',
+    canonicalKey: 'wiki.conflicted',
+  });
+  db.prepare(`UPDATE memory_items SET tags=? WHERE id='conflict-peer'`)
+    .run(JSON.stringify(['step3', 'workflow']));
+  assert.deepEqual(queryRelatedTopics(db, ['step3']), []);
+
+  // These rows have no origin_class column in this legacy-shaped fixture, but
+  // retain canonical keys and remain eligible when no conflict peer exists.
+  insertFact(db, { id: 'legacy-safe-1', tag: 'step3', project: 'MetaMe', canonicalKey: 'wiki.safe.1' });
+  insertFact(db, { id: 'legacy-safe-2', tag: 'workflow', project: 'MetaMe', canonicalKey: 'wiki.safe.2' });
+  db.prepare(`UPDATE memory_items SET tags=? WHERE id='legacy-safe-1'`).run(JSON.stringify(['step3', 'workflow']));
+  db.prepare(`UPDATE memory_items SET tags=? WHERE id='legacy-safe-2'`).run(JSON.stringify(['step3', 'workflow']));
+  assert.deepEqual(queryRelatedTopics(db, ['step3']).map(row => row.slug), ['workflow']);
+  db.close();
+});
+
 test('queryRawFacts returns totalCount=0 when no facts exist', () => {
   const db = buildTestDb();
   const { totalCount, facts } = queryRawFacts(db, 'missing-tag');
