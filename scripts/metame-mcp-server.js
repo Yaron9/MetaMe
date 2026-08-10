@@ -319,12 +319,18 @@ const handlers = {
 
   async memory_write(args, deps) {
     const access = resolveMcpAccess(args, deps);
+    const project = access.hasTrustedSeam
+      ? access.context.project
+      : (access.context.project || args.project || '*');
+    if (access.hasTrustedSeam && !project) {
+      return { saved: false, errors: ['project_scope_unavailable'] };
+    }
     const outcome = deps.writeFact()({
       entity: args.entity,
       relation: args.relation,
       value: args.value,
       confidence: args.confidence || 'medium',
-      project: access.context.project || args.project || '*',
+      project,
       tags: Array.isArray(args.tags) ? args.tags : [],
       sourceType: 'mcp',
     });

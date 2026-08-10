@@ -181,6 +181,41 @@ describe('metame-mcp-server tools', () => {
     assert.deepEqual(bad.errors, ['value too short']);
   });
 
+  it('memory_write treats a trusted project as authority and fails closed when it is absent', async () => {
+    let writeCalls = 0;
+    let written = null;
+    const trustedDeps = tempDeps({
+      accessContext: () => ({ principal: 'managed:daemon', project: 'metame', agent_id: 'jia', trust: 'managed' }),
+      writeFact: () => args => { writeCalls += 1; written = args; return { ok: true, result: { skipped: 0 } }; },
+    });
+    const bound = await callTool('memory_write', {
+      entity: 'A.b', relation: 'config_fact', value: 'x'.repeat(30), project: 'forged-project',
+    }, trustedDeps);
+    assert.equal(bound.saved, true);
+    assert.equal(written.project, 'metame');
+
+    const missingProject = await callTool('memory_write', {
+      entity: 'A.b', relation: 'config_fact', value: 'x'.repeat(30), project: 'forged-project',
+    }, tempDeps({
+      accessContext: () => ({ principal: 'managed:daemon', project: null, agent_id: 'jia', trust: 'managed' }),
+      writeFact: () => () => { writeCalls += 1; return { ok: true, result: { skipped: 0 } }; },
+    }));
+    assert.deepEqual(missingProject, { saved: false, errors: ['project_scope_unavailable'] });
+    assert.equal(writeCalls, 1, 'a missing trusted project must not reach the writer');
+  });
+
+  it('memory_write keeps project arguments for the unbound legacy path', async () => {
+    let written = null;
+    const out = await callTool('memory_write', {
+      entity: 'A.b', relation: 'config_fact', value: 'x'.repeat(30), project: 'legacy-project',
+    }, tempDeps({
+      accessContext: () => null,
+      writeFact: () => args => { written = args; return { ok: true, result: { skipped: 0 } }; },
+    }));
+    assert.equal(out.saved, true);
+    assert.equal(written.project, 'legacy-project');
+  });
+
   it('memory_feedback records applied/validated evidence without content', async () => {
     const audits = [];
     const deps = tempDeps({ recordAudit: () => row => audits.push(row) });
