@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { isDaemonStatusCommand } = require('./daemon-status');
 
 const ROOT = path.resolve(__dirname, '..');
 
@@ -125,4 +126,31 @@ test('daemon status does not install hooks or touch existing runtime files', () 
   const out = runStatus(home);
   assert.match(out, /MetaMe Daemon: .*Stopped/);
   assert.deepEqual(snapshotTree(home), before);
+});
+
+test('status trailing flags stay on the read-only path', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-daemon-status-flags-'));
+  const variants = [
+    ['daemon', 'status', '--help'],
+    ['daemon', 'status', '--json'],
+    ['daemon', 'status', '--unknown-flag'],
+    ['status', '--help'],
+    ['status', '--json'],
+    ['status', '--unknown-flag'],
+  ];
+
+  for (const args of variants) {
+    const before = snapshotTree(home);
+    const out = runStatus(home, args);
+    assert.match(out, /MetaMe Daemon: .*Stopped/);
+    assert.deepEqual(snapshotTree(home), before, `status must stay read-only for ${args.join(' ')}`);
+  }
+});
+
+test('status-like commands are not mistaken for daemon status', () => {
+  assert.equal(isDaemonStatusCommand(['node', 'index.js', 'status']), true);
+  assert.equal(isDaemonStatusCommand(['node', 'index.js', 'daemon', 'status', '--json']), true);
+  assert.equal(isDaemonStatusCommand(['node', 'index.js', 'statusish']), false);
+  assert.equal(isDaemonStatusCommand(['node', 'index.js', 'daemon', 'statusish']), false);
+  assert.equal(isDaemonStatusCommand(['node', 'index.js', 'daemon']), false);
 });

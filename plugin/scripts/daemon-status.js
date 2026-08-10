@@ -9,14 +9,15 @@ const { icon: defaultIcon } = require('./platform');
 const DAEMON_LABEL = 'com.metame.npm-daemon';
 
 /**
- * Recognize the status commands before index.js performs any runtime
- * bootstrap.  Keep the command boundary narrow so unrelated commands cannot
- * accidentally bypass the worktree guard.
+ * Recognize the status command prefix before index.js performs any runtime
+ * bootstrap.  The dispatcher intentionally ignores trailing status flags, so
+ * the early read-only boundary must accept the same forms while keeping
+ * status-like commands such as `statusish` outside the boundary.
  */
 function isDaemonStatusCommand(argv = process.argv) {
   const args = Array.from(argv).slice(2).map(arg => String(arg).trim().toLowerCase());
-  return (args.length === 2 && args[0] === 'daemon' && args[1] === 'status')
-    || (args.length === 1 && args[0] === 'status');
+  return args[0] === 'status'
+    || (args[0] === 'daemon' && args[1] === 'status');
 }
 
 function readJsonFile(fsModule, filePath, fallback = {}) {
