@@ -15,6 +15,8 @@ const {
 
 const PHASES = Object.freeze(['cold_start', 'project_switch', 'refresh']);
 const IN_FLIGHT_DELIVERIES = new Map();
+const DELIVERY_SCOPE_IDS = new WeakMap();
+let nextDeliveryScopeId = 1;
 
 function buildProjectContextManifest(options = {}) {
   return buildManifest(options);
@@ -87,6 +89,30 @@ function deliveryAlreadyRecorded(options, key) {
   };
 }
 
+function objectScopeId(value) {
+  if (!value || (typeof value !== 'object' && typeof value !== 'function')) return null;
+  let id = DELIVERY_SCOPE_IDS.get(value);
+  if (!id) {
+    id = `scope-${nextDeliveryScopeId}`;
+    nextDeliveryScopeId += 1;
+    DELIVERY_SCOPE_IDS.set(value, id);
+  }
+  return id;
+}
+
+function inFlightKey(options, key) {
+  const sessionId = options.logicalSessionId || options.chatId || null;
+  const engine = options.engine || options.host || null;
+  const storeId = objectScopeId(options.sessionStore);
+  const ledgerId = storeId ? null : objectScopeId(options.ledger);
+  return JSON.stringify({
+    delivery: key,
+    logical_session: sessionId == null ? null : String(sessionId),
+    engine: engine == null ? null : String(engine),
+    persistence: storeId ? `session-store:${storeId}` : (ledgerId ? `ledger:${ledgerId}` : 'ephemeral'),
+  });
+}
+
 function persistDelivery(options, key, manifest) {
   const metadata = {
     revision: manifest.revision,
@@ -144,15 +170,15 @@ function finalizeDeliveryResult(projected, cas, manifest, key) {
   return { ...projected, delivered: true, key, ledger: cas.ledger };
 }
 
-function trackDelivery(key, promise, manifest) {
-  const existing = IN_FLIGHT_DELIVERIES.get(key);
+function trackDelivery(scopeKey, promise, manifest) {
+  const existing = IN_FLIGHT_DELIVERIES.get(scopeKey);
   if (existing) return existing;
   const work = Promise.resolve(promise)
     .catch(error => failedProjection(error, manifest))
     .finally(() => {
-      if (IN_FLIGHT_DELIVERIES.get(key) === work) IN_FLIGHT_DELIVERIES.delete(key);
+      if (IN_FLIGHT_DELIVERIES.get(scopeKey) === work) IN_FLIGHT_DELIVERIES.delete(scopeKey);
     });
-  IN_FLIGHT_DELIVERIES.set(key, work);
+  IN_FLIGHT_DELIVERIES.set(scopeKey, work);
   return work;
 }
 
@@ -172,7 +198,8 @@ function deliverProjectContext(options = {}) {
     accessIdentity: accessIdentity(access),
     revision: manifest.revision,
   });
-  const inFlight = IN_FLIGHT_DELIVERIES.get(key);
+  const scopeKey = inFlightKey(options, key);
+  const inFlight = IN_FLIGHT_DELIVERIES.get(scopeKey);
   if (inFlight) return inFlight;
   const prior = deliveryAlreadyRecorded(options, key);
   if (prior.recorded) {
@@ -188,13 +215,13 @@ function deliverProjectContext(options = {}) {
   const projected = projectContext({ adapter, manifest, phase });
   if (isThenable(projected)) {
     return trackDelivery(
-      key,
+      scopeKey,
       Promise.resolve(projected).then(result => finalizeDelivery(result, options, manifest, key)),
       manifest,
     );
   }
   const finalized = finalizeDelivery(projected, options, manifest, key);
-  return isThenable(finalized) ? trackDelivery(key, finalized, manifest) : finalized;
+  return isThenable(finalized) ? trackDelivery(scopeKey, finalized, manifest) : finalized;
 }
 
 module.exports = {

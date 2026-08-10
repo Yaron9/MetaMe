@@ -6,7 +6,7 @@ const {
   buildProjectContextManifest,
   deliverProjectContext,
 } = require('./cognitive-context');
-const { normalizeAccessContext } = require('./core/context-manifest');
+const { compareAndSetDelivery, normalizeAccessContext } = require('./core/context-manifest');
 
 const access = normalizeAccessContext({
   principal: 'principal:test', project: 'metame', agent_id: 'jarvis',
@@ -96,4 +96,63 @@ test('concurrent async projection claims one delivery per revision', async () =>
   assert.equal(left.delivered, true);
   assert.equal(right.delivered, true);
   assert.equal(calls, 1);
+});
+
+function sessionLedgerStore() {
+  const ledgers = new Map();
+  const entryKey = (chatId, engine) => `${chatId}:${engine}`;
+  return {
+    getContextDeliveryLedger(chatId, engine) {
+      return { ...(ledgers.get(entryKey(chatId, engine)) || {}) };
+    },
+    compareAndSetContextDelivery(chatId, engine, key, metadata) {
+      const id = entryKey(chatId, engine);
+      const result = compareAndSetDelivery(ledgers.get(id) || {}, key, metadata);
+      if (result.delivered) ledgers.set(id, result.ledger);
+      return result;
+    },
+  };
+}
+
+test('concurrent sessions do not share in-flight projection or ledger result', async () => {
+  const manifest = buildProjectContextManifest({ assets: [claim], access });
+  const store = sessionLedgerStore();
+  let calls = 0;
+  const adapter = {
+    projectContext() {
+      calls += 1;
+      return new Promise(resolve => setTimeout(() => resolve({ state: 'projected', fingerprint: `session-${calls}` }), 10));
+    },
+  };
+  const common = { manifest, access, adapter, host: 'fixture', nativeSessionId: 'shared-native', engine: 'fixture', sessionStore: store };
+  const first = deliverProjectContext({ ...common, logicalSessionId: 'logical-a' });
+  const second = deliverProjectContext({ ...common, logicalSessionId: 'logical-b' });
+  assert.notEqual(first, second);
+  const [left, right] = await Promise.all([first, second]);
+  assert.equal(left.delivered, true);
+  assert.equal(right.delivered, true);
+  assert.equal(calls, 2);
+  assert.ok(store.getContextDeliveryLedger('logical-a', 'fixture')[left.key]);
+  assert.ok(store.getContextDeliveryLedger('logical-b', 'fixture')[right.key]);
+});
+
+test('same logical session shares in-flight projection and keeps its ledger entry', async () => {
+  const manifest = buildProjectContextManifest({ assets: [claim], access });
+  const store = sessionLedgerStore();
+  let calls = 0;
+  const adapter = {
+    projectContext() {
+      calls += 1;
+      return new Promise(resolve => setTimeout(() => resolve({ state: 'projected', fingerprint: 'same-session' }), 10));
+    },
+  };
+  const common = { manifest, access, adapter, host: 'fixture', nativeSessionId: 'shared-native-2', engine: 'fixture', sessionStore: store, logicalSessionId: 'logical-same' };
+  const first = deliverProjectContext(common);
+  const second = deliverProjectContext(common);
+  assert.equal(first, second);
+  const [left, right] = await Promise.all([first, second]);
+  assert.equal(left.delivered, true);
+  assert.equal(right.delivered, true);
+  assert.equal(calls, 1);
+  assert.ok(store.getContextDeliveryLedger('logical-same', 'fixture')[left.key]);
 });
