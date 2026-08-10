@@ -31,7 +31,7 @@ const {
   sourceMembershipHash,
 } = require('./core/wiki-topic-model');
 const {
-  exportWikiPage,
+  exportManagedWikiPage,
   rebuildIndex,
   exportSessionSummary,
   reconcileSessionProjection,
@@ -98,6 +98,7 @@ async function runWikiReflect(db, {
   const built = [];
   const failed = [];
   const exportFailed = [];
+  const projectionSkipped = [];
   const strippedLinksMap = {};
   let docsExported = 0;
   let pagesExported = 0;
@@ -124,6 +125,7 @@ async function runWikiReflect(db, {
         built.push(...result.built);
         failed.push(...result.failed);
         exportFailed.push(...result.exportFailed);
+        projectionSkipped.push(...(result.projectionSkipped || []));
       }
     }
 
@@ -185,14 +187,10 @@ async function runWikiReflect(db, {
           source_type: updatedPage.source_type || 'memory',
         };
 
-        try {
-          exportWikiPage(slug, frontmatter, buildResult.content, outputDir);
-          built.push(slug);
-        } catch (exportErr) {
-          // DB write succeeded, file write failed — log separately.
-          // Do NOT push to built: callers must not assume the file exists.
-          exportFailed.push(slug);
-        }
+        const exportResult = exportManagedWikiPage(db, slug, frontmatter, buildResult.content, outputDir);
+        if (exportResult.written) built.push(slug);
+        else if (exportResult.classification === 'export_failed') exportFailed.push(slug);
+        else projectionSkipped.push({ slug, status: exportResult.classification, reason: exportResult.reason });
 
       } catch (err) {
         // Unexpected error (DB failure from buildWikiPage throws)
@@ -233,8 +231,10 @@ async function runWikiReflect(db, {
     // Export rebuildable document projections before indexes, then reconcile
     // legacy flat files into their stable collection directories.
     if (allPagesLoaded) try {
-      const { exported, skipped } = exportStoredWikiPages(allPages, outputDir);
+      const { exported, skipped, projectionSkipped: storedProjectionSkipped = [] } =
+        exportStoredWikiPages(allPages, outputDir, { db });
       pagesExported = exported.length;
+      projectionSkipped.push(...storedProjectionSkipped);
       const exportedSet = new Set(exported);
       docsExported = allPages.filter(page => exportedSet.has(page.slug)
         && ['doc', 'topic_cluster'].includes(page.source_type)).length;
@@ -298,6 +298,7 @@ async function runWikiReflect(db, {
       ts: new Date().toISOString(),
       slugs_built: built,
       export_failed_slugs: exportFailed,
+      projection_skipped: projectionSkipped,
       failed_slugs: failed,
       stripped_links: strippedLinksMap,
       docs_exported: docsExported,
@@ -329,7 +330,17 @@ async function runWikiReflect(db, {
       || `${linkHealth.hardBroken.length} generated links broken`;
     throw new Error(`wiki link integrity failed: ${detail}`);
   }
-  return { built, failed, exportFailed, docsExported, pagesExported, reflectExported, artifactProjection, linkHealth };
+  return {
+    built,
+    failed,
+    exportFailed,
+    projectionSkipped,
+    docsExported,
+    pagesExported,
+    reflectExported,
+    artifactProjection,
+    linkHealth,
+  };
 }
 
 async function _mapWithConcurrency(items, limit, mapper) {
@@ -350,6 +361,7 @@ async function _reflectDossierTopic(db, topic, { outputDir, providers, threshold
   const built = [];
   const failed = [];
   const exportFailed = [];
+  const projectionSkipped = [];
   const evidenceRows = queryTopicEvidence(db, topic.aliases || [topic.tag]);
   const grouped = groupTopicEvidence(evidenceRows);
   const research = queryTopicResearch(db, topic.aliases || [topic.tag]);
@@ -377,7 +389,7 @@ async function _reflectDossierTopic(db, topic, { outputDir, providers, threshold
         continue;
       }
       dossierChanged = true;
-      _recordExport(db, slug, result.content, outputDir, built, exportFailed);
+      _recordExport(db, slug, result.content, outputDir, built, exportFailed, projectionSkipped);
     }
     dossierLinks.push({ slug, projectKey: dossier.projectKey, factCount: dossier.facts.length });
   }
@@ -412,7 +424,7 @@ async function _reflectDossierTopic(db, topic, { outputDir, providers, threshold
       source_membership_hash: '', raw_source_ids: '[]', raw_source_count: 0, topic_tags: '[]',
     }, redirect, { evidence: [], scopes: [] });
     dossierChanged = true;
-    _recordExport(db, existing.slug, redirect, outputDir, built, exportFailed);
+    _recordExport(db, existing.slug, redirect, outputDir, built, exportFailed, projectionSkipped);
   }
 
   const hubEvidence = grouped.sparse.map(fact => ({ ...fact, evidence_type: 'memory_item', evidence_id: fact.id }));
@@ -430,7 +442,7 @@ async function _reflectDossierTopic(db, topic, { outputDir, providers, threshold
   if (needsHub) {
     const hub = buildTopicHubPage(db, topic, { dossiers: dossierLinks, sparse: grouped.sparse, research, related });
     db.prepare('UPDATE wiki_pages SET source_membership_hash=? WHERE slug=?').run(hubMembership, topic.slug);
-    _recordExport(db, topic.slug, hub.content, outputDir, built, exportFailed);
+    _recordExport(db, topic.slug, hub.content, outputDir, built, exportFailed, projectionSkipped);
   }
 
   db.prepare(`
@@ -448,17 +460,17 @@ async function _reflectDossierTopic(db, topic, { outputDir, providers, threshold
         source_type: 'managed_redirect', page_kind: 'managed_redirect', build_profile: 'managed-redirect-v1',
         source_membership_hash: '', raw_source_ids: '[]', raw_source_count: 0, topic_tags: '[]',
       }, content, { evidence: [], scopes: [] });
-      _recordExport(db, legacySlug, content, outputDir, built, exportFailed);
+      _recordExport(db, legacySlug, content, outputDir, built, exportFailed, projectionSkipped);
     }
   }
-  return { built, failed, exportFailed };
+  return { built, failed, exportFailed, projectionSkipped };
 }
 
 function _failedBuild(slug) {
   return { slug, retries: 1, next_retry: _nextRetryISO(1), permanent_error: false };
 }
 
-function _recordExport(db, slug, content, outputDir, built, exportFailed) {
+function _recordExport(db, slug, content, outputDir, built, exportFailed, projectionSkipped = []) {
   const page = getWikiPageBySlug(db, slug);
   const frontmatter = {
     title: page.title,
@@ -473,10 +485,14 @@ function _recordExport(db, slug, content, outputDir, built, exportFailed) {
     project_key: page.project_key,
   };
   try {
-    exportWikiPage(slug, frontmatter, content, outputDir);
-    built.push(slug);
-  } catch {
+    const result = exportManagedWikiPage(db, slug, frontmatter, content, outputDir);
+    if (result.written) built.push(slug);
+    else if (result.classification === 'export_failed') exportFailed.push(slug);
+    else projectionSkipped.push({ slug, status: result.classification, reason: result.reason });
+    return result;
+  } catch (error) {
     exportFailed.push(slug);
+    return { slug, written: false, classification: 'export_failed', reason: error.message };
   }
 }
 

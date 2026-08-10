@@ -2203,6 +2203,13 @@ if (process.argv[2] === 'memory' && process.argv[3] === 'artifacts' && process.a
 if (process.argv[2] === 'wiki') {
   const area = process.argv[3];
   const action = process.argv[4];
+  if (area === 'annotate') {
+    const result = spawnSync(process.execPath, [
+      path.join(__dirname, 'scripts', 'wiki-annotation.js'),
+      ...process.argv.slice(4),
+    ], { stdio: 'inherit', env: process.env });
+    process.exit(result.status ?? 1);
+  }
   if (area === 'doctor') {
     const result = spawnSync(process.execPath, [
       path.join(__dirname, 'scripts', 'wiki-doctor.js'),
@@ -2251,7 +2258,7 @@ if (process.argv[2] === 'wiki') {
     ], { stdio: 'inherit', env: process.env });
     process.exit(result.status ?? 1);
   }
-  console.error('Usage: metame wiki doctor [--json] | metame wiki links <audit|repair --confirm-idle> | metame wiki openwiki <setup|sync|recall off|shadow|on> | metame wiki dossier migrate <--dry-run|--stage|--apply>');
+  console.error('Usage: metame wiki annotate <slug> --from-file <path> [--claim-key <canonical_key>] | doctor [--json] | links <audit|repair --confirm-idle> | openwiki <setup|sync|recall off|shadow|on> | dossier migrate <--dry-run|--stage|--apply>');
   process.exit(1);
 }
 

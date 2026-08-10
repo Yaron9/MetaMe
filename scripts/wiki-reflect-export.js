@@ -24,6 +24,14 @@ const {
   resolveWikiPageRelativePath,
   wikiPageLink,
 } = require('./core/wiki-layout');
+const {
+  classifyProjectionHashes,
+  projectionHash,
+} = require('./core/wiki-projection');
+const {
+  getWikiPageProjection,
+  recordWikiProjection,
+} = require('./core/wiki-db');
 
 /**
  * Write a wiki page as a Markdown file (atomic: write .tmp → rename).
@@ -41,20 +49,89 @@ function exportWikiPage(slug, frontmatter, content, outputDir) {
   const filePath = path.join(outputDir, ...relativePath.split('/'));
   _ensureDir(path.dirname(filePath));
 
-  // Ensure slug in frontmatter matches the positional slug argument
-  const yaml = _buildFrontmatter(page);
-  const fileContent = `${yaml}\n${content}\n`;
-  const tmpPath = `${filePath}.tmp`;
+  // Ensure slug in frontmatter matches the positional slug argument.
+  _writeAtomic(filePath, renderWikiPage(slug, frontmatter, content));
+  ensureAnnotationSidecar(filePath);
 
-  // Remove stale .tmp if present (previous interrupted write)
-  try { fs.unlinkSync(tmpPath); } catch { /* not present */ }
-
-  fs.writeFileSync(tmpPath, fileContent, 'utf8');
-  fs.renameSync(tmpPath, filePath);
-
-  const legacyPath = path.join(outputDir, `${slug}.md`);
-  if (legacyPath !== filePath && fs.existsSync(legacyPath)) fs.rmSync(legacyPath, { force: true });
+  // Legacy flat files are reconciled by organizeWikiProjection, which can
+  // preserve a differing user file instead of deleting it here.
   return filePath;
+}
+
+/**
+ * Export a DB-backed page with Base/Current/User protection.
+ *
+ * The low-level exportWikiPage function remains available for callers that
+ * intentionally create a new unmanaged file.  All managed Wiki projection
+ * paths use this function so an edited or legacy file is never overwritten.
+ */
+function exportManagedWikiPage(db, slug, frontmatter, content, outputDir) {
+  outputDir = resolveOutputDir(outputDir);
+  const page = { ...frontmatter, slug };
+  const relativePath = resolveWikiPageRelativePath(page);
+  const filePath = path.join(outputDir, ...relativePath.split('/'));
+  const currentContent = renderWikiPage(slug, frontmatter, content);
+  const currentHash = projectionHash(currentContent);
+  const userExists = fs.existsSync(filePath);
+  const userContent = userExists ? fs.readFileSync(filePath, 'utf8') : null;
+  const userHash = userExists ? projectionHash(userContent) : null;
+  const baseline = getWikiPageProjection(db, slug);
+  const pageExists = Boolean(db.prepare('SELECT 1 FROM wiki_pages WHERE slug = ?').get(slug));
+
+  if (!pageExists || !baseline.schemaReady) {
+    if (userExists) ensureAnnotationSidecar(filePath);
+    return {
+      slug,
+      filePath,
+      sidecarPath: userExists ? `${filePath}.notes.md` : null,
+      written: false,
+      ...classifyProjectionHashes({ baseHash: null, currentHash, userHash, userExists }),
+      reason: pageExists ? 'projection_schema_missing' : 'wiki_page_missing',
+    };
+  }
+
+  const decision = classifyProjectionHashes({
+    baseHash: baseline.projection_hash,
+    currentHash,
+    userHash,
+    userExists,
+  });
+  if (!decision.canWrite) {
+    if (userExists) ensureAnnotationSidecar(filePath);
+    return { slug, filePath, sidecarPath: userExists ? `${filePath}.notes.md` : null, written: false, ...decision };
+  }
+
+  try {
+    _writeAtomic(filePath, currentContent);
+    ensureAnnotationSidecar(filePath);
+    if (!recordWikiProjection(db, slug, currentHash)) {
+      return {
+        slug, filePath, sidecarPath: `${filePath}.notes.md`, written: false,
+        ...decision, classification: 'degraded', status: 'degraded',
+        canWrite: false, write: false, reason: 'projection_baseline_not_recorded',
+      };
+    }
+  } catch (error) {
+    return {
+      slug, filePath, sidecarPath: fs.existsSync(`${filePath}.notes.md`) ? `${filePath}.notes.md` : null,
+      written: false, ...decision, classification: 'export_failed', status: 'export_failed',
+      canWrite: false, write: false, reason: error.message,
+    };
+  }
+  return { slug, filePath, sidecarPath: `${filePath}.notes.md`, written: true, ...decision };
+}
+
+function renderWikiPage(slug, frontmatter, content) {
+  const page = { ...(frontmatter || {}), slug };
+  return `${_buildFrontmatter(page)}\n${String(content ?? '')}\n`;
+}
+
+function ensureAnnotationSidecar(filePath) {
+  const sidecarPath = `${filePath}.notes.md`;
+  if (!fs.existsSync(sidecarPath)) {
+    _writeAtomic(sidecarPath, '');
+  }
+  return sidecarPath;
 }
 
 /**
@@ -545,11 +622,15 @@ function _pruneEmptyDirectories(dir, stopDir) {
 function exportDocPages(db, outputDir) {
   outputDir = resolveOutputDir(outputDir);
   _ensureDir(outputDir);
+  const projectionReady = _hasProjectionSchema(db);
+  const columns = new Set(db.prepare('PRAGMA table_info(wiki_pages)').all().map(row => row.name));
+  const optionalSelect = column => columns.has(column) ? column : `NULL AS ${column}`;
   const rows = db.prepare(
     `SELECT slug, title, primary_topic, source_type, content,
-            topic_tags, created_at, last_built_at, raw_source_count, staleness
+            topic_tags, created_at, last_built_at, raw_source_count, staleness,
+            ${optionalSelect('page_kind')}, ${optionalSelect('project_key')}, ${optionalSelect('source_path')}
      FROM wiki_pages
-     WHERE source_type IN ('doc', 'topic_cluster')
+      WHERE source_type IN ('doc', 'topic_cluster')
        AND content IS NOT NULL AND content != ''`
   ).all();
 
@@ -567,9 +648,15 @@ function exportDocPages(db, outputDir) {
         last_built: (row.last_built_at || '').slice(0, 10),
         raw_sources: row.raw_source_count || 0,
         staleness: row.staleness || 0,
+        page_kind: row.page_kind,
+        project_key: row.project_key,
+        source_path: row.source_path,
       };
-      exportWikiPage(row.slug, { ...frontmatter, source_type: row.source_type }, row.content, outputDir);
-      exported.push(row.slug);
+      const result = projectionReady
+        ? exportManagedWikiPage(db, row.slug, { ...frontmatter, source_type: row.source_type }, row.content, outputDir)
+        : { written: Boolean(exportWikiPage(row.slug, { ...frontmatter, source_type: row.source_type }, row.content, outputDir)) };
+      if (result.written) exported.push(row.slug);
+      else skipped.push(row.slug);
     } catch {
       skipped.push(row.slug);
     }
@@ -578,14 +665,31 @@ function exportDocPages(db, outputDir) {
   return { exported, skipped };
 }
 
-function exportStoredWikiPages(pages, outputDir) {
+function exportStoredWikiPages(pages, outputDir, { db = null } = {}) {
   const exportable = new Set(['memory', 'managed_redirect', 'doc', 'topic_cluster']);
   const exported = [];
   const skipped = [];
+  const projectionSkipped = [];
+  const projectionReady = _hasProjectionSchema(db);
   for (const page of Array.isArray(pages) ? pages : []) {
     if (!exportable.has(String(page.source_type || 'memory')) || !String(page.content || '').trim()) continue;
+    if (db && !projectionReady) {
+      let filePath = null;
+      try {
+        const relative = resolveWikiPageRelativePath({ ...page, slug: page.slug });
+        filePath = path.join(resolveOutputDir(outputDir), ...relative.split('/'));
+        if (fs.existsSync(filePath)) ensureAnnotationSidecar(filePath);
+      } catch { /* report the degraded state below */ }
+      projectionSkipped.push({
+        slug: page.slug,
+        status: 'untracked',
+        reason: 'projection_schema_missing',
+        ...(filePath ? { filePath } : {}),
+      });
+      continue;
+    }
     try {
-      exportWikiPage(page.slug, {
+      const frontmatter = {
         title: page.title || page.slug,
         tags: _safeJsonArray(page.topic_tags),
         created: String(page.created_at || '').slice(0, 10),
@@ -593,11 +697,30 @@ function exportStoredWikiPages(pages, outputDir) {
         raw_sources: page.raw_source_count || 0,
         staleness: page.staleness || 0,
         source_type: page.source_type || 'memory',
-      }, page.content, outputDir);
-      exported.push(page.slug);
+        page_kind: page.page_kind,
+        project_key: page.project_key,
+        source_path: page.source_path,
+      };
+      const result = projectionReady
+        ? exportManagedWikiPage(db, page.slug, frontmatter, page.content, outputDir)
+        : { written: Boolean(exportWikiPage(page.slug, frontmatter, page.content, outputDir)) };
+      if (result.written) exported.push(page.slug);
+      else if (projectionReady && ['modified', 'conflict', 'untracked', 'missing'].includes(result.classification)) {
+        projectionSkipped.push({ slug: page.slug, status: result.classification, reason: result.reason });
+      } else skipped.push(page.slug);
     } catch { skipped.push(page.slug); }
   }
-  return { exported, skipped };
+  return { exported, skipped, projectionSkipped };
+}
+
+function _hasProjectionSchema(db) {
+  if (!db || typeof db.prepare !== 'function') return false;
+  try {
+    const columns = new Set(db.prepare('PRAGMA table_info(wiki_pages)').all().map(row => row.name));
+    return columns.has('projection_hash') && columns.has('projection_at');
+  } catch {
+    return false;
+  }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -714,6 +837,9 @@ function _dedupeRelated(items) {
 
 module.exports = {
   exportWikiPage,
+  exportManagedWikiPage,
+  ensureAnnotationSidecar,
+  renderWikiPage,
   organizeWikiProjection,
   rebuildIndex,
   exportSessionSummary,

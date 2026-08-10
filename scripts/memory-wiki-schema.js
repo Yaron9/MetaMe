@@ -40,6 +40,8 @@ function applyWikiSchema(db) {
       new_facts_since_build INTEGER DEFAULT 0,
       word_count            INTEGER DEFAULT 0,
       last_built_at         TEXT,
+      projection_hash      TEXT,
+      projection_at        TEXT,
       created_at            TEXT DEFAULT (datetime('now')),
       updated_at            TEXT DEFAULT (datetime('now'))
     )
@@ -52,6 +54,8 @@ function applyWikiSchema(db) {
   try { db.exec("ALTER TABLE wiki_pages ADD COLUMN build_profile TEXT DEFAULT 'legacy-v1'"); } catch { /* already exists */ }
   try { db.exec("ALTER TABLE wiki_pages ADD COLUMN source_membership_hash TEXT DEFAULT ''"); } catch { /* already exists */ }
   try { db.exec('ALTER TABLE wiki_pages ADD COLUMN eligibility_miss_count INTEGER DEFAULT 0'); } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE wiki_pages ADD COLUMN projection_hash TEXT'); } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE wiki_pages ADD COLUMN projection_at TEXT'); } catch { /* already exists */ }
   db.exec('CREATE INDEX IF NOT EXISTS idx_wiki_pages_kind_project ON wiki_pages(page_kind, project_key)');
 
   // ── wiki_topics ─────────────────────────────────────────────────────────────
@@ -100,6 +104,32 @@ function applyWikiSchema(db) {
     )
   `);
   db.exec('CREATE INDEX IF NOT EXISTS idx_wiki_page_evidence_source ON wiki_page_evidence(evidence_type, evidence_id)');
+
+  // Human corrections are revision-bound annotations, never a second source
+  // of truth for wiki_pages.  `status` mirrors `state` for older callers that
+  // use status terminology; both are kept in sync by the annotation writer.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS wiki_annotations (
+      id                    TEXT PRIMARY KEY,
+      page_slug             TEXT NOT NULL,
+      base_projection_hash  TEXT,
+      content               TEXT NOT NULL,
+      content_hash          TEXT NOT NULL,
+      claim_key             TEXT,
+      claim_id              TEXT,
+      claim_outcome         TEXT,
+      state                 TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (state IN ('pending','admitted','conflict','archived')),
+      status                TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (status IN ('pending','admitted','conflict','archived')),
+      source_path           TEXT,
+      created_at            TEXT DEFAULT (datetime('now')),
+      updated_at            TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (page_slug) REFERENCES wiki_pages(slug) ON DELETE CASCADE
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_wiki_annotations_page ON wiki_annotations(page_slug, created_at)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_wiki_annotations_status ON wiki_annotations(status, state)');
 
   // ── wiki_pages_fts (FTS5 content table) ─────────────────────────────────────
   try {

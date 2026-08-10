@@ -10,6 +10,9 @@ const { DatabaseSync } = require('node:sqlite');
 const embedding = require('./core/embedding');
 const { loadOpenWikiConfig, preparePages } = require('./openwiki-sync')._internal;
 const { resolveConfiguredWikiOutputDir } = require('./core/wiki-paths');
+const { resolveWikiPageRelativePath } = require('./core/wiki-layout');
+const { classifyProjectionHashes, projectionHash } = require('./core/wiki-projection');
+const { renderWikiPage } = require('./wiki-reflect-export');
 const { auditVault } = require('./wiki-link-maintain');
 
 const HOME = os.homedir();
@@ -49,6 +52,91 @@ function tableColumns(db, table) {
 function countRows(db, table, where = '') {
   if (!/^[a-z_]+$/i.test(table) || !tableExists(db, table)) return 0;
   return db.prepare(`SELECT COUNT(*) AS count FROM ${table}${where ? ` WHERE ${where}` : ''}`).get().count;
+}
+
+function parseTags(value) {
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function inspectWikiProjections(report, db, outputDir) {
+  const columns = tableColumns(db, 'wiki_pages');
+  if (!columns.has('projection_hash') || !columns.has('projection_at')) {
+    report.metrics.wiki_projection = { schema_ready: false };
+    addCheck(report, 'wiki-projection-schema', 'degraded', 'projection baseline schema not installed');
+    return;
+  }
+  const counts = {
+    tracked: 0,
+    drift: 0,
+    modified: 0,
+    conflict: 0,
+    untracked: 0,
+    missing: 0,
+    new: 0,
+    sidecar_missing: 0,
+  };
+  const details = [];
+  const rows = db.prepare('SELECT * FROM wiki_pages').all();
+  for (const row of rows) {
+    let classification;
+    let filePath = null;
+    try {
+      const relative = resolveWikiPageRelativePath(row);
+      filePath = path.join(outputDir, ...relative.split('/'));
+      const userExists = fs.existsSync(filePath);
+      const userContent = userExists ? fs.readFileSync(filePath, 'utf8') : null;
+      const current = renderWikiPage(row.slug, {
+        title: row.title || row.slug,
+        slug: row.slug,
+        tags: parseTags(row.topic_tags),
+        created: String(row.created_at || '').slice(0, 10),
+        last_built: String(row.last_built_at || '').slice(0, 10),
+        raw_sources: row.raw_source_count || 0,
+        staleness: row.staleness || 0,
+        source_type: row.source_type || 'memory',
+        page_kind: row.page_kind,
+        project_key: row.project_key,
+        source_path: row.source_path,
+      }, row.content || '');
+      classification = classifyProjectionHashes({
+        baseHash: row.projection_hash || null,
+        currentHash: projectionHash(current),
+        userHash: userExists ? projectionHash(userContent) : null,
+        userExists,
+      }).classification;
+      if (userExists && !fs.existsSync(`${filePath}.notes.md`)) {
+        counts.sidecar_missing += 1;
+        details.push({ slug: row.slug, status: 'sidecar_missing', filePath });
+      }
+    } catch (error) {
+      classification = 'untracked';
+      details.push({ slug: row.slug, status: classification, reason: error.message, filePath });
+    }
+    counts[classification] = (counts[classification] || 0) + 1;
+    if (classification !== 'tracked') details.push({ slug: row.slug, status: classification, filePath });
+  }
+
+  let pending = 0;
+  let annotationConflict = 0;
+  if (tableExists(db, 'wiki_annotations')) {
+    const annotationColumns = tableColumns(db, 'wiki_annotations');
+    const statusColumn = annotationColumns.has('status') ? 'status' : 'state';
+    pending = countRows(db, 'wiki_annotations', `${statusColumn}='pending'`);
+    annotationConflict = countRows(db, 'wiki_annotations', `${statusColumn}='conflict'`);
+  }
+  report.metrics.wiki_projection = { schema_ready: true, ...counts, details };
+  report.metrics.wiki_annotations = { pending, conflict: annotationConflict };
+  const conflicts = counts.conflict;
+  const degraded = counts.untracked + counts.modified + counts.drift + counts.missing + counts.new
+    + counts.sidecar_missing + pending + annotationConflict;
+  if (conflicts > 0) addCheck(report, 'wiki-projection', 'error', `${conflicts} managed projection conflicts`, details.filter(item => item.status === 'conflict').slice(0, 20));
+  else if (degraded > 0) addCheck(report, 'wiki-projection', 'degraded', `${degraded} projection or annotation items need review`, details.slice(0, 20));
+  else addCheck(report, 'wiki-projection', 'ok', `${counts.tracked} tracked projections healthy`);
 }
 
 function inspectDatabase(report, config, { dbPath = DB_PATH, Database = DatabaseSync } = {}) {
@@ -93,6 +181,7 @@ function inspectDatabase(report, config, { dbPath = DB_PATH, Database = Database
       lineage_edges: artifactSchemaReady ? countRows(db, 'knowledge_lineage') : 0,
     };
     report.metrics = { ...report.metrics, ...metrics };
+    inspectWikiProjections(report, db, config.outputDir || resolveConfiguredWikiOutputDir(config, { home: os.homedir() }));
     const models = chunkColumns.has('embedding_model') && chunkColumns.has('embedding_dim')
       ? db.prepare(`
       SELECT COALESCE(embedding_model, 'NULL') AS model, COALESCE(embedding_dim, 0) AS dimensions,
@@ -280,7 +369,7 @@ function runDoctor() {
   );
   const config = loadOpenWikiConfig();
   inspectOpenWiki(report, config);
-  inspectDatabase(report, config);
+  inspectDatabase(report, { ...config, outputDir: resolveConfiguredWikiOutputDir(raw, { home: HOME }) });
   inspectReflection(report);
   inspectWikiLinks(report, resolveConfiguredWikiOutputDir(raw, { home: HOME }));
   return report;
@@ -310,6 +399,7 @@ module.exports = {
     addCheck,
     ageHours,
     inspectDatabase,
+    inspectWikiProjections,
     inspectReflection,
     inspectWikiLinks,
     lastJsonLine,
