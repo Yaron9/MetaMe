@@ -21,7 +21,7 @@
         "!skills/**/*.pyc"
     ],
     "scripts": {
-        "test": "node --require ./scripts/test-support/env-setup.js --test scripts/*.test.js",
+        "test": "node --require ./scripts/test-support/env-setup.js --test scripts/*.test.js scripts/core/*.test.js scripts/engines/*.test.js",
         "test:daemon-status": "node --require ./scripts/test-support/env-setup.js --test scripts/daemon-restart-status.test.js",
         "start": "node index.js",
         "deploy": "node index.js deploy",

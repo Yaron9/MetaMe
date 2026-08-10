@@ -605,10 +605,15 @@ class ExternalAdapterClient {
     }
     if (!options.allowUnsupported) this._ensureCapability(operation);
     const correlationId = options.correlationId || this._newRequestId(operation);
+    // Correlation IDs belong to the client so the pending map and response
+    // dispatch cannot be redirected by an adapter payload.  Ignore the
+    // duplicate payload field while preserving all other request fields.
+    const requestPayload = isPlainObject(payload) ? { ...payload } : {};
+    delete requestPayload.correlationId;
     const record = {
       type: operation,
       correlationId,
-      ...payload,
+      ...requestPayload,
     };
     delete record.type;
     record.type = operation;

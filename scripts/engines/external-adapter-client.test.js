@@ -68,6 +68,24 @@ test('external client negotiates, runs, and exposes revisioned session operation
   }
 });
 
+test('request keeps client correlation ownership when probe payload contains a correlationId', async () => {
+  const records = [];
+  const { client, cwd } = fixture();
+  client.onRecord = record => records.push(record);
+  try {
+    await client.start();
+    const response = await client.request('probe', { correlationId: 'payload-spoof' }, {
+      correlationId: 'client-probe',
+    });
+    assert.deepEqual(response, { state: 'verified', available: true, reachable: true, verified: true });
+    assert.equal(records.at(-1).correlationId, 'client-probe');
+    assert.equal(client.pending.size, 0);
+  } finally {
+    await client.close();
+    cleanup(cwd);
+  }
+});
+
 test('unsupported operations are explicit and do not emulate capability', async () => {
   const { client, cwd } = fixture({ unsupported: 'session.inspect', envAllowlist: ['METAME_FIXTURE_UNSUPPORTED'] });
   try {

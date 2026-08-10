@@ -32,6 +32,15 @@ test('external protocol schema is strict and closes record envelopes', () => {
   assert.throws(() => assertProtocolRecord({ ...initialize(), unexpected: true }), /PROTOCOL_RECORD_INVALID/);
 });
 
+test('run accepts prompt-only records but rejects records missing both input and prompt', () => {
+  assert.equal(validateProtocolRecord({
+    type: 'run', correlationId: 'prompt-only', prompt: 'hello',
+  }).valid, true);
+  const missing = validateProtocolRecord({ type: 'run', correlationId: 'missing-input' });
+  assert.equal(missing.valid, false);
+  assert.match(missing.errors[0].code, /run_input_required/);
+});
+
 test('strict-LF framer preserves UTF-8 split boundaries and rejects CRLF', () => {
   const first = encodeProtocolRecord({ ...initialize('utf8-1') });
   const split = Buffer.from(first, 'utf8');

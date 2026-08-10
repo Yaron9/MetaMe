@@ -178,7 +178,7 @@ const EXTERNAL_ADAPTER_PROTOCOL_SCHEMA = Object.freeze({
     run: {
       type: 'object',
       additionalProperties: false,
-      required: ['type', 'correlationId', 'input'],
+      required: ['type', 'correlationId'],
       properties: {
         type: { const: 'run' },
         correlationId: { $ref: '#/$defs/correlationId' },
