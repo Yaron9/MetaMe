@@ -388,3 +388,16 @@ WHERE trace_id IS NOT NULL AND ts >= datetime('now', '-30 days');
 ```
 
 Baseline queries are diagnostics only. Their counts are not acceptance thresholds and never authorize mutation.
+
+## 11. GitHub delivery map
+
+| New ticket | Acceptance slice | Superseded scope |
+|---|---|---|
+| #24 | Observability contract and `memory status/doctor` | #4 capability evidence where still relevant, #8 consumption audit, #9 effectiveness metrics |
+| #25 | Claim admission, conflict, lineage, active-only Synthesis | #6 consistency foundation |
+| #26 | Extraction lifecycle and non-destructive reconcile | #6 lifecycle/supersession, #9 production hygiene |
+| #27 | Project Context Manifest, access, Cognitive Host projection, JIT idempotency | #4 baseline contract, #5 consumption, #7 Host adapter |
+| #28 | Wiki projection safety and Human Annotation | Wiki consistency portions of #6 and #9 |
+| #29 | Integration, review, regression, and documentation | #10 final acceptance |
+
+Parent #23 supersedes parent #3. Issues #3–#10 remain open as historical acceptance references until #24–#29 pass; #29 then records final evidence and closes them.
