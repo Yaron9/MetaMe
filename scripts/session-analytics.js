@@ -367,9 +367,15 @@ async function listCanonicalSessions(kind = 'analyzed', limit = 30, options = {}
   const rows = [];
   const pageSize = discoveryPageSize(max, options);
   const scanBudget = discoveryScanBudget(options);
+  const sourceEntries = [...getSessionSources()];
   let remainingScanBudget = scanBudget;
-  for (const [engineId, source] of getSessionSources()) {
+  for (const [sourceIndex, [engineId, source]] of sourceEntries.entries()) {
     if (remainingScanBudget <= 0) break;
+    const sourcesLeft = sourceEntries.length - sourceIndex;
+    const sourceScanBudget = Math.min(
+      remainingScanBudget,
+      Math.max(1, Math.ceil(remainingScanBudget / sourcesLeft)),
+    );
     const sourceRows = [];
     const scan = await walkDiscoveredRefs(source, {
       ...(options.discoveryRequest || {}),
@@ -377,7 +383,7 @@ async function listCanonicalSessions(kind = 'analyzed', limit = 30, options = {}
       suppressOwnedSubagents: options.suppressOwnedSubagents !== false,
     }, {
       pageSize,
-      scanBudget: remainingScanBudget,
+      scanBudget: sourceScanBudget,
       onRef: async ref => {
       const inspected = await inspectSourceSession(engineId, source, ref);
       if (!inspected) return false;

@@ -91,6 +91,7 @@ test('session analytics paginates past processed newer sessions and honors curso
     const assert = require('node:assert/strict');
     const analytics = require('./scripts/session-analytics');
     const sources = analytics._internal.getSessionSources();
+    sources.clear();
     const refs = Array.from({ length: 24 }, (_, index) => ({
       engineId: 'claude',
       nativeSessionId: 'page-session-' + index,
