@@ -26,6 +26,7 @@ const DEFAULT_MAX_TEXT = 4000;
 const DEFAULT_MAX_TOOL_TEXT = 1600;
 const DEFAULT_MAX_TOOL_INPUT = 1200;
 const DEFAULT_DISCOVERY_LIMIT = 1000;
+const MAX_DISCOVERY_SNAPSHOT_PATHS = DEFAULT_DISCOVERY_LIMIT * 100;
 
 function adapterError(code, detail = '') {
   const normalizedCode = String(code || '').startsWith('CLAUDE_')
@@ -459,12 +460,20 @@ function parseDiscoveryCursor(value, pathMod) {
     throw adapterError('CLAUDE_SESSION_SOURCE_CURSOR_INVALID', 'snapshot_required');
   }
   const snapshot = object.snapshot.map(entry => normalizeDiscoverySnapshotEntry(entry, pathMod));
+  if (snapshot.length > MAX_DISCOVERY_SNAPSHOT_PATHS) {
+    throw adapterError('CLAUDE_SESSION_SOURCE_CURSOR_INVALID', 'snapshot_too_large');
+  }
   if (offset > snapshot.length) throw adapterError('CLAUDE_SESSION_SOURCE_CURSOR_INVALID', 'offset');
+  const accepted = object.accepted === undefined ? offset : Number(object.accepted);
+  if (!Number.isSafeInteger(accepted) || accepted < 0 || accepted > DEFAULT_DISCOVERY_LIMIT) {
+    throw adapterError('CLAUDE_SESSION_SOURCE_CURSOR_INVALID', 'accepted');
+  }
   const query = asObject(object.query);
   if (!query) throw adapterError('CLAUDE_SESSION_SOURCE_CURSOR_INVALID', 'query_required');
   return {
     version,
     offset,
+    accepted,
     snapshot,
     query: {
       project: stringValue(query.project).trim(),
@@ -482,10 +491,11 @@ function sameDiscoveryQuery(left, right) {
     && left.suppressOwnedSubagents === right.suppressOwnedSubagents;
 }
 
-function makeDiscoveryCursor(snapshot, offset, query) {
+function makeDiscoveryCursor(snapshot, offset, accepted, query) {
   return {
     version: DISCOVERY_CURSOR_VERSION,
     offset,
+    accepted,
     snapshot,
     query,
   };
@@ -545,7 +555,7 @@ function createClaudeSessionSourceAdapter(options = {}) {
   }
 
   function snapshotPaths(files) {
-    return files.slice(0, DEFAULT_DISCOVERY_LIMIT).map(filePath => ({
+    return files.slice(0, MAX_DISCOVERY_SNAPSHOT_PATHS).map(filePath => ({
       relativePath: normalizeRelativePath(pathMod.relative(projectsRoot, filePath), pathMod),
     }));
   }
@@ -610,14 +620,21 @@ function createClaudeSessionSourceAdapter(options = {}) {
     const state = prepareDiscovery(request);
     const limit = discoveryLimit(request);
     const start = state.cursor ? state.cursor.offset : 0;
-    const page = entriesFromSnapshot(state.snapshot, start, limit);
+    const acceptedStart = state.cursor ? state.cursor.accepted : 0;
+    const page = entriesFromSnapshot(
+      state.snapshot,
+      start,
+      Math.min(limit, DEFAULT_DISCOVERY_LIMIT - acceptedStart),
+    );
+    const acceptedEnd = acceptedStart + page.length;
     const hasMore = page.length > 0
+      && acceptedEnd < DEFAULT_DISCOVERY_LIMIT
       && page[page.length - 1].snapshotIndex + 1 < state.snapshot.length;
     return page.map((entry, index) => refForFile(
       entry.filePath,
       entry.info,
       hasMore && index === page.length - 1
-        ? makeDiscoveryCursor(state.snapshot, entry.snapshotIndex + 1, state.query)
+        ? makeDiscoveryCursor(state.snapshot, entry.snapshotIndex + 1, acceptedEnd, state.query)
         : null,
     ));
   }

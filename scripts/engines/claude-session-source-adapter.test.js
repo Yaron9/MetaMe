@@ -132,6 +132,39 @@ test('Claude bounded discovery parses only the requested page without ownership 
   assert.equal(reads, 1);
 });
 
+test('Claude discovery skips unreadable newest files before its valid-session cap', async () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-unreadable-'));
+  const blockedPath = path.join(tmpRoot, '00-blocked.jsonl');
+  const validPath = path.join(tmpRoot, '01-valid.jsonl');
+  fs.writeFileSync(blockedPath, `${JSON.stringify({
+    type: 'user', sessionId: 'blocked', message: { content: 'blocked' },
+  })}\n`);
+  fs.writeFileSync(validPath, `${JSON.stringify({
+    type: 'user', sessionId: 'valid', message: { content: 'valid' },
+  })}\n`);
+  const sameTime = new Date('2026-07-01T00:00:00.000Z');
+  fs.utimesSync(blockedPath, sameTime, sameTime);
+  fs.utimesSync(validPath, sameTime, sameTime);
+  const nativeReadFileSync = fs.readFileSync;
+  let reads = 0;
+  const fsSpy = {
+    ...fs,
+    readFileSync(filePath, ...args) {
+      reads += 1;
+      if (filePath === blockedPath) {
+        const error = new Error('blocked');
+        error.code = 'EACCES';
+        throw error;
+      }
+      return nativeReadFileSync(filePath, ...args);
+    },
+  };
+  const source = createClaudeSessionSourceAdapter({ projectsRoot: tmpRoot, fs: fsSpy });
+  const refs = await discoverAll(source, { limit: 1 });
+  assert.deepEqual(refs.map(ref => ref.nativeSessionId), ['valid']);
+  assert.equal(reads, 2);
+});
+
 test('Claude discovery cursor replays a stable snapshot after files are touched', async () => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-cursor-'));
   const writeSession = (name, sessionId) => {
