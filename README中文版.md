@@ -18,7 +18,7 @@
 
 MetaMe 是一个驻留在你电脑上的 AI——记住你的思维方式，7×24 待命，通过 Telegram 或飞书随时接受手机指令。它不在云端，它住在你的机器里。原生支持 macOS 和 Windows。
 
-Claude Code 与 Codex 都是一等宿主：共享 skills 与 runtime，hooks 和插件配置按宿主隔离，避免 Claude harness 污染 Codex 启动环境。
+MetaMe 的核心与宿主无关。内置 Engine Plugin 当前覆盖 Claude Code、Codex、agy 和 Pi；其他 Host 只有在明确安装、注册并信任本地插件后才能接入。Runtime、Session Source 与 Cognitive Plane 能力独立协商，原生 hook 和配置留在插件边缘。
 
 不上云。你的机器，你的数据。
 
@@ -45,8 +45,8 @@ irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 > - **团队协作播报**：共享群聊中跨 Agent 状态流转可视化，支持昵称路由及黏性跟随。
 > - **统一意图引擎**：配置驱动的意图分发器，提供协作通信、操作辅助和任务创建等上下文提示。
 > - **模块化向导**：精简 CLI 工具，快速组建团队和克隆 Agent。
-> - **动态默认引擎**：启动时自动检测已安装的 CLI（claude/codex），纯 codex 用户零配置即可运行。
-> - **多引擎 runtime 适配**：daemon 按 `project.engine` 进行 Claude/Codex 路由，执行链路统一。
+> - **动态默认引擎**：启动时解析已配置、已注册的本地 Engine Plugin；仅仅出现在 `PATH` 上的 CLI 不会自动获得信任。
+> - **通用 runtime 适配**：daemon 通过唯一 capability registry 按项目（`project.engine`）路由，Claude、Codex、agy、Pi 和符合条件的外部插件共用执行契约。
 > - **Mentor Mode Hook**：预检情绪熔断、上下文摩擦注入、后置反思债务。
 > - **多用户 ACL / Team Task / 跨平台支持**：保持现有能力并与新链路兼容。
 >
@@ -69,9 +69,9 @@ $ metame
 连接建立。我们今天要做什么？
 ```
 
-### 2. 手机上完整的 Claude/Codex 会话
+### 2. 手机上使用原生 Agent 会话
 
-你的 Mac 跑一个 daemon，手机通过 Telegram 或飞书发消息。底层引擎按 `project.engine`（`claude`/`codex`）选择——同样的工具、同样的文件、同一个会话连续性。
+你的 Mac 跑一个 daemon，手机通过 Telegram 或飞书发消息。每个项目选择已注册的 Engine Plugin（`project.engine`）——同样的工具、同样的文件，并遵守插件声明的会话连续性。Claude Code、Codex、agy、Pi 和外部适配器在安装并 allowlist 后都走同一 daemon 路由契约。
 
 ```
 你（手机）：修一下 api/login.ts 的鉴权 bug
@@ -208,7 +208,7 @@ MetaMe 当前的技能进化是“可审计队列流”，不是黑盒自动安�
 
 ## 安装
 
-MetaMe 是编排层，Claude Code 和 Codex 是引擎。一条命令装齐。
+MetaMe 是编排层和 Cognitive Plane。至少安装一个支持的 Engine Plugin；想让项目调用其他插件时，还必须在 `daemon.yaml` 中显式注册并 allowlist。
 
 ### 按用户类型一键安装
 
@@ -217,6 +217,7 @@ MetaMe 是编排层，Claude Code 和 Codex 是引擎。一条命令装齐。
 | **Claude Code** | `npm install -g @anthropic-ai/claude-code metame-cli` | `claude` |
 | **Codex** | `npm install -g @openai/codex metame-cli` | `codex login` |
 | **两个都用** | `npm install -g @anthropic-ai/claude-code @openai/codex metame-cli` | `claude` + `codex login` |
+| **其他可信插件** | 按插件文档安装 Engine Plugin，再在 `daemon.yaml` 中注册并 allowlist | 由插件决定 |
 | **Claude 插件**（免 npm） | `claude plugin install github:Yaron9/MetaMe/plugin` | `claude` |
 
 > **没有 Node.js？** 一行命令搞定（Node + MetaMe 一起装）：
@@ -229,7 +230,7 @@ MetaMe 是编排层，Claude Code 和 Codex 是引擎。一条命令装齐。
 
 | 步骤 | 操作 |
 |------|------|
-| 1. 启动 | `metame`（Claude）或 `metame codex`（Codex） |
+| 1. 启动 | `metame`（使用配置的默认插件）或 `metame codex`（Codex 便捷入口） |
 | 2. 认知访谈 | 直接聊天 — 首次运行自动开始深度访谈 → 生成 `~/.claude_profile.yaml` |
 | 3. 连接手机 | 说”帮我设置手机访问” → 交互式 Telegram/飞书 Bot 配置向导 |
 | 4. 启动 daemon | `metame start` → 后台 daemon 上线，bot 开始工作 |
@@ -303,8 +304,8 @@ systemctl --user start metame
 ### FAQ
 
 - **插件模式支持 daemon + 手机吗？** 支持。插件在 `daemon.yaml` 存在时自动拉起 daemon。
-- **MetaMe 内置引擎吗？** 不内置。`metame-cli` 是引擎无关的，你装哪个引擎它就调哪个。
-- **只装一个引擎行吗？** 完全可以。`/doctor` 对缺失的非默认引擎只报告警，不判故障。
+- **MetaMe 内置 Agent 吗？** 不内置。`metame-cli` 与 Host 无关；你需要另行安装 Engine Plugin，且只有显式注册/allowlist 的插件才会执行。
+- **只装一个可信插件行吗？** 完全可以。`/doctor` 会报告不可用或未注册插件；只有默认插件或启用的项目确实依赖它时才判为故障。
 
 ---
 
@@ -314,7 +315,7 @@ systemctl --user start metame
 |------|------|
 | **认知画像** | 跨会话学习你的思维方式。Schema 约束、800 token 预算，后台统一通过 `agy/auto` 蒸馏（可通过 `/distill-model` 调整模型）。任何值标 `# [LOCKED]` 即不可覆写。 |
 | **分层记忆** | 三层记忆：长期事实（含 concept 标签）、历史检索、高阶沉淀（含 synthesized_insight / 全局索引 / 胶囊）。全自动。 |
-| **手机桥接** | 通过 Telegram/飞书完整使用 Claude/Codex。有状态会话、双向文件互传、实时工具调用状态。 |
+| **手机桥接** | 通过 Telegram/飞书使用已注册 Engine Plugin 的原生会话。有状态会话、双向文件互传、实时工具调用状态。 |
 | **技能进化** | 队列化技能进化：采集任务信号、生成工作流提案，并通过 `/skill-evo` 显式审批/结案。 |
 | **心跳系统** | 三层可编程神经系统。Layer 0 内核永远在线（零配置）。Layer 1 系统自进化内置（蒸馏+记忆+技能+nightly+index）。Layer 2 自定义定时任务，支持 `require_idle`、`precondition`、`notify`、工作流。 |
 | **多 Agent** | 多项目独立群聊，`/agent bind` 一键配置，真正并行执行。 |
@@ -432,7 +433,7 @@ feishu:
 | `/undo <hash>` | 回退到指定 git checkpoint |
 | `/list` | 浏览和下载项目文件 |
 | `/model` | 切换模型（sonnet/opus/haiku） |
-| `/engine` | 查看/切换默认引擎（`claude`/`codex`） |
+| `/engine` | 查看/切换默认的已注册 Engine Plugin（例如 `claude`、`codex` 或 allowlist 项目插件） |
 | `/distill-model` | 查看/设置后台蒸馏模型（后台引擎 `agy`，默认模型 `auto`） |
 | `/mentor` | 导师模式控制：on/off/level/status |
 | `/activate` | 在新群里激活并绑定最近创建的 Agent |
@@ -445,7 +446,7 @@ feishu:
 | `/broadcast [on\|off]` | 切换当前项目的团队广播（将成员间 dispatch 以卡片形式展示在群里） |
 | `/stop <昵称>` | 停止指定团队成员（例如 `/stop 乙`） |
 | `/mac` | macOS 控制助手：权限检查/跳转 + AppleScript/JXA 执行 |
-| `/sh <命令>` | 原始 shell——绕过 Claude |
+| `/sh <命令>` | 原始 shell——绕过 Agent 执行 |
 | `/memory` | 记忆统计：事实数量、已标签 session 数、DB 大小 |
 | `/memory <关键词>` | 按关键词搜索长期事实 |
 | `/doctor` | 交互式诊断 |
@@ -482,12 +483,12 @@ Mentor 模式不是替你执行命令，而是提升你做决策和复盘的质�
 
 ## Hook 优化（默认开启）
 
-MetaMe 启动时只保留最小必要的 Claude Hook：
+MetaMe 启动时只保留最小必要的 Host Hook（Claude 使用以下原生入口）：
 
 - `UserPromptSubmit`（`scripts/signal-capture.js`）：分层过滤后采集高价值偏好/任务信号。
 - `Stop`（`scripts/hooks/stop-session-capture.js`）：记录会话结束与工具失败信号，带 watermark 保护。
 
-语义识别和提示注入统一在 daemon 运行时完成，Claude / Codex 共用同一条注入链路。
+语义识别和提示注入统一在 daemon 运行时完成，所有已注册 Engine Plugin 共用同一条注入契约；原生 hook 安装仍属于显式 Host/插件边缘。
 
 Hook 安装失败不会阻断会话；MetaMe 会记录日志并继续运行。
 
@@ -499,8 +500,9 @@ Hook 安装失败不会阻断会话；MetaMe 会记录日志并继续运行。
 └─────────────┘                           │  （你的电脑，7×24）           │
                                           │                              │
                                           │   ┌──────────────┐           │
-                                          │   │ Claude/Codex  │           │
-                                          │   │（同一引擎）    │           │
+                                          │   │ 已注册的      │           │
+                                          │   │ Engine Plugin │           │
+                                          │   │（同一 runtime）│           │
                                           │   └──────────────┘           │
                                           │                              │
                                           │   ~/.claude_profile          │
@@ -522,11 +524,12 @@ Hook 安装失败不会阻断会话；MetaMe 会记录日志并继续运行。
 
 - **画像**（`~/.claude_profile.yaml`）：你的认知指纹，通过 `CLAUDE.md` 注入每个 Claude 会话。
 - **Daemon**（`scripts/daemon.js`）：后台进程，处理消息、心跳任务、Unix socket 分发，以及 idle/sleep 状态切换。
-- **Runtime Adapter**（`scripts/daemon-engine-runtime.js`）：统一 Claude/Codex 的参数构建、环境变量与流式事件归一化。
+- **Runtime Adapter**（`scripts/daemon-engine-runtime.js`）：解析唯一 capability registry，把原生参数、环境变量和流式事件归一化委托给插件适配器。
 - **蒸馏**（`scripts/distill.js`）：心跳任务（默认 4h，信号守卫），更新画像并合并能力信号；显著会话可生成 postmortem + `bug_lesson`。
 - **记忆提取**（`scripts/memory-extract.js`）：心跳任务（默认 4h，闲置守卫），提取长期事实并写入 `fact_labels`。
 - **夜间反思**（`scripts/memory-nightly-reflect.js`）：每日 01:00，蒸馏热事实并回写 `synthesized_insight`，生成知识胶囊。
 - **索引构建**（`scripts/memory-index.js`）：每日 01:30，重建全局记忆索引。
+- **Session Source + Extraction Run**：插件适配器提供带 revision 的原生证据，共享 ingestion 在 `memory.db` 记录 claim/completion，所有 Host 使用同一幂等模型。
 
 ## Scripts/Docs 指针地图
 

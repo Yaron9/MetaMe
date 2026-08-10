@@ -54,3 +54,26 @@ test('analytics keeps one revision-scoped processing identity', () => {
   assert.match(source, /sourceRevision/);
   assert.match(source, /pipeline_version/);
 });
+
+test('published metadata and operator docs describe the universal trust boundary', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  assert.doesNotMatch(pkg.description, /Claude Code and Codex$/i);
+  assert.ok(pkg.keywords.includes('engine-plugin'));
+  assert.ok(pkg.keywords.includes('universal-agent'));
+
+  const activeDocs = [
+    'README.md',
+    'README中文版.md',
+    'scripts/docs/maintenance-manual.md',
+    'scripts/docs/pointer-map.md',
+  ];
+  for (const relativePath of activeDocs) {
+    const source = fs.readFileSync(path.join(ROOT, relativePath), 'utf8');
+    assert.doesNotMatch(
+      source,
+      /Claude\/Codex 双引擎|Claude Code and Codex are first-class hosts|project\.engine:\s*claude\|codex/i,
+      `${relativePath} must not advertise the retired two-host architecture`,
+    );
+    assert.match(source, /registered|已注册|Capability Registry|capability registry/i);
+  }
+});

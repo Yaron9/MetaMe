@@ -18,7 +18,7 @@ Stop (每轮结束)
 ```
 
 `scripts/intent-registry.js` 是单一维护源，负责调用各意图模块并返回提示块。
-daemon 在运行时直接复用同一 registry，Claude / Codex 共用这一条注入路径。
+daemon 在运行时直接复用同一 capability registry，所有已注册 Engine Plugin 共用这一条注入路径；Host-specific hook 只在 adapter/config edge 处理。
 零匹配 → 零输出（不浪费 token）。
 
 ---

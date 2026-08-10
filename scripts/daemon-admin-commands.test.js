@@ -116,6 +116,29 @@ describe('daemon-admin-commands /status perpetual', () => {
   });
 });
 
+describe('daemon-admin-commands /status architecture boundary', () => {
+  it('reports the selected plugin registry scope without treating PATH discovery as trust', async () => {
+    const sent = [];
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      { getDefaultEngine: () => 'codex' },
+    );
+
+    const res = await handleAdminCommand({
+      bot: createBot(sent),
+      chatId: 'mobile-user-status',
+      text: '/status',
+      config: { budget: { daily_limit: 50000 } },
+      state: { started_at: '2026-08-10T00:00:00.000Z', budget: { tokens_used: 0 } },
+    });
+
+    assert.equal(res.handled, true);
+    assert.match(sent[0], /Engine Plugin: codex/);
+    assert.match(sent[0], /registered built-in descriptor/);
+    assert.match(sent[0], /PATH discovery is not trust/);
+  });
+});
+
 describe('daemon-admin-commands /weixin', () => {
   it('shows weixin status from config and auth store', async () => {
     const sent = [];

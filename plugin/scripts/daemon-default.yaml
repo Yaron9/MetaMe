@@ -212,8 +212,12 @@ daemon:
     backend: ollama
     model: bge-m3
     dimensions: 1024
-  # Experimental engines are opt-in and project-scoped. They are never
-  # selected globally or for newly created agents by default.
+  # Engine Plugin trust is explicit: a CLI on PATH is only discoverable.
+  # It becomes runnable through a registered descriptor plus an enabled,
+  # project-scoped allowlist. Built-in Claude/Codex are ordinary registry
+  # entries; agy/Pi stay opt-in until their plugin capability is enabled.
+  # External adapters must use the same explicit install/register/allowlist
+  # boundary and must never be inferred from arbitrary executable names.
   experimental_engines:
     agy:
       enabled: false

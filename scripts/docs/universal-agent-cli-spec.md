@@ -1,5 +1,7 @@
 # Spec: Universal Agent CLI Runtime and Cognitive Session Ingestion
 
+> Status: Accepted universal contract. Ticket #22 replaces the earlier selected-host implementation scope with one registry, canonical Session Sources, shared Extraction Runs, and explicit trusted-plugin admission. Host names below identify conformance fixtures, not branches permitted in MetaMe Core.
+
 ## Problem Statement
 
 MetaMe currently integrates selected Agent CLIs deeply enough to execute work, preserve some native session continuity, and extract knowledge from some session formats. The execution side has begun to converge on a registry and native CLI adapter contract, but Host-specific assumptions still leak into routing, configuration, diagnostics, session storage, analytics, and memory extraction. Adding another Agent such as Pi therefore risks becoming another repository-wide branch rather than a bounded integration.

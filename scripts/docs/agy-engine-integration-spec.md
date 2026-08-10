@@ -1,12 +1,12 @@
-# MetaMe scoped agy engine integration spec
+# MetaMe scoped agy Engine Plugin integration record
 
-> Status: Implemented
+> Status: Implemented historical migration record; current architecture is governed by the universal Engine Plugin contract and ADR 0003.
 > Scope: scoped foreground AGY plus isolated background subconscious inference
 > Last reviewed: 2026-07-17
 
 ## 1. Decision
 
-MetaMe will add `agy` as a scoped daemon engine without changing the default engine, desktop CLI entrypoints, or the behavior of existing Claude/Codex sessions.
+MetaMe added `agy` as a scoped Engine Plugin without changing the configured default descriptor, desktop CLI entrypoints, or the behavior of existing registered plugin sessions.
 
 Foreground and background are deliberately separate boundaries:
 
@@ -37,7 +37,7 @@ Antigravity-specific behavior stays at the process boundary. Core handoff code c
 5. Provide a deterministic rollback to the current engines:
    - `digital_me` -> `claude`
    - `munger` -> `codex`
-6. Keep all existing Claude/Codex tests and runtime behavior unchanged.
+6. Keep all existing built-in plugin tests and runtime behavior unchanged.
 
 ## 3. Non-goals
 
@@ -51,7 +51,7 @@ The first release does not add:
 - `/compact` support for agy;
 - warm-process pooling;
 - token/usage accounting beyond the existing text-length estimate;
-- byte-identical streaming parity with Claude/Codex;
+- byte-identical streaming parity with every other built-in plugin;
 - automatic import, mutation, or credential migration of Antigravity plugins/MCP servers.
 
 ## 4. Current-state findings
@@ -64,7 +64,7 @@ The daemon route is:
 chat_agent_map -> project -> project.engine -> getEngineRuntime()
 ```
 
-The runtime interface already normalizes engine output into `session`, `text`, `tool_use`, `tool_result`, `done`, and `error` events. However, several implementations are still binary Claude/Codex choices:
+The runtime interface already normalizes engine output into `session`, `text`, `tool_use`, `tool_result`, `done`, and `error` events. This historical record captured several legacy two-name choices that Ticket #22 now keeps behind plugin boundaries:
 
 - `daemon-utils.js:normalizeEngineName()` rejects every value except `claude` and `codex`;
 - `daemon-engine-runtime.js` resolves only the two existing binaries and models;
@@ -251,7 +251,7 @@ The agy backend validates a session by UUID plus at least one durable artifact:
 
 The cache's cwd mapping is supporting evidence, not mandatory validation, because a newer conversation in the same cwd can replace it.
 
-General cross-engine session listing remains Claude/Codex-only in phase 1. The bound chat's stored `engines.agy` slot is sufficient for continuation.
+General cross-plugin session listing is capability-driven. In the historical phase-1 implementation, the bound chat's stored `engines.agy` slot was sufficient for continuation; current `/sessions` uses registered Session Source Adapters.
 
 ### 6.6 Concurrency
 
@@ -299,7 +299,7 @@ Rules:
 1. Default is disabled.
 2. `engine: agy` is accepted only when enabled and the resolved bound project is allowlisted.
 3. Unbound chats and other projects cannot select agy.
-4. The global default engine remains Claude/Codex; agy is never auto-detected as the default.
+4. The global default remains the configured default descriptor; agy is never auto-detected as the default.
 5. Agent creation and natural-language engine selection do not advertise agy in phase 1.
 
 This is a generic configuration gate, not a hardcoded `if project === 'munger'` in the execution path.
@@ -482,7 +482,7 @@ node --test scripts/daemon-*.test.js
 node --test scripts/core/*.test.js
 ```
 
-Existing Claude/Codex snapshots, arguments, session routing, permission behavior, and scheduler defaults must remain unchanged.
+Existing registered-plugin snapshots, arguments, session routing, permission behavior, and scheduler defaults must remain unchanged.
 
 ### 12.4 Live acceptance
 

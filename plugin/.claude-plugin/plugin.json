@@ -1,7 +1,7 @@
 {
   "name": "metame",
   "version": "1.7.0",
-  "description": "The cognitive profile and agent runtime layer for Claude Code and Codex.",
+  "description": "A universal cognitive control plane and trusted local Engine Plugin runtime for agent hosts.",
   "author": {
     "name": "Yaron",
     "url": "https://github.com/Yaron9/MetaMe"

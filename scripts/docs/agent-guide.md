@@ -16,9 +16,9 @@
 在手机端（飞书/Telegram），直接说即可，daemon 会自动处理：
 > 创建一个 Agent，目录是 ~/projects/my-bot
 
-引擎选择（手机端自然语言）：
-- 默认不写引擎时，使用 Claude（配置里不落 `engine` 字段）
-- 句子里带 `codex` 关键词时，自动写入 `engine: codex`
+Engine Plugin 选择（手机端自然语言）：
+- 默认不写 plugin 时沿用兼容默认 descriptor（配置里不落 `engine` 字段）。
+- 只有明确提到并已注册/allowlist 的 plugin id 才写入 `engine`；不能仅因为某个 CLI 名称出现在 PATH 或文本中就授予执行信任。
 
 示例：
 > 创建一个 codex agent，目录是 ~/projects/reviewer
@@ -91,5 +91,5 @@
 ## 注意事项
 - 专属群（chat_agent_map 中的群）永远绑定同一个 Agent，不能通过昵称切换
 - 新群必须发 `/activate` 才能使用，未授权群会提示"此群未授权"
-- Codex 当前限制（MVP）：`/sessions` 列表暂只展示 Claude 本地会话，Codex 会话暂不可见
-- Codex 当前限制（MVP）：`/compact` 暂不支持，请继续在同一会话中对话
+- `/sessions` 仅展示已注册 Session Source Adapter 能发现并投影的会话；缺少该 capability 的 plugin 会明确显示不可见原因。
+- `/compact` 是否支持由当前 plugin capability contract 决定；unsupported 时请继续在同一会话中对话。

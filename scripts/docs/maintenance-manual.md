@@ -1,14 +1,15 @@
-# MetaMe 维护手册（Claude/Codex 双引擎）
+# MetaMe 维护手册（Universal Runtime + Cognitive Plane）
 
 > 适用范围：`scripts/daemon.js` 后台 daemon 链路（飞书/Telegram 路由、会话执行、Agent 绑定）。
 
-## 1. 引擎路由规则
+## 1. Engine Plugin 路由规则
 
 ### 手机端（daemon 生效）
 
-- 路由入口：`chat_agent_map -> project -> project.engine`
-- `project.engine` 可选值：`claude`（默认）/`codex`
-- 未配置 `engine` 时等价 `claude`
+- 路由入口：`chat_agent_map -> project -> project.engine -> Capability Registry`
+- `project.engine` 必须解析到已注册的 Engine Plugin descriptor；内置 descriptor 当前包括 Claude Code、Codex、agy、Pi。
+- 未配置 `engine` 时沿用兼容默认值 `claude`，但仍必须通过 registry 解析；外部 CLI 出现在 `PATH` 上不会自动获信任。
+- agy/Pi 以及外部 adapter 还必须满足 daemon 配置中的启用和 project allowlist；只发现可执行文件不等于可调用。
 
 示例：
 
@@ -26,13 +27,13 @@ feishu:
 
 ### 电脑端（CLI）
 
-- Claude 入口：`metame`（等价启动 Claude + MetaMe 初始化）
-- Codex 入口：`metame codex [args]`
-- 也可直接用原生命令：`claude` / `codex`
+- 默认入口：`metame`（启动已配置的默认 Engine Plugin + MetaMe 初始化）
+- Codex 便捷入口：`metame codex [args]`
+- 直接调用原生命令只属于 Host/plugin 边缘；daemon 不会绕过 registry 执行任意 CLI。
 
 ### 宿主定制隔离
 
-- 共享能力：`skills/` 与 `scripts/`，由 MetaMe 部署后供两个引擎使用。
+- 共享能力：`skills/`、`scripts/` 与 Cognitive Plane，通过统一 Runtime/Session Source/Cognitive Host capability contract 供所有已注册插件使用。
 - Claude hooks：写入 `~/.claude/settings.json`。
 - Codex hooks：按 Codex 原生 schema 合并写入 `~/.codex/hooks.json`，不复用 Claude 插件 hooks。
 - 原生 Codex 的 `UserPromptSubmit` 同时运行信号采集和按需记忆召回；召回复用 `core/recall-prepare.js`，不维护第二套路由/检索实现。
@@ -40,11 +41,11 @@ feishu:
 - 隔离前备份 `~/.codex/config.toml` 到 `config.toml.pre-metame-codex-compat.bak`；不修改 `~/.codex/plugins/cache/`。
 - 可用 `METAME_CODEX_COMPAT=off metame codex` 关闭自动兼容审计。
 
-## 2. Agent 创建与引擎写入
+## 2. Agent 创建与 Engine Plugin 写入
 
-- 默认创建 Agent：不写 `engine` 字段（保持兼容）
-- 创建语句中包含 `codex` 关键词：写入 `engine: codex`
-- 绑定语句包含 `codex` 时同样支持写入 `engine: codex`
+- 默认创建 Agent：不写 `engine` 字段（保持兼容默认 descriptor）
+- 创建/绑定语句可显式请求一个 registry 中已注册且允许的 plugin id（例如 `codex` 或 allowlisted `pi`）。
+- 只有明确的 plugin id 才能写入 `engine`；不能从任意 CLI 名称或自然语言猜测出可执行信任。
 
 示例：
 
@@ -53,8 +54,10 @@ feishu:
 
 ## 3. 会话与执行规则
 
-- Runtime 工厂：`daemon-engine-runtime.js`
+- Capability Registry / Runtime facade：`daemon-engine-runtime.js` → `engines/engine-registry.js`
+- native adapter assembly：`engines/native-runtime-factory.js`（唯一接触各 Host CLI `_private` 的边缘）
 - 执行编排：`daemon-claude-engine.js`，streaming 纯逻辑委托 `core/handoff.js`（引擎中性），审计状态在 `core/audit.js`
+- Session Source 与 Cognitive Plane ingestion 只消费 canonical input，不解析 Host-native path/DB/event。
 - 架构纪律见 CLAUDE.md「代码架构纪律（Unix 哲学）」
 
 ### Codex 会话策略
@@ -66,28 +69,27 @@ feishu:
 ## 4. 命令行为差异
 
 - `/stop`：引擎中性，按 `activeProcesses.killSignal` 停止
-- `/compact`：
-  - Claude 会话：正常压缩
-  - Codex 会话：返回"暂不支持，请继续同会话"
+- `/compact`：由当前 plugin 的 capability contract 决定；core 不按 Host 名称分支，unsupported 能力返回明确提示。
 - `/engine`：
   - 查询当前默认引擎：`/engine`
-  - 切换默认引擎：`/engine claude` 或 `/engine codex`
+  - 切换默认引擎：`/engine <registered-plugin-id>`；project-scoped plugin 只有在 enabled + allowlist 命中时可切换
 - `/distill-model`：
   - 后台蒸馏/记忆沉淀统一走 `agy`，默认模型为 `auto`
   - 查询当前后台模型：`/distill-model`
   - 设置后台模型：`/distill-model auto`（或 agy CLI 支持的模型名）
   - 也支持严格自然语言：`把蒸馏模型改成 auto`
 - `/doctor`：
-  - 同时检查 Claude/Codex CLI 可用性
-  - 仅在"当前默认引擎对应 CLI 不可用"时判为故障
-  - 自定义 provider 下允许任意合法模型名（不再强制 sonnet/opus/haiku）
+  - 报告 registry descriptor、CLI discovery、enabled/allowlist 与当前默认 plugin 的区别
+  - 仅当当前默认 plugin 或已启用 project plugin 缺失时判为故障；PATH 上的未注册 CLI 不是可用性证明
+  - 自定义 provider 下由 plugin capability 校验模型名，不把 Claude/Codex 模型规则复制到 core
 
-## 4.1 Codex session 记忆沉淀
+## 4.1 Session Source 与 Extraction Run 记忆沉淀
 
-- 入口：`scripts/memory-extract.js` → `scripts/session-analytics.js`
-- 新版 Codex 优先从 `state_5.sqlite` 的 `threads.rollout_path` 定位 rollout transcript；已知 DB 包括 `~/.codex/state_5.sqlite` 和 daemon state 里各 session cwd 下的 `.codex/state_5.sqlite`。
-- 旧版兼容仍扫描 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`。
-- 去重标记使用 analytics state DB 的 `codex_facts:<session_id>`，不会和 Claude session 标记碰撞。
+- 入口：`scripts/memory-extract.js` → `scripts/session-analytics.js` → shared `memory.db`
+- 各 Engine Plugin 的 Session Source Adapter 负责发现 native evidence，并返回 canonical `source/ref/revision`；core 不扫描 Host-native path、DB、transcript 或 event schema。
+- Codex 的 `state_5.sqlite` / rollout path 兼容只存在于 Codex Session Source Adapter；其他 Host 以同一 adapter contract 接入。
+- `session_sources` 是唯一 source registry；`extraction_runs` 是每个 source revision/pipeline 的 claim、lease、completion 权威模型。
+- 不再写入 `analytics_state.json`、`analytics_state.db`、`processed_sessions` 或重复的 Host-specific marker。无法立即删除的持久化兼容必须进入命名 migration edge 并配测试。
 
 ## 4.2 自维护知识链路
 
@@ -178,28 +180,38 @@ feishu:
 3. 确认 relay 群已加入 `allowed_chat_ids`（relay 群消息需被 daemon 接收）
 4. 两端的 `secret` 必须完全一致
 
-## 9. 双平台/双引擎维护矩阵
+## 9. 跨平台 / 多 Engine Plugin 维护矩阵
 
 ### 统一维护（改一处即可）
 - **core/handoff.js**（引擎中性、平台中性的纯逻辑，通过参数接收平台/引擎差异）
 - **core/audit.js**（纯状态管理，无平台差异）
+- **core/engine-descriptors.js + engines/engine-registry.js**（唯一 capability registry）
+- **core/session-source-db.js + core/extraction-run-db.js**（唯一 Session Source / Extraction Run model）
+- **session-analytics.js / cognitive-ingestion.js / memory-extract.js**（不得出现 Host token、native path、DB、transcript 或 event branch）
 - agent-layer.js / daemon-agent-tools.js / daemon-agent-commands.js / daemon-user-acl.js
 - ENGINE_MODEL_CONFIG（daemon-engine-runtime.js 集中管理）
 - daemon-runtime-lifecycle.js 的语法检查和备份机制
 - daemon-remote-dispatch.js（纯逻辑，无平台差异）
 - daemon-team-dispatch.js（共享解析/hint/enrichment）
 
-### 需分别维护（有平台/引擎特殊分支）
+### 只在 plugin / platform edge 分别维护（允许出现原生差异）
 
 | 模块 | 差异点 | 注意事项 |
 |------|--------|----------|
 | platform.js `killProcessTree` | POSIX: `kill(-pid)` / Windows: `taskkill /T /F` | 所有进程杀死调用点应统一使用此函数 |
-| daemon-engine-runtime.js `resolveBinary` | macOS: `which` + homebrew / Windows: `where` + `.cmd` | 新增引擎需两端测试 |
-| daemon-engine-runtime.js `buildArgs` | Claude: `--resume`/`--continue` / Codex: `exec resume`，Codex resume 不能传权限 flag | 改参数结构时两端验证 |
-| daemon-claude-engine.js Soul 注入 | Claude: `@SOUL.md` import（引用式）/ Codex: AGENTS.md 合并写入（快照式） | 改 soul 加载方式需两端测试 |
+| plugin runtime adapter `resolveBinary` | 各 Host 的 discovery / wrapper / platform executable 差异 | 新增 plugin 需 registry + shared conformance + 两端测试 |
+| plugin runtime adapter `buildArgs` | 各 Host 的 native resume / permission / model args | 改参数结构时只改 adapter，并验证 canonical runtime contract |
+| Cognitive Host Adapter / context projection | 各 Host 的 context file / hook schema | 不把 Host format 带入 daemon/core；更新 capability fixture |
 | agent-layer.js `createLinkOrMirror` | macOS: symlink / Windows: hardlink → copy 降级 | copy 模式不会自动同步源文件变更 |
 | daemon.js `spawnReplacementDaemon` | POSIX: `detached: true` / Windows: `detached: false` | 改 spawn 参数时注意平台分支 |
 | NL Mac 控制（command-router） | macOS only，`process.platform === 'darwin'` 守卫 | Windows 天然跳过 |
+
+### 架构验收不变量
+
+- Core routing、Run Coordinator、cognitive ingestion、analytics、memory 只能接收 canonical capabilities and inputs；出现 Host-native token/import/path/DB/transcript/event branch 即失败。
+- 每个 Session Source revision 只能通过 shared `extraction_runs` claim/lease/completion 进入 pipeline；不得新增 processed marker 表或平行 state DB。
+- MCP northbound 只走 official SDK entrypoint/bundle；不得新增手写 framing 或第二 transport。
+- External adapter 只有在显式 install → register → allowlist 后才可运行；`PATH` discovery 只用于诊断。
 
 ## 10. 团队路由（Team Routing）
 

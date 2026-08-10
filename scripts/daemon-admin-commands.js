@@ -379,6 +379,11 @@ function createAdminCommandHandler(deps) {
       const session = getSession(chatId);
       let msg = `MetaMe Daemon\nStatus: Running\nStarted: ${state.started_at || 'unknown'}\n`;
       msg += `Budget: ${state.budget.tokens_used}/${(config.budget && config.budget.daily_limit) || 50000} tokens`;
+      const currentEngine = getDefaultEngine();
+      const pluginScope = isExperimentalEngineName(currentEngine)
+        ? 'project-scoped; enabled + allowlist required'
+        : 'registered built-in descriptor';
+      msg += `\nEngine Plugin: ${currentEngine} (${pluginScope}; PATH discovery is not trust)`;
       if (session) msg += `\nSession: ${session.id.slice(0, 8)}... (${session.cwd})`;
       try {
         if (fs.existsSync(BRAIN_FILE)) {
@@ -1493,10 +1498,13 @@ function createAdminCommandHandler(deps) {
       }
 
       const daemonCfg = (cfg && cfg.daemon) || {};
-      const m = resolveEngineModel('claude', daemonCfg);
-      const modelOk = isCustomProvider
-        ? ['sonnet', 'opus', 'haiku'].includes(m)
-        : validModels.includes(m);
+      const currentEngine = getDefaultEngine();
+      const m = resolveEngineModel(currentEngine, daemonCfg);
+      const modelOk = currentEngine === 'claude'
+        ? validModels.includes(m)
+        : currentEngine === 'pi'
+          ? true
+          : Boolean(m);
       if (modelOk) {
         checks.push(`✅ 模型: ${m}`);
       } else {
@@ -1512,19 +1520,18 @@ function createAdminCommandHandler(deps) {
           ? engineName
           : `${engineName.slice(0, 1).toUpperCase()}${engineName.slice(1)}`;
         if (!isExperimentalEngineName(engineName)) {
-          checks.push(ready ? `✅ ${cliLabel} CLI` : `⚠️ ${cliLabel} CLI 未找到`);
+          checks.push(ready ? `✅ ${cliLabel} CLI（registered Engine Plugin）` : `⚠️ ${cliLabel} CLI 未找到`);
           continue;
         }
         const engineCfg = experimentalCfg[engineName];
         if (engineCfg && engineCfg.enabled === true) {
-          checks.push(ready ? `✅ ${cliLabel} CLI` : `❌ ${cliLabel} 已启用但 CLI 未找到`);
+          checks.push(ready ? `✅ ${cliLabel} CLI（registered Engine Plugin）` : `❌ ${cliLabel} 已启用但 CLI 未找到`);
           if (!ready) issues++;
         } else {
           checks.push(ready ? `ℹ️ ${cliLabel} CLI（scoped engine 未启用）` : `ℹ️ ${cliLabel} CLI 未安装`);
         }
       }
 
-      const currentEngine = getDefaultEngine();
       if (engineReady[currentEngine] === false) {
         checks.push(`❌ 当前默认引擎是 ${currentEngine}，但对应 CLI 不可用`);
         issues++;
@@ -1535,10 +1542,14 @@ function createAdminCommandHandler(deps) {
       if (engineReady[distillEngine] === false) {
         checks.push(`❌ 后台潜意识引擎是 ${distillEngine}，但对应 CLI 不可用`);
         issues++;
-      } else {
+      } else if (engineReady[distillEngine] === true) {
         checks.push(`✅ 后台潜意识引擎: ${distillEngine}（隔离、禁用工具）`);
+      } else {
+        checks.push(`⚠️ 后台潜意识引擎 ${distillEngine} 未在 Capability Registry 注册`);
+        issues++;
       }
 
+      checks.push('ℹ️ 信任边界: 仅显式安装、注册并 allowlist 的 Engine Plugin 可执行；PATH 上的 CLI 不会自动获信任');
       checks.push(`✅ 前台默认引擎: ${currentEngine}`);
       checks.push(`✅ Provider: ${activeProvider}${isCustomProvider ? ' (custom)' : ''}`);
 

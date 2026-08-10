@@ -72,16 +72,16 @@ Behavior note:
 | `/stop` | Interrupt current Claude task (ESC equivalent) |
 | `/undo` | Undo turns with file restoration (ESC×2 equivalent) |
 | `/model` | Interactive model switcher with auto-backup |
-| `/engine` | Show/switch default runtime engine (`claude`/`codex`) |
+| `/engine` | Show/switch the default registered Engine Plugin (for example `claude`, `codex`, or an allowlisted project plugin) |
 | `/distill-model` | Show/update background distill model |
 | `/doctor` | Interactive diagnostics with one-tap fix buttons |
-| `/sh <cmd>` | Run shell command directly — bypasses Claude entirely |
+| `/sh <cmd>` | Run shell command directly — bypasses Agent execution entirely |
 | `/fix` | Restore `daemon.yaml` from last backup |
 
 **Features:**
-- Full Claude/Codex engine on your phone (file editing, bash, code search)
-- Engine routing by project (`project.engine: claude|codex`) with shared session continuity
-- **Remote Wake** — daemon runs in background; phone wakes up Claude Code on your computer
+- Native Agent sessions on your phone through explicitly installed, registered, trusted Engine Plugins (file editing, bash, code search)
+- Engine routing by project (`project.engine`) through one shared capability registry and session contract
+- **Remote Wake** — daemon runs in background; phone wakes the selected trusted plugin on your computer
 - **File Transfer** — send files from computer to phone, or phone to computer (saved to `<project>/upload/`)
 - **Provider Relay** — route through any Anthropic-compatible relay for third-party models
 - **Emergency Recovery** — `/doctor` diagnostics, `/sh` direct shell, `/fix` config restore

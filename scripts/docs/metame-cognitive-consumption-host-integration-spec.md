@@ -1,5 +1,7 @@
 # MetaMe 认知资产消费闭环与统一 Agent 接入层 Spec
 
+> 状态：历史规划记录，已由 `scripts/docs/universal-agent-cli-spec.md` 与 ADR 0003 取代。文中的 Claude/Codex 范围描述只代表写作时的首批验证，不是当前支持边界；现行实现必须复用统一 Capability Registry、Session Source 与 Extraction Run 契约。
+
 ## Problem Statement
 
 MetaMe 已经具备长期记忆、Wiki、Profile、Agent Context、Skill Evolution、Session 提炼、混合检索、MCP 服务、Claude/Codex 宿主接入和后台治理等大量基础设施，但这些资产的生产能力强于消费能力。系统目前不能可靠回答：Claude 与 Codex 实际拥有了哪些 MetaMe 能力；某项资产是否能被发现、返回、展开、采用并帮助任务成功；消费链路断在何处；哪些后台任务仍在持续生产没有消费出口的资产。
@@ -114,7 +116,7 @@ MetaMe 将提供统一的认知能力契约，以现有 MCP Server 为首选标�
 ## Implementation Decisions
 
 - MetaMe is a user-owned cognitive control plane. It does not replace Claude, Codex or future domain Agents and does not duplicate their professional reasoning.
-- The first implementation scope is Claude and Codex. Pi is not currently integrated and is excluded until the two-host contract is proven.
+- The historical first implementation scope covered Claude and Codex. It is superseded: Pi, agy, and external fixtures now validate the same contract when their plugins are registered and allowlisted.
 - The work is an incremental retrofit of existing infrastructure. Existing memory, Wiki, Profile, Skill, daemon, session and runtime systems remain in place unless an acceptance test demonstrates a specific missing contract.
 - Consumption is implemented before further asset production or broad architectural refactoring.
 - The first phase is a read-only capability audit that records actual host capabilities for Facts, Wiki, Profile, Agent Context, Skills and consumption telemetry.

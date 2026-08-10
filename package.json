@@ -1,7 +1,7 @@
 {
     "name": "metame-cli",
     "version": "1.7.0",
-    "description": "The cognitive profile and agent runtime layer for Claude Code and Codex.",
+    "description": "A universal cognitive control plane and trusted local Engine Plugin runtime for agent hosts.",
     "main": "index.js",
     "bin": {
         "metame": "./index.js"
@@ -34,8 +34,14 @@
         "precommit": "npm run sync:plugin && npm run restart:daemon"
     },
     "keywords": [
+        "agent-runtime",
+        "engine-plugin",
+        "cognitive-control-plane",
+        "universal-agent",
         "claude",
         "codex",
+        "agy",
+        "pi",
         "ai",
         "meta-cognition",
         "productivity",

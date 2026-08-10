@@ -5,7 +5,7 @@ MetaMe is a user-owned runtime and cognitive control plane that connects indepen
 ## Language
 
 **Host**:
-An independently installed Agent application or CLI, such as Claude Code, Codex, Pi, or agy.
+An independently installed Agent application or CLI, such as Claude Code, Codex, Pi, or agy. A Host becomes usable by MetaMe only through an explicitly installed, registered, and trusted Engine Plugin.
 _Avoid_: Engine, Provider, Agent CLI when referring to the installed product
 
 **Engine**:
@@ -15,6 +15,14 @@ _Avoid_: Provider, Model
 **Engine Plugin**:
 The declared bundle of capabilities by which MetaMe can execute an Engine, observe its sessions, or connect it to MetaMe cognition. A plugin may provide only a subset of those capabilities.
 _Avoid_: Universal adapter, integration
+
+**Trusted Local Plugin**:
+An Engine Plugin that the user has explicitly installed, registered, and allowed for local execution. A CLI being present on `PATH` does not make it trusted.
+_Avoid_: Any installed CLI, auto-detected Host
+
+**Capability Registry**:
+The authoritative set of Engine Plugin descriptors and the capabilities they declare. Routing, diagnostics, and conformance use this registry instead of maintaining per-Host lists.
+_Avoid_: Engine map, host switch table
 
 **Runtime Adapter**:
 The Engine Plugin capability that translates between a MetaMe run and one Engine's native execution protocol.
@@ -36,6 +44,10 @@ _Avoid_: MetaMe Session
 A revisioned reference to native session evidence eligible for cognitive ingestion.
 _Avoid_: Memory, Fact
 
+**Extraction Run**:
+A durable attempt to ingest one Session Source revision for one cognitive pipeline, with claim, lease, and completion state.
+_Avoid_: Processed marker, analytics state
+
 **Episode**:
 An engine-neutral account of what occurred in a session. An Episode is evidence, not a trusted assertion.
 _Avoid_: Fact, Memory
@@ -55,6 +67,10 @@ _Avoid_: Tool, one-off behavior
 **Cognitive Plane**:
 MetaMe's user-owned memory, identity, policy, knowledge, skill, retrieval, and governance capabilities shared across Hosts.
 _Avoid_: MCP Server
+
+**Official MCP Transport**:
+The protocol transport used by the maintained MCP SDK at the integration boundary for Cognitive Plane capabilities. It is a transport boundary, not a second runtime or session-ingestion path.
+_Avoid_: Hand-written MCP transport, custom protocol shim
 
 **Capability Contract**:
 A versioned declaration of what an Engine Plugin can actually support and what MetaMe has behaviorally verified.

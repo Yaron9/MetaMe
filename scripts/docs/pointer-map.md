@@ -5,10 +5,11 @@
 ## 快速入口
 
 - 主入口：`index.js`
-- CLI 双入口：`metame`（Claude）/`metame codex [args]`（Codex）
+- CLI 入口：`metame`（配置的默认 Engine Plugin）/`metame codex [args]`（Codex 便捷入口）
 - Daemon 主循环：`scripts/daemon.js`
-- 多引擎 runtime 适配层：`scripts/daemon-engine-runtime.js`
-- 会话执行引擎（Claude/Codex 共用入口）：`scripts/daemon-claude-engine.js`
+- Capability Registry / runtime facade：`scripts/daemon-engine-runtime.js` → `scripts/engines/engine-registry.js`
+- native adapter assembly edge：`scripts/engines/native-runtime-factory.js`
+- 会话执行编排（所有 registered plugins 共用入口）：`scripts/daemon-claude-engine.js`
 - **核心纯逻辑模块**：`scripts/core/handoff.js`（子进程生命周期）、`scripts/core/audit.js`（审计状态）
 - Codex 宿主兼容：`scripts/core/codex-host.js`（插件 hooks 审计、配置隔离、原生 hooks 合并）；MetaMe MCP 默认提供按需记忆访问，`scripts/hooks/memory-recall-context.js` 仅作为可选 legacy 自动召回 hook（`METAME_CODEX_MEMORY_RECALL=on`）
 - 管理命令：`scripts/daemon-admin-commands.js`
@@ -23,24 +24,25 @@
 - 热重载安全机制：`scripts/daemon-runtime-lifecycle.js`（语法预检、last-good 备份、crash-loop 自愈）
 - 打包工具：`scripts/deploy-manifest.js`（部署清单）、`scripts/sync-plugin.js`（plugin 镜像同步）
 - 维护手册：`scripts/docs/maintenance-manual.md`
-- 通用 Agent CLI 基础设施目标架构：`scripts/docs/universal-agent-cli-infrastructure.md`；统一语言：`CONTEXT.md`；核心边界决策：`scripts/docs/adr/0001-separate-agent-runtime-session-and-cognitive-adapters.md`
+- 通用 Agent CLI 基础设施接受架构：`scripts/docs/universal-agent-cli-infrastructure.md`；统一语言：`CONTEXT.md`；核心边界决策：`scripts/docs/adr/0001-separate-agent-runtime-session-and-cognitive-adapters.md`、`scripts/docs/adr/0003-universal-architecture-acceptance.md`
 - 文件地图、原生维护扫描与 typed-action 清理：`scripts/docs/file-map-maintenance.md`
 
-## 多引擎（Claude/Codex）定位
+## Universal Runtime + Cognitive Plane 定位
 
-- 宿主定制边界：
+- Host/plugin 定制边界（唯一允许出现 Host identity）：
   - `index.js:ensureHookInstalled()`：Claude 原生 hooks
   - `index.js:ensureCodexHooksInstalled()`：Codex 原生 hooks
-  - `scripts/core/codex-host.js`：纯逻辑检测 Claude-only 插件并生成最小配置变更
+  - `scripts/core/codex-host.js`：纯逻辑检测 Claude-only 插件并生成最小配置变更；不得被 core routing/analytics/memory 复用
+  - 其他 Host 的 native args/path/config/event 只能留在对应 `scripts/engines/*-adapter.js`
 
 - Runtime 工厂与事件归一化：
   - `scripts/daemon-engine-runtime.js`
-  - 关键点：`normalizeEngineName()`、`buildClaudeArgs()`、`buildCodexArgs()`、`parseCodexStreamEvent()`
+  - 关键点：registry lookup、plugin capability resolution；native `buildArgs`/`parseEvent` 只通过 `native-runtime-factory.js` 进入
 
-- 会话与引擎选择：
+- 会话与 Engine Plugin 选择：
   - `scripts/daemon-claude-engine.js`
-  - 关键点：`askClaude()` 路由+执行，streaming 纯逻辑委托 `core/handoff.js`；`patchSessionSerialized()` 串行回写避免竞态
-  - Codex 规则：`exec`/`resume`、10 分钟窗口内一次自动重试、`thread_id` 迁移回写
+  - 关键点：canonical runtime dispatch，streaming 纯逻辑委托 `core/handoff.js`；`patchSessionSerialized()` 串行回写避免竞态
+  - Host-specific resume/retry/thread identifiers belong in plugin adapters and their conformance fixtures.
 
 - Agent Soul 身份层（新）：
   - `scripts/agent-layer.js`
@@ -61,21 +63,22 @@
 - 路由与 Agent 创建：
   - `scripts/daemon-command-router.js`
   - `scripts/daemon-agent-tools.js`
-  - 关键点：自然语言提取 `codex` 关键词；默认 `claude` 不写 `engine` 字段，仅 `codex` 持久化 `engine: codex`；
+  - 关键点：自然语言只能选择 registry 中明确注册的 plugin id；默认 descriptor 不写 `engine` 字段，显式 plugin 才持久化；
     `bindAgentToChat()` 自动调用 `ensureAgentMetadata()` 建立 soul 层；
     `daemon-agent-intent.js` 统一处理 Agent/团队自然语言入口（含负样本过滤、Windows 路径识别、显式动作优先）
 
-- 会话命令与兼容边界：
+- 会话命令与 capability 边界：
   - `scripts/daemon-exec-commands.js`
-  - 关键点：`/stop` 引擎中性；`/compact` 在 codex 会话返回"暂不支持"
+  - 关键点：`/stop` 引擎中性；`/compact` 由 plugin capability contract 报告支持与否，core 不按 Host 分支
 
-- Codex session 记忆沉淀：
-  - `scripts/session-analytics.js`：优先读 `state_5.sqlite -> threads.rollout_path`，兼容旧版 `~/.codex/sessions` rollout 文件
-  - `scripts/memory-extract.js`：复用同一事实提取链路，使用 `codex_facts:<session_id>` 做已处理标记
+- Session Source / Extraction Run 记忆沉淀：
+  - `scripts/session-analytics.js`：只消费 canonical Session Source input，并通过 shared `memory.db` `extraction_runs` 完成 claim/lease/completion
+  - `scripts/memory-extract.js`：复用同一 ingestion contract；Host-native path/DB/transcript discovery 由 plugin Session Source Adapter 负责
+  - `scripts/engines/*-session-source-adapter.js`：各 Host 的 native discovery edge；不得在 shared modules 添加 host branch
 
-- 运行时引擎切换与诊断：
+- 运行时 Engine Plugin 切换与诊断：
   - `scripts/daemon-admin-commands.js`
-  - 关键点：`/engine` 切换默认引擎；`/doctor` 按默认引擎检查 CLI 可用性（Claude/Codex）并兼容自定义 provider 模型名
+  - 关键点：`/engine` 切换 registry plugin；`/doctor` 分开报告 descriptor、CLI discovery、enabled/allowlist/trust，不把 PATH 当作信任
 
 ## 核心模块层（scripts/core/）
 
@@ -83,6 +86,9 @@
 
 - `core/handoff.js`：子进程 spawn/kill、streaming 状态机、超时看门狗、结果构建。唯一消费者 `daemon-claude-engine.js`
 - `core/audit.js`：审计状态。唯一消费者 `daemon.js`
+- `core/engine-descriptors.js` + `engines/engine-registry.js`：唯一 authoritative Engine Plugin registry
+- `core/extraction-run-db.js` + `core/session-source-db.js`：唯一 Session Source / Extraction Run persistence model
+- `core/architecture-invariants.test.js`：禁止 shared routing/ingestion/analytics/memory 引入 Host token、native path/DB/transcript/event 或 adapter imports
 - 测试：`core/handoff.test.js`、`daemon-audit.test.js`、`daemon-claude-engine.test.js`
 
 ## 团队 Dispatch 与跨设备通信定位
@@ -184,13 +190,13 @@
   - `soul.md` — 身份定义（主文件，项目目录的 SOUL.md 是其链接）
   - `memory-snapshot.md` — 近期记忆快照（注入 session prompt）
   - 项目视图：`<cwd>/SOUL.md`（symlink/hardlink/copy）、`<cwd>/MEMORY.md`（同）
-  - `<cwd>/AGENTS.md` — Codex 专用，每次新 session 由 daemon 合并 CLAUDE.md + SOUL.md 写入
+  - `<cwd>/AGENTS.md` — Codex Cognitive Host projection；每次新 session 由 daemon 合并 CLAUDE.md + SOUL.md 写入
 
 ## 诊断顺序（推荐）
 
 1. 先看配置：`~/.metame/daemon.yaml` 与 `scripts/daemon-default.yaml`
 2. 再看命令入口：`scripts/daemon-admin-commands.js`、`scripts/daemon-command-router.js`、`scripts/daemon-exec-commands.js`
-3. 再看执行链路：`scripts/daemon-engine-runtime.js` → `scripts/daemon-claude-engine.js` → `scripts/core/handoff.js`（纯逻辑）→ `scripts/mentor-engine.js`
+3. 再看执行链路：`scripts/daemon-engine-runtime.js` → `scripts/engines/engine-registry.js` → `scripts/daemon-claude-engine.js` → `scripts/core/handoff.js`（纯逻辑）→ `scripts/mentor-engine.js`
 4. 团队/跨设备：`scripts/daemon-team-dispatch.js` → `scripts/daemon-remote-dispatch.js` → `scripts/daemon-bridges.js`
 5. 最后看离线任务：模型任务经 `providers.js` → `daemon-background-runner.js`，由 `daemon-task-scheduler.js` 标记并通过 `METAME_ENGINE` 传入；确定性任务不注入引擎变量
 

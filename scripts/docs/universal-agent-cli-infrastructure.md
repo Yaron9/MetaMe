@@ -1,8 +1,10 @@
 # MetaMe Universal Agent CLI Infrastructure
 
-Status: Proposed implementation design
+Status: Accepted implementation baseline (Ticket #22)
 
-Decision baseline: `scripts/docs/adr/0001-separate-agent-runtime-session-and-cognitive-adapters.md`
+Decision baseline: `scripts/docs/adr/0001-separate-agent-runtime-session-and-cognitive-adapters.md`, `scripts/docs/adr/0002-official-mcp-sdk-boundary.md`, `scripts/docs/adr/0003-universal-architecture-acceptance.md`
+
+Acceptance note: the shared runtime and Cognitive Plane now use one Engine Plugin registry, canonical Session Sources, and durable `extraction_runs`. Claude Code, Codex, agy, Pi, and external fixtures must exercise the same contracts; Host-native details remain at plugin/config/persistence migration edges.
 
 ## 1. Outcome
 
@@ -524,22 +526,22 @@ Create one reusable conformance suite, not one bespoke integration test strategy
 
 Each built-in Engine Plugin must pass the same applicable conformance cases. Capability-specific tests are skipped only when the descriptor declares the capability unsupported.
 
-## 14. Migration plan
+## 14. Ticket #22 acceptance mapping
 
-These are final architectural slices, not temporary implementations.
+The slices below identify the final architectural locations and proof obligations. They are not permission to add a second protocol, duplicate ingestion path, or temporary compatibility wrapper.
 
 ### Slice 1: Contracts and registry
 
-- Introduce final Engine Plugin, capability, run-event, and session-source contracts.
-- Replace registry assumptions with descriptor-driven validation.
-- Migrate Claude, Codex, and agy directly to the final plugin shape.
+- Keep Engine Plugin, capability, run-event, and session-source contracts final and versioned.
+- Use descriptor-driven validation through the authoritative registry.
+- Keep Claude, Codex, agy, and Pi on the same plugin shape; external fixtures use the isolated protocol.
 - Preserve existing observable behavior through characterization tests.
 
 Exit criterion: no daemon/core module outside Engine Plugins constructs native CLI args or parses native run events.
 
 ### Slice 2: Session source extraction
 
-- Move Claude and Codex discovery/parsing behind Session Source Adapters.
+- Keep every Host discovery/parser behind its Session Source Adapter.
 - Route analytics and memory extraction through canonical session events.
 - Replace engine-specific processed markers with revisioned extraction runs.
 - Preserve current memory output through golden tests.
@@ -558,7 +560,7 @@ Exit criterion: Pi is added without adding a Pi branch outside its plugin, confi
 
 - Move MCP protocol handling to the official SDK while retaining MetaMe's existing tool semantics.
 - Unify Host detection, capability status, install planning, and doctor output.
-- Verify Claude, Codex, and Pi independently.
+- Verify every built-in plugin and the external fixture independently.
 
 Exit criterion: every Host has a truthful capability matrix and a tested read path to MetaMe cognition where supported.
 
@@ -623,6 +625,6 @@ Before implementation, reviewers must be able to answer:
 7. Which component owns MCP protocol compliance versus memory tool semantics?
 8. How is an external adapter prevented from executing arbitrary shell fragments?
 9. How does `/doctor` distinguish installed from behaviorally verified?
-10. Can Pi be removed without touching Claude/Codex sessions or cognitive assets?
+10. Can Pi or any external plugin be removed without touching other registered plugin sessions or cognitive assets?
 
 If any answer requires an engine-specific branch in core or a second pipeline, the design has been violated.

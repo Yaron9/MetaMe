@@ -18,7 +18,7 @@
 
 MetaMe is an AI that lives on your machine — remembers how you think, stays online 24/7, and takes commands from your phone via Telegram or Feishu. Not in the cloud. In your computer. Runs natively on macOS and Windows.
 
-Claude Code and Codex are first-class hosts. MetaMe shares skills and runtime logic between them while keeping host-specific hooks and plugin configuration isolated.
+MetaMe is Host-neutral at the core. Built-in Engine Plugins currently cover Claude Code, Codex, agy, and Pi; additional Hosts are usable only through explicitly installed, registered, trusted local plugins. Runtime, Session Source, and Cognitive Plane capabilities are negotiated independently, while native hooks and configuration stay at the plugin edge.
 
 No cloud. Your machine, your data.
 
@@ -45,8 +45,8 @@ irm https://raw.githubusercontent.com/Yaron9/MetaMe/main/install.ps1 | iex
 > - **Team broadcast**: Real-time cross-agent visibility in shared group chats with nickname routing and sticky follow.
 > - **Unified intent engine**: Config-driven intent dispatcher replacing standalone hooks for team communication, ops assist, and task creation.
 > - **Modular agent wizards**: New streamlined CLI flows for creating teams and cloning agents.
-> - **Dynamic default engine**: auto-detects installed CLI (claude/codex) at startup; pure-codex users work out of the box with zero config.
-> - **Multi-engine runtime adapter**: daemon supports engine routing by project (`project.engine`) with shared execution flow for Claude/Codex.
+> - **Dynamic default engine**: resolves a configured, registered local Engine Plugin at startup; the presence of a CLI on `PATH` alone never grants trust.
+> - **Universal runtime adapter**: daemon routes by project (`project.engine`) through one capability registry and shared execution flow for Claude, Codex, agy, Pi, and eligible external plugins.
 > - **Mentor mode hooks**: pre-flight emotion breaker, context-time mentor prompt, and post-flight reflection debt registration.
 > - **Multi-user ACL**: role-based permissions (admin / member / stranger) with binding protection.
 > - **Windows native support**: cross-platform path handling, Named Pipes IPC, GBK-safe encoding.
@@ -72,10 +72,10 @@ $ metame
 Link Established. What are we building?
 ```
 
-### 2. Full Claude/Codex Sessions From Your Phone
+### 2. Native Agent Sessions From Your Phone
 
 Your Mac runs a daemon. Your phone sends messages via Telegram or Feishu.
-Engine is selected per project (`project.engine: claude|codex`) — same tools, same files, same session continuity.
+The registered Engine Plugin is selected per project (`project.engine`) — same tools, same files, and the plugin's declared session continuity. Claude Code, Codex, agy, Pi, and external adapters use the same daemon routing contract when their capabilities are installed and allowlisted.
 
 ```
 You (phone):  Fix the auth bug in api/login.ts
@@ -193,12 +193,12 @@ Chain skills into multi-step workflows — research → write → publish — fu
 
 ### 5. Long-running Work — Native Goals, Thin Local Scheduling
 
-Codex or Claude Code owns the objective, plan, progress, retries, and completion semantics. MetaMe deliberately does not mirror that state into a second goal engine.
+The active native Agent owns the objective, plan, progress, retries, and completion semantics. MetaMe deliberately does not mirror that state into a second goal engine.
 
 MetaMe keeps only the local infrastructure that native sessions do not replace:
 
 - **Heartbeat scheduling** wakes a script or agent at a fixed time or interval.
-- **Session resume** reconnects scheduled work to its native Codex/Claude session.
+- **Session resume** reconnects scheduled work to the selected native Agent session.
 - **Task Board** records explicit multi-agent delegation and handoffs.
 - **Memory, Wiki, and graph** retain durable facts, decisions, evidence, and reusable knowledge—not execution traces.
 
@@ -236,7 +236,7 @@ task outcome/failure → skill signal buffer
 
 ## Install
 
-MetaMe is the orchestration layer. Claude Code and Codex are the engines. You install them together.
+MetaMe is the orchestration and Cognitive Plane layer. You install at least one supported Engine Plugin, then explicitly register and allowlist any project-scoped or external plugin you want the daemon to invoke.
 
 ### One-liner by user type
 
@@ -245,6 +245,7 @@ MetaMe is the orchestration layer. Claude Code and Codex are the engines. You in
 | **Claude Code** | `npm install -g @anthropic-ai/claude-code metame-cli` | `claude` |
 | **Codex** | `npm install -g @openai/codex metame-cli` | `codex login` |
 | **Both** | `npm install -g @anthropic-ai/claude-code @openai/codex metame-cli` | `claude` + `codex login` |
+| **Other trusted plugin** | Install its Engine Plugin through its documented distribution, then register and allowlist it in `daemon.yaml` | Plugin-specific |
 | **Claude plugin** (no npm) | `claude plugin install github:Yaron9/MetaMe/plugin` | `claude` |
 
 > **No Node.js?** One-liner installers handle everything (Node + MetaMe):
@@ -257,7 +258,7 @@ MetaMe is the orchestration layer. Claude Code and Codex are the engines. You in
 
 | Step | What to do |
 |------|-----------|
-| 1. Launch | `metame` (Claude) or `metame codex` (Codex) |
+| 1. Launch | `metame` (configured default plugin) or `metame codex` (Codex convenience entrypoint) |
 | 2. Genesis Interview | Just chat — MetaMe auto-starts a deep soul interview on first run → builds `~/.claude_profile.yaml` |
 | 3. Connect phone | Say "help me set up mobile access" → interactive Telegram/Feishu bot wizard |
 | 4. Start daemon | `metame start` → background daemon launches, bot goes online |
@@ -331,8 +332,8 @@ systemctl --user start metame
 ### FAQ
 
 - **Does plugin mode support daemon + phone?** Yes. Plugin auto-starts daemon when `daemon.yaml` exists.
-- **Does MetaMe bundle Claude or Codex?** No. `metame-cli` is engine-agnostic — you install engine(s) separately.
-- **One engine only?** Works fine. `/doctor` marks the missing engine as warning, not failure.
+- **Does MetaMe bundle an Agent?** No. `metame-cli` is Host-neutral — you install an Engine Plugin separately, and only explicitly registered/allowlisted plugins are eligible for execution.
+- **One trusted plugin only?** Works fine. `/doctor` reports unavailable or unregistered plugins as warnings unless the configured default or an enabled project requires them.
 
 ---
 
@@ -342,7 +343,7 @@ systemctl --user start metame
 |-----------|-------------|
 | **Cognitive Profile** | 6-dimension soul schema (Values, Drive, Cognition Style, Stress & Shadow, Relational, Identity Narrative). 67 fields, tier-locked, 800-token budget. First-time Genesis Interview builds your profile from scratch. |
 | **Layered Memory** | Five-tier memory: long-term facts (+ concept labels), session summaries (continuity bridge), session index (topic tags), nightly reflection (distill + write-back), memory index (global lookup). All automatic. |
-| **Mobile Bridge** | Full Claude/Codex via Telegram/Feishu. Stateful sessions, file transfer both ways, real-time streaming status. |
+| **Mobile Bridge** | Native sessions through registered Engine Plugins via Telegram/Feishu. Stateful sessions, file transfer both ways, real-time streaming status. |
 | **Skill Evolution** | Queue-driven skill evolution: captures task signals, generates workflow proposals, and supports explicit approval/resolve via `/skill-evo` commands. |
 | **Token Budget** | Daily token usage tracking with per-category breakdown. Configurable daily limit, automatic 80% warning threshold, usage history with rollover. |
 | **Auto-Provisioning** | First run deploys default CLAUDE.md, documentation, and runtime copies under `~/.metame/`. Subsequent runs redeploy generated runtime files without overwriting user config in `~/.metame/daemon.yaml`. |
@@ -525,7 +526,7 @@ Use from mobile: `/dispatch to windows:hunter research competitors` or just ment
 | `/undo <hash>` | Roll back to a specific git checkpoint |
 | `/list` | Browse & download project files |
 | `/model` | Switch model (sonnet/opus/haiku) |
-| `/engine` | Show/switch default engine (`claude`/`codex`) |
+| `/engine` | Show/switch the default registered Engine Plugin (for example `claude`, `codex`, or an allowlisted project plugin) |
 | `/distill-model` | Show/update background distill model (background engine: `agy`, default model: `auto`) |
 | `/mentor` | Mentor mode control: on/off/level/status |
 | `/activate` | Activate and bind the most recently created pending agent in a new group |
@@ -607,12 +608,12 @@ Level mapping:
 
 ## Hook Optimizations (Default On)
 
-MetaMe keeps Claude hooks minimal and non-essential:
+MetaMe keeps host hooks minimal and non-essential:
 
 - `UserPromptSubmit` hook (`scripts/signal-capture.js`): captures high-signal preference/task traces with layered filtering.
 - `Stop` hook (`scripts/hooks/stop-session-capture.js`): records session-end/tool-failure signals with watermark protection.
 
-Semantic intent recognition and prompt hint injection now run only inside the daemon runtime, so Claude and Codex share the same injection path.
+Semantic intent recognition and prompt hint injection run inside the daemon runtime, so every registered Engine Plugin receives the same injection contract. Native hook installation remains an explicit Host/plugin edge concern.
 
 If hook installation fails, MetaMe logs and continues the session (non-blocking fallback).
 
@@ -624,7 +625,8 @@ If hook installation fails, MetaMe logs and continues the session (non-blocking 
 └─────────────┘                           │   (your machine, 24/7)       │
                                           │                              │
                                           │   ┌──────────────┐           │
-                                          │   │ Claude/Codex  │           │
+                                          │   │ Registered    │           │
+                                          │   │ Engine Plugins│           │
                                           │   │ (same runtime)│           │
                                           │   └──────────────┘           │
                                           │                              │
@@ -647,13 +649,13 @@ If hook installation fails, MetaMe logs and continues the session (non-blocking 
 
 - **Profile** (`~/.claude_profile.yaml`): 6-dimension soul schema. Injected into every Claude session via `CLAUDE.md`.
 - **Daemon**: Background process handling Telegram/Feishu messages, heartbeat tasks, Unix socket dispatch, and idle/sleep transitions.
-- **Runtime Adapter** (`scripts/daemon-engine-runtime.js`): normalizes engine args/env/event parsing across Claude/Codex.
+- **Runtime Adapter** (`scripts/daemon-engine-runtime.js`): resolves the authoritative capability registry and delegates native args/env/event parsing to plugin adapters.
 - **Distillation**: Heartbeat task (4h, signal-gated) that updates your cognitive profile, merges competence signals, and emits postmortems for significant sessions.
 - **Memory Extract**: Heartbeat task (4h, idle-gated) that extracts long-term facts, then writes concept labels (`fact_labels`) linked by fact id.
 - **Nightly Reflection**: Daily at 01:00. Distills hot-zone facts into decision logs/lessons, writes back `synthesized_insight`, and generates knowledge capsules.
 - **Memory Index**: Daily at 01:30. Regenerates the global memory index for fast retrieval.
-- **Session Summarize**: Generates a brief summary for idle sessions. Injected as context when resuming after a 2h+ gap.
-- **Codex session memory**: Codex memory extraction reads `state_5.sqlite -> threads.rollout_path` first, then falls back to legacy `~/.codex/sessions` rollout files.
+- **Session Source + Extraction Run**: plugin adapters expose revisioned native evidence; shared ingestion records claim/completion in `memory.db` so every Host follows one idempotency model.
+- **Codex session edge**: the Codex Session Source Adapter reads `state_5.sqlite -> threads.rollout_path` first, then falls back to legacy `~/.codex/sessions` rollout files without exposing those paths to core modules.
 
 ## Scripts Docs Pointer Map
 
