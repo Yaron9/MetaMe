@@ -129,7 +129,7 @@ test('registry rejects malformed and duplicate plugins and distinguishes unknown
     runtime: null,
     sessionSource: null,
     cognitiveHost: null,
-  }]), /engine_plugin_schema_invalid/);
+  }]), /engine_id_invalid/);
 
   assert.equal(registry.remove('fixture-agent'), true);
   assert.equal(registry.lookup('fixture-agent'), null);
@@ -192,6 +192,48 @@ test('shallow-frozen descriptors are copied into a deeply immutable contract gra
   descriptor.capabilities.runtime.state = 'unsupported';
   assert.deepEqual(plugin.descriptor.executableNames, ['shallow-agent']);
   assert.equal(plugin.descriptor.capabilities.runtime.state, 'verified');
+});
+
+test('constructor canonicalizes legacy descriptor aliases and omitted unsupported adapters', () => {
+  const legacyInput = {
+    protocolVersion: 1,
+    descriptor: {
+      name: 'legacy-agent',
+      provider: 'metame-test',
+      contextProjection: 'none',
+      sessionStorage: 'legacy-session',
+      hostHook: null,
+    },
+    runtime: runtimeFixture(),
+  };
+  assert.equal(validateEnginePluginSchema(legacyInput).valid, false, 'raw legacy form is not the manifest schema');
+  const plugin = createEnginePlugin(legacyInput);
+  assert.equal(plugin.descriptor.id, 'legacy-agent');
+  assert.equal(plugin.descriptor.displayName, 'legacy-agent');
+  assert.deepEqual(plugin.descriptor.executableNames, ['legacy-agent']);
+  assert.equal(plugin.descriptor.configSchemaVersion, 1);
+  assert.equal(plugin.sessionSource, null);
+  assert.equal(plugin.cognitiveHost, null);
+  assert.equal(validateEnginePlugin(legacyInput).valid, true, 'constructor validator accepts canonicalizable compatibility input');
+  assert.equal(runEnginePluginConformance(legacyInput).ok, true);
+
+  const omittedAdapters = createEnginePlugin({
+    protocolVersion: 1,
+    descriptor: {
+      id: 'runtime-only',
+      displayName: 'Runtime Only',
+      vendor: 'metame-test',
+      executableNames: ['runtime-only'],
+      contextProjection: 'none',
+      nativeSessionKind: 'runtime-session',
+      configSchemaVersion: 1,
+      capabilities: { runtime: { state: 'verified' }, sessionSource: false, cognitiveHost: false },
+    },
+    runtime: runtimeFixture(),
+  });
+  assert.equal(omittedAdapters.sessionSource, null);
+  assert.equal(omittedAdapters.cognitiveHost, null);
+  assert.equal(validateEnginePluginSchema(omittedAdapters).valid, true);
 });
 
 test('Ajv strict schemas reject unknown public fields and malformed capability declarations', () => {

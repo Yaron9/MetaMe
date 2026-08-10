@@ -255,17 +255,17 @@ function canReuseDescriptor(input, normalized) {
   return Object.keys(input).every(key => equivalentValue(input[key], normalized[key]));
 }
 
-function normalizeDescriptor(input) {
+function normalizeDescriptor(input, { adapterPresence = {} } = {}) {
   if (!isPlainObject(input)) throw contractError('engine_descriptor_required');
   assertKnownKeys(input, DESCRIPTOR_KEYS, 'engine_descriptor_property_unknown');
 
   const id = normalizeEngineId(input.id || input.name);
-  const displayName = String(input.displayName || '').trim();
+  const displayName = String(input.displayName || input.name || id).trim();
   const vendor = String(input.vendor || input.provider || '').trim();
-  const executableNames = input.executableNames;
+  const executableNames = input.executableNames === undefined ? [id] : input.executableNames;
   const contextProjection = String(input.contextProjection || '').trim();
   const nativeSessionKind = String(input.nativeSessionKind || input.sessionStorage || '').trim();
-  const configSchemaVersion = input.configSchemaVersion;
+  const configSchemaVersion = input.configSchemaVersion === undefined ? 1 : input.configSchemaVersion;
   if (input.id !== undefined && input.name !== undefined && String(input.name).trim() !== id) {
     throw contractError('engine_descriptor_id_mismatch', id);
   }
@@ -289,7 +289,11 @@ function normalizeDescriptor(input) {
   if (!Number.isInteger(configSchemaVersion) || configSchemaVersion < 1) {
     throw contractError('engine_descriptor_config_schema_invalid', id);
   }
-  const capabilities = normalizeCapabilities(input.capabilities);
+  const capabilities = normalizeCapabilities(input.capabilities || {
+    runtime: adapterPresence.runtime === true,
+    sessionSource: adapterPresence.sessionSource === true,
+    cognitiveHost: adapterPresence.cognitiveHost === true,
+  });
   const descriptor = {
     id,
     displayName,
@@ -430,25 +434,30 @@ function addRuntimeCompatibilityAliases(plugin) {
 
 function createEnginePlugin(spec) {
   if (!isPlainObject(spec)) throw contractError('engine_plugin_required');
-  assertPluginSchema(spec);
   assertKnownKeys(spec, PLUGIN_KEYS, 'engine_plugin_property_unknown');
   if (spec.protocolVersion !== ENGINE_PLUGIN_PROTOCOL_VERSION) {
     throw contractError('engine_plugin_protocol_unsupported', String(spec.protocolVersion));
   }
-  const descriptor = normalizeDescriptor(spec.descriptor);
+  const adapterPresence = Object.fromEntries(CAPABILITY_NAMES.map(name => [
+    name,
+    spec[name] !== undefined && spec[name] !== null,
+  ]));
+  const descriptor = normalizeDescriptor(spec.descriptor, { adapterPresence });
   const adapters = {
     runtime: normalizeAdapter(spec.runtime, 'runtime', descriptor),
     sessionSource: normalizeAdapter(spec.sessionSource, 'sessionSource', descriptor),
     cognitiveHost: normalizeAdapter(spec.cognitiveHost, 'cognitiveHost', descriptor),
   };
-  validateCapabilityAdapters(descriptor, adapters);
-  const plugin = {
+  const canonicalSpec = {
     protocolVersion: ENGINE_PLUGIN_PROTOCOL_VERSION,
     descriptor,
     runtime: adapters.runtime,
     sessionSource: adapters.sessionSource,
     cognitiveHost: adapters.cognitiveHost,
   };
+  assertPluginSchema(canonicalSpec);
+  validateCapabilityAdapters(descriptor, adapters);
+  const plugin = canonicalSpec;
   addRuntimeCompatibilityAliases(plugin);
   return Object.freeze(plugin);
 }
@@ -470,11 +479,12 @@ function isEnginePlugin(value) {
 }
 
 function validateEnginePlugin(value) {
-  const schemaResult = validateEnginePluginSchema(value);
-  if (!schemaResult.valid) return schemaResult;
   try {
     const plugin = createEnginePlugin(value);
-    return { valid: true, errors: [], plugin };
+    const schemaResult = validateEnginePluginSchema(plugin);
+    return schemaResult.valid
+      ? { valid: true, errors: [], plugin }
+      : schemaResult;
   } catch (error) {
     return {
       valid: false,
@@ -514,8 +524,8 @@ function negotiateCapabilities(plugin, requested = CAPABILITY_NAMES) {
  * launching a Host or touching native session state.
  */
 function runEnginePluginConformance(plugin, options = {}) {
-  const schema = validateEnginePluginSchema(plugin);
   const checked = createEnginePlugin(plugin);
+  const schema = validateEnginePluginSchema(checked);
   const requiredCapabilities = options.requiredCapabilities || CAPABILITY_NAMES.filter(name => (
     capabilityIsSupported(checked.descriptor.capabilities[name])
   ));
