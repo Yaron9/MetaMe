@@ -201,15 +201,14 @@ function createClaudeEngine(deps) {
     return plugin && plugin.runtime;
   }
 
-  function acceptsRuntimeNativeSession(plugin, engineName, session) {
-    const selected = plugin && plugin.runtime ? plugin : getEnginePlugin(engineName);
-    const adapter = selected && selected.runtime;
-    if (!adapter || typeof adapter.validateSession !== 'function') return false;
-    try {
-      return adapter.validateSession(session);
-    } catch {
-      return false;
-    }
+  function acceptsRuntimeNativeSession(_plugin, engineName, session) {
+    // Isolation is a routing concern: reject only a foreign engine slot here.
+    // Full native validity stays in validateRuntimeNativeSession below so a
+    // stale same-engine session can still follow the existing recovery path.
+    if (!session || typeof session !== 'object') return true;
+    const sessionEngine = String(session.engine || '').trim().toLowerCase();
+    if (!sessionEngine) return true;
+    return sessionEngine === String(engineName || '').trim().toLowerCase();
   }
 
   function validateRuntimeNativeSession(plugin, engineName, session) {
