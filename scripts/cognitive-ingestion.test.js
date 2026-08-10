@@ -95,3 +95,29 @@ test('missing source preserves a readable source row and does not create an extr
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM extraction_runs').get().n, 0);
   db.close();
 });
+
+test('discovered parent sessions suppress attributed subagents by default', async () => {
+  const db = fixtureDb();
+  const adapter = {
+    engineId: 'fixture-agent',
+    probe: () => ({ state: 'verified' }),
+    discover: function* discover() {
+      yield { nativeSessionId: 'parent', sourceLocator: { key: 'parent' } };
+      yield { nativeSessionId: 'child', parentNativeSessionId: 'parent', sourceLocator: { key: 'child' } };
+    },
+    inspect: ref => ({ ...ref, sourceHash: `${ref.nativeSessionId}-rev`, cursor: { sequence: 0 } }),
+    read: function* read(ref) {
+      yield { actor: 'user', kind: 'message', text: `${ref.nativeSessionId} evidence` };
+    },
+    validate: () => ({ valid: true }),
+  };
+  const results = await require('./cognitive-ingestion').ingestDiscoveredSessions({
+    db,
+    adapter,
+    pipelineVersion: 'v1',
+  });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].revision.nativeSessionId, 'parent');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM session_sources').get().n, 1);
+  db.close();
+});

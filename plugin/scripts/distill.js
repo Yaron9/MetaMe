@@ -645,7 +645,7 @@ Do NOT repeat existing unchanged values.`;
     // 7. Parse result
     if (!result || result === 'NO_UPDATE') {
       if (skeleton && sessionAnalytics) {
-        try { sessionAnalytics.markAnalyzed(skeleton.session_id); } catch { /* non-fatal */ }
+        try { sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision); } catch { /* non-fatal */ }
       }
       ackSignals = true;
       finalize();
@@ -727,7 +727,7 @@ Do NOT repeat existing unchanged values.`;
 
       if (extractedFieldCount === 0 && !mergedCompetence.changed) {
         if (skeleton && sessionAnalytics) {
-          try { sessionAnalytics.markAnalyzed(skeleton.session_id); } catch { }
+          try { sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision); } catch { }
         }
         ackSignals = true;
         finalize();
@@ -799,7 +799,7 @@ Do NOT repeat existing unchanged values.`;
 
       // Mark session as analyzed after successful distill
       if (skeleton && sessionAnalytics) {
-        try { sessionAnalytics.markAnalyzed(skeleton.session_id); } catch { }
+        try { sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision); } catch { }
       }
 
       ackSignals = true;
@@ -1184,7 +1184,7 @@ function bootstrapSessionLog() {
 
       // Skip trivial sessions (< 2 messages or < 1 min)
       if (skeleton.message_count < 2 && skeleton.duration_min < 1) {
-        sessionAnalytics.markAnalyzed(skeleton.session_id);
+        sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision);
         continue;
       }
 
@@ -1232,7 +1232,7 @@ function bootstrapSessionLog() {
         intent: facet ? facet.underlying_goal || skeleton.intent : skeleton.intent || null,
       });
 
-      sessionAnalytics.markAnalyzed(skeleton.session_id);
+      sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision);
       count++;
     } catch {
       // Skip individual session failures

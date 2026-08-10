@@ -126,11 +126,14 @@ async function ingestSessionSource(options) {
 
   const events = [];
   const maxEvents = Math.min(Math.max(Number(options.maxEvents) || DEFAULT_MAX_EVENTS, 1), DEFAULT_MAX_EVENTS);
+  // A revision's append cursor describes the current end of the source; it is
+  // not a read start position.  First ingestion must read from the beginning,
+  // while callers that resume incrementally provide an explicit cursor.
   const readCursor = options.cursor !== undefined
     ? options.cursor
     : options.readRequest && options.readRequest.cursor !== undefined
       ? options.readRequest.cursor
-      : revision.cursor;
+      : null;
   try {
     for await (const event of source.read({ ...ref, sourceRevision: revision.sourceRevision }, {
       ...(options.readRequest || {}),
@@ -186,8 +189,14 @@ async function ingestSessionSource(options) {
 async function ingestDiscoveredSessions(options) {
   requireIngestionOptions(options, { requireSessionRef: false });
   const source = wrapSessionSourceAdapter(options.adapter, { engineId: options.engineId });
+  const discovered = [];
+  for await (const sessionRef of source.discover(options.discoveryRequest || {})) discovered.push(sessionRef);
+  const parentIds = new Set(discovered.map(ref => ref.nativeSessionId).filter(Boolean));
+  const refs = options.includeSubagents === true
+    ? discovered
+    : discovered.filter(ref => !ref.parentNativeSessionId || !parentIds.has(ref.parentNativeSessionId));
   const results = [];
-  for await (const sessionRef of source.discover(options.discoveryRequest || {})) {
+  for (const sessionRef of refs) {
     results.push(await ingestSessionSource({ ...options, sessionRef }));
   }
   return results;

@@ -166,7 +166,10 @@ function statSize(filePath) {
 
 function saveSessionSource(memory, engine, sourcePath, skeleton, status = 'indexed', errorMessage = null) {
   if (!memory || typeof memory.saveSessionSource !== 'function' || !skeleton) return null;
-  const sourceHash = hashFile(sourcePath);
+  // Session Source Adapters own revision fingerprints.  The hash fallback is
+  // retained for legacy/non-adapter callers, but Claude extraction receives
+  // the adapter revision through the canonical skeleton.
+  const sourceHash = skeleton.source_revision || (engine === 'claude' ? null : hashFile(sourcePath));
   if (!sourceHash) return null;
   try {
     return memory.saveSessionSource({
@@ -175,14 +178,18 @@ function saveSessionSource(memory, engine, sourcePath, skeleton, status = 'index
       project: skeleton.project || 'unknown',
       scope: skeleton.project_id || null,
       cwd: skeleton.project_path || null,
-      sourcePath,
+      sourcePath: engine === 'claude' ? null : sourcePath,
+      sourceLocator: skeleton.source_locator || null,
       sourceHash,
-      sourceSize: statSize(sourcePath),
+      sourceSize: skeleton.source_size || statSize(sourcePath),
       firstTs: skeleton.first_ts || null,
       lastTs: skeleton.last_ts || null,
       messageCount: skeleton.message_count || 0,
       toolCallCount: skeleton.total_tool_calls || 0,
       toolErrorCount: skeleton.tool_error_count || 0,
+      parentNativeSessionId: skeleton.parent_session_id || null,
+      classification: skeleton.source === 'subagent' ? 'subagent' : 'conversation',
+      engineId: engine,
       status,
       errorMessage,
     });
@@ -297,7 +304,7 @@ async function run() {
         // Skip trivial sessions
         if (skeleton.message_count < 2 && skeleton.duration_min < 1) {
           if (sourceRow) saveSessionSource(memory, 'claude', session.path, skeleton, 'archived');
-          sessionAnalytics.markFactsExtracted(skeleton.session_id);
+          sessionAnalytics.markFactsExtracted(skeleton.session_id, skeleton.source_revision);
           continue;
         }
 
@@ -332,7 +339,7 @@ async function run() {
           console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)} (${session_name}): no facts extracted`);
         }
 
-        sessionAnalytics.markFactsExtracted(skeleton.session_id);
+        sessionAnalytics.markFactsExtracted(skeleton.session_id, skeleton.source_revision);
 
         // Persist session summary to memory.db sessions table (makes sessions searchable)
         try {
