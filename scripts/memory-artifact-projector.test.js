@@ -19,11 +19,12 @@ function fixture() {
   const db = new DatabaseSync(':memory:');
   db.exec(`CREATE TABLE memory_items (
     id TEXT PRIMARY KEY, kind TEXT, state TEXT, title TEXT, content TEXT, relation TEXT,
-    source_id TEXT, session_id TEXT, task_key TEXT, origin_class TEXT DEFAULT 'primary',
+    source_id TEXT, session_id TEXT, task_key TEXT, canonical_key TEXT, project TEXT, scope TEXT,
+    origin_class TEXT DEFAULT 'primary',
     provenance_root_id TEXT, tags TEXT DEFAULT '[]', created_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
-  db.prepare("INSERT INTO memory_items (id,kind,state,content,origin_class) VALUES ('mi_1','insight','active','observed','primary')").run();
-  db.prepare("INSERT INTO memory_items (id,kind,state,content,origin_class,provenance_root_id) VALUES ('mi_2','insight','active','confirmed','primary','source:independent')").run();
+  db.prepare("INSERT INTO memory_items (id,kind,state,content,canonical_key,project,scope,origin_class) VALUES ('mi_1','insight','active','observed','metame.observed','metame','core','primary')").run();
+  db.prepare("INSERT INTO memory_items (id,kind,state,content,canonical_key,project,scope,origin_class,provenance_root_id) VALUES ('mi_2','insight','active','confirmed','metame.confirmed','metame','core','primary','source:independent')").run();
   applyWikiSchema(db);
   return { root, decisionsDir, capsulesDir, db };
 }
@@ -103,6 +104,27 @@ test('active artifact requires two live independent evidence roots', () => {
   const result = projectArtifacts(f.db, scanArtifacts(f));
   assert.equal(result.ok, false);
   assert.match(result.errors.map(error => error.error).join(' '), /inactive|two independent/);
+  f.db.close();
+  fs.rmSync(f.root, { recursive: true, force: true });
+});
+
+test('active projection fails closed for candidate, task-local, conflict, and legacy-null evidence; drafts admit candidates', () => {
+  const f = fixture();
+  const file = path.join(f.capsulesDir, 'deploy.md');
+  fs.writeFileSync(file, artifact('playbook'));
+  for (const update of [
+    "UPDATE memory_items SET state='candidate' WHERE id='mi_1'",
+    "UPDATE memory_items SET kind='episode', state='active', task_key='task-1', canonical_key=NULL WHERE id='mi_1'",
+    "UPDATE memory_items SET kind='insight', state='conflict', task_key=NULL WHERE id='mi_1'",
+    "UPDATE memory_items SET kind='insight', state='active', task_key=NULL, canonical_key=NULL WHERE id='mi_1'",
+  ]) {
+    f.db.exec(update);
+    assert.equal(projectArtifacts(f.db, scanArtifacts(f)).ok, false);
+    f.db.exec("UPDATE memory_items SET kind='insight', state='active', task_key=NULL, canonical_key='metame.observed' WHERE id='mi_1'");
+  }
+  fs.writeFileSync(file, artifact('playbook', { status: 'draft' }));
+  f.db.exec("UPDATE memory_items SET state='candidate' WHERE id='mi_1'");
+  assert.equal(projectArtifacts(f.db, scanArtifacts(f)).ok, true);
   f.db.close();
   fs.rmSync(f.root, { recursive: true, force: true });
 });

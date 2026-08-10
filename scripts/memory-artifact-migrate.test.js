@@ -24,12 +24,13 @@ function fixture() {
   const db = new DatabaseSync(dbPath);
   db.exec(`CREATE TABLE memory_items (
     id TEXT PRIMARY KEY, kind TEXT, state TEXT, title TEXT, content TEXT, relation TEXT,
-    source_id TEXT, session_id TEXT, task_key TEXT, tags TEXT DEFAULT '[]',
+    source_id TEXT, session_id TEXT, task_key TEXT, canonical_key TEXT,
+    project TEXT DEFAULT '*', scope TEXT, tags TEXT DEFAULT '[]',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
-  db.prepare("INSERT INTO memory_items (id,kind,state,title,content,relation,source_id,created_at) VALUES ('primary_1','fact','active','metame.deploy.release','deploy evidence','observed','session-1','2026-07-14')").run();
-  db.prepare("INSERT INTO memory_items (id,kind,state,title,content,relation,source_id,created_at) VALUES ('decision_1','insight','active','MetaMe.deploy.strategy · tech_decision','use staged deploy','tech_decision','session-a','2026-07-13')").run();
-  db.prepare("INSERT INTO memory_items (id,kind,state,title,content,relation,source_id,created_at) VALUES ('decision_2','insight','active','MetaMe.deploy.rollback · tech_decision','retain backup','tech_decision','session-b','2026-07-14')").run();
+  db.prepare("INSERT INTO memory_items (id,kind,state,title,content,relation,source_id,canonical_key,project,scope,created_at) VALUES ('primary_1','insight','active','metame.deploy.release','deploy evidence','observed','session-1','metame.deploy.release','metame','core','2026-07-14')").run();
+  db.prepare("INSERT INTO memory_items (id,kind,state,title,content,relation,source_id,canonical_key,project,scope,created_at) VALUES ('decision_1','insight','active','MetaMe.deploy.strategy · tech_decision','use staged deploy','tech_decision','session-a','metame.deploy.strategy','metame','core','2026-07-13')").run();
+  db.prepare("INSERT INTO memory_items (id,kind,state,title,content,relation,source_id,canonical_key,project,scope,created_at) VALUES ('decision_2','insight','active','MetaMe.deploy.rollback · tech_decision','retain backup','tech_decision','session-b','metame.deploy.rollback','metame','core','2026-07-14')").run();
   db.prepare("INSERT INTO memory_items (id,kind,state,content,relation,source_id) VALUES ('derived_1','insight','active','derived','synthesized_insight','nightly-reflect-2026-07-15')").run();
   applyWikiSchema(db);
   db.close();

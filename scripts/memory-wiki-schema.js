@@ -397,6 +397,10 @@ function applyWikiSchema(db) {
     "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='memory_items'"
   ).get();
   if (hasMemoryItems) {
+    // Claim Contract v1 identity is additive. Legacy rows stay NULL and are
+    // intentionally never re-keyed from title, tags, or popularity.
+    try { db.exec('ALTER TABLE memory_items ADD COLUMN canonical_key TEXT'); } catch { /* already exists */ }
+    try { db.exec('CREATE INDEX IF NOT EXISTS idx_mi_canonical_identity ON memory_items(canonical_key, project, scope)'); } catch { /* partial legacy fixture */ }
     try { db.exec('ALTER TABLE memory_items ADD COLUMN relation TEXT'); } catch { /* already exists */ }
     try { db.exec('ALTER TABLE memory_items ADD COLUMN source_id TEXT'); } catch { /* already exists */ }
     try { db.exec('ALTER TABLE memory_items ADD COLUMN session_id TEXT'); } catch { /* already exists */ }

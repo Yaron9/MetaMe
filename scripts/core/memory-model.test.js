@@ -28,6 +28,7 @@ function makeItem(overrides = {}) {
     confidence: 0.7,
     project: 'metame',
     scope: null,
+    canonical_key: 'test.item',
     agent_key: null,
     task_key: null,
     session_id: null,
@@ -275,40 +276,40 @@ describe('judgeMerge', () => {
     assert.strictEqual(result.action, 'noop');
   });
 
-  it('same title, different content → supersede with targetId', () => {
+  it('same title, different content → conflict with targetId', () => {
     const candidate = makeItem({ title: 'Rule A', content: 'Do X v2' });
     const existing = [makeItem({ id: 'e1', title: 'Rule A', content: 'Do X v1' })];
     const result = judgeMerge(candidate, existing);
-    assert.strictEqual(result.action, 'supersede');
+    assert.strictEqual(result.action, 'conflict');
     assert.strictEqual(result.targetId, 'e1');
   });
 
   it('genuinely new → promote', () => {
-    const candidate = makeItem({ title: 'Brand new rule', content: 'Something unique' });
+    const candidate = makeItem({ title: 'Brand new rule', content: 'Something unique', canonical_key: 'test.other' });
     const existing = [makeItem({ id: 'e1', title: 'Old rule', content: 'Old content' })];
     const result = judgeMerge(candidate, existing);
     assert.strictEqual(result.action, 'promote');
   });
 
-  it('protected item (source_type=manual) → reject', () => {
+  it('manual source does not auto-replace an active claim', () => {
     const candidate = makeItem({ title: 'Rule A', content: 'Do X v2' });
     const existing = [makeItem({ id: 'e1', title: 'Rule A', content: 'Do X v1', source_type: 'manual' })];
     const result = judgeMerge(candidate, existing);
-    assert.strictEqual(result.action, 'reject');
+    assert.strictEqual(result.action, 'conflict');
   });
 
-  it('protected item (tags=[protected]) → reject', () => {
+  it('protected tags do not auto-replace an active claim', () => {
     const candidate = makeItem({ title: 'Rule A', content: 'Do X v2' });
     const existing = [makeItem({ id: 'e1', title: 'Rule A', content: 'Do X v1', tags: '["protected"]' })];
     const result = judgeMerge(candidate, existing);
-    assert.strictEqual(result.action, 'reject');
+    assert.strictEqual(result.action, 'conflict');
   });
 
-  it('protected item (kind=profile, confidence=0.95) → reject', () => {
+  it('different kind is complementary, not title replacement', () => {
     const candidate = makeItem({ title: 'User pref', content: 'Updated pref' });
     const existing = [makeItem({ id: 'e1', title: 'User pref', content: 'Original pref', kind: 'profile', confidence: 0.95 })];
     const result = judgeMerge(candidate, existing);
-    assert.strictEqual(result.action, 'reject');
+    assert.strictEqual(result.action, 'promote');
   });
 });
 

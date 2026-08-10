@@ -8,6 +8,7 @@ const PRIMARY_ONLY_CHANNELS = new Set([
   'graph_claim',
   'skill_evidence',
 ]);
+const CLAIM_ELIGIBILITY_CHANNELS = new Set(['synthesis', 'synthesis_active', 'synthesis_draft']);
 
 const DERIVED_RELATIONS = new Set(['synthesized_insight', 'knowledge_capsule']);
 const DERIVED_SOURCE_PREFIXES = ['nightly-reflect-', 'capsule-'];
@@ -42,12 +43,33 @@ function deriveProvenanceRootId(record = {}) {
 }
 
 function eligibleFor(channel, record = {}) {
+  if (CLAIM_ELIGIBILITY_CHANNELS.has(channel)) {
+    const { isSynthesisEvidenceEligible } = require('./claim-contract');
+    return isSynthesisEvidenceEligible(record, { draft: channel === 'synthesis_draft' });
+  }
   if (!PRIMARY_ONLY_CHANNELS.has(channel)) {
     throw new Error(`unknown knowledge eligibility channel: ${channel}`);
   }
   if (classifyOrigin(record) !== 'primary') return false;
   if (record.state && !['active', 'candidate'].includes(String(record.state))) return false;
   return true;
+}
+
+function claimSqlForDb(db, alias = 'mi', { draft = false } = {}) {
+  const columns = new Set(db.prepare('PRAGMA table_info(memory_items)').all().map(row => row.name));
+  const prefix = alias ? `${alias}.` : '';
+  const eligibility = primarySqlForDb(db, alias);
+  const checks = [eligibility.sql];
+  checks.push(columns.has('canonical_key')
+    ? `${prefix}canonical_key IS NOT NULL AND trim(${prefix}canonical_key) != ''`
+    : '0');
+  checks.push(columns.has('kind') ? `${prefix}kind IN ('insight','convention')` : '0');
+  checks.push(columns.has('state')
+    ? `${prefix}state IN (${draft ? "'active','candidate'" : "'active'"})`
+    : '0');
+  if (columns.has('task_key')) checks.push(`COALESCE(trim(${prefix}task_key), '') = ''`);
+  if (columns.has('origin_class')) checks.push(`COALESCE(${prefix}origin_class, 'primary') != 'derived'`);
+  return { sql: checks.join(' AND '), args: [] };
 }
 
 function primarySql(alias = 'mi') {
@@ -84,11 +106,13 @@ function primarySqlForDb(db, alias = 'mi', table = 'memory_items') {
 }
 
 module.exports = {
+  CLAIM_ELIGIBILITY_CHANNELS,
   DERIVED_RELATIONS,
   PRIMARY_ONLY_CHANNELS,
   classifyOrigin,
   deriveProvenanceRootId,
   eligibleFor,
+  claimSqlForDb,
   normalizeOriginClass,
   primarySql,
   primarySqlForDb,

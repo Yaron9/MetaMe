@@ -16,7 +16,6 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const mutate = require('./core/memory-mutate');
 
 const HOME = os.homedir();
 const METAME_DIR = path.join(HOME, '.metame');
@@ -615,103 +614,19 @@ entity_prefix: ${group.prefix}
       try { if (memory && typeof memory.close === 'function') memory.close(); } catch { /* non-fatal */ }
     }
 
-    // ── Conflict Resolution ──────────────────────────────────────────────
-    // Query CONFLICT memory_items grouped by title+kind, ask Haiku to pick winner.
-    // Loser is archived with supersedes_id; winner restored to active.
+    // ── Conflict review ──────────────────────────────────────────────────
+    // Conflict winners require an explicit operator decision.  In particular,
+    // title, confidence, and recency must never silently replace an active
+    // claim from the nightly job.  Keep a report-only count for the audit log;
+    // resolveClaimConflict owns the transactional resolution path.
     let conflictsResolved = 0;
     try {
-      const conflictGroups = db.prepare(`
-        SELECT title, kind, COUNT(*) as cnt
-        FROM memory_items
-        WHERE state = 'conflict'
-        GROUP BY title, kind
-        HAVING cnt >= 2
-        ORDER BY cnt DESC
-        LIMIT 10
-      `).all();
-
-      if (conflictGroups.length > 0) {
-        console.log(`[NIGHTLY-REFLECT] Found ${conflictGroups.length} conflict group(s) to resolve.`);
-
-        // Collect all conflicting facts for these groups (batch to reduce queries)
-        const allConflicts = [];
-        for (const g of conflictGroups) {
-          const rows = db.prepare(`
-            SELECT id, title, kind, content, confidence, created_at
-            FROM memory_items
-            WHERE title = ? AND kind = ? AND state = 'conflict'
-            ORDER BY created_at DESC
-          `).all(g.title, g.kind);
-          if (rows.length >= 2) allConflicts.push({ title: g.title, kind: g.kind, facts: rows });
-        }
-
-        if (allConflicts.length > 0) {
-          // Limit to 5 groups to avoid truncating serialized JSON
-          const conflictInput = allConflicts.slice(0, 5).map(g => ({
-            title: g.title,
-            kind: g.kind,
-            candidates: g.facts.slice(0, 5).map(f => ({ id: f.id, content: f.content.slice(0, 150), confidence: f.confidence, created_at: f.created_at })),
-          }));
-
-          const resolvePrompt = `你是知识库冲突调解员。以下是同一 title+kind 下的冲突记忆条目，请选出每组最准确的一条保留。
-
-冲突组(JSON):
-${JSON.stringify(conflictInput, null, 2)}
-
-输出 JSON 数组，每个元素对应一组冲突的裁决：
-[
-  {
-    "title": "...",
-    "kind": "...",
-    "winner_id": "保留的item id",
-    "reason": "一句话理由"
-  }
-]
-
-规则：
-- 优先选最新（created_at）且 confidence 高的
-- 如果旧条目更准确具体，选旧的
-- 只输出 JSON 数组`;
-
-          try {
-            const resolveRaw = await Promise.race([
-              callHaiku(resolvePrompt, distillEnv, 60000),
-              new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 65000)),
-            ]);
-            const verdicts = parseJsonFromLlm(resolveRaw);
-            if (Array.isArray(verdicts)) {
-              for (const v of verdicts) {
-                if (!v || !v.winner_id || !v.title || !v.kind) continue;
-                // Validate winner exists in our conflict set
-                const group = allConflicts.find(g => g.title === v.title && g.kind === v.kind);
-                if (!group) continue;
-                const winnerExists = group.facts.some(f => f.id === v.winner_id);
-                if (!winnerExists) continue;
-
-                const loserIds = group.facts.filter(f => f.id !== v.winner_id).map(f => f.id);
-                if (loserIds.length === 0) continue;
-
-                // Mark losers as archived (superseded by winner)
-                for (const loserId of loserIds) {
-                  mutate.archiveMemoryItem(db, loserId, { supersededBy: v.winner_id, reason: 'conflict_resolution' });
-                }
-
-                // Restore winner to active
-                mutate.setItemState(db, v.winner_id, 'active');
-
-                conflictsResolved += loserIds.length;
-              }
-              if (conflictsResolved > 0) {
-                console.log(`[NIGHTLY-REFLECT] Resolved ${conflictsResolved} conflicting fact(s).`);
-              }
-            }
-          } catch (e) {
-            console.log(`[NIGHTLY-REFLECT] Conflict resolution failed (non-fatal): ${e.message}`);
-          }
-        }
+      const row = db.prepare(`SELECT COUNT(*) AS count FROM memory_items WHERE state='conflict'`).get();
+      if (row && row.count > 0) {
+        console.log(`[NIGHTLY-REFLECT] ${row.count} conflict claim(s) require explicit review.`);
       }
     } catch (e) {
-      console.log(`[NIGHTLY-REFLECT] Conflict query failed (non-fatal): ${e.message}`);
+      console.log(`[NIGHTLY-REFLECT] Conflict review failed (non-fatal): ${e.message}`);
     }
 
     // Write audit log

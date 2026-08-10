@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { parseArtifactMarkdown, stableArtifactId, validateArtifact } = require('./core/knowledge-artifact');
-const { primarySqlForDb } = require('./core/knowledge-eligibility');
+const { isSynthesisEvidenceEligible } = require('./core/claim-contract');
 const { writeWikiPageWithChunks } = require('./wiki-reflect-build');
 
 function listMarkdownFiles(root) {
@@ -71,16 +71,18 @@ function scanArtifacts({ decisionsDir, capsulesDir }) {
 }
 
 function validateEvidence(db, artifacts) {
-  const eligibility = primarySqlForDb(db, 'mi');
-  const find = db.prepare(`SELECT id,state,COALESCE(provenance_root_id,id) AS root_id
-    FROM memory_items mi WHERE id=? AND state IN ('active','candidate') AND ${eligibility.sql}`);
+  const find = db.prepare(`SELECT * FROM memory_items WHERE id=?`);
   const errors = [];
   for (const artifact of artifacts) {
     const roots = new Set();
     for (const evidenceId of artifact.validation.evidenceIds) {
       const row = find.get(evidenceId);
-      if (!row) errors.push({ file: artifact.file, error: `missing, inactive or ineligible evidence: ${evidenceId}` });
-      else roots.add(row.root_id);
+      const draft = artifact.meta.status === 'draft';
+      if (!row || !isSynthesisEvidenceEligible(row, { draft })) {
+        errors.push({ file: artifact.file, error: `missing, inactive or ineligible evidence: ${evidenceId}` });
+      } else {
+        roots.add(row.provenance_root_id || row.id);
+      }
     }
     if (artifact.meta.status === 'active' && roots.size < 2) errors.push({ file: artifact.file, error: 'active artifact requires two independent provenance roots' });
   }

@@ -18,6 +18,12 @@ const DERIVED_RELATIONS = new Set([
   'synthesized_insight',
   'knowledge_capsule',
 ]);
+const {
+  isCanonicalClaim,
+  isTaskLocalClaim,
+  sameClaimContent,
+  sameClaimIdentity,
+} = require('./claim-contract');
 
 /** @param {{ project, scope, task, session, agent }} itemScope */
 /** @param {{ project, scope, task, session, agent }} queryScope */
@@ -104,11 +110,7 @@ function isProtected(item) {
 }
 
 function contentEqual(a, b) {
-  return a.content === b.content && a.title === b.title;
-}
-
-function sameTitle(a, b) {
-  return !!(a.title && b.title && a.title === b.title);
+  return sameClaimContent(a, b);
 }
 
 /** @param {object} candidate */
@@ -116,12 +118,13 @@ function sameTitle(a, b) {
 /** @returns {{ action: string, targetId?: * }} */
 function judgeMerge(candidate, existingItems) {
   for (const existing of existingItems) {
-    if (contentEqual(candidate, existing)) return { action: 'noop' };
-  }
-  for (const existing of existingItems) {
-    if (sameTitle(candidate, existing)) {
-      if (isProtected(existing)) return { action: 'reject' };
-      return { action: 'supersede', targetId: existing.id };
+    if (isCanonicalClaim(candidate) && isCanonicalClaim(existing)
+      && sameClaimIdentity(candidate, existing) && contentEqual(candidate, existing)) {
+      return { action: 'noop', targetId: existing.id };
+    }
+    if (isCanonicalClaim(candidate) && isCanonicalClaim(existing)
+      && sameClaimIdentity(candidate, existing)) {
+      return { action: 'conflict', targetId: existing.id };
     }
   }
   return { action: 'promote' };
@@ -154,6 +157,7 @@ function assemblePromptBlocks(allocated) {
 /** @returns {boolean} */
 function shouldPromote(item) {
   if (!item || item.state !== 'candidate') return false;
+  if (isTaskLocalClaim(item)) return false;
   // Derived relations are nightly-reflect outputs; they must never self-promote
   // without an explicit consumption signal, regardless of search/recency feedback.
   const relation = String(item.relation || '');
