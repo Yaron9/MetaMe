@@ -426,14 +426,14 @@ async function distill() {
       try {
         let targetInput = null;
         if (signalAnchorSessionId && typeof sessionAnalytics.buildSessionInputById === 'function') {
-          targetInput = sessionAnalytics.buildSessionInputById(signalAnchorSessionId);
+          targetInput = await sessionAnalytics.buildSessionInputById(signalAnchorSessionId);
           if (!targetInput) {
             console.log(`[distill] signal session ${signalAnchorSessionId.slice(0, 8)} not found — skip session context to avoid cross-session mismatch`);
           }
         } else {
-          const targetSession = sessionAnalytics.findLatestUnanalyzedSession();
+          const targetSession = await sessionAnalytics.findLatestUnanalyzedSession();
           if (targetSession && typeof sessionAnalytics.buildSessionInputBySession === 'function') {
-            targetInput = sessionAnalytics.buildSessionInputBySession(targetSession);
+            targetInput = await sessionAnalytics.buildSessionInputBySession(targetSession);
           }
         }
         if (targetInput) {
@@ -640,7 +640,7 @@ Do NOT repeat existing unchanged values.`;
     // 7. Parse result
     if (!result || result === 'NO_UPDATE') {
       if (skeleton && sessionAnalytics) {
-        try { sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision, skeleton.engine); } catch { /* non-fatal */ }
+        try { sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision, skeleton.engine, skeleton); } catch { /* non-fatal */ }
       }
       ackSignals = true;
       finalize();
@@ -722,7 +722,7 @@ Do NOT repeat existing unchanged values.`;
 
       if (extractedFieldCount === 0 && !mergedCompetence.changed) {
         if (skeleton && sessionAnalytics) {
-          try { sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision, skeleton.engine); } catch { }
+          try { sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision, skeleton.engine, skeleton); } catch { }
         }
         ackSignals = true;
         finalize();
@@ -794,7 +794,7 @@ Do NOT repeat existing unchanged values.`;
 
       // Mark session as analyzed after successful distill
       if (skeleton && sessionAnalytics) {
-        try { sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision, skeleton.engine); } catch { }
+        try { sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision, skeleton.engine, skeleton); } catch { }
       }
 
       ackSignals = true;
@@ -1137,7 +1137,7 @@ function writeSessionLog(behavior, signalCount, skeleton, summary) {
  * Merges: skeleton (local, FREE) + /insights facets (if available, FREE).
  * Returns number of sessions bootstrapped.
  */
-function bootstrapSessionLog() {
+async function bootstrapSessionLog() {
   if (!sessionAnalytics) return 0;
 
   const yaml = require('js-yaml');
@@ -1169,14 +1169,14 @@ function bootstrapSessionLog() {
     }
   } catch { /* facets not available */ }
 
-  const allSessions = sessionAnalytics.findAllUnanalyzedSessions(30);
+  const allSessions = await sessionAnalytics.findAllUnanalyzedSessions(30);
   if (allSessions.length === 0) return 0;
 
   let count = 0;
   for (const session of allSessions) {
     try {
       const input = typeof sessionAnalytics.buildSessionInputBySession === 'function'
-        ? sessionAnalytics.buildSessionInputBySession(session)
+        ? await sessionAnalytics.buildSessionInputBySession(session)
         : null;
       if (!input) continue;
       const skeleton = input.skeleton || sessionAnalytics.extractSkeleton(input);
@@ -1185,7 +1185,7 @@ function bootstrapSessionLog() {
         ? session.source.isTrivialSession(skeleton)
         : skeleton.message_count < 2 && skeleton.duration_min < 1;
       if (isTrivial) {
-        sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision, skeleton.engine);
+        sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision, skeleton.engine, skeleton);
         continue;
       }
 
@@ -1233,7 +1233,7 @@ function bootstrapSessionLog() {
         intent: facet ? facet.underlying_goal || skeleton.intent : skeleton.intent || null,
       });
 
-      sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision, skeleton.engine);
+      sessionAnalytics.markAnalyzed(skeleton.session_id, skeleton.source_revision, skeleton.engine, skeleton);
       count++;
     } catch {
       // Skip individual session failures
@@ -1511,7 +1511,7 @@ module.exports = {
 if (require.main === module) {
   (async () => {
     // Bootstrap: if session_log is thin, batch-fill from history
-    const bootstrapped = bootstrapSessionLog();
+    const bootstrapped = await bootstrapSessionLog();
     if (bootstrapped > 0) {
       console.log(`📊 MetaMe: Bootstrapped ${bootstrapped} historical sessions.`);
       // Force pattern detection immediately after bootstrap

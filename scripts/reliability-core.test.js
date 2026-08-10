@@ -158,7 +158,7 @@ test('memory-extract does not mark session extracted when extraction fails', () 
     (async () => {
       await me.run();
       const sa = require('./scripts/session-analytics');
-      const remain = sa.findAllUnextractedSessions(50).map(s => s.session_id);
+      const remain = (await sa.findAllUnextractedSessions(50)).map(s => s.session_id);
       console.log(JSON.stringify(remain));
     })().then(() => process.exit(0)).catch(() => process.exit(1));
   `, env);
@@ -166,7 +166,9 @@ test('memory-extract does not mark session extracted when extraction fails', () 
   const remain = JSON.parse(
     runNode(home, `
       const sa = require('./scripts/session-analytics');
-      console.log(JSON.stringify(sa.findAllUnextractedSessions(50).map(s => s.session_id)));
+      (async () => {
+        console.log(JSON.stringify((await sa.findAllUnextractedSessions(50)).map(s => s.session_id)));
+      })().catch(() => process.exitCode = 1);
     `).trim()
   );
   assert.ok(remain.includes(sessionId));

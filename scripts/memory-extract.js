@@ -286,7 +286,7 @@ async function run() {
     let distillEnv = {};
     try { distillEnv = buildDistillEnv(); } catch { }
 
-    const sessions = sessionAnalytics.findAllUnextractedSessions(3);
+    const sessions = await sessionAnalytics.findAllUnextractedSessions(3);
     if (sessions.length === 0) {
       console.log('[memory-extract] No unanalyzed sessions found.');
     }
@@ -298,7 +298,7 @@ async function run() {
 
     for (const session of sessions) {
       try {
-        const input = sessionAnalytics.buildSessionInputBySession(session);
+        const input = await sessionAnalytics.buildSessionInputBySession(session);
         if (!input) throw new Error('session source input unavailable');
         const skeleton = input.skeleton || sessionAnalytics.extractSkeleton(input);
         const engine = skeleton.engine || session.engineId || session.engine || 'unknown';
@@ -307,7 +307,7 @@ async function run() {
         // Skip trivial sessions
         if (typeof session.source.isTrivialSession === 'function' && session.source.isTrivialSession(skeleton)) {
           if (sourceRow) saveSessionSource(memory, engine, null, skeleton, 'archived');
-          sessionAnalytics.markFactsExtracted(skeleton.session_id, skeleton.source_revision, engine);
+          sessionAnalytics.markFactsExtracted(skeleton.session_id, skeleton.source_revision, engine, skeleton);
           continue;
         }
 
@@ -343,7 +343,7 @@ async function run() {
           console.log(`[memory-extract] Session ${skeleton.session_id.slice(0, 8)} (${session_name}): no facts extracted`);
         }
 
-        sessionAnalytics.markFactsExtracted(skeleton.session_id, skeleton.source_revision, engine);
+        sessionAnalytics.markFactsExtracted(skeleton.session_id, skeleton.source_revision, engine, skeleton);
 
         // Persist session summary to memory.db sessions table (makes sessions searchable)
         try {

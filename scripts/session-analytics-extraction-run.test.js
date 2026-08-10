@@ -12,8 +12,29 @@ test('session analytics processing uses the shared extraction-run table', () => 
   const script = `
     const { DatabaseSync } = require('node:sqlite');
     const assert = require('node:assert/strict');
+    const fs = require('node:fs');
+    const path = require('node:path');
     const analytics = require('./scripts/session-analytics');
-    analytics._internal.markProcessed('analyzed', 'session-1', 'revision-1', 'ignored-by-canonical-path', 'fixture');
+    const { upsertSessionSource } = require('./scripts/core/session-source-db');
+    const dbPath = path.join(process.env.HOME, '.metame', 'memory.db');
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    const seedDb = new DatabaseSync(dbPath);
+    upsertSessionSource(seedDb, {
+      engineId: 'fixture',
+      nativeSessionId: 'session-1',
+      sourceHash: 'revision-1',
+      project: 'fixture-project',
+      cwd: '/tmp/fixture',
+      sourceLocator: { relativePath: 'session-1.jsonl' },
+      sourceSize: 12,
+    });
+    seedDb.close();
+    analytics._internal.markProcessed('analyzed', 'session-1', 'revision-1', 'ignored-by-canonical-path', 'fixture', {
+      project: 'fixture-project',
+      cwd: '/tmp/fixture',
+      sourceLocator: { relativePath: 'session-1.jsonl' },
+      sourceSize: 12,
+    });
     assert(analytics._internal.isProcessed('analyzed', 'session-1', 'revision-1', 'ignored-by-canonical-path', 'fixture'));
     const db = new DatabaseSync(require('node:path').join(process.env.HOME, '.metame', 'memory.db'));
     const row = db.prepare('SELECT status, pipeline_version FROM extraction_runs').get();

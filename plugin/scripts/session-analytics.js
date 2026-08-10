@@ -22,7 +22,7 @@ const {
   claimExtractionLease,
   completeExtractionRun,
 } = require('./core/extraction-run-db');
-const { upsertSessionSource } = require('./core/session-source-db');
+const { getSessionSource, upsertSessionSource } = require('./core/session-source-db');
 const {
   makeSkeleton: makeCanonicalSkeleton,
   extractEvidence: canonicalEvidenceFromEvents,
@@ -36,6 +36,10 @@ const PIPELINE_VERSIONS = Object.freeze({
   analyzed: `${CANONICAL_PIPELINE_VERSION}:analytics`,
   facts_analyzed: `${CANONICAL_PIPELINE_VERSION}:facts`,
 });
+const DEFAULT_DISCOVERY_PAGE_SIZE = 100;
+const DEFAULT_DISCOVERY_SCAN_BUDGET = 5000;
+const MAX_DISCOVERY_PAGE_SIZE = 1000;
+const MAX_DISCOVERY_SCAN_BUDGET = 10000;
 let _stateDb = null;
 let _sessionSources = null;
 
@@ -61,15 +65,64 @@ function pipelineVersionForKind(kind) {
   return PIPELINE_VERSIONS[kind] || `${CANONICAL_PIPELINE_VERSION}:${String(kind || 'unknown').trim() || 'unknown'}`;
 }
 
-function extractionRunFor(kind, sessionId, sourceRevision, engineId, create = false) {
-  if (!kind || !sessionId || !sourceRevision || !engineId) return null;
-  const db = getStateDb();
-  const source = upsertSessionSource(db, {
+function completeSourceMetadata(metadata, engineId, sessionId, sourceRevision) {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+  const sourceLocator = Object.hasOwn(metadata, 'sourceLocator')
+    ? metadata.sourceLocator
+    : metadata.source_locator;
+  const sourceSize = Object.hasOwn(metadata, 'sourceSize')
+    ? metadata.sourceSize
+    : metadata.source_size;
+  const project = Object.hasOwn(metadata, 'project')
+    ? metadata.project
+    : metadata.project_name;
+  if (sourceLocator === undefined || sourceSize === undefined || project === undefined) return null;
+  return {
+    ...metadata,
     engineId,
     nativeSessionId: sessionId,
     sourceHash: sourceRevision,
-    project: '*',
+    sourceLocator,
+    sourceSize,
+    project: project || '*',
+    scope: metadata.scope ?? metadata.project_id ?? null,
+    cwd: metadata.cwd ?? metadata.project_path ?? null,
+    firstTs: metadata.firstTs ?? metadata.first_ts ?? null,
+    lastTs: metadata.lastTs ?? metadata.last_ts ?? null,
+    messageCount: metadata.messageCount ?? metadata.message_count ?? 0,
+    toolCallCount: metadata.toolCallCount ?? metadata.total_tool_calls ?? metadata.tool_call_count ?? 0,
+    toolErrorCount: metadata.toolErrorCount ?? metadata.tool_error_count ?? 0,
+    parentNativeSessionId: metadata.parentNativeSessionId ?? metadata.parent_session_id ?? null,
+    classification: metadata.classification || (metadata.source === 'subagent' ? 'subagent' : 'conversation'),
+  };
+}
+
+function extractionRunFor(
+  kind,
+  sessionId,
+  sourceRevision,
+  engineId,
+  create = false,
+  sourceMetadata = null,
+) {
+  if (!kind || !sessionId || !sourceRevision || !engineId) return null;
+  const db = getStateDb();
+  let source = getSessionSource(db, {
+    engineId,
+    nativeSessionId: sessionId,
+    sourceRevision,
   });
+  if (!source && create) {
+    const complete = completeSourceMetadata(sourceMetadata, engineId, sessionId, sourceRevision);
+    if (!complete) return null;
+    upsertSessionSource(db, complete);
+    source = getSessionSource(db, {
+      engineId,
+      nativeSessionId: sessionId,
+      sourceRevision,
+    });
+  }
+  if (!source) return null;
   const options = {
     sessionSourceId: source.id,
     pipelineVersion: pipelineVersionForKind(kind),
@@ -84,10 +137,17 @@ function isProcessed(kind, sessionId, sourceRevision = '', pipelineVersion = CAN
   return !!run && ['completed', 'skipped'].includes(run.status);
 }
 
-function markProcessed(kind, sessionId, sourceRevision = '', pipelineVersion = CANONICAL_PIPELINE_VERSION, engineId = '') {
+function markProcessed(
+  kind,
+  sessionId,
+  sourceRevision = '',
+  pipelineVersion = CANONICAL_PIPELINE_VERSION,
+  engineId = '',
+  sourceMetadata = null,
+) {
   if (!sessionId || !sourceRevision || !engineId) return;
   const db = getStateDb();
-  const run = extractionRunFor(kind, sessionId, sourceRevision, engineId, true);
+  const run = extractionRunFor(kind, sessionId, sourceRevision, engineId, true, sourceMetadata);
   if (!run || ['completed', 'skipped'].includes(run.status)) return;
   const leaseToken = `analytics:${pipelineVersionForKind(kind)}:${engineId}:${sessionId}:${sourceRevision}`;
   const lease = claimExtractionLease(db, {
@@ -162,51 +222,168 @@ function contextFromRevision(engineId, ref, revision) {
   };
 }
 
-function readSourceInput(engineId, source, ref, revision) {
-  if (typeof source.readPathEvents !== 'function' || typeof source.resolveSessionRefPath !== 'function') {
-    throw new Error(`session source ${engineId} does not expose a synchronous read seam`);
+async function readSourceInput(engineId, source, ref, revision) {
+  let events;
+  let inputRevision = revision;
+  let filePath = null;
+  if (typeof source.read === 'function') {
+    events = [];
+    const sourceHash = sourceRevisionOf(ref, revision);
+    for await (const event of source.read(ref, sourceHash ? { sourceRevision: sourceHash } : {})) events.push(event);
+  } else if (typeof source.readPathEvents === 'function' && typeof source.resolveSessionRefPath === 'function') {
+    filePath = source.resolveSessionRefPath(ref);
+    const input = source.readPathEvents(filePath, ref);
+    inputRevision = input.revision || revision;
+    events = input.events;
+  } else {
+    throw new Error(`session source ${engineId} does not expose a readable source seam`);
   }
-  const filePath = source.resolveSessionRefPath(ref);
-  const input = source.readPathEvents(filePath, ref);
-  const context = contextFromRevision(engineId, ref, input.revision || revision);
+  const context = contextFromRevision(engineId, ref, inputRevision);
   return {
     engine: engineId,
     path: filePath,
     source,
     ref,
-    revision: input.revision || revision,
-    events: input.events,
+    revision: inputRevision,
+    events,
     context,
-    skeleton: makeCanonicalSkeleton(input.events, context),
-    evidence: canonicalEvidenceFromEvents(input.events, 3000),
+    skeleton: makeCanonicalSkeleton(events, context),
+    evidence: canonicalEvidenceFromEvents(events, 3000),
   };
 }
 
-function inspectSourceSession(engineId, source, ref) {
+async function inspectSourceSession(engineId, source, ref) {
   try {
-    if (typeof source.resolveSessionRefPath !== 'function' || typeof source.inspectPath !== 'function') return null;
-    const filePath = source.resolveSessionRefPath(ref);
-    const revision = source.inspectPath(filePath, ref);
+    let revision;
+    let filePath = null;
+    if (typeof source.inspect === 'function') {
+      revision = await source.inspect(ref);
+    } else if (typeof source.resolveSessionRefPath === 'function' && typeof source.inspectPath === 'function') {
+      filePath = source.resolveSessionRefPath(ref);
+      revision = source.inspectPath(filePath, ref);
+    } else {
+      return null;
+    }
     return { engineId, source, ref, revision, filePath };
   } catch { return null; }
 }
 
-function listCanonicalSessions(kind = 'analyzed', limit = 30, options = {}) {
+function boundedDiscoveryValue(value, fallback, minimum, maximum) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(Math.max(Math.floor(number), minimum), maximum);
+}
+
+function discoveryPageSize(max, options = {}) {
+  const requested = options.discoveryPageSize
+    ?? options.discoveryRequest?.pageSize
+    ?? options.discoveryRequest?.limit;
+  return boundedDiscoveryValue(
+    requested,
+    Math.min(Math.max(max, 1), DEFAULT_DISCOVERY_PAGE_SIZE),
+    1,
+    MAX_DISCOVERY_PAGE_SIZE,
+  );
+}
+
+function discoveryScanBudget(options = {}) {
+  return boundedDiscoveryValue(
+    options.discoveryScanBudget,
+    DEFAULT_DISCOVERY_SCAN_BUDGET,
+    1,
+    MAX_DISCOVERY_SCAN_BUDGET,
+  );
+}
+
+function cursorKey(cursor) {
+  if (cursor === undefined || cursor === null || cursor === '') return '<start>';
+  try { return JSON.stringify(cursor); } catch { return String(cursor); }
+}
+
+async function* iterateDiscovery(source, request) {
+  if (!source) return;
+  const discover = typeof source.discover === 'function'
+    ? source.discover.bind(source)
+    : typeof source.listSessionRefs === 'function'
+      ? source.listSessionRefs.bind(source)
+      : null;
+  if (!discover) return;
+  let result = discover(request);
+  if (result && typeof result.then === 'function') result = await result;
+  if (!result) return;
+  if (typeof result[Symbol.asyncIterator] === 'function') {
+    for await (const ref of result) yield ref;
+    return;
+  }
+  if (typeof result[Symbol.iterator] === 'function') {
+    for (const ref of result) yield ref;
+  }
+}
+
+async function walkDiscoveredRefs(source, request, options = {}) {
+  const pageSize = boundedDiscoveryValue(options.pageSize, DEFAULT_DISCOVERY_PAGE_SIZE, 1, MAX_DISCOVERY_PAGE_SIZE);
+  const scanBudget = boundedDiscoveryValue(options.scanBudget, DEFAULT_DISCOVERY_SCAN_BUDGET, 1, MAX_DISCOVERY_SCAN_BUDGET);
+  let cursor = request && request.cursor;
+  const visitedCursors = new Set();
+  let scanned = 0;
+
+  while (scanned < scanBudget) {
+    const currentKey = cursorKey(cursor);
+    if (visitedCursors.has(currentKey)) break;
+    visitedCursors.add(currentKey);
+
+    const pageRequest = { ...(request || {}), limit: Math.min(pageSize, scanBudget - scanned) };
+    if (cursor === undefined || cursor === null || cursor === '') delete pageRequest.cursor;
+    else pageRequest.cursor = cursor;
+
+    const page = [];
+    for await (const ref of iterateDiscovery(source, pageRequest)) {
+      page.push(ref);
+      scanned += 1;
+      if (page.length >= pageRequest.limit || scanned >= scanBudget) break;
+    }
+    if (page.length === 0) break;
+
+    for (const ref of page) {
+      if (typeof options.onRef === 'function' && await options.onRef(ref)) {
+        return { scanned, stopped: true };
+      }
+    }
+    if (scanned >= scanBudget) break;
+
+    const last = page.at(-1) || {};
+    const nextCursor = last.discoveryCursor
+      ?? last.discovery_cursor
+      ?? last.cursor;
+    if (nextCursor === undefined || nextCursor === null || nextCursor === '') break;
+    if (cursorKey(nextCursor) === currentKey) break;
+    cursor = nextCursor;
+  }
+  return { scanned, stopped: false };
+}
+
+async function listCanonicalSessions(kind = 'analyzed', limit = 30, options = {}) {
   const max = Math.min(Math.max(Number(limit) || 30, 1), 1000);
   const rows = [];
+  const pageSize = discoveryPageSize(max, options);
+  const scanBudget = discoveryScanBudget(options);
+  let remainingScanBudget = scanBudget;
   for (const [engineId, source] of getSessionSources()) {
-    const refs = source.listSessionRefs({
+    if (remainingScanBudget <= 0) break;
+    const sourceRows = [];
+    const scan = await walkDiscoveredRefs(source, {
       ...(options.discoveryRequest || {}),
       includeSubagents: options.includeSubagents !== false,
       suppressOwnedSubagents: options.suppressOwnedSubagents !== false,
-      limit: Math.min(max * 3, 1000),
-    });
-    for (const ref of refs) {
-      const inspected = inspectSourceSession(engineId, source, ref);
-      if (!inspected) continue;
+    }, {
+      pageSize,
+      scanBudget: remainingScanBudget,
+      onRef: async ref => {
+      const inspected = await inspectSourceSession(engineId, source, ref);
+      if (!inspected) return false;
       const sourceRevision = sourceRevisionOf(ref, inspected.revision);
-      if (!sourceRevision || isProcessed(kind, ref.nativeSessionId, sourceRevision, CANONICAL_PIPELINE_VERSION, engineId)) continue;
-      rows.push({
+      if (!sourceRevision || isProcessed(kind, ref.nativeSessionId, sourceRevision, CANONICAL_PIPELINE_VERSION, engineId)) return false;
+      sourceRows.push({
         engine: engineId,
         engineId,
         session_id: ref.nativeSessionId,
@@ -217,54 +394,68 @@ function listCanonicalSessions(kind = 'analyzed', limit = 30, options = {}) {
         mtime: inspected.revision.lastModified ? Date.parse(inspected.revision.lastModified) : 0,
         path: inspected.filePath || null,
       });
-    }
+      return sourceRows.length >= max;
+      },
+    });
+    remainingScanBudget -= scan.scanned;
+    rows.push(...sourceRows);
   }
   rows.sort((left, right) => right.mtime - left.mtime || left.engineId.localeCompare(right.engineId) || left.session_id.localeCompare(right.session_id));
   return rows.slice(0, max);
 }
 
-function findLatestCanonicalSession() {
-  return listCanonicalSessions('analyzed', 1)[0] || null;
+async function findLatestCanonicalSession() {
+  return (await listCanonicalSessions('analyzed', 1))[0] || null;
 }
 
-function findAllCanonicalSessions(kind, limit = 30) {
-  return listCanonicalSessions(kind, limit);
+async function findAllCanonicalSessions(kind, limit = 30, options = {}) {
+  return listCanonicalSessions(kind, limit, options);
 }
 
-function findCanonicalSessionById(sessionId, engineId = '') {
+async function findCanonicalSessionById(sessionId, engineId = '') {
   const id = String(sessionId || '').trim();
   if (!id) return null;
   const sources = engineId && getSessionSources().has(engineId)
     ? [[engineId, getSessionSources().get(engineId)]]
     : [...getSessionSources()];
   for (const [sourceEngineId, source] of sources) {
-    const refs = source.listSessionRefs({ includeSubagents: true, suppressOwnedSubagents: false, limit: 1000 });
-    const ref = refs.find(item => item.nativeSessionId === id);
-    if (!ref) continue;
-    const inspected = inspectSourceSession(sourceEngineId, source, ref);
-    if (!inspected) continue;
-    return {
-      engine: sourceEngineId,
-      engineId: sourceEngineId,
-      session_id: id,
-      nativeSessionId: id,
-      ref,
-      revision: inspected.revision,
-      source,
-      path: inspected.filePath || null,
-      mtime: inspected.revision.lastModified ? Date.parse(inspected.revision.lastModified) : 0,
-    };
+    let found = null;
+    await walkDiscoveredRefs(source, {
+      includeSubagents: true,
+      suppressOwnedSubagents: false,
+    }, {
+      pageSize: DEFAULT_DISCOVERY_PAGE_SIZE,
+      scanBudget: DEFAULT_DISCOVERY_SCAN_BUDGET,
+      onRef: async ref => {
+        if (!ref || ref.nativeSessionId !== id) return false;
+        const inspected = await inspectSourceSession(sourceEngineId, source, ref);
+        if (!inspected) return false;
+        found = {
+          engine: sourceEngineId,
+          engineId: sourceEngineId,
+          session_id: id,
+          nativeSessionId: id,
+          ref,
+          revision: inspected.revision,
+          source,
+          path: inspected.filePath || null,
+          mtime: inspected.revision.lastModified ? Date.parse(inspected.revision.lastModified) : 0,
+        };
+        return true;
+      },
+    });
+    if (found) return found;
   }
   return null;
 }
 
-function buildSessionInputById(sessionId) {
-  const item = findCanonicalSessionById(sessionId);
+async function buildSessionInputById(sessionId) {
+  const item = await findCanonicalSessionById(sessionId);
   if (!item) return null;
   return readSourceInput(item.engineId, item.source, item.ref, item.revision);
 }
 
-function buildSessionInputBySession(session) {
+async function buildSessionInputBySession(session) {
   if (!session || !session.source || !session.ref) return null;
   return readSourceInput(session.engineId || session.engine, session.source, session.ref, session.revision);
 }
@@ -316,8 +507,8 @@ function summarizeCanonicalSession(skeleton, sourceInput, evidence = null) {
   };
 }
 
-function markCanonicalProcessed(kind, sessionId, sourceRevision = '', engineId = '') {
-  markProcessed(kind, sessionId, sourceRevision, CANONICAL_PIPELINE_VERSION, engineId);
+function markCanonicalProcessed(kind, sessionId, sourceRevision = '', engineId = '', sourceMetadata = null) {
+  markProcessed(kind, sessionId, sourceRevision, CANONICAL_PIPELINE_VERSION, engineId, sourceMetadata);
 }
 
 module.exports = {
@@ -325,8 +516,8 @@ module.exports = {
   findSessionById: findCanonicalSessionById,
   buildSessionInputById,
   buildSessionInputBySession,
-  findAllUnanalyzedSessions: limit => findAllCanonicalSessions('analyzed', limit),
-  findAllUnextractedSessions: limit => findAllCanonicalSessions('facts_analyzed', limit),
+  findAllUnanalyzedSessions: (limit, options = {}) => findAllCanonicalSessions('analyzed', limit, options),
+  findAllUnextractedSessions: (limit, options = {}) => findAllCanonicalSessions('facts_analyzed', limit, options),
   extractSkeleton: extractCanonicalSkeleton,
   extractSkeletonFromEvents: (events, context = {}) => makeCanonicalSkeleton(events, context),
   extractEvidence: extractCanonicalEvidence,
@@ -335,24 +526,32 @@ module.exports = {
   formatGoalContext,
   summarizeSession: summarizeCanonicalSession,
   detectSignificantSession: detectCanonicalSignificantSession,
-  markAnalyzed: (sessionId, sourceRevision = '', engineId = '') => markCanonicalProcessed('analyzed', sessionId, sourceRevision, engineId),
-  markFactsExtracted: (sessionId, sourceRevision = '', engineId = '') => markCanonicalProcessed('facts_analyzed', sessionId, sourceRevision, engineId),
+  markAnalyzed: (sessionId, sourceRevision = '', engineId = '', sourceMetadata = null) => markCanonicalProcessed('analyzed', sessionId, sourceRevision, engineId, sourceMetadata),
+  markFactsExtracted: (sessionId, sourceRevision = '', engineId = '', sourceMetadata = null) => markCanonicalProcessed('facts_analyzed', sessionId, sourceRevision, engineId, sourceMetadata),
   _internal: {
     getSessionSources,
     isProcessed,
     markProcessed,
+    completeSourceMetadata,
+    listCanonicalSessions,
+    walkDiscoveredRefs,
   },
 };
 
 if (require.main === module) {
-  const latest = findLatestCanonicalSession();
-  if (!latest) {
-    console.log('No unanalyzed sessions found.');
-    process.exit(0);
-  }
-  const input = buildSessionInputBySession(latest);
-  console.log(`Session: ${latest.session_id}`);
-  console.log(`Engine: ${latest.engineId}`);
-  console.log('Skeleton:', JSON.stringify(input && input.skeleton, null, 2));
-  console.log('Prompt format:', formatForPrompt(input && input.skeleton));
+  (async () => {
+    const latest = await findLatestCanonicalSession();
+    if (!latest) {
+      console.log('No unanalyzed sessions found.');
+      return;
+    }
+    const input = await buildSessionInputBySession(latest);
+    console.log(`Session: ${latest.session_id}`);
+    console.log(`Engine: ${latest.engineId}`);
+    console.log('Skeleton:', JSON.stringify(input && input.skeleton, null, 2));
+    console.log('Prompt format:', formatForPrompt(input && input.skeleton));
+  })().catch(error => {
+    console.error(error.message || error);
+    process.exitCode = 1;
+  });
 }
