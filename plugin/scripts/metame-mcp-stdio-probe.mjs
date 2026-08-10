@@ -3,60 +3,52 @@
 /**
  * Read-only MCP doctor probe.
  *
- * This helper deliberately uses the official SDK client so initialize,
- * protocol-version negotiation, stdio framing and transport failures are not
- * reimplemented in the CommonJS doctor command.
+ * The regular npm path loads the official SDK client modules directly. A
+ * no-npm plugin copy falls back to its sibling SDK bundle; both paths share
+ * the same probe logic and transport semantics.
  */
 
-import { Client } from '@modelcontextprotocol/client';
-import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
-import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { probeWithSdk } from './metame-mcp-stdio-probe-core.mjs';
 
-function errorReport(error) {
-  const message = error && error.message ? error.message : String(error || 'MCP probe failed');
-  return {
-    code: error && (error.code || error.name) ? String(error.code || error.name) : 'MCP_PROBE_FAILED',
-    message: message.slice(0, 300),
-  };
+function isMissingOfficialSdk(error) {
+  const message = error && error.message ? error.message : String(error || '');
+  return error && error.code === 'ERR_MODULE_NOT_FOUND'
+    && /@modelcontextprotocol\/(?:client|core)|(?:^|[\s'])zod(?:[\/'"]|$)/.test(message);
+}
+
+let probeImplementation;
+async function resolveProbeImplementation() {
+  if (probeImplementation) return probeImplementation;
+  try {
+    const [{ Client }, { StdioClientTransport }] = await Promise.all([
+      import('@modelcontextprotocol/client'),
+      import('@modelcontextprotocol/client/stdio'),
+    ]);
+    probeImplementation = serverPath => probeWithSdk({ Client, StdioClientTransport }, serverPath);
+  } catch (error) {
+    if (!isMissingOfficialSdk(error)) throw error;
+    const bundled = await import('./metame-mcp-stdio-probe.bundle.mjs');
+    probeImplementation = bundled.probe;
+  }
+  return probeImplementation;
 }
 
 async function probe(serverPath) {
-  const target = path.resolve(String(serverPath || ''));
-  if (!serverPath) return { reachable: false, tools: [], error: { code: 'MCP_SERVER_PATH_REQUIRED', message: 'server path is required' } };
+  return (await resolveProbeImplementation())(serverPath);
+}
 
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [target],
-    stderr: 'ignore',
-  });
-  const client = new Client({ name: 'metame-doctor', version: '1.0.0' });
+function isMainModule() {
+  if (!process.argv[1]) return false;
   try {
-    await client.connect(transport);
-    const listed = await client.listTools();
-    const tools = Array.isArray(listed.tools)
-      ? listed.tools.map(tool => String(tool && tool.name || '')).filter(Boolean).sort()
-      : [];
-    const protocolVersion = client.getNegotiatedProtocolVersion?.() || null;
-    const serverInfo = client.getServerVersion?.() || null;
-    const capabilities = client.getServerCapabilities?.() || {};
-    return {
-      reachable: true,
-      tools,
-      protocol_version: protocolVersion,
-      server_info: serverInfo,
-      server_capabilities: capabilities,
-      client_verified: !!serverInfo,
-      protocol_verified: !!protocolVersion,
-    };
-  } catch (error) {
-    return { reachable: false, tools: [], error: errorReport(error) };
-  } finally {
-    try { await client.close(); } catch { /* best effort for a read-only probe */ }
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule()) {
   const result = await probe(process.argv[2]);
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }

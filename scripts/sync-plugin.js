@@ -71,7 +71,29 @@ function syncDirFiles(srcDir, destDir, { fileList, chmod, cleanupStale, cleanupE
   return updated;
 }
 
-const PLUGIN_EXCLUDED_SCRIPTS = new Set(['sync-readme.js', 'test_daemon.js', 'daemon.yaml']);
+const PLUGIN_EXCLUDED_SCRIPTS = new Set([
+  'sync-readme.js',
+  'test_daemon.js',
+  'build-mcp-bundle.js',
+  'metame-mcp-stdio-probe-bundle-entry.mjs',
+  'daemon.yaml',
+]);
+const MCP_BUNDLE_NOTICE = 'metame-mcp-server-sdk.bundle.NOTICES.txt';
+
+function rebuildMcpBundle(projectRoot) {
+  const entrypoint = path.join(projectRoot, 'scripts', 'metame-mcp-server-sdk.mjs');
+  const buildScript = path.join(projectRoot, 'scripts', 'build-mcp-bundle.js');
+  if (!fs.existsSync(entrypoint) || !fs.existsSync(buildScript)) return false;
+
+  try {
+    require.resolve('esbuild', { paths: [path.dirname(buildScript)] });
+  } catch {
+    throw new Error('MCP SDK bundle sync requires the esbuild dev dependency; run npm install first');
+  }
+
+  require(buildScript).buildMcpBundle();
+  return true;
+}
 
 function writeJsonIfChanged(filePath, value) {
   const next = `${JSON.stringify(value, null, 2)}\n`;
@@ -132,6 +154,7 @@ function syncProjectSkillEntrypoints(projectRoot = process.cwd()) {
 function syncPluginScripts(projectRoot = process.cwd()) {
   const scriptsDir = path.join(projectRoot, 'scripts');
   const pluginScriptsDir = path.join(projectRoot, 'plugin', 'scripts');
+  rebuildMcpBundle(projectRoot);
   const deployGroups = collectDeployGroups(fs, path, scriptsDir, {
     excludedScripts: PLUGIN_EXCLUDED_SCRIPTS,
     includeNestedDirs: ['core', 'engines'],
@@ -156,6 +179,9 @@ function syncPluginScripts(projectRoot = process.cwd()) {
     fileList: ['agy-adapter.js'],
     cleanupStale: true,
   }) || updated;
+  updated = syncDirFiles(scriptsDir, pluginScriptsDir, {
+    fileList: [MCP_BUNDLE_NOTICE],
+  }) || updated;
   updated = syncPluginManifest(projectRoot) || updated;
   updated = syncProjectSkillEntrypoints(projectRoot) || updated;
   return updated;
@@ -167,6 +193,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  rebuildMcpBundle,
   syncPluginScripts,
   syncDirFiles,
   syncPluginManifest,

@@ -35,6 +35,12 @@ const FORBIDDEN_PACKAGE_RULES = [
   { check: file => /(^|\/)verify-reactive-claude-md\.js$/.test(file), reason: 'obsolete verifier' },
   { check: file => /(^|\/)\.DS_Store$/.test(file), reason: 'macOS metadata' },
 ];
+const MCP_BUNDLE_SPECS = [
+  { relative: 'scripts/metame-mcp-server-sdk.bundle.mjs', marker: 'StdioServerTransport' },
+  { relative: 'scripts/metame-mcp-stdio-probe.bundle.mjs', marker: 'StdioClientTransport' },
+];
+const MCP_BUNDLE_NOTICE_RELATIVE = 'scripts/metame-mcp-server-sdk.bundle.NOTICES.txt';
+const MCP_BUNDLE_MAX_BYTES = 1024 * 1024;
 
 function isRealSecretValue(value) {
   if (value == null || value === false) return false;
@@ -77,6 +83,39 @@ function inspectPackageFileList(files) {
   return violations;
 }
 
+function inspectMcpBundle(root, packageFiles = []) {
+  const violations = [];
+  const noticePath = path.join(root, MCP_BUNDLE_NOTICE_RELATIVE);
+  if (packageFiles.length && !packageFiles.includes(MCP_BUNDLE_NOTICE_RELATIVE)) {
+    violations.push(`${MCP_BUNDLE_NOTICE_RELATIVE}: SDK bundle notice missing from npm package`);
+  }
+  for (const spec of MCP_BUNDLE_SPECS) {
+    const bundlePath = path.join(root, spec.relative);
+    if (packageFiles.length && !packageFiles.includes(spec.relative)) {
+      violations.push(`${spec.relative}: generated SDK bundle missing from npm package`);
+    }
+    if (!fs.existsSync(bundlePath)) {
+      violations.push(`${spec.relative}: generated SDK bundle missing`);
+      continue;
+    }
+    const size = fs.statSync(bundlePath).size;
+    if (size > MCP_BUNDLE_MAX_BYTES) {
+      violations.push(`${spec.relative}: ${size} bytes exceeds ${MCP_BUNDLE_MAX_BYTES} byte limit`);
+    }
+    const bundle = fs.readFileSync(bundlePath, 'utf8');
+    if (!bundle.includes(spec.marker)) {
+      violations.push(`${spec.relative}: official SDK transport marker missing`);
+    }
+    if (/(?:bot_token|app_secret|access_token|refresh_token|api_key|api_secret)\s*[:=]\s*["'][^"'${}<]{8,}["']/i.test(bundle)) {
+      violations.push(`${spec.relative}: credential-like literal detected`);
+    }
+  }
+  if (!fs.existsSync(noticePath)) {
+    violations.push(`${MCP_BUNDLE_NOTICE_RELATIVE}: SDK bundle notice missing`);
+  }
+  return violations;
+}
+
 function collectPackageFileList(root) {
   const raw = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
     cwd: root,
@@ -102,8 +141,10 @@ function main() {
     const secretPaths = inspectConfigFile(path.join(root, rel));
     if (secretPaths.length) failures.push(`${rel}: ${secretPaths.join(', ')}`);
   }
-  const packageViolations = inspectPackageFileList(collectPackageFileList(root));
+  const packageFiles = collectPackageFileList(root);
+  const packageViolations = inspectPackageFileList(packageFiles);
   for (const violation of packageViolations) failures.push(`package: ${violation}`);
+  for (const violation of inspectMcpBundle(root, packageFiles)) failures.push(`bundle: ${violation}`);
   if (failures.length) {
     console.error(`ABORT: publish safety check failed:\n${failures.join('\n')}`);
     process.exit(1);
@@ -116,6 +157,7 @@ module.exports = {
   isRealSecretValue,
   collectSecretPaths,
   inspectConfigFile,
+  inspectMcpBundle,
   inspectPackageFileList,
   collectPackageFileList,
   resolveProjectRoot,

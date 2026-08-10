@@ -1,0 +1,26 @@
+MetaMe MCP SDK transport bundle notices
+
+The sibling *.bundle.mjs files are generated from the maintained ESM
+SDK boundaries with esbuild. They embed these runtime dependencies so
+the no-npm Claude plugin can use the official MCP SDK:
+
+Server bundle (metame-mcp-server-sdk.bundle.mjs, 746319 bytes):
+  @modelcontextprotocol/server 2.0.0 — MIT
+  @modelcontextprotocol/core 2.0.0 — MIT
+  zod 4.4.3 — MIT
+
+Client probe bundle (metame-mcp-stdio-probe.bundle.mjs, 812351 bytes):
+  @modelcontextprotocol/client 2.0.0 — MIT
+  @modelcontextprotocol/core 2.0.0 — MIT
+  zod 4.4.3 — MIT
+  cross-spawn 7.0.6 — MIT
+  isexe 2.0.0 — ISC
+  path-key 3.1.1 — MIT
+  pkce-challenge 5.0.1 — MIT
+  shebang-command 2.0.0 — MIT
+  shebang-regex 3.0.0 — MIT
+  which 2.0.2 — ISC
+
+The bundle is not a replacement implementation of MCP; it is a reproducible
+distribution form of the official SDK. The project keeps the SDK boundary
+source and exact dependency versions in package.json/package-lock.json.

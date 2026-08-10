@@ -7,9 +7,13 @@ const assert = require('node:assert/strict');
 const {
   isRealSecretValue,
   collectSecretPaths,
+  inspectMcpBundle,
   inspectPackageFileList,
   resolveProjectRoot,
 } = require('./prepublish-check');
+const fs = require('fs');
+const path = require('path');
+const { mkdtempForTest } = require('./test-support/test-utils');
 
 test('prepublish check ignores empty and placeholder credential values', () => {
   assert.equal(isRealSecretValue(null), false);
@@ -32,7 +36,9 @@ test('prepublish check reports nested secret paths without treating enabled flag
 });
 
 test('prepublish check resolves the project root from the scripts copy', () => {
-  assert.equal(resolveProjectRoot().endsWith('MetaMe'), true);
+  const root = resolveProjectRoot();
+  assert.equal(fs.existsSync(path.join(root, 'package.json')), true);
+  assert.equal(fs.existsSync(path.join(root, 'scripts')), true);
 });
 
 test('prepublish check blocks test, config, metadata, and obsolete files from package', () => {
@@ -68,4 +74,23 @@ test('prepublish check allows current maintenance tools that are tested and expl
     'scripts/retire-perpetual.js',
     'scripts/core/wiki-chunks.js',
   ]), []);
+});
+
+test('prepublish check audits the official MCP bundle, notice, and size boundary', () => {
+  const root = mkdtempForTest('metame-mcp-bundle-audit-');
+  const scripts = path.join(root, 'scripts');
+  fs.mkdirSync(scripts, { recursive: true });
+  fs.writeFileSync(path.join(scripts, 'metame-mcp-server-sdk.bundle.mjs'), 'StdioServerTransport\n', 'utf8');
+  fs.writeFileSync(path.join(scripts, 'metame-mcp-stdio-probe.bundle.mjs'), 'StdioClientTransport\n', 'utf8');
+  fs.writeFileSync(path.join(scripts, 'metame-mcp-server-sdk.bundle.NOTICES.txt'), 'MIT\n', 'utf8');
+
+  assert.deepEqual(inspectMcpBundle(root, [
+    'scripts/metame-mcp-server-sdk.bundle.mjs',
+    'scripts/metame-mcp-stdio-probe.bundle.mjs',
+    'scripts/metame-mcp-server-sdk.bundle.NOTICES.txt',
+  ]), []);
+  assert.match(
+    inspectMcpBundle(root, ['scripts/metame-mcp-server-sdk.bundle.mjs']).join('\n'),
+    /SDK bundle notice missing from npm package/,
+  );
 });

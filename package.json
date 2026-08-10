@@ -26,6 +26,7 @@
         "start": "node index.js",
         "deploy": "node index.js deploy",
         "push": "bash scripts/bin/push-clean.sh",
+        "build:mcp-bundle": "node scripts/build-mcp-bundle.js",
         "sync:plugin": "node scripts/sync-plugin.js",
         "sync:readme": "node scripts/sync-readme.js",
         "restart:daemon": "node index.js stop 2>/dev/null; sleep 1; node index.js start 2>/dev/null || echo '鈿狅笍  Daemon not running or restart failed'",
@@ -54,6 +55,7 @@
         "node": ">=22.5"
     },
     "devDependencies": {
+        "esbuild": "0.28.2",
         "qrcode": "^1.5.4"
     }
 }

@@ -30,6 +30,16 @@ module-system migration. The [official stdio server guide](https://ts.sdk.modelc
 and [client guide](https://ts.sdk.modelcontextprotocol.io/v2/clients/stdio) are
 the transport references for this boundary.
 
+The Claude GitHub plugin is a no-npm distribution and cannot rely on a parent
+`node_modules` directory. `scripts/build-mcp-bundle.js` therefore produces
+two committed, unminified ESM artifacts: the server SDK transport bundle and
+the client doctor-probe bundle. Each is limited to 1 MiB, carries a generated
+MIT/ISC notice file, and is copied to `plugin/scripts/` by `sync:plugin`.
+The CommonJS server and doctor entrypoints use normal package imports when
+available and fall back only when the official SDK package is missing. This
+keeps the official SDK as the production transport on both npm and no-npm
+paths without migrating the repository to ESM.
+
 The legacy monolith `@modelcontextprotocol/sdk` remains published separately
 (npm `latest` was `1.30.0` during this audit), but it is not selected: the v2
 stable package boundary is the maintained `server`/`client`/`core` split and
@@ -50,8 +60,13 @@ The client adds the SDK's stdio process transport and its declared transitive
 OAuth/HTTP support (`cross-spawn`, `eventsource`, `eventsource-parser`,
 `jose`, and `pkce-challenge`), even though this ticket uses only local stdio.
 The transport is invoked with argument arrays and `shell: false` through the
-SDK; no host configuration or credentials are written or copied. `npm audit
---omit=dev` is part of the ticket verification and must remain clean.
+SDK; no host configuration or credentials are written or copied. The bundle
+contains only the client dependencies reached by the local stdio path; the
+full npm dependency graph remains lockfile-audited. `esbuild@0.28.2` is a
+MIT-licensed dev-only build dependency and is never required by a plugin user.
+The prepublish check verifies bundle presence, transport markers, notices,
+size limits and credential-like literals. `npm audit --omit=dev` is part of
+the ticket verification and must remain clean.
 
 ## Removal and rollback
 

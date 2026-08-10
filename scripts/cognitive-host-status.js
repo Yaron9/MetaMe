@@ -9,11 +9,19 @@ const { spawnSync } = require('node:child_process');
 const { HOST_NAMES, inspectHosts, planInstall } = require('./core/cognitive-host');
 
 function probeServer(serverPath, { probeScript = path.join(__dirname, 'metame-mcp-stdio-probe.mjs') } = {}) {
-  const result = spawnSync(process.execPath, [probeScript, serverPath], {
-    encoding: 'utf8',
-    timeout: 5000,
-    maxBuffer: 1024 * 1024,
-  });
+  const bundledProbe = path.join(path.dirname(probeScript), 'metame-mcp-stdio-probe.bundle.mjs');
+  const probeScripts = [probeScript];
+  if (fs.existsSync(bundledProbe) && bundledProbe !== probeScript) probeScripts.push(bundledProbe);
+
+  let result;
+  for (const script of probeScripts) {
+    result = spawnSync(process.execPath, [script, serverPath], {
+      encoding: 'utf8',
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+    });
+    if (!result.error && result.status === 0) break;
+  }
   if (result.error || result.status !== 0) {
     return {
       reachable: false,

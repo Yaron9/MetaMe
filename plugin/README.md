@@ -135,6 +135,10 @@ Patterns and mirror observations can appear from your very first session, no war
 - Claude Code CLI installed
 - `js-yaml` npm package (install globally or in the plugin directory)
 
+The MetaMe MCP server and read-only MCP doctor use the official MCP TypeScript
+SDK. The plugin carries audited SDK transport bundles, so its MCP initialize,
+stdio framing, and capability probe do not depend on a parent `node_modules`.
+
 ## Also Available As
 
 - **npm package**: `npm install -g metame-cli` — same daemon/runtime features plus always-on 24/7 service mode

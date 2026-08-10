@@ -423,7 +423,19 @@ function startLegacyStdioServer() {
 }
 
 async function startStdioServer() {
-  const sdk = await import('./metame-mcp-server-sdk.mjs');
+  let sdk;
+  try {
+    // npm installs resolve the maintained SDK from package dependencies.
+    // Claude's GitHub plugin is intentionally a no-npm distribution, so it
+    // carries the auditable SDK-only bundle as a sibling fallback.
+    sdk = await import('./metame-mcp-server-sdk.mjs');
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error || '');
+    const missingSdk = error && error.code === 'ERR_MODULE_NOT_FOUND'
+      && /@modelcontextprotocol\/(?:server|core)|(?:^|[\s'])zod(?:[\/'"]|$)/.test(message);
+    if (!missingSdk) throw error;
+    sdk = await import('./metame-mcp-server-sdk.bundle.mjs');
+  }
   return sdk.startStdioServer();
 }
 
