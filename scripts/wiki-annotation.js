@@ -222,8 +222,28 @@ function importWikiAnnotation({
 
   db.exec('BEGIN IMMEDIATE');
   try {
-    const existing = db.prepare('SELECT state, claim_id FROM wiki_annotations WHERE id=?').get(annotation.id);
+    const existing = db.prepare('SELECT * FROM wiki_annotations WHERE id=?').get(annotation.id);
     if (existing) {
+      if (normalizedClaimKey && existing.state === 'pending') {
+        const admittedAnnotation = {
+          ...annotation,
+          pageSlug: existing.page_slug,
+          baseProjectionHash: existing.base_projection_hash,
+          content: existing.content,
+          contentHash: existing.content_hash,
+          sourcePath: existing.source_path || annotation.sourcePath,
+          claimKey: normalizedClaimKey,
+        };
+        db.prepare(`
+          UPDATE wiki_annotations
+             SET claim_key=?, updated_at=datetime('now')
+           WHERE id=?
+        `).run(normalizedClaimKey, annotation.id);
+        const admitted = admitAnnotationClaim(db, admittedAnnotation, page);
+        updateAnnotation(db, annotation.id, admitted);
+        db.exec('COMMIT');
+        return { ...annotation, ...admitted, claimKey: normalizedClaimKey, idempotent: false };
+      }
       db.exec('COMMIT');
       return { ...annotation, state: existing.state, claimId: existing.claim_id || null, idempotent: true };
     }

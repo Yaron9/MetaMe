@@ -53,6 +53,25 @@ test('plain annotation is stored separately and never writes memory_items', () =
   fs.rmSync(notes.dir, { recursive: true, force: true });
 });
 
+test('pending annotation can later be admitted with an explicit claim key', () => {
+  const db = fixture();
+  const notes = notesFile('The project policy requires a review before generated Wiki export.');
+  const pending = importWikiAnnotation({ db, slug: 'topics/test', fromFile: notes.file });
+  assert.equal(pending.state, 'pending');
+  const admitted = importWikiAnnotation({
+    db,
+    slug: 'topics/test',
+    fromFile: notes.file,
+    claimKey: 'metame.policy.review',
+  });
+  assert.equal(admitted.state, 'admitted');
+  assert.equal(admitted.idempotent, false);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM memory_items').get().n, 1);
+  assert.equal(db.prepare('SELECT claim_key FROM wiki_annotations').get().claim_key, 'metame.policy.review');
+  db.close();
+  fs.rmSync(notes.dir, { recursive: true, force: true });
+});
+
 test('claim-key annotation follows Claim Contract and records candidate lineage', () => {
   const db = fixture();
   const notes = notesFile('The project policy requires a review before generated Wiki export.');
