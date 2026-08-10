@@ -15,6 +15,30 @@ function writeCodexRollout(filePath, events) {
 }
 
 describe('daemon-session-store codex metadata', () => {
+  it('persists an engine-scoped context delivery ledger across daemon resume', () => {
+    const state = { sessions: { 'chat-ledger': { cwd: '/tmp/project', engines: { codex: { id: 'native-1' } } } } };
+    const store = createSessionStore({
+      fs,
+      path,
+      HOME: os.tmpdir(),
+      loadState: () => state,
+      saveState: next => { state.sessions = next.sessions; },
+      log: () => {},
+      formatRelativeTime: () => 'now',
+      cpExtractTimestamp: () => null,
+    });
+    const first = store.compareAndSetContextDelivery('chat-ledger', 'codex', 'delivery-1', {
+      revision: 'rev-1', project: 'metame', delivered_at: '2026-08-10T00:00:00.000Z',
+    });
+    const second = store.compareAndSetContextDelivery('chat-ledger', 'codex', 'delivery-1', {
+      revision: 'rev-1', project: 'metame',
+    });
+    assert.equal(first.delivered, true);
+    assert.equal(second.delivered, false);
+    assert.equal(store.getContextDeliveryLedger('chat-ledger', 'codex')['delivery-1'].revision, 'rev-1');
+    assert.equal(state.sessions['chat-ledger'].engines.codex.id, 'native-1');
+  });
+
   it('keeps target-engine slots isolated and restores the original slot after switching back', () => {
     const state = {
       sessions: {

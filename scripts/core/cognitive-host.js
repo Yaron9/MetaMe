@@ -213,7 +213,11 @@ function inspectHost(name, {
   cwd,
   probeServer = () => unavailableProbe(),
   probeExecutable,
+  adapter,
 } = {}) {
+  if (adapter && typeof adapter.inspectCapabilities === 'function') {
+    return adapter.inspectCapabilities({ fs, home, cwd, probeServer, probeExecutable, host: name });
+  }
   const host = String(name || '').trim().toLowerCase();
   const definition = HOST_DEFINITIONS[host];
   if (!fs || !home || !cwd || !definition) throw new Error('inspectHost requires a supported host and fs/home/cwd');
@@ -262,11 +266,56 @@ function inspectHost(name, {
 
 function inspectHosts(options = {}) {
   const names = Array.isArray(options.hosts) ? options.hosts : DEFAULT_HOST_NAMES;
-  return names.map(name => inspectHost(name, options));
+  const registry = options.registry;
+  if (!registry || typeof registry.lookup !== 'function') return names.map(name => inspectHost(name, options));
+  return names.map(name => {
+    const plugin = registry.lookup(name);
+    if (plugin && plugin.cognitiveHost) {
+      return plugin.cognitiveHost.inspectCapabilities({ ...options, host: name });
+    }
+    return inspectHost(name, options);
+  });
 }
 
 function inspectCapabilityMatrix(options = {}) {
   return inspectHosts({ ...options, hosts: HOST_NAMES });
+}
+
+/**
+ * Bind the generic host inspection contract to a registered Engine Plugin.
+ * The adapter is deliberately thin: selection, access, and retrieval remain
+ * in core; this seam only knows host registration and projection support.
+ */
+function createCognitiveHostAdapter(name) {
+  const host = String(name || '').trim().toLowerCase();
+  const definition = HOST_DEFINITIONS[host];
+  if (!definition) throw new Error(`cognitive_host_unsupported:${host}`);
+  return {
+    detect(options = {}) {
+      return inspectHost(host, options);
+    },
+    inspectCapabilities(options = {}) {
+      return inspectHost(host, options);
+    },
+    planInstall(options = {}) {
+      const { registry: _registry, ...hostOptions } = options;
+      return planInstall(host, hostOptions);
+    },
+    verify(options = {}) {
+      const { registry: _registry, ...hostOptions } = options;
+      return verifyHost(host, hostOptions);
+    },
+    projectContext({ manifest = {}, phase = 'cold_start' } = {}) {
+      if (definition.automaticContext === 'unsupported') return { state: 'unsupported' };
+      const revision = String(manifest.revision || '').trim();
+      if (!revision) return { state: 'failed', error: 'manifest_revision_required' };
+      return {
+        state: 'projected',
+        phase,
+        fingerprint: `${host}:${revision}`,
+      };
+    },
+  };
 }
 
 function normalizePlanArgs(nameOrOptions, options = {}) {
@@ -278,6 +327,11 @@ function normalizePlanArgs(nameOrOptions, options = {}) {
 function planInstall(nameOrOptions, options = {}) {
   const normalized = normalizePlanArgs(nameOrOptions, options);
   const name = String(normalized.name || '').trim().toLowerCase();
+  const registry = normalized.options.registry;
+  const registered = registry && typeof registry.lookup === 'function' ? registry.lookup(name) : null;
+  if (registered && registered.cognitiveHost && typeof registered.cognitiveHost.planInstall === 'function') {
+    return registered.cognitiveHost.planInstall(normalized.options);
+  }
   const definition = HOST_DEFINITIONS[name];
   const home = normalized.options.home || require('node:os').homedir();
   const cwd = normalized.options.cwd || process.cwd();
@@ -313,6 +367,11 @@ function planInstall(nameOrOptions, options = {}) {
 
 function verifyHost(nameOrOptions, options = {}) {
   const normalized = normalizePlanArgs(nameOrOptions, options);
+  const registry = normalized.options.registry;
+  const registered = registry && typeof registry.lookup === 'function' ? registry.lookup(normalized.name) : null;
+  if (registered && registered.cognitiveHost && typeof registered.cognitiveHost.verify === 'function') {
+    return registered.cognitiveHost.verify(normalized.options);
+  }
   const report = inspectHost(normalized.name, normalized.options);
   return { ok: report.verified, host: report.host, report };
 }
@@ -325,6 +384,7 @@ module.exports = {
   inspectHost,
   inspectHosts,
   inspectCapabilityMatrix,
+  createCognitiveHostAdapter,
   planInstall,
   planRepair: planInstall,
   verifyHost,

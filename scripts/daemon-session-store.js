@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { normalizeEngineName } = require('./daemon-utils');
+const { compareAndSetDelivery } = require('./core/context-manifest');
 
 function normalizeCodexSandboxMode(value, fallback = null) {
   const text = String(value || '').trim().toLowerCase();
@@ -1013,6 +1014,46 @@ function createSessionStore(deps) {
     return state.sessions[chatId] || null;
   }
 
+  /**
+   * Project context delivery ledger for a logical session.  It intentionally
+   * lives beside the engine-scoped native session slot so daemon resume keeps
+   * the at-most-once contract without introducing a second database.
+   */
+  function getContextDeliveryLedger(chatId, engine) {
+    const state = loadState() || {};
+    const record = state.sessions && state.sessions[String(chatId)];
+    if (!record || typeof record !== 'object') return {};
+    const safeEngine = normalizeEngineName(engine);
+    const slot = record.engines && record.engines[safeEngine];
+    const ledger = slot && slot.context_delivery;
+    return ledger && typeof ledger === 'object' && !Array.isArray(ledger) ? { ...ledger } : {};
+  }
+
+  function compareAndSetContextDelivery(chatId, engine, key, metadata = {}) {
+    if (!chatId || !key) return { delivered: false, key: null, ledger: {} };
+    const state = loadState() || {};
+    if (!state.sessions || typeof state.sessions !== 'object') state.sessions = {};
+    const safeChatId = String(chatId);
+    const safeEngine = normalizeEngineName(engine);
+    const record = state.sessions[safeChatId] && typeof state.sessions[safeChatId] === 'object'
+      ? state.sessions[safeChatId]
+      : { cwd: HOME, engines: {} };
+    const engines = record.engines && typeof record.engines === 'object' ? record.engines : {};
+    const slot = engines[safeEngine] && typeof engines[safeEngine] === 'object' ? engines[safeEngine] : {};
+    const result = compareAndSetDelivery(slot.context_delivery || {}, key, metadata);
+    if (!result.delivered) return result;
+    state.sessions[safeChatId] = {
+      ...record,
+      engines: {
+        ...engines,
+        [safeEngine]: { ...slot, context_delivery: result.ledger },
+      },
+      last_active: record.last_active || Date.now(),
+    };
+    saveState(state);
+    return result;
+  }
+
   function getSessionForEngine(chatId, engine) {
     const raw = getSession(chatId);
     if (!raw) return null;
@@ -1465,6 +1506,8 @@ function createSessionStore(deps) {
     listProjectDirs,
     getSession,
     getSessionForEngine,
+    getContextDeliveryLedger,
+    compareAndSetContextDelivery,
     createSession,
     restoreSessionFromReply,
     getSessionName,

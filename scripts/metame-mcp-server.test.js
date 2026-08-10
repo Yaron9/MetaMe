@@ -214,6 +214,43 @@ describe('metame-mcp-server tools', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it('trusted MCP binding ignores forged project/agent/host selectors', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-bound-agent-'));
+    fs.mkdirSync(path.join(dir, 'jia'));
+    fs.mkdirSync(path.join(dir, 'other'));
+    fs.writeFileSync(path.join(dir, 'jia', 'soul.md'), '# trusted jia', 'utf8');
+    fs.writeFileSync(path.join(dir, 'other', 'soul.md'), '# must stay private', 'utf8');
+    let searchOptions;
+    let recallScope;
+    const deps = tempDeps({
+      agentsDir: dir,
+      accessContext: () => ({
+        principal: 'managed:daemon', project: 'metame', agent_id: 'jia',
+        host: 'codex', scopes: ['project'], trust: 'managed',
+      }),
+      memory: () => ({
+        hybridSearchWiki: async (_query, options) => {
+          searchOptions = options;
+          return { facts: [], wikiPages: [] };
+        },
+      }),
+      planRecall: () => () => ({ shouldRecall: false }),
+      assembleRecallContext: () => async ({ scope }) => {
+        recallScope = scope;
+        return { text: '', sources: [] };
+      },
+    });
+
+    await callTool('memory_search', { query: 'rules', project: 'other', host: 'forged', agent_key: 'other' }, deps);
+    assert.equal(searchOptions.projectKey, 'metame');
+    assert.deepEqual(searchOptions.scopeKeys, ['metame']);
+    await callTool('memory_recall', { text: 'rules', project: 'other', agent_key: 'other' }, deps);
+    assert.deepEqual(recallScope, { project: 'metame', agentKey: 'jia' });
+    assert.deepEqual((await callTool('agent_context', { agent_id: 'other' }, deps)), { error: 'agent_context_unauthorized' });
+    assert.match((await callTool('agent_context', { agent_id: 'jia' }, deps)).soul, /trusted jia/);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('tools/call wraps handler errors as tool results, not protocol crashes', async () => {
     const reply = await handleMessage({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'profile_get', arguments: {} } });
     assert.equal(reply.id, 9);
