@@ -108,6 +108,18 @@ test('capability absence is valid, while a declared-but-missing capability is re
     },
     runtime: null,
   }), /capability_adapter_mismatch/);
+
+  for (const malformedCapabilities of [null, false]) {
+    assert.throws(() => pluginFixture({
+      descriptor: {
+        ...pluginFixture().descriptor,
+        id: `malformed-capabilities-${String(malformedCapabilities)}`,
+        name: `malformed-capabilities-${String(malformedCapabilities)}`,
+        capabilities: malformedCapabilities,
+      },
+      runtime: null,
+    }), /capabilities_required/);
+  }
 });
 
 test('registry rejects malformed and duplicate plugins and distinguishes unknown from explicit fallback', () => {
@@ -234,6 +246,27 @@ test('constructor canonicalizes legacy descriptor aliases and omitted unsupporte
   assert.equal(omittedAdapters.sessionSource, null);
   assert.equal(omittedAdapters.cognitiveHost, null);
   assert.equal(validateEnginePluginSchema(omittedAdapters).valid, true);
+});
+
+test('frozen legacy alias-only descriptors are normalized instead of reused', () => {
+  const descriptor = {
+    name: 'frozen-legacy-agent',
+    provider: 'metame-test',
+    contextProjection: 'none',
+    sessionStorage: 'legacy-session',
+    hostHook: null,
+  };
+  Object.freeze(descriptor);
+  const plugin = createEnginePlugin({
+    protocolVersion: 1,
+    descriptor,
+    runtime: runtimeFixture(),
+  });
+  assert.notEqual(plugin.descriptor, descriptor);
+  assert.equal(plugin.descriptor.id, 'frozen-legacy-agent');
+  assert.equal(plugin.descriptor.configSchemaVersion, 1);
+  assert.ok(Object.prototype.hasOwnProperty.call(plugin.descriptor, 'capabilities'));
+  assert.ok(Object.isFrozen(plugin.descriptor.capabilities));
 });
 
 test('Ajv strict schemas reject unknown public fields and malformed capability declarations', () => {

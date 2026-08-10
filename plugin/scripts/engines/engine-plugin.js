@@ -28,6 +28,10 @@ const DESCRIPTOR_KEYS = Object.freeze([
   // Kept as read-only aliases for existing persisted/configured callers.
   'name', 'provider', 'sessionStorage', 'hostHook',
 ]);
+const CANONICAL_DESCRIPTOR_KEYS = Object.freeze([
+  'id', 'displayName', 'vendor', 'executableNames', 'contextProjection',
+  'nativeSessionKind', 'capabilities', 'configSchemaVersion',
+]);
 const PLUGIN_KEYS = Object.freeze([
   'protocolVersion', 'descriptor', 'runtime', 'sessionSource', 'cognitiveHost',
 ]);
@@ -248,6 +252,7 @@ function equivalentValue(left, right, seen = new Map()) {
 
 function canReuseDescriptor(input, normalized) {
   if (!isDeeplyFrozen(input)) return false;
+  if (!CANONICAL_DESCRIPTOR_KEYS.every(key => Object.prototype.hasOwnProperty.call(input, key))) return false;
   // Compare every supplied field against the normalized contract.  This
   // permits omitted legacy aliases while preventing booleans, duplicate
   // executable names, or mutable nested capability values from bypassing
@@ -289,11 +294,13 @@ function normalizeDescriptor(input, { adapterPresence = {} } = {}) {
   if (!Number.isInteger(configSchemaVersion) || configSchemaVersion < 1) {
     throw contractError('engine_descriptor_config_schema_invalid', id);
   }
-  const capabilities = normalizeCapabilities(input.capabilities || {
-    runtime: adapterPresence.runtime === true,
-    sessionSource: adapterPresence.sessionSource === true,
-    cognitiveHost: adapterPresence.cognitiveHost === true,
-  });
+  const capabilities = input.capabilities === undefined
+    ? normalizeCapabilities({
+      runtime: adapterPresence.runtime === true,
+      sessionSource: adapterPresence.sessionSource === true,
+      cognitiveHost: adapterPresence.cognitiveHost === true,
+    })
+    : normalizeCapabilities(input.capabilities);
   const descriptor = {
     id,
     displayName,
