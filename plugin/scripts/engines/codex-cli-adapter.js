@@ -521,7 +521,7 @@ function createCodexCliAdapter(deps = {}) {
       projectMcp: true,
       projectSkills: true,
     },
-    structuredOutput: Object.freeze({ schema: 'path', format: 'jsonl', buffer: 'tail' }),
+    structuredOutput: Object.freeze({ schema: 'path', format: 'jsonl', buffer: 'tail', unstructuredBuffer: 'tail' }),
     buildArgs: buildCodexArgs,
     buildEnv: options => buildCodexEnv(process.env, options),
     parseStreamEvent: parseCodexStreamEvent,

@@ -283,7 +283,7 @@ function createClaudeCliAdapter(deps = {}) {
       projectMcp: true,
       projectSkills: true,
     },
-    structuredOutput: Object.freeze({ schema: 'inline', format: 'json', buffer: 'prefix' }),
+    structuredOutput: Object.freeze({ schema: 'inline', format: 'json', buffer: 'tail', unstructuredBuffer: 'prefix' }),
     buildArgs: buildClaudeArgs,
     buildEnv: ({
       metameProject = '',

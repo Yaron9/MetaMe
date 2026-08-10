@@ -87,6 +87,26 @@ test('background runner maps Completion Contract through Codex native output', a
   assert.equal(invocation.stdoutBufferMode, 'tail');
 });
 
+test('background runner keeps each runtime buffer policy at the plugin boundary', async () => {
+  const seen = {};
+  const runner = createBackgroundRunner({
+    getEngineRuntime: engine => runtime(engine),
+    runCommand: async options => {
+      seen[options.cmd] = options.stdoutBufferMode;
+      const output = options.cmd === 'codex'
+        ? JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'plain result' } })
+        : 'plain result';
+      return { output, error: null };
+    },
+  });
+  const claude = await runner.startTurn({ engine: 'claude', prompt: 'work', structured: false });
+  const codex = await runner.startTurn({ engine: 'codex', prompt: 'work', structured: false });
+  assert.equal(claude.ok, true);
+  assert.equal(codex.ok, true);
+  assert.equal(seen.claude, 'prefix');
+  assert.equal(seen.codex, 'tail');
+});
+
 test('background runner rejects native success with invalid structured result', async () => {
   const runner = createBackgroundRunner({
     getEngineRuntime: () => runtime('claude'),

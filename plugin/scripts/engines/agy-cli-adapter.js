@@ -135,7 +135,7 @@ function createAgyCliAdapter(deps = {}) {
       projectMcp: 'probe-required',
       projectSkills: 'probe-required',
     },
-    structuredOutput: Object.freeze({ schema: 'none', format: '', buffer: 'prefix' }),
+    structuredOutput: Object.freeze({ schema: 'none', format: '', buffer: 'prefix', unstructuredBuffer: 'prefix' }),
     buildArgs: (options = {}) => buildAgyArgs({ ...options, adapterPath }),
     buildEnv: ({
       metameProject = '',

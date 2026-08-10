@@ -160,7 +160,9 @@ function createBackgroundRunner(deps = {}) {
             // The runtime declares whether structured output requires tail
             // retention; truncation is rejected below so no mode can silently
             // validate partial output.
-            stdoutBufferMode: structured && structuredOutput.buffer === 'tail' ? 'tail' : 'prefix',
+            stdoutBufferMode: structured
+              ? (structuredOutput.buffer || 'tail')
+              : (structuredOutput.unstructuredBuffer || 'prefix'),
             onChild(child) {
               childRef = child;
               activeChildren.add(child);
