@@ -9,7 +9,7 @@
  *   queryRawFacts(db, tag) → { totalCount, facts, capsuleExcerpts }
  */
 
-const { primarySqlForDb } = require('./core/knowledge-eligibility');
+const { claimSqlForDb } = require('./core/knowledge-eligibility');
 const FACTS_LIMIT = 30;
 const DOSSIER_FACTS_LIMIT = 40;
 const {
@@ -33,7 +33,10 @@ const {
  * @returns {{ totalCount: number, facts: object[], capsuleExcerpts: string }}
  */
 function queryRawFacts(db, tag) {
-  const eligibility = primarySqlForDb(db, 'mi');
+  // Wiki rendering is a draft Synthesis path: only canonical, non-task
+  // claims may be supplied as evidence. Legacy null-key rows remain available
+  // to reliable fact recall, not to newly rendered Wiki truth.
+  const eligibility = claimSqlForDb(db, 'mi', { draft: true });
 
   // Step 1: total count (staleness denominator, no LIMIT)
   // Include 'candidate' so topics promoted via saveFacts aren't skipped on first build.
@@ -74,10 +77,12 @@ function queryRawFacts(db, tag) {
 function queryTopicEvidence(db, aliases, { limitPerProject = DOSSIER_FACTS_LIMIT } = {}) {
   const wanted = new Set((Array.isArray(aliases) ? aliases : [aliases]).map(normalizeTopicKey).filter(Boolean));
   if (wanted.size === 0) return [];
-  const eligibility = primarySqlForDb(db, 'memory_items');
+  const eligibility = claimSqlForDb(db, 'memory_items', { draft: true });
   const rows = db.prepare(`
     SELECT id, title, content, confidence, search_count, created_at, tags,
            project, scope, state, kind, relation, source_type, source_id,
+           ${_optionalColumn(db, 'memory_items', 'canonical_key')},
+           ${_optionalColumn(db, 'memory_items', 'task_key')},
            ${_optionalColumn(db, 'memory_items', 'origin_class')},
            ${_optionalColumn(db, 'memory_items', 'provenance_root_id')}
     FROM memory_items
@@ -144,12 +149,16 @@ function queryRelatedTopics(db, aliases) {
   const current = new Set((Array.isArray(aliases) ? aliases : [aliases]).map(normalizeTopicKey).filter(Boolean));
   if (current.size === 0) return [];
   const memoryColumns = new Set(db.prepare('PRAGMA table_info(memory_items)').all().map(row => row.name));
+  const claimColumns = [
+    memoryColumns.has('canonical_key') ? 'canonical_key' : 'NULL AS canonical_key',
+    memoryColumns.has('task_key') ? 'task_key' : 'NULL AS task_key',
+  ].join(', ');
   const provenanceColumns = [
     memoryColumns.has('source_id') ? 'source_id' : "NULL AS source_id",
     memoryColumns.has('origin_class') ? 'origin_class' : "NULL AS origin_class",
   ].join(', ');
   const rows = db.prepare(`
-    SELECT id, project, scope, state, kind, relation, ${provenanceColumns}, tags FROM memory_items
+    SELECT id, project, scope, state, kind, relation, ${claimColumns}, ${provenanceColumns}, tags FROM memory_items
     WHERE state='active' AND kind IN ('insight','convention')
   `).all().map(row => {
     let tags = [];

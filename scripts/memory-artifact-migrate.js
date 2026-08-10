@@ -13,7 +13,7 @@ const {
   serializeArtifact,
   stableArtifactId,
 } = require('./core/knowledge-artifact');
-const { primarySqlForDb } = require('./core/knowledge-eligibility');
+const { claimSqlForDb } = require('./core/knowledge-eligibility');
 const { projectArtifacts, scanArtifacts } = require('./memory-artifact-projector');
 const { resolveConfiguredWikiOutputDir } = require('./core/wiki-paths');
 
@@ -144,7 +144,7 @@ function copyTree(source, target) {
 }
 
 function evidenceForPrefix(db, prefix, date) {
-  const eligibility = primarySqlForDb(db, 'mi');
+  const eligibility = claimSqlForDb(db, 'mi', { draft: true });
   const hasCreated = db.prepare('PRAGMA table_info(memory_items)').all().some(row => row.name === 'created_at');
   const dateClause = hasCreated && /^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))
     ? "AND mi.created_at >= datetime(?, '-7 days') AND mi.created_at < datetime(?, '+2 days')" : '';
@@ -201,7 +201,7 @@ function mergeLegacyBodies(group) {
 function canonicalizeDecisions(db, decisionsDir, now = new Date().toISOString()) {
   const columns = new Set(db.prepare('PRAGMA table_info(memory_items)').all().map(row => row.name));
   if (!columns.has('relation')) return [];
-  const eligibility = primarySqlForDb(db, 'mi');
+  const eligibility = claimSqlForDb(db, 'mi', { draft: true });
   const select = name => columns.has(name) ? `mi.${name}` : `NULL AS ${name}`;
   const rows = db.prepare(`SELECT mi.id,mi.title,mi.content,mi.created_at,mi.provenance_root_id,
       ${select('project')},${select('scope')}

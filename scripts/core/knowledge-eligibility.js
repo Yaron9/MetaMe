@@ -8,6 +8,7 @@ const PRIMARY_ONLY_CHANNELS = new Set([
   'graph_claim',
   'skill_evidence',
 ]);
+const RELIABLE_FACT_KINDS = new Set(['fact', 'insight', 'convention']);
 const CLAIM_ELIGIBILITY_CHANNELS = new Set(['synthesis', 'synthesis_active', 'synthesis_draft']);
 
 const DERIVED_RELATIONS = new Set(['synthesized_insight', 'knowledge_capsule']);
@@ -73,6 +74,9 @@ function eligibleFor(channel, record = {}, options = {}) {
   }
   if (classifyOrigin(record) !== 'primary') return false;
   if (record.state && !['active', 'candidate'].includes(String(record.state))) return false;
+  const kind = String(record.kind || '').trim().toLowerCase();
+  if (kind && !RELIABLE_FACT_KINDS.has(kind)) return false;
+  if (String(record.task_key ?? record.taskKey ?? '').trim()) return false;
   return true;
 }
 
@@ -88,7 +92,9 @@ function claimSqlForDb(db, alias = 'mi', { draft = false } = {}) {
   checks.push(columns.has('state')
     ? `${prefix}state IN (${draft ? "'active','candidate'" : "'active'"})`
     : '0');
-  if (columns.has('task_key')) checks.push(`COALESCE(trim(${prefix}task_key), '') = ''`);
+  checks.push(columns.has('task_key')
+    ? `COALESCE(trim(${prefix}task_key), '') = ''`
+    : '0');
   if (columns.has('origin_class')) checks.push(`COALESCE(${prefix}origin_class, 'primary') != 'derived'`);
   return { sql: checks.join(' AND '), args: [] };
 }
@@ -100,6 +106,8 @@ function primarySql(alias = 'mi') {
       AND COALESCE(${prefix}relation, '') NOT IN ('synthesized_insight','knowledge_capsule')
       AND lower(COALESCE(${prefix}source_id, '')) NOT LIKE 'nightly-reflect-%'
       AND lower(COALESCE(${prefix}source_id, '')) NOT LIKE 'capsule-%'
+      AND ${prefix}kind IN ('fact','insight','convention')
+      AND COALESCE(trim(${prefix}task_key), '') = ''
       AND ${unresolvedConflictSql(alias)}`,
     args: [],
   };
@@ -121,6 +129,8 @@ function primarySqlForDb(db, alias = 'mi', table = 'memory_items') {
     : "'primary'";
   const checks = [`${inferred} = 'primary'`];
   if (columns.has('origin_class')) checks.unshift(`COALESCE(${prefix}origin_class, 'primary') != 'derived'`);
+  if (columns.has('kind')) checks.push(`${prefix}kind IN ('fact','insight','convention')`);
+  if (columns.has('task_key')) checks.push(`COALESCE(trim(${prefix}task_key), '') = ''`);
   if (table === 'memory_items'
     && columns.has('id') && columns.has('canonical_key')
     && columns.has('project') && columns.has('scope') && columns.has('state')) {
@@ -136,6 +146,7 @@ module.exports = {
   CLAIM_ELIGIBILITY_CHANNELS,
   DERIVED_RELATIONS,
   PRIMARY_ONLY_CHANNELS,
+  RELIABLE_FACT_KINDS,
   classifyOrigin,
   deriveProvenanceRootId,
   eligibleFor,

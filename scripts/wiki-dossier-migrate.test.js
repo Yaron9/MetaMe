@@ -30,6 +30,7 @@ function seed(root) {
       id TEXT PRIMARY KEY, kind TEXT, state TEXT, title TEXT, content TEXT,
       confidence REAL DEFAULT .5, search_count INTEGER DEFAULT 0, relation TEXT,
       tags TEXT DEFAULT '[]', project TEXT, scope TEXT, source_type TEXT, source_id TEXT,
+      task_key TEXT, canonical_key TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -39,7 +40,7 @@ function seed(root) {
   upsertWikiTopic(db, 'skill', { force: true });
   upsertWikiTopic(db, 'skills', { force: true });
   for (const id of ['m1', 'm2', 'm3']) {
-    db.prepare(`INSERT INTO memory_items (id,kind,state,content,tags,project) VALUES (?,'insight','active',?,'["step3"]','MetaMe')`).run(id, `fact ${id}`);
+    db.prepare(`INSERT INTO memory_items (id,kind,state,content,tags,project,canonical_key) VALUES (?,'insight','active',?,'["step3"]','MetaMe',?)`).run(id, `fact ${id}`, `wiki.${id}`);
   }
   db.close();
   return dbPath;

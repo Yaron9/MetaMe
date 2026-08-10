@@ -47,6 +47,8 @@ function buildTestDb() {
       relation  TEXT,
       project   TEXT,
       scope     TEXT,
+      task_key  TEXT,
+      canonical_key TEXT,
       source_type TEXT,
       source_id TEXT,
       tags      TEXT DEFAULT '[]',
@@ -74,9 +76,9 @@ function makeProviders({ response = 'Wiki content.', shouldFail = false } = {}) 
 
 function seedFact(db, tag, id = `f_${Date.now()}_${Math.random().toString(36).slice(2)}`) {
   db.prepare(`
-    INSERT OR IGNORE INTO memory_items (id, state, content, tags)
-    VALUES (?, 'active', 'fact content', ?)
-  `).run(id, JSON.stringify([tag]));
+    INSERT OR IGNORE INTO memory_items (id, state, content, tags, canonical_key)
+    VALUES (?, 'active', 'fact content', ?, ?)
+  `).run(id, JSON.stringify([tag]), `wiki.${id}`);
 }
 
 async function runReflect(db, { dir, providers, logPath, threshold = 0.4 } = {}) {
@@ -106,9 +108,9 @@ test('dossier mode canonicalizes aliases and builds Hub plus project dossier', a
   upsertWikiTopic(db, 'step3', { force: true });
   for (const id of ['d1', 'd2', 'd3']) {
     db.prepare(`
-      INSERT INTO memory_items (id, state, kind, content, tags, project, scope)
-      VALUES (?, 'active', 'insight', ?, ?, 'MetaMe', 'proj_metame')
-    `).run(id, `project fact ${id}`, JSON.stringify([id === 'd1' ? 'Step3' : 'step3']));
+      INSERT INTO memory_items (id, state, kind, content, tags, project, scope, canonical_key)
+      VALUES (?, 'active', 'insight', ?, ?, 'MetaMe', 'proj_metame', ?)
+    `).run(id, `project fact ${id}`, JSON.stringify([id === 'd1' ? 'Step3' : 'step3']), `wiki.${id}`);
   }
   const dir = makeTmpDir();
   try {
@@ -138,7 +140,7 @@ test('dossier eligibility uses two-miss hysteresis for one or two remaining fact
   const db = buildTestDb();
   upsertWikiTopic(db, 'skill', { force: true });
   for (const id of ['s1', 's2']) {
-    db.prepare(`INSERT INTO memory_items (id,state,kind,content,tags,project) VALUES (?,'active','insight','fact','["skill"]','MetaMe')`).run(id);
+    db.prepare(`INSERT INTO memory_items (id,state,kind,content,tags,project,canonical_key) VALUES (?,'active','insight','fact','["skill"]','MetaMe',?)`).run(id, `wiki.${id}`);
   }
   const { writeWikiPageWithChunks } = require('./wiki-reflect-build');
   writeWikiPageWithChunks(db, {

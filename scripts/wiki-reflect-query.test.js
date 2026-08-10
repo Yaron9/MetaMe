@@ -26,6 +26,8 @@ function buildTestDb() {
       relation  TEXT,
       project   TEXT,
       scope     TEXT,
+      task_key  TEXT,
+      canonical_key TEXT,
       source_type TEXT,
       source_id TEXT,
       tags      TEXT DEFAULT '[]',
@@ -37,11 +39,14 @@ function buildTestDb() {
   return db;
 }
 
-function insertFact(db, { id, tag, state = 'active', relation = null, searchCount = 0, confidence = 0.5, project = null, kind = 'insight' }) {
+function insertFact(db, {
+  id, tag, state = 'active', relation = null, searchCount = 0, confidence = 0.5,
+  project = null, kind = 'insight', canonicalKey = `wiki.${id}`, taskKey = null,
+}) {
   db.prepare(`
-    INSERT INTO memory_items (id, kind, state, content, relation, search_count, confidence, tags, project)
-    VALUES (?, ?, ?, 'fact content', ?, ?, ?, ?, ?)
-  `).run(id, kind, state, relation, searchCount, confidence, JSON.stringify([tag]), project);
+    INSERT INTO memory_items (id, kind, state, content, relation, search_count, confidence, tags, project, task_key, canonical_key)
+    VALUES (?, ?, ?, 'fact content', ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, kind, state, relation, searchCount, confidence, JSON.stringify([tag]), project, taskKey, canonicalKey);
 }
 
 test('queryTopicEvidence resolves normalized aliases and retains project semantics', () => {
@@ -51,7 +56,7 @@ test('queryTopicEvidence resolves normalized aliases and retains project semanti
   insertFact(db, { id: 'semantic', tag: 'step3-2', project: 'MetaMe' });
   insertFact(db, { id: 'episode', tag: 'step3', project: 'MetaMe', kind: 'episode' });
   const rows = queryTopicEvidence(db, ['Step3']);
-  assert.deepEqual(rows.map(row => row.id).sort(), ['episode', 'lower', 'upper']);
+  assert.deepEqual(rows.map(row => row.id).sort(), ['lower', 'upper']);
   assert.equal(rows.find(row => row.id === 'upper').project, 'MetaMe');
   db.close();
 });
@@ -86,7 +91,7 @@ test('queryRelatedTopics uses same-project active atomic co-occurrence with a tw
   upsertWikiTopic(db, 'workflow', { force: true });
   upsertWikiTopic(db, 'noise', { force: true });
   for (const [id, tags] of [['r1', ['step3', 'workflow']], ['r2', ['Step3', 'workflow']], ['r3', ['step3', 'noise']]]) {
-    db.prepare(`INSERT INTO memory_items (id,kind,state,content,tags,project) VALUES (?,'insight','active','fact',?,'MetaMe')`).run(id, JSON.stringify(tags));
+    db.prepare(`INSERT INTO memory_items (id,kind,state,content,tags,project,canonical_key) VALUES (?,'insight','active','fact',?,'MetaMe',?)`).run(id, JSON.stringify(tags), `wiki.${id}`);
   }
   assert.deepEqual(queryRelatedTopics(db, ['step3']).map(row => row.slug), ['workflow']);
   db.close();
@@ -111,6 +116,17 @@ test('queryRawFacts counts active and candidate raw facts only (not derived)', (
   const { totalCount, facts } = queryRawFacts(db, 'session');
   assert.equal(totalCount, 3, 'should count active/candidate non-derived facts');
   assert.equal(facts.length, 3);
+  db.close();
+});
+
+test('queryRawFacts excludes task Episodes and legacy null-key rows from Wiki evidence', () => {
+  const db = buildTestDb();
+  insertFact(db, { id: 'canonical', tag: 'boundary' });
+  insertFact(db, { id: 'task-episode', tag: 'boundary', kind: 'episode', canonicalKey: null, taskKey: 'session-1' });
+  insertFact(db, { id: 'legacy-null', tag: 'boundary', canonicalKey: null });
+  const { totalCount, facts } = queryRawFacts(db, 'boundary');
+  assert.equal(totalCount, 1);
+  assert.deepEqual(facts.map(row => row.id), ['canonical']);
   db.close();
 });
 

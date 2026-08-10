@@ -237,8 +237,11 @@ function upsertWikiTopic(db, tag, { label, pinned = 0, force = false } = {}) {
  * @returns {boolean}
  */
 function checkTopicThreshold(db, tag) {
-  const { primarySqlForDb } = require('./knowledge-eligibility');
-  const eligibility = primarySqlForDb(db, 'mi');
+  // Topic registration is the first step toward a new Wiki Synthesis.  Keep
+  // it on the draft Claim boundary so legacy null-key rows and task Episodes
+  // cannot create a topic that the renderer could never use as evidence.
+  const { claimSqlForDb } = require('./knowledge-eligibility');
+  const eligibility = claimSqlForDb(db, 'mi', { draft: true });
 
   // Condition 1: lifetime count >= 5 (active or candidate)
   const row1 = db.prepare(`

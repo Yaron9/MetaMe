@@ -36,12 +36,12 @@ test('builds traversal-safe stable dossier slugs and handles collisions', () => 
 
 test('creates dossiers only from three distinct active atomic facts', () => {
   const items = [
-    { id: '1', project: 'MetaMe', kind: 'insight', state: 'active' },
-    { id: '2', project: 'metame', kind: 'convention', state: 'active' },
-    { id: '3', project: 'METAME', kind: 'insight', state: 'active' },
-    { id: '4', project: 'Other', kind: 'insight', state: 'active' },
+    { id: '1', project: 'MetaMe', kind: 'insight', state: 'active', canonical_key: 'wiki.one' },
+    { id: '2', project: 'metame', kind: 'convention', state: 'active', canonical_key: 'wiki.two' },
+    { id: '3', project: 'METAME', kind: 'insight', state: 'active', canonical_key: 'wiki.three' },
+    { id: '4', project: 'Other', kind: 'insight', state: 'active', canonical_key: 'wiki.four' },
     { id: '5', project: 'Other', kind: 'episode', state: 'active' },
-    { id: '6', project: '*', kind: 'insight', state: 'active' },
+    { id: '6', project: '*', kind: 'insight', state: 'active', canonical_key: 'wiki.six' },
   ];
   const grouped = groupTopicEvidence(items);
   assert.deepEqual(grouped.dossiers.map(row => row.projectKey), ['metame']);

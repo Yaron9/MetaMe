@@ -64,6 +64,8 @@ function openTestDb() {
       title           TEXT,
       content         TEXT NOT NULL DEFAULT '',
       relation        TEXT,
+      task_key        TEXT,
+      canonical_key   TEXT,
       confidence      REAL DEFAULT 0.5,
       tags            TEXT DEFAULT '[]',
       search_count    INTEGER DEFAULT 0,
@@ -113,12 +115,15 @@ function openTestDb() {
 }
 
 /** Insert a raw memory_item (not synthesized/capsule). */
-function insertRawFact(db, { id, tags = '[]', state = 'active', relation = null, created_at = null } = {}) {
+function insertRawFact(db, {
+  id, tags = '[]', state = 'active', relation = null, created_at = null,
+  canonical_key = `wiki.${id}`,
+} = {}) {
   const ts = created_at ?? new Date().toISOString().replace('T', ' ').slice(0, 19);
   db.prepare(`
-    INSERT INTO memory_items (id, kind, state, title, content, relation, tags, created_at)
-    VALUES (?, 'insight', ?, 'Test fact', 'Test content', ?, ?, ?)
-  `).run(id, state, relation, typeof tags === 'string' ? tags : JSON.stringify(tags), ts);
+    INSERT INTO memory_items (id, kind, state, title, content, relation, tags, created_at, canonical_key)
+    VALUES (?, 'insight', ?, 'Test fact', 'Test content', ?, ?, ?, ?)
+  `).run(id, state, relation, typeof tags === 'string' ? tags : JSON.stringify(tags), ts, canonical_key);
 }
 
 // ── Test suite ────────────────────────────────────────────────────────────────
@@ -337,6 +342,17 @@ describe('wiki-db', () => {
       }
       assert.equal(checkTopicThreshold(db, 'capsule-topic'), false);
     });
+
+    it('does not count task Episodes as topic evidence', () => {
+      const db = openTestDb();
+      for (let i = 0; i < 5; i++) {
+        insertRawFact(db, { id: `episode-topic-${i}`, tags: ['episode-topic'] });
+        db.prepare(`UPDATE memory_items SET kind='episode', task_key=? WHERE id=?`)
+          .run(`session-${i}`, `episode-topic-${i}`);
+      }
+      assert.equal(checkTopicThreshold(db, 'episode-topic'), false);
+      db.close();
+    });
   });
 
   // ── Test 4: updateStalenessForTags — only matches primary_topic ────────────
@@ -448,6 +464,17 @@ describe('wiki-db', () => {
       const db = openTestDb();
       const result = searchWikiAndFacts(db, '', { trackSearch: false });
       assert.deepEqual(result, { wikiPages: [], facts: [] });
+    });
+
+    it('does not return active task Episodes as fact evidence', () => {
+      const db = openTestDb();
+      db.prepare(`
+        INSERT INTO memory_items (id, kind, state, title, content, tags, task_key)
+        VALUES ('episode-search', 'episode', 'active', 'Episode', 'taskepisode searchable evidence', '[]', 'session-1')
+      `).run();
+      const result = searchWikiAndFacts(db, 'taskepisode', { trackSearch: false });
+      assert.deepEqual(result.facts, []);
+      db.close();
     });
 
     it('trackSearch=true: search_count should increment for matched facts', () => {

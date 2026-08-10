@@ -36,19 +36,21 @@ describe('memory-nightly-reflect Step4', () => {
         confidence REAL,
         search_count INTEGER,
         created_at TEXT,
-        state TEXT DEFAULT 'active'
+        state TEXT DEFAULT 'active',
+        canonical_key TEXT,
+        task_key TEXT
       )
     `);
 
     const ins = db.prepare(`
-      INSERT INTO memory_items (id, title, kind, relation, content, confidence, search_count, created_at, state)
-      VALUES (?, ?, ?, ?, ?, 0.9, ?, datetime('now'), 'active')
+      INSERT INTO memory_items (id, title, kind, relation, content, confidence, search_count, created_at, state, canonical_key, task_key)
+      VALUES (?, ?, ?, ?, ?, 0.9, ?, datetime('now'), 'active', ?, NULL)
     `);
-    ins.run('1', 'a.b', 'convention', 'arch_convention', 'v1', 5);
-    ins.run('2', 'a.b', 'insight', 'synthesized_insight', 'v2', 5);
-    ins.run('3', 'a.b', 'insight', 'knowledge_capsule', 'v3', 5);
-    ins.run('4', 'a.b', 'convention', 'bug_lesson', 'v4', 5);
-    ins.run('5', 'a.b', 'insight', 'project_milestone', 'v5', 5);
+    ins.run('1', 'a.b', 'convention', 'arch_convention', 'v1', 5, 'nightly.one');
+    ins.run('2', 'a.b', 'insight', 'synthesized_insight', 'v2', 5, 'nightly.two');
+    ins.run('3', 'a.b', 'insight', 'knowledge_capsule', 'v3', 5, 'nightly.three');
+    ins.run('4', 'a.b', 'convention', 'bug_lesson', 'v4', 5, 'nightly.four');
+    ins.run('5', 'a.b', 'insight', 'project_milestone', 'v5', 5, 'nightly.five');
 
     const rows = reflect._private.queryHotFacts(db);
     assert.equal(rows.length, 3);
@@ -67,13 +69,15 @@ describe('memory-nightly-reflect Step4', () => {
         confidence REAL,
         search_count INTEGER,
         created_at TEXT,
-        state TEXT DEFAULT 'active'
+        state TEXT DEFAULT 'active',
+        canonical_key TEXT,
+        task_key TEXT
       )
     `);
     reflect._private.ensureMemoryItemsCompatibility(db);
     db.prepare(`
-      INSERT INTO memory_items (id, title, kind, relation, content, confidence, search_count, created_at, state)
-      VALUES ('1', 'a.b', 'convention', 'workflow_rule', 'old database row still works', 0.9, 0, datetime('now'), 'candidate')
+      INSERT INTO memory_items (id, title, kind, relation, content, confidence, search_count, created_at, state, canonical_key, task_key)
+      VALUES ('1', 'a.b', 'convention', 'workflow_rule', 'old database row still works', 0.9, 0, datetime('now'), 'candidate', 'legacy.workflow', NULL)
     `).run();
     const rows = reflect._private.queryHotFacts(db);
     assert.equal(rows.length, 1);
@@ -141,24 +145,26 @@ describe('memory-nightly-reflect Step4', () => {
         confidence REAL,
         search_count INTEGER,
         created_at TEXT,
-        state TEXT DEFAULT 'candidate'
+        state TEXT DEFAULT 'candidate',
+        canonical_key TEXT,
+        task_key TEXT
       )
     `);
 
     db.prepare(`
-      INSERT INTO memory_items (id, title, kind, relation, content, confidence, search_count, created_at, state)
+      INSERT INTO memory_items (id, title, kind, relation, content, confidence, search_count, created_at, state, canonical_key, task_key)
       VALUES ('1', 'MetaMe.daemon · arch_convention', 'convention', 'arch_convention',
-              'high confidence candidate should feed nightly reflect', 0.9, 0, datetime('now'), 'candidate')
+              'high confidence candidate should feed nightly reflect', 0.9, 0, datetime('now'), 'candidate', 'nightly.daemon.arch', NULL)
     `).run();
     db.prepare(`
-      INSERT INTO memory_items (id, title, kind, relation, content, confidence, search_count, created_at, state)
+      INSERT INTO memory_items (id, title, kind, relation, content, confidence, search_count, created_at, state, canonical_key, task_key)
       VALUES ('2', 'MetaMe.deploy · workflow_rule', 'convention', 'workflow_rule',
-              'high confidence active fact should still feed nightly reflect after GC promotion', 0.9, 0, datetime('now'), 'active')
+              'high confidence active fact should still feed nightly reflect after GC promotion', 0.9, 0, datetime('now'), 'active', 'nightly.deploy.workflow', NULL)
     `).run();
     db.prepare(`
-      INSERT INTO memory_items (id, title, kind, relation, content, confidence, search_count, created_at, state)
+      INSERT INTO memory_items (id, title, kind, relation, content, confidence, search_count, created_at, state, canonical_key, task_key)
       VALUES ('3', 'MetaMe.daemon · config_fact', 'convention', 'config_fact',
-              'low confidence candidate should stay out of nightly reflect', 0.7, 0, datetime('now'), 'candidate')
+              'low confidence candidate should stay out of nightly reflect', 0.7, 0, datetime('now'), 'candidate', 'nightly.daemon.config', NULL)
     `).run();
 
     const rows = reflect._private.queryHotFacts(db);

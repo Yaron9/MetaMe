@@ -482,11 +482,14 @@ function saveFacts(sessionId, project, facts, { scope = null, source_type = null
   if (savedFacts.length > 0) {
     try {
       const { markTopicEvidenceDirty, checkTopicThreshold, upsertWikiTopic } = require('./core/wiki-db');
+      const { isSynthesisEvidenceEligible } = require('./core/claim-contract');
       const db = getDb();
+      const wikiFacts = savedFacts.filter(fact => isSynthesisEvidenceEligible(fact, { draft: true }));
 
-      // Build tag → new-fact count map from saved facts' tags
+      // Only canonical Claim evidence can dirty Wiki projections; task
+      // Episodes remain session history and never trigger a topic.
       const dirtyTagCounts = new Map();
-      for (const f of savedFacts) {
+      for (const f of wikiFacts) {
         const tags = Array.isArray(f.tags) ? f.tags : [];
         for (const tag of tags) {
           if (tag && typeof tag === 'string') {
@@ -498,7 +501,7 @@ function saveFacts(sessionId, project, facts, { scope = null, source_type = null
       if (dirtyTagCounts.size > 0) {
         markTopicEvidenceDirty(db, [...dirtyTagCounts].map(([rawTag, count]) => ({
           rawTag,
-          projectKey: savedFacts.find(fact => fact.tags.includes(rawTag))?.project || scope,
+          projectKey: wikiFacts.find(fact => fact.tags.includes(rawTag))?.project || scope,
           count,
         })));
 

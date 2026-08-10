@@ -127,8 +127,10 @@ function writeReflectLog(record) {
  * Returns array of plain objects.
  */
 function queryHotFacts(db, windowDays = WINDOW_DAYS) {
-  const { primarySqlForDb } = require('./core/knowledge-eligibility');
-  const eligibility = primarySqlForDb(db, 'memory_items');
+  // Nightly distillation produces draft Synthesis candidates, so it must use
+  // canonical Claim evidence rather than the legacy-compatible recall SQL.
+  const { claimSqlForDb } = require('./core/knowledge-eligibility');
+  const eligibility = claimSqlForDb(db, 'memory_items', { draft: true });
   const columns = new Set(db.prepare('PRAGMA table_info(memory_items)').all().map(row => row.name));
   const provenance = columns.has('provenance_root_id') ? 'provenance_root_id' : 'NULL AS provenance_root_id';
   const stmt = db.prepare(`
@@ -140,7 +142,7 @@ function queryHotFacts(db, windowDays = WINDOW_DAYS) {
       )
       AND created_at >= datetime('now', '-${windowDays} days')
       AND state IN ('active', 'candidate')
-      AND kind IN ('insight', 'convention', 'episode')
+      AND kind IN ('insight', 'convention')
       AND ${eligibility.sql}
     ORDER BY search_count DESC, created_at DESC
     LIMIT ${MAX_FACTS}

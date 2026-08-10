@@ -35,6 +35,8 @@ function buildTestDb() {
       session_id      TEXT,
       source_type     TEXT,
       relation        TEXT,
+      task_key        TEXT,
+      canonical_key   TEXT,
       search_count    INTEGER DEFAULT 0,
       last_searched_at TEXT,
       tags            TEXT DEFAULT '[]',
@@ -51,9 +53,9 @@ function buildTestDb() {
 function seedFacts(db, tag, n, state = 'active') {
   for (let i = 0; i < n; i++) {
     db.prepare(`
-      INSERT INTO memory_items (id, kind, state, content, tags, created_at)
-      VALUES (?, 'insight', ?, 'fact content', ?, datetime('now'))
-    `).run(`id_${tag}_${state}_${i}`, state, JSON.stringify([tag]));
+      INSERT INTO memory_items (id, kind, state, content, tags, canonical_key, created_at)
+      VALUES (?, 'insight', ?, 'fact content', ?, ?, datetime('now'))
+    `).run(`id_${tag}_${state}_${i}`, state, JSON.stringify([tag]), `wiki.${tag}.${state}.${i}`);
   }
 }
 
