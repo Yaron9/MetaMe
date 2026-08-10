@@ -2,6 +2,10 @@
 
 const STAGES = Object.freeze(['delivered', 'opened', 'applied', 'validated']);
 const ASSET_TYPES = Object.freeze({ facts: 'fact', wiki: 'wiki', skills: 'skill' });
+// The memory status/doctor contract extends this existing pure effectiveness
+// seam.  Keep one observability implementation instead of introducing a
+// second metrics reader beside the cognitive audit command.
+const observability = require('./cognitive-observability');
 
 function emptyStages() {
   return Object.fromEntries(STAGES.map(stage => [stage, 0]));
@@ -61,4 +65,15 @@ function buildEffectivenessReport({ inventory = {}, consumption = [], opportunit
   };
 }
 
-module.exports = { ASSET_TYPES, STAGES, buildEffectivenessReport, _internal: { countStages, emptyStages, firstBrokenStage } };
+module.exports = {
+  ASSET_TYPES,
+  STAGES,
+  buildEffectivenessReport,
+  ...observability,
+  _internal: {
+    countStages,
+    emptyStages,
+    firstBrokenStage,
+    ...observability._internal,
+  },
+};

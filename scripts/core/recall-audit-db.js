@@ -28,6 +28,7 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const { RECALL_AUDIT_DDL, RECALL_AUDIT_INDEXES, RECALL_AUDIT_STATE_DDL } = require('./recall-audit-ddl');
+const { aggregateRecall } = require('./cognitive-effectiveness');
 
 let _db = null;
 let _droppedCount = 0;
@@ -185,6 +186,8 @@ function summarizeAudit({ days = 30 } = {}) {
   const since = `-${Math.max(1, Math.floor(days))} days`;
   const get = (sql) => { try { return db.prepare(sql).get(since) || {}; } catch { return {}; } };
   const all = (sql) => { try { return db.prepare(sql).all(since); } catch { return []; } };
+  const rows = all(`SELECT * FROM recall_audit WHERE ts >= datetime('now', ?)`);
+  const recall = aggregateRecall(rows);
   const totals = get(
     `SELECT COUNT(*) AS turns,
        COALESCE(SUM(should_recall), 0) AS triggered,
@@ -212,7 +215,23 @@ function summarizeAudit({ days = 30 } = {}) {
       GROUP BY consumer_stage, COALESCE(engine, consumer_type, '(unknown)')
       ORDER BY consumer_stage, host`
   );
-  return { days, totals, reasons, outcomes, consumption, dropped: getDroppedCount() };
+  return {
+    days,
+    totals: {
+      ...totals,
+      // `turns` is retained as a compatibility alias for older consumers;
+      // callers should use audit_rows and unique_traces for honest counts.
+      audit_rows: recall.audit_rows,
+      unique_traces: recall.unique_traces,
+      opportunities: recall.opportunities,
+      turns: totals.turns,
+      injected: recall.injected,
+    },
+    reasons,
+    outcomes,
+    consumption,
+    dropped: getDroppedCount(),
+  };
 }
 
 function _resetForTesting() {

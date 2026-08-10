@@ -186,15 +186,23 @@ const METAME_END = '<!-- METAME:END -->';
 // explicit temporary-HOME escape; real worktrees targeting ~/.metame remain
 // blocked below.
 const _cliCommand = String(process.argv[2] || '').trim().toLowerCase();
-const _isReadOnlyCommand = isDaemonStatusCommand(process.argv);
+const _isDaemonStatusCommand = isDaemonStatusCommand(process.argv);
+const _isMemoryObservabilityCommand = _cliCommand === 'memory'
+  && ['status', 'doctor'].includes(String(process.argv[3] || '').trim().toLowerCase());
+const _isReadOnlyCommand = _isDaemonStatusCommand || _isMemoryObservabilityCommand;
 
 // This is intentionally before the first ~/.metame mkdir, runtime sync,
 // hook install, plugin bootstrap, or local activity heartbeat.  Keep status
 // on one authoritative implementation so both source checkouts and installed
 // npm entry points have the same read-only behavior.
-if (_isReadOnlyCommand) {
+if (_isDaemonStatusCommand) {
   printDaemonStatus({ homeDir: HOME_DIR, icon });
   process.exit(0);
+}
+if (_isMemoryObservabilityCommand) {
+  const command = String(process.argv[3]).toLowerCase();
+  require(`./scripts/memory-${command}`).main(process.argv.slice(4));
+  process.exit(process.exitCode || 0);
 }
 
 function resolveAutoUpdateBehavior() {
@@ -1418,7 +1426,7 @@ try {
 // Non-session commands (daemon ops, version, help) should not show genesis message
 const _arg2 = process.argv[2];
 const _isNonSessionCmd = ['daemon', 'start', 'stop', 'status', 'logs', 'codex',
-  'sync', 'continue', 'deploy', 'host', 'cognition', '-v', '--version', '-h', '--help', 'distill', 'evolve'].includes(_arg2);
+  'sync', 'continue', 'deploy', 'host', 'cognition', 'memory', '-v', '--version', '-h', '--help', 'distill', 'evolve'].includes(_arg2);
 
 let finalProtocol;
 if (isKnownUser) {
@@ -2178,6 +2186,14 @@ if (process.argv[2] === 'memory' && process.argv[3] === 'artifacts' && process.a
   const result = spawnSync(process.execPath, [
     path.join(__dirname, 'scripts', 'memory-artifact-migrate.js'),
     ...process.argv.slice(5),
+  ], { stdio: 'inherit', env: process.env });
+  process.exit(result.status ?? 1);
+}
+if (process.argv[2] === 'memory' && ['status', 'doctor'].includes(process.argv[3])) {
+  const command = process.argv[3];
+  const result = spawnSync(process.execPath, [
+    path.join(__dirname, 'scripts', `memory-${command}.js`),
+    ...process.argv.slice(4),
   ], { stdio: 'inherit', env: process.env });
   process.exit(result.status ?? 1);
 }

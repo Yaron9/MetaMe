@@ -26,6 +26,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { assembleSearchResults, scopeKeys } = require('./core/cognitive-consumption');
+const { toBoundedSourceRef } = require('./core/cognitive-effectiveness');
 
 const HOME = os.homedir();
 const SKILLS_DIR = path.join(HOME, '.claude', 'skills');
@@ -256,7 +257,30 @@ const handlers = {
       plan,
       scope: { project: args.project || null, agentKey: args.agent_key || null },
     });
-    return { recalled: true, reason: plan.reason, context: ctx.text || '', sources: ctx.sources || [], truncated: !!ctx.truncated };
+    const traceId = `mcp_${crypto.randomUUID()}`;
+    const sourceRefs = Array.isArray(ctx.sources)
+      ? [...new Set(ctx.sources.map(toBoundedSourceRef).filter(Boolean))].slice(0, 32)
+      : [];
+    const context = typeof ctx.text === 'string' ? ctx.text : '';
+    if (context.length > 0) {
+      // Audit only the bounded delivery metadata.  The prompt and assembled
+      // recall text must never enter recall_audit, even when an MCP caller
+      // supplied sensitive search terms.
+      deps.recordAudit()({
+        id: `ca_${crypto.randomUUID()}`,
+        phase: 'consume',
+        consumer_stage: 'delivered',
+        consumer_type: 'mcp',
+        trace_id: traceId,
+        engine: args.host || null,
+        agent_key: args.agent_key || null,
+        project: args.project || null,
+        source_refs: sourceRefs,
+        injected_chars: Math.min(context.length, 12000),
+        outcome: 'injected',
+      });
+    }
+    return { recalled: true, trace_id: traceId, reason: plan.reason, context, sources: ctx.sources || [], truncated: !!ctx.truncated };
   },
 
   async memory_write(args, deps) {

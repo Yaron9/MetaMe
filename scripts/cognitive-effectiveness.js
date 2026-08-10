@@ -5,7 +5,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { buildEffectivenessReport } = require('./core/cognitive-effectiveness');
+const { aggregateRecall, buildEffectivenessReport } = require('./core/cognitive-effectiveness');
 
 function safeGet(db, sql, ...args) {
   try { return db.prepare(sql).get(...args) || {}; } catch { return {}; }
@@ -27,7 +27,8 @@ function collectReport({ dbPath, skillsDir, days = 30 }) {
       skills = fs.readdirSync(skillsDir, { withFileTypes: true })
         .filter(entry => !entry.name.startsWith('.') && !entry.name.startsWith('_') && (entry.isDirectory() || entry.isSymbolicLink())).length;
     } catch { /* unavailable skill directory */ }
-    const opportunities = safeGet(db, `SELECT COUNT(*) AS n FROM recall_audit WHERE ts >= datetime('now', ?) AND should_recall=1`, since).n || 0;
+    const auditRows = safeAll(db, `SELECT * FROM recall_audit WHERE ts >= datetime('now', ?)`, since);
+    const opportunities = aggregateRecall(auditRows).opportunities;
     const consumption = safeAll(db, `
       SELECT consumer_stage, COALESCE(engine, consumer_type, 'unknown') AS host,
              CASE WHEN instr(j.value, ':') > 0 THEN substr(j.value, 1, instr(j.value, ':') - 1) ELSE '' END AS asset_type,
