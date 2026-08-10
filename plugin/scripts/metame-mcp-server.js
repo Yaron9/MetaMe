@@ -11,11 +11,14 @@
  *   claude mcp add metame -- node ~/.metame/metame-mcp-server.js
  *   # Codex: [mcp_servers.metame] command = "node", args = ["~/.metame/metame-mcp-server.js"]
  *
- * Hand-written newline-delimited JSON-RPC (initialize / tools/list /
- * tools/call) — tools-only surface, no SDK dependency (repo discipline).
- * Every tool is a thin wrapper over an existing module; no memory logic
- * lives here. Writes go through memory-write's validation + candidate
- * pipeline and are tagged source `mcp` for auditability.
+ * Tool semantics stay CommonJS and are shared by the narrow SDK transport
+ * entrypoint (`metame-mcp-server-sdk.mjs`).  Keeping this module CommonJS
+ * avoids migrating the repository's existing runtime while the official MCP
+ * SDK owns production protocol framing and transport lifecycle.
+ *
+ * Every tool is a thin wrapper over an existing module; no memory logic lives
+ * here. Writes go through memory-write's validation + candidate pipeline and
+ * are tagged source `mcp` for auditability.
  */
 
 const fs = require('fs');
@@ -29,7 +32,9 @@ const SKILLS_DIR = path.join(HOME, '.claude', 'skills');
 const AGENTS_DIR = path.join(HOME, '.metame', 'agents');
 const DB_PATH = path.join(HOME, '.metame', 'memory.db');
 
-const PROTOCOL_VERSION = '2024-11-05';
+// Kept only for the imported legacy handleMessage characterization seam. The
+// executable path negotiates this through the official SDK server.
+const PROTOCOL_VERSION = '2025-11-25';
 const SERVER_INFO = { name: 'metame', version: '1.0.0' };
 
 // ── Tool definitions ─────────────────────────────────────────────────────────
@@ -391,7 +396,10 @@ async function handleMessage(msg) {
   return null;
 }
 
-function startStdioServer() {
+// Retained as a characterization seam for existing unit tests and for callers
+// that import handleMessage directly. The executable entrypoint below uses
+// the official SDK transport instead.
+function startLegacyStdioServer() {
   let buffer = '';
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', async (chunk) => {
@@ -414,6 +422,23 @@ function startStdioServer() {
   process.stdin.on('end', () => process.exit(0));
 }
 
-if (require.main === module) startStdioServer();
+async function startStdioServer() {
+  const sdk = await import('./metame-mcp-server-sdk.mjs');
+  return sdk.startStdioServer();
+}
 
-module.exports = { TOOLS, handlers, callTool, handleMessage, _private: { readSkillMeta, defaultDeps } };
+if (require.main === module) {
+  startStdioServer().catch(error => {
+    process.stderr.write(`[metame-mcp] ${error && error.message ? error.message : error}\n`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  TOOLS,
+  handlers,
+  callTool,
+  handleMessage,
+  startStdioServer,
+  _private: { readSkillMeta, defaultDeps, startLegacyStdioServer },
+};

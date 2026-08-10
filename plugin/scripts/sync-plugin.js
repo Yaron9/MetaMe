@@ -13,7 +13,7 @@ const { fingerprintDirectory } = require('./skill-registry-sync');
 // Files whose extension we consider "managed" by the sync flow. Stale-dest
 // cleanup only ever deletes files matching this pattern, so unrelated dest
 // artifacts (README, package.json, etc.) are never touched.
-const MANAGED_EXT_RE = /\.(js|yaml|sh)$/;
+const MANAGED_EXT_RE = /\.(js|mjs|yaml|sh)$/;
 
 function syncDirFiles(srcDir, destDir, { fileList, chmod, cleanupStale, cleanupExclusions } = {}) {
   if (!fs.existsSync(srcDir)) return false;

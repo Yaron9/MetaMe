@@ -1,6 +1,6 @@
 'use strict';
 
-const MANAGED_FILE_RE = /\.(js|yaml|sh)$/;
+const MANAGED_FILE_RE = /\.(js|mjs|yaml|sh)$/;
 const TEST_SCRIPT_RE = /(?:^test-.*\.js$|\.test\.js$)/;
 
 function isTestScriptFile(filename) {
@@ -85,7 +85,7 @@ function collectSyntaxCheckFiles(path, deployGroups) {
   const files = [];
   for (const group of deployGroups || []) {
     for (const file of group.fileList || []) {
-      if (!file.endsWith('.js')) continue;
+      if (!file.endsWith('.js') && !file.endsWith('.mjs')) continue;
       files.push(path.join(group.srcDir, file));
     }
   }

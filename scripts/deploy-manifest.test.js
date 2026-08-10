@@ -21,6 +21,7 @@ function makeTempScriptsTree() {
   fs.mkdirSync(testSupportDir, { recursive: true });
 
   fs.writeFileSync(path.join(scriptsDir, 'daemon.js'), 'console.log("daemon");\n', 'utf8');
+  fs.writeFileSync(path.join(scriptsDir, 'transport.mjs'), 'export default 1;\n', 'utf8');
   fs.writeFileSync(path.join(scriptsDir, 'test-helper.js'), 'test\n', 'utf8');
   fs.writeFileSync(path.join(scriptsDir, 'daemon.test.js'), 'test\n', 'utf8');
   fs.writeFileSync(path.join(scriptsDir, 'daemon-default.yaml'), 'enabled: false\n', 'utf8');
@@ -45,7 +46,7 @@ describe('collectDeployGroups', () => {
     });
 
     assert.equal(groups.length, 4);
-    assert.deepEqual(groups[0].fileList.sort(), ['daemon-default.yaml', 'daemon.js']);
+    assert.deepEqual(groups[0].fileList.sort(), ['daemon-default.yaml', 'daemon.js', 'transport.mjs']);
     assert.equal(groups[1].destSubdir, 'core');
     assert.deepEqual(groups[1].fileList, ['audit.js']);
     assert.equal(groups[2].destSubdir, path.join('core', 'nested'));
@@ -65,6 +66,6 @@ describe('collectSyntaxCheckFiles', () => {
     });
 
     const files = collectSyntaxCheckFiles(path, groups).map((file) => path.relative(scriptsDir, file)).sort();
-    assert.deepEqual(files, ['core/audit.js', 'core/nested/deeper.js', 'daemon.js', 'engines/claude.js']);
+    assert.deepEqual(files, ['core/audit.js', 'core/nested/deeper.js', 'daemon.js', 'engines/claude.js', 'transport.mjs']);
   });
 });
