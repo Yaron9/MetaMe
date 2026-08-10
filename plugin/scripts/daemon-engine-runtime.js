@@ -9,10 +9,12 @@ const { isExperimentalEngineName } = require('./core/engine-descriptors');
 const { AGY_DEFAULT_MODEL, normalizeAgyModel } = require('./core/agy-model');
 const { createDefaultEngineRegistry } = require('./engines/engine-registry');
 const { isEnginePlugin } = require('./engines/engine-plugin');
-const { _private: claudeAdapter } = require('./engines/claude-cli-adapter');
-const { _private: codexAdapter } = require('./engines/codex-cli-adapter');
-const { _private: agyAdapter } = require('./engines/agy-cli-adapter');
-const { _private: piAdapter } = require('./engines/pi-cli-adapter');
+const {
+  claudeAdapter,
+  codexAdapter,
+  agyAdapter,
+  piAdapter,
+} = require('./engines/native-runtime-factory');
 
 const CODEX_AUTO_MODEL = 'auto';
 const AGY_AUTO_MODEL = AGY_DEFAULT_MODEL;

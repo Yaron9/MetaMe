@@ -7,7 +7,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { extractSkeleton, detectSignificantSession, buildCodexInput, formatForPrompt, _internal } = require('./session-analytics');
+const { extractSkeleton, detectSignificantSession, formatForPrompt } = require('./session-analytics');
+const { createClaudeSessionSourceForFile } = require('./engines/claude-session-source-adapter');
+const {
+  buildCodexInput,
+  createCodexSessionSourceAdapter,
+  _internal: codexInternal,
+} = require('./engines/codex-session-source-adapter');
 
 function ts(baseMs, deltaSec) {
   return new Date(baseMs + deltaSec * 1000).toISOString();
@@ -32,7 +38,7 @@ test('extractSkeleton captures Step-1 numeric metrics', () => {
   ];
 
   fs.writeFileSync(file, lines.map(x => JSON.stringify(x)).join('\n') + '\n', 'utf8');
-  const sk = extractSkeleton(file);
+  const sk = extractSkeleton(createClaudeSessionSourceForFile(file).readEvents());
 
   assert.equal(sk.tool_error_count, 1);
   assert.equal(sk.file_churn, 1);
@@ -47,7 +53,7 @@ test('extractSkeleton captures Step-1 numeric metrics', () => {
 
 test('Claude native gitBranch maps to the canonical branch prompt field', () => {
   const fixture = path.join(__dirname, 'engines', 'fixtures', 'claude-native-session.jsonl');
-  const skeleton = extractSkeleton(fixture);
+  const skeleton = extractSkeleton(createClaudeSessionSourceForFile(fixture).readEvents());
 
   assert.equal(skeleton.branch, 'feature/login-timeout');
   assert.match(formatForPrompt(skeleton), /Proj=metame-fixture@feature\/login-timeout/);
@@ -141,9 +147,15 @@ test('Codex state_5.sqlite rollout_path can be discovered for memory extraction'
     .run(sessionId, rollout, 1780000000, 1780000000);
   db.close();
 
-  const rows = _internal.queryCodexThreadRows(dbPath, sessionId);
+  const rows = codexInternal.queryCodexThreadRows(dbPath, sessionId);
   assert.equal(rows.length, 1);
-  const item = _internal.codexSessionFromRolloutPath(rows[0].rollout_path, rows[0].id);
+  const source = createCodexSessionSourceAdapter({
+    home: tmpDir,
+    stateDbPath: dbPath,
+    projectsRoot: tmpDir,
+    rolloutRoots: [tmpDir],
+  });
+  const item = source.sessionFromRolloutPath(rows[0].rollout_path, rows[0].id);
   assert.equal(item.session_id, sessionId);
   assert.equal(item.path, rollout);
   assert.equal(item.engine, 'codex');

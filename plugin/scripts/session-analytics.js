@@ -14,8 +14,15 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { createClaudeSessionSourceForFile } = require('./engines/claude-session-source-adapter');
 const { createBuiltinSessionSourceMap } = require('./engines/session-source-registry');
+const {
+  ensureExtractionRunSchema,
+  getExtractionRun,
+  ensureExtractionRun,
+  claimExtractionLease,
+  completeExtractionRun,
+} = require('./core/extraction-run-db');
+const { upsertSessionSource } = require('./core/session-source-db');
 const {
   makeSkeleton: makeCanonicalSkeleton,
   extractEvidence: canonicalEvidenceFromEvents,
@@ -24,14 +31,12 @@ const {
 } = require('./core/canonical-session-analytics');
 
 const HOME = os.homedir();
-const STATE_FILE = path.join(HOME, '.metame', 'analytics_state.json');
-const STATE_DB = path.join(HOME, '.metame', 'analytics_state.db');
 const CANONICAL_PIPELINE_VERSION = 'canonical-session-v1';
+const PIPELINE_VERSIONS = Object.freeze({
+  analyzed: `${CANONICAL_PIPELINE_VERSION}:analytics`,
+  facts_analyzed: `${CANONICAL_PIPELINE_VERSION}:facts`,
+});
 let _stateDb = null;
-let _stmtIsProcessed = null;
-let _stmtMarkProcessed = null;
-let _stmtIsRevisionProcessed = null;
-let _stmtMarkRevisionProcessed = null;
 let _sessionSources = null;
 
 function getSessionSources() {
@@ -41,109 +46,62 @@ function getSessionSources() {
 
 function getStateDb() {
   if (_stateDb) return _stateDb;
-  const dir = path.dirname(STATE_DB);
+  const dbPath = path.join(HOME, '.metame', 'memory.db');
+  const dir = path.dirname(dbPath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const { DatabaseSync } = require('node:sqlite');
-  _stateDb = new DatabaseSync(STATE_DB);
+  _stateDb = new DatabaseSync(dbPath);
   _stateDb.exec('PRAGMA journal_mode = WAL');
   _stateDb.exec('PRAGMA busy_timeout = 3000');
-  _stateDb.exec(`
-    CREATE TABLE IF NOT EXISTS processed_sessions (
-      kind TEXT NOT NULL,
-      session_id TEXT NOT NULL,
-      processed_at INTEGER NOT NULL,
-      PRIMARY KEY (kind, session_id)
-    )
-  `);
-  _stateDb.exec('CREATE INDEX IF NOT EXISTS idx_processed_kind_ts ON processed_sessions(kind, processed_at)');
-  _stateDb.exec(`
-    CREATE TABLE IF NOT EXISTS processed_source_revisions (
-      kind TEXT NOT NULL,
-      engine_id TEXT NOT NULL,
-      session_id TEXT NOT NULL,
-      source_revision TEXT NOT NULL,
-      pipeline_version TEXT NOT NULL,
-      processed_at INTEGER NOT NULL,
-      PRIMARY KEY (kind, engine_id, session_id, source_revision, pipeline_version)
-    )
-  `);
-  _stateDb.exec('CREATE INDEX IF NOT EXISTS idx_processed_source_revision ON processed_source_revisions(kind, processed_at)');
-  _stateDb.exec('CREATE TABLE IF NOT EXISTS state_meta (key TEXT PRIMARY KEY, value TEXT)');
-  migrateLegacyStateOnce(_stateDb);
+  ensureExtractionRunSchema(_stateDb);
   return _stateDb;
 }
 
-function migrateLegacyStateOnce(db) {
-  try {
-    const migrated = db.prepare("SELECT value FROM state_meta WHERE key = 'legacy_json_migrated'").get();
-    if (migrated && migrated.value === '1') return;
-    if (fs.existsSync(STATE_FILE)) {
-      let raw = null;
-      try { raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { raw = null; }
-      if (raw && typeof raw === 'object') {
-        const insert = db.prepare(`
-          INSERT INTO processed_sessions (kind, session_id, processed_at)
-          VALUES (?, ?, ?)
-          ON CONFLICT(kind, session_id) DO UPDATE SET processed_at = excluded.processed_at
-        `);
-        const tx = db.transaction(() => {
-          for (const [sessionId, timestamp] of Object.entries(raw.analyzed || {})) {
-            insert.run('analyzed', sessionId, Number(timestamp) || Date.now());
-          }
-          for (const [sessionId, timestamp] of Object.entries(raw.facts_analyzed || {})) {
-            insert.run('facts_analyzed', sessionId, Number(timestamp) || Date.now());
-          }
-        });
-        tx();
-      }
-    }
-    db.prepare("INSERT OR REPLACE INTO state_meta (key, value) VALUES ('legacy_json_migrated', '1')").run();
-  } catch { /* legacy state is best effort */ }
+function pipelineVersionForKind(kind) {
+  return PIPELINE_VERSIONS[kind] || `${CANONICAL_PIPELINE_VERSION}:${String(kind || 'unknown').trim() || 'unknown'}`;
 }
 
-function isProcessed(kind, sessionId, sourceRevision = '', pipelineVersion = CANONICAL_PIPELINE_VERSION, engineId = 'claude') {
-  if (!kind || !sessionId) return false;
+function extractionRunFor(kind, sessionId, sourceRevision, engineId, create = false) {
+  if (!kind || !sessionId || !sourceRevision || !engineId) return null;
   const db = getStateDb();
-  if (sourceRevision) {
-    if (!_stmtIsRevisionProcessed) {
-      _stmtIsRevisionProcessed = db.prepare(`
-        SELECT 1 AS ok FROM processed_source_revisions
-        WHERE kind = ? AND engine_id = ? AND session_id = ? AND source_revision = ? AND pipeline_version = ? LIMIT 1
-      `);
-    }
-    const row = _stmtIsRevisionProcessed.get(kind, engineId, sessionId, sourceRevision, pipelineVersion);
-    return !!(row && row.ok === 1);
-  }
-  if (!_stmtIsProcessed) {
-    _stmtIsProcessed = db.prepare('SELECT 1 AS ok FROM processed_sessions WHERE kind = ? AND session_id = ? LIMIT 1');
-  }
-  const row = _stmtIsProcessed.get(kind, sessionId);
-  return !!(row && row.ok === 1);
+  const source = upsertSessionSource(db, {
+    engineId,
+    nativeSessionId: sessionId,
+    sourceHash: sourceRevision,
+    project: '*',
+  });
+  const options = {
+    sessionSourceId: source.id,
+    pipelineVersion: pipelineVersionForKind(kind),
+  };
+  if (create) ensureExtractionRun(db, options);
+  return getExtractionRun(db, options);
 }
 
-function markProcessed(kind, sessionId, sourceRevision = '', pipelineVersion = CANONICAL_PIPELINE_VERSION, engineId = 'claude') {
-  if (!sessionId) return;
+function isProcessed(kind, sessionId, sourceRevision = '', pipelineVersion = CANONICAL_PIPELINE_VERSION, engineId = '') {
+  if (!kind || !sessionId || !sourceRevision || !engineId) return false;
+  const run = extractionRunFor(kind, sessionId, sourceRevision, engineId);
+  return !!run && ['completed', 'skipped'].includes(run.status);
+}
+
+function markProcessed(kind, sessionId, sourceRevision = '', pipelineVersion = CANONICAL_PIPELINE_VERSION, engineId = '') {
+  if (!sessionId || !sourceRevision || !engineId) return;
   const db = getStateDb();
-  if (sourceRevision) {
-    if (!_stmtMarkRevisionProcessed) {
-      _stmtMarkRevisionProcessed = db.prepare(`
-        INSERT INTO processed_source_revisions (kind, engine_id, session_id, source_revision, pipeline_version, processed_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(kind, engine_id, session_id, source_revision, pipeline_version)
-        DO UPDATE SET processed_at = excluded.processed_at
-      `);
-    }
-    _stmtMarkRevisionProcessed.run(kind, engineId, sessionId, sourceRevision, pipelineVersion, Date.now());
-    return;
-  }
-  if (!_stmtMarkProcessed) {
-    _stmtMarkProcessed = db.prepare(`
-      INSERT INTO processed_sessions (kind, session_id, processed_at)
-      VALUES (?, ?, ?)
-      ON CONFLICT(kind, session_id) DO UPDATE SET processed_at = excluded.processed_at
-    `);
-  }
-  _stmtMarkProcessed.run(kind, sessionId, Date.now());
+  const run = extractionRunFor(kind, sessionId, sourceRevision, engineId, true);
+  if (!run || ['completed', 'skipped'].includes(run.status)) return;
+  const leaseToken = `analytics:${pipelineVersionForKind(kind)}:${engineId}:${sessionId}:${sourceRevision}`;
+  const lease = claimExtractionLease(db, {
+    sessionSourceId: run.session_source_id,
+    pipelineVersion: run.pipeline_version,
+    leaseToken,
+    leaseMs: 60 * 1000,
+  });
+  if (!lease.claimed) return;
+  completeExtractionRun(db, {
+    runId: lease.run.id,
+    leaseToken,
+    metrics: { kind, sourceRevision, pipelineVersion },
+  });
 }
 
 function formatForPrompt(skeleton) {
@@ -162,13 +120,8 @@ function formatForPrompt(skeleton) {
   if (skeleton.total_tool_calls > 0) parts.push(`Tools: ${skeleton.total_tool_calls} (${toolSummary})`);
   if (skeleton.git_committed) parts.push('Git: committed');
   if (Array.isArray(skeleton.models) && skeleton.models.length > 0) {
-    const shortModels = skeleton.models.map(model => {
-      if (model.includes('opus')) return 'opus';
-      if (model.includes('sonnet')) return 'sonnet';
-      if (model.includes('haiku')) return 'haiku';
-      return model.split('-')[0];
-    });
-    parts.push(`Model: ${[...new Set(shortModels)].join(',')}`);
+    const models = [...new Set(skeleton.models.map(model => String(model).trim()).filter(Boolean))];
+    if (models.length > 0) parts.push(`Models: ${models.slice(0, 5).join(',')}`);
   }
   return parts.join(' | ');
 }
@@ -222,23 +175,6 @@ function readSourceInput(engineId, source, ref, revision) {
     source,
     ref,
     revision: input.revision || revision,
-    events: input.events,
-    context,
-    skeleton: makeCanonicalSkeleton(input.events, context),
-    evidence: canonicalEvidenceFromEvents(input.events, 3000),
-  };
-}
-
-function canonicalInputFromPath(sessionPath) {
-  const source = createClaudeSessionSourceForFile(sessionPath);
-  const input = source.readEvents();
-  const context = contextFromRevision('claude', input.ref, input.revision);
-  return {
-    engine: 'claude',
-    path: sessionPath,
-    source,
-    ref: input.ref,
-    revision: input.revision,
     events: input.events,
     context,
     skeleton: makeCanonicalSkeleton(input.events, context),
@@ -333,17 +269,36 @@ function buildSessionInputBySession(session) {
   return readSourceInput(session.engineId || session.engine, session.source, session.ref, session.revision);
 }
 
+function contextFromCanonicalInput(input) {
+  if (!input || typeof input !== 'object') return {};
+  if (input.context && typeof input.context === 'object') return input.context;
+  const revision = input.revision && typeof input.revision === 'object' ? input.revision : {};
+  const ref = input.ref && typeof input.ref === 'object' ? input.ref : {};
+  const engineId = input.engine || revision.engineId || ref.engineId || null;
+  return {
+    engine: engineId,
+    source: revision.classification === 'subagent' ? 'subagent' : engineId,
+    nativeSessionId: revision.nativeSessionId || ref.nativeSessionId || null,
+    sourceRevision: sourceRevisionOf(ref, revision),
+    sourceSize: revision.sourceSize || 0,
+    sourceLocator: revision.sourceLocator || ref.sourceLocator || null,
+    project: revision.project || ref.project || null,
+    project_id: revision.scope || ref.scope || null,
+    project_path: revision.cwd || ref.cwd || null,
+    parentNativeSessionId: revision.parentNativeSessionId || ref.parentNativeSessionId || null,
+    first_ts: revision.firstTs || null,
+    last_ts: revision.lastTs || null,
+    branch: revision.gitBranch || revision.branch || null,
+  };
+}
+
 function extractCanonicalSkeleton(input) {
-  if (typeof input === 'string') return canonicalInputFromPath(input).skeleton;
   if (Array.isArray(input)) return makeCanonicalSkeleton(input);
-  if (input && Array.isArray(input.events)) return makeCanonicalSkeleton(input.events, input.context || input);
+  if (input && Array.isArray(input.events)) return makeCanonicalSkeleton(input.events, contextFromCanonicalInput(input));
   return makeCanonicalSkeleton([], input || {});
 }
 
 function extractCanonicalEvidence(input, budget = 3000) {
-  if (typeof input === 'string') {
-    return canonicalEvidenceFromEvents(canonicalInputFromPath(input).events, budget);
-  }
   if (Array.isArray(input)) return canonicalEvidenceFromEvents(input, budget);
   return canonicalEvidenceFromEvents(input && input.events, budget);
 }
@@ -361,43 +316,15 @@ function summarizeCanonicalSession(skeleton, sourceInput, evidence = null) {
   };
 }
 
-function markCanonicalProcessed(kind, sessionId, sourceRevision = '', engineId = 'claude') {
-  markProcessed(kind, sessionId, sourceRevision, CANONICAL_PIPELINE_VERSION, engineId || 'claude');
-}
-
-// Compatibility facades remain deliberately thin: native discovery and
-// parsing are implemented by the Codex adapter, not by shared analytics.
-function findCodexSessionById(sessionId) {
-  return findCanonicalSessionById(sessionId, 'codex');
-}
-
-function findAllUnextractedCodexSessions(limit = 30) {
-  return listCanonicalSessions('facts_analyzed', 1000)
-    .filter(session => session.engineId === 'codex')
-    .slice(0, Math.max(Number(limit) || 30, 1));
-}
-
-function buildCodexInput(filePath, historyMap = new Map()) {
-  const adapterModule = require('./engines/codex-session-source-adapter');
-  return adapterModule.buildCodexInput(filePath, historyMap);
-}
-
-function loadCodexHistory(sessionIds = null) {
-  const source = getSessionSources().get('codex');
-  return source && typeof source.loadHistory === 'function' ? source.loadHistory(sessionIds) : new Map();
-}
-
-function markCodexFactsExtracted(sessionId, sourceRevision = '') {
-  markCanonicalProcessed('facts_analyzed', sessionId, sourceRevision, 'codex');
+function markCanonicalProcessed(kind, sessionId, sourceRevision = '', engineId = '') {
+  markProcessed(kind, sessionId, sourceRevision, CANONICAL_PIPELINE_VERSION, engineId);
 }
 
 module.exports = {
   findLatestUnanalyzedSession: findLatestCanonicalSession,
   findSessionById: findCanonicalSessionById,
-  findCodexSessionById,
   buildSessionInputById,
   buildSessionInputBySession,
-  buildSessionInputByPath: canonicalInputFromPath,
   findAllUnanalyzedSessions: limit => findAllCanonicalSessions('analyzed', limit),
   findAllUnextractedSessions: limit => findAllCanonicalSessions('facts_analyzed', limit),
   extractSkeleton: extractCanonicalSkeleton,
@@ -408,28 +335,12 @@ module.exports = {
   formatGoalContext,
   summarizeSession: summarizeCanonicalSession,
   detectSignificantSession: detectCanonicalSignificantSession,
-  markAnalyzed: (sessionId, sourceRevision = '', engineId = 'claude') => markCanonicalProcessed('analyzed', sessionId, sourceRevision, engineId),
-  markFactsExtracted: (sessionId, sourceRevision = '', engineId = 'claude') => markCanonicalProcessed('facts_analyzed', sessionId, sourceRevision, engineId),
-  loadCodexHistory,
-  findAllUnextractedCodexSessions,
-  buildCodexInput,
-  markCodexFactsExtracted,
+  markAnalyzed: (sessionId, sourceRevision = '', engineId = '') => markCanonicalProcessed('analyzed', sessionId, sourceRevision, engineId),
+  markFactsExtracted: (sessionId, sourceRevision = '', engineId = '') => markCanonicalProcessed('facts_analyzed', sessionId, sourceRevision, engineId),
   _internal: {
     getSessionSources,
     isProcessed,
     markProcessed,
-    queryCodexThreadRows(dbPath, sessionId = '') {
-      const source = getSessionSources().get('codex');
-      return source && typeof source.queryThreadRows === 'function'
-        ? source.queryThreadRows(dbPath, sessionId)
-        : [];
-    },
-    codexSessionFromRolloutPath(filePath, fallbackId = '') {
-      const source = getSessionSources().get('codex');
-      return source && typeof source.sessionFromRolloutPath === 'function'
-        ? source.sessionFromRolloutPath(filePath, fallbackId)
-        : null;
-    },
   },
 };
 

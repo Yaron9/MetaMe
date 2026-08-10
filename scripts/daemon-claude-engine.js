@@ -12,6 +12,7 @@ const {
 const { rawChatId } = require('./core/thread-chat-id');
 const { resolveScopedEngine, fallbackForUnavailableRuntime } = require('./core/engine-policy');
 const { isExperimentalEngineName } = require('./core/engine-descriptors');
+const { createClaudeSessionSourceForFile } = require('./engines/claude-session-source-adapter');
 const { buildAgentContextForEngine, buildMemorySnapshotContent, selectSnapshotContext, refreshMemorySnapshot } = require('./agent-layer');
 const {
   adaptDaemonHintForEngine,
@@ -1680,7 +1681,8 @@ function createClaudeEngine(deps) {
             if (file && fs.existsSync(file)) {
               const st = fs.statSync(file);
               if (st.size <= 2 * 1024 * 1024) {
-                skeleton = sessionAnalytics.extractSkeleton(file);
+                const source = createClaudeSessionSourceForFile(file, { fs, path });
+                skeleton = sessionAnalytics.extractSkeleton(source.readEvents());
               }
             }
           }

@@ -177,6 +177,15 @@ const DAEMON_CONFIG_FILE = path.join(METAME_DIR, 'daemon.yaml');
 const METAME_START = '<!-- METAME:START -->';
 const METAME_END = '<!-- METAME:END -->';
 
+// `daemon status` is read-only and must work from a feature worktree without
+// syncing files or touching the user's runtime.  The deployment test has an
+// explicit temporary-HOME escape; real worktrees targeting ~/.metame remain
+// blocked below.
+const _cliCommand = String(process.argv[2] || '').trim().toLowerCase();
+const _cliSubcommand = String(process.argv[3] || '').trim().toLowerCase();
+const _isReadOnlyCommand = _cliCommand === 'status'
+  || (_cliCommand === 'daemon' && _cliSubcommand === 'status');
+
 function resolveAutoUpdateBehavior() {
   const mode = String(process.env.METAME_AUTO_UPDATE || '').trim().toLowerCase();
   if (['0', 'false', 'off', 'disable', 'disabled'].includes(mode)) {
@@ -199,7 +208,7 @@ function resolveAutoUpdateBehavior() {
 // ---------------------------------------------------------
 // 1.5 ENSURE METAME DIRECTORY + DEPLOY SCRIPTS
 // ---------------------------------------------------------
-if (!fs.existsSync(METAME_DIR)) {
+if (!_isReadOnlyCommand && !fs.existsSync(METAME_DIR)) {
   fs.mkdirSync(METAME_DIR, { recursive: true });
 }
 
@@ -219,6 +228,7 @@ if (!fs.existsSync(METAME_DIR)) {
  * @returns {boolean} true if any file was updated
  */
 function syncDirFiles(srcDir, destDir, { fileList, chmod } = {}) {
+  if (_isReadOnlyCommand) return false;
   if (!fs.existsSync(srcDir)) return false;
   if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
   let updated = false;
@@ -578,7 +588,7 @@ function cleanupObsoleteRuntimeArtifacts() {
 // Protect daemon.yaml: create backup before any sync operation
 const DAEMON_YAML_BACKUP = path.join(METAME_DIR, 'daemon.yaml.bak');
 try {
-  if (fs.existsSync(DAEMON_CONFIG_FILE)) {
+  if (!_isReadOnlyCommand && fs.existsSync(DAEMON_CONFIG_FILE)) {
     const content = fs.readFileSync(DAEMON_CONFIG_FILE, 'utf8');
     // Only backup if it has real config (not just the default template)
     if (content.includes('enabled: true') || content.includes('bot_token:') && !content.includes('bot_token: null')) {
@@ -597,7 +607,10 @@ const _isInWorktree = (() => {
     return stat.isFile(); // .git is a file → worktree; directory → main repo; missing → npm install
   } catch { return false; }
 })();
-if (_isInWorktree) {
+const _allowIsolatedDeploy = _cliCommand === 'deploy'
+  && process.env.METAME_TEST_ISOLATED_DEPLOY === '1'
+  && path.resolve(METAME_DIR).startsWith(`${path.resolve(os.tmpdir())}${path.sep}`);
+if (_isInWorktree && !_isReadOnlyCommand && !_allowIsolatedDeploy) {
   console.error(`\n${icon("stop")} ACTION BLOCKED: Worktree Deploy Prevented`);
   console.error(`   You are running from a git worktree (${path.basename(__dirname)}).`);
   console.error('   Deploying from a worktree would overwrite production daemon code.');
@@ -609,14 +622,16 @@ if (_isInWorktree) {
 // Catches bad merges and careless agent edits BEFORE they can crash the daemon.
 const { execSync: _execSync } = require('child_process');
 const syntaxErrors = [];
-for (const fp of collectSyntaxCheckFiles(path, SCRIPT_DEPLOY_GROUPS)) {
-  if (!fs.existsSync(fp)) continue;
-  try {
-    _execSync(`"${process.execPath}" -c "${fp}"`, { timeout: 5000, stdio: 'pipe', windowsHide: true });
-  } catch (e) {
-    const label = path.relative(scriptsDir, fp);
-    const msg = (e.stderr ? e.stderr.toString().trim() : e.message).split('\n')[0];
-    syntaxErrors.push(`${label}: ${msg}`);
+if (!_isReadOnlyCommand) {
+  for (const fp of collectSyntaxCheckFiles(path, SCRIPT_DEPLOY_GROUPS)) {
+    if (!fs.existsSync(fp)) continue;
+    try {
+      _execSync(`"${process.execPath}" -c "${fp}"`, { timeout: 5000, stdio: 'pipe', windowsHide: true });
+    } catch (e) {
+      const label = path.relative(scriptsDir, fp);
+      const msg = (e.stderr ? e.stderr.toString().trim() : e.message).split('\n')[0];
+      syntaxErrors.push(`${label}: ${msg}`);
+    }
   }
 }
 
@@ -636,9 +651,9 @@ if (scriptsUpdated) {
   }
 }
 
-cleanupObsoleteRuntimeArtifacts();
+if (!_isReadOnlyCommand) cleanupObsoleteRuntimeArtifacts();
 
-try {
+if (!_isReadOnlyCommand) try {
   const runtimeEnvFile = path.join(METAME_DIR, 'runtime-env.json');
   const runtimeNodeModules = path.join(__dirname, 'node_modules');
   const runtimeEnvPayload = {
@@ -658,15 +673,17 @@ try {
 // Docs: lazy-load references for CLAUDE.md pointer instructions
 syncDirFiles(path.join(__dirname, 'scripts', 'docs'), path.join(METAME_DIR, 'docs'));
 // Bin: CLI tools (dispatch_to etc.)
-const binUpdated = syncDirFiles(path.join(__dirname, 'scripts', 'bin'), path.join(METAME_DIR, 'bin'), { chmod: 0o755 });
+let binUpdated = false;
+if (!_isReadOnlyCommand) binUpdated = syncDirFiles(path.join(__dirname, 'scripts', 'bin'), path.join(METAME_DIR, 'bin'), { chmod: 0o755 });
 // Hooks: Claude Code event hooks (Stop, PostToolUse, etc.)
-const hooksUpdated = syncDirFiles(path.join(__dirname, 'scripts', 'hooks'), path.join(METAME_DIR, 'hooks'));
+let hooksUpdated = false;
+if (!_isReadOnlyCommand) hooksUpdated = syncDirFiles(path.join(__dirname, 'scripts', 'hooks'), path.join(METAME_DIR, 'hooks'));
 
 // Install the credential-free agy MCP plugin from source assets. The installed
 // mcp_config is generated with absolute wrapper paths because agy 1.0.x does
 // not resolve plugin-relative command arguments reliably.
 let agyPluginUpdated = false;
-try {
+if (!_isReadOnlyCommand) try {
   const pluginResult = ensureAgyPlugin({
     fs, path, crypto, execFileSync,
     pluginSource: path.join(__dirname, 'scripts', 'agy-plugin'),
@@ -690,7 +707,7 @@ const shouldAutoRestartAfterDeploy = (() => {
   if (cmd === 'deploy') return true;
   return ['codex', 'continue', 'sync'].includes(cmd);
 })();
-if (daemonCodeUpdated && shouldAutoRestartAfterDeploy) {
+if (!_isReadOnlyCommand && daemonCodeUpdated && shouldAutoRestartAfterDeploy) {
   const restartResult = requestDaemonRestart({ reason: 'deploy-sync' });
   if (restartResult.ok) {
     console.log(`${icon("reload")} Daemon restart requested after deploy${restartResult.pid ? ` (PID: ${restartResult.pid})` : ''}.`);
@@ -707,7 +724,7 @@ if (daemonCodeUpdated && shouldAutoRestartAfterDeploy) {
 // ---------------------------------------------------------
 const CLAUDE_SKILLS_DIR = path.join(HOME_DIR, '.claude', 'skills');
 const bundledSkillsDir = path.join(__dirname, 'skills');
-if (fs.existsSync(bundledSkillsDir)) {
+if (!_isReadOnlyCommand && fs.existsSync(bundledSkillsDir)) {
   try {
     const skillSync = syncBundledSkills({
       bundledSkillsDir,
@@ -731,7 +748,7 @@ if (fs.existsSync(bundledSkillsDir)) {
 
 // Ensure ~/.codex/skills and ~/.agents/skills are symlinks to ~/.claude/skills
 // This keeps skill evolution unified across all engines.
-for (const altDir of [
+if (!_isReadOnlyCommand) for (const altDir of [
   path.join(HOME_DIR, '.codex', 'skills'),
   path.join(HOME_DIR, '.agents', 'skills'),
 ]) {
@@ -766,7 +783,7 @@ try {
 } catch { /* non-fatal */ }
 
 // Ensure daemon.yaml exists (restore backup or copy from template)
-if (!fs.existsSync(DAEMON_CONFIG_FILE)) {
+if (!_isReadOnlyCommand && !fs.existsSync(DAEMON_CONFIG_FILE)) {
   if (fs.existsSync(DAEMON_YAML_BACKUP)) {
     // Restore from backup — user had real config that was lost
     fs.copyFileSync(DAEMON_YAML_BACKUP, DAEMON_CONFIG_FILE);
@@ -782,7 +799,7 @@ if (!fs.existsSync(DAEMON_CONFIG_FILE)) {
 // Idempotently add required built-ins to older user configs. Existing task
 // schedules and enabled flags always win; only recognized legacy commands are
 // rewritten. Credentials remain in daemon.yaml and are never copied elsewhere.
-try {
+if (!_isReadOnlyCommand) try {
   if (fs.existsSync(DAEMON_CONFIG_FILE)) {
     const _yaml = require(path.join(__dirname, 'node_modules', 'js-yaml'));
     const current = _yaml.load(fs.readFileSync(DAEMON_CONFIG_FILE, 'utf8')) || {};

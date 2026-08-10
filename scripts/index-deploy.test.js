@@ -52,6 +52,7 @@ describe('index.js deploy command', () => {
         ...process.env,
         HOME: home,
         METAME_AUTO_UPDATE: 'off',
+        METAME_TEST_ISOLATED_DEPLOY: '1',
       },
       encoding: 'utf8',
       timeout: 30000,

@@ -64,7 +64,7 @@ const FACT_EXTRACTION_PROMPT = `你是精准的知识提取引擎。从以下会
   "session_name": "用3-5个词极其精简地概括这起会话的主题（例如：优化微信登录架构、排查Redis连接泄漏、配置Nginx反向代理）",
   "facts": [
     {
-      "entity":"主体(点号层级如MetaMe.daemon.askClaude)",
+      "entity":"主体(点号层级如MetaMe.daemon.execute)",
       "relation":"类型",
       "value":"脱离上下文可独立理解的一句话",
       "confidence":"high或medium",
