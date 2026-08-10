@@ -14,6 +14,21 @@
 
 const ENGINE_DESCRIPTORS = Object.freeze({
   claude: Object.freeze({
+    // The final Engine Plugin contract uses `id`/`vendor` while the legacy
+    // aliases below remain part of the descriptor for persisted/configured
+    // callers.  They intentionally carry the same values.
+    id: 'claude',
+    displayName: 'Claude Code',
+    vendor: 'anthropic',
+    executableNames: Object.freeze(['claude']),
+    nativeSessionKind: 'claude-jsonl',
+    configSchemaVersion: 1,
+    capabilities: Object.freeze({
+      runtime: Object.freeze({ state: 'verified' }),
+      sessionSource: Object.freeze({ state: 'unsupported' }),
+      cognitiveHost: Object.freeze({ state: 'unsupported' }),
+    }),
+    // Legacy aliases — do not remove without a persisted-config migration.
     name: 'claude',
     provider: 'anthropic',
     // How SOUL/instructions reach the engine's sessions:
@@ -27,6 +42,17 @@ const ENGINE_DESCRIPTORS = Object.freeze({
     hostHook: 'claude-settings',
   }),
   codex: Object.freeze({
+    id: 'codex',
+    displayName: 'Codex',
+    vendor: 'openai',
+    executableNames: Object.freeze(['codex']),
+    nativeSessionKind: 'codex-sqlite',
+    configSchemaVersion: 1,
+    capabilities: Object.freeze({
+      runtime: Object.freeze({ state: 'verified' }),
+      sessionSource: Object.freeze({ state: 'unsupported' }),
+      cognitiveHost: Object.freeze({ state: 'unsupported' }),
+    }),
     name: 'codex',
     provider: 'openai',
     contextProjection: 'agents-md-merge',
@@ -34,6 +60,17 @@ const ENGINE_DESCRIPTORS = Object.freeze({
     hostHook: 'codex-hooks',
   }),
   agy: Object.freeze({
+    id: 'agy',
+    displayName: 'agy',
+    vendor: 'google',
+    executableNames: Object.freeze(['agy']),
+    nativeSessionKind: 'agy-transcript',
+    configSchemaVersion: 1,
+    capabilities: Object.freeze({
+      runtime: Object.freeze({ state: 'verified' }),
+      sessionSource: Object.freeze({ state: 'unsupported' }),
+      cognitiveHost: Object.freeze({ state: 'unsupported' }),
+    }),
     name: 'agy',
     provider: 'google',
     contextProjection: 'prompt-bootstrap',
