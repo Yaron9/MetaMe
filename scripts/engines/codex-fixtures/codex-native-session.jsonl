@@ -1,8 +1,10 @@
 {"type":"session_meta","timestamp":"2026-07-15T08:00:00.000Z","payload":{"id":"codex-fixture-parent","cwd":"/tmp/metame-codex-fixture","source":"cli","model_provider":"openai"}}
 {"type":"response_item","timestamp":"2026-07-15T08:00:01.000Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"请修复 Codex 会话摄取并保留来源证据。"}]}}
 {"type":"response_item","timestamp":"2026-07-15T08:00:02.000Z","payload":{"type":"custom_tool_call","name":"exec_command","input":{"cmd":"node --test","workdir":"/tmp/metame-codex-fixture"}}}
-{"type":"response_item","timestamp":"2026-07-15T08:00:03.000Z","payload":{"type":"custom_tool_call_output","output":"{\"exit_code\":0,\"output\":\"all tests passed\"}"}}
+{"type":"response_item","timestamp":"2026-07-15T08:00:03.000Z","payload":{"type":"custom_tool_call_output","output":"Process exited with code 0"}}
 {"type":"response_item","timestamp":"2026-07-15T08:00:04.000Z","payload":{"type":"function_call","name":"apply_patch","arguments":"{\"patch\":\"*** Begin Patch\n*** End Patch\"}","call_id":"call-function-1"}}
-{"type":"response_item","timestamp":"2026-07-15T08:00:05.000Z","payload":{"type":"function_call_output","call_id":"call-function-1","output":"{\"exit_code\":1,\"output\":\"patch rejected\"}"}}
-{"type":"response_item","timestamp":"2026-07-15T08:00:06.000Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"修复完成，canonical pipeline 测试通过。"}]}}
-{"type":"event_msg","timestamp":"2026-07-15T08:00:07.000Z","payload":{"type":"task_complete","last_agent_message":"已完成 Codex session source 接线。"}}
+{"type":"response_item","timestamp":"2026-07-15T08:00:05.000Z","payload":{"type":"function_call_output","call_id":"call-function-1","output":"Process exited with code 1"}}
+{"type":"response_item","timestamp":"2026-07-15T08:00:06.000Z","payload":{"type":"function_call","name":"read_file","arguments":"{\"path\":\"/tmp/metame-codex-fixture/result.txt\"}","call_id":"call-function-2"}}
+{"type":"response_item","timestamp":"2026-07-15T08:00:07.000Z","payload":{"type":"function_call_output","call_id":"call-function-2","output":"file contents without an exit status"}}
+{"type":"response_item","timestamp":"2026-07-15T08:00:08.000Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"修复完成，canonical pipeline 测试通过。"}]}}
+{"type":"event_msg","timestamp":"2026-07-15T08:00:09.000Z","payload":{"type":"task_complete","last_agent_message":"已完成 Codex session source 接线。"}}

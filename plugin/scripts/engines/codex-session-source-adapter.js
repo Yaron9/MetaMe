@@ -358,6 +358,15 @@ function toolInputText(input, maxToolInput) {
   return cleanText(compactJson(value || {}), maxToolInput, { allowInternal: true }) || '';
 }
 
+function nativeExitCodeFromText(value) {
+  const text = String(value || '');
+  const match = text.match(/(?:^|\r?\n)[ \t]*(?:Process|Command) exited with code[ \t]+(-?\d+)\b/im)
+    || text.match(/(?:^|\r?\n)[ \t]*Exit code[ \t]*[:=][ \t]*(-?\d+)\b/im);
+  if (!match) return null;
+  const code = Number(match[1]);
+  return Number.isSafeInteger(code) ? code : null;
+}
+
 function normalizedToolOutcome(payload, outputText = '') {
   const object = asObject(payload) || {};
   let parsed = object.output;
@@ -365,12 +374,23 @@ function normalizedToolOutcome(payload, outputText = '') {
     try { parsed = JSON.parse(parsed); } catch { /* retain text */ }
   }
   const result = asObject(parsed) || {};
-  const code = firstDefined(result.exit_code, result.exitCode, result.code, object.exit_code, object.exitCode, object.code);
+  const code = firstDefined(
+    result.exit_code,
+    result.exitCode,
+    result.code,
+    object.exit_code,
+    object.exitCode,
+    object.code,
+    nativeExitCodeFromText(typeof object.output === 'string' ? object.output : outputText),
+  );
   const explicitError = firstDefined(result.is_error, result.isError, object.is_error, object.isError);
-  const error = explicitError === true || Number(code) !== 0 && code !== undefined && code !== null;
+  const numericCode = code !== undefined && code !== null && code !== '' && Number.isFinite(Number(code))
+    ? Number(code)
+    : null;
+  const error = explicitError === true || numericCode !== null && numericCode !== 0;
   return {
     error,
-    ...(code !== undefined && code !== null && Number.isFinite(Number(code)) ? { exitCode: Number(code) } : {}),
+    ...(numericCode !== null ? { exitCode: numericCode } : {}),
     ...(outputText ? { outputChars: Math.min(outputText.length, DEFAULT_MAX_TOOL_TEXT) } : {}),
   };
 }

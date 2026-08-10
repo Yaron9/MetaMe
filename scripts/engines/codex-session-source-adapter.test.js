@@ -100,25 +100,32 @@ test('Codex adapter uses state_5.sqlite authority and enriches canonical events 
   const input = source.readPathEvents(rolloutPath, refs[0]);
   assert.equal(input.revision.sourceLocator.authority, 'state_5.sqlite');
   assert.equal(revision.classification, 'conversation');
-  assert.equal(revision.toolCallCount, 2);
+  assert.equal(revision.toolCallCount, 3);
   assert.equal(revision.toolErrorCount, 1);
   const events = await readAll(source, refs[0], { sourceRevision: revision.sourceRevision });
   assert.deepEqual(events.map(event => `${event.actor}:${event.kind}`), [
     'user:message', 'tool:tool_call', 'tool:tool_result', 'tool:tool_call', 'tool:tool_result',
-    'assistant:message', 'assistant:message',
+    'tool:tool_call', 'tool:tool_result', 'assistant:message', 'assistant:message',
   ]);
   assert.equal(events[0].text, '从 history 索引补充的用户请求。');
   assert.equal(events[1].tool, 'exec_command');
   assert.equal(events[2].outcome.error, false);
+  assert.equal(events[2].outcome.exitCode, 0);
   assert.equal(events[3].tool, 'apply_patch');
   assert.equal(events[3].provenance.callId, 'call-function-1');
   assert.equal(events[4].tool, 'apply_patch');
   assert.equal(events[4].provenance.callId, 'call-function-1');
   assert.equal(events[4].outcome.exitCode, 1);
   assert.equal(events[4].outcome.error, true);
+  assert.equal(events[5].tool, 'read_file');
+  assert.equal(events[5].provenance.callId, 'call-function-2');
+  assert.equal(events[6].tool, 'read_file');
+  assert.equal(events[6].provenance.callId, 'call-function-2');
+  assert.equal(events[6].outcome.error, false);
+  assert.equal(Object.hasOwn(events[6].outcome, 'exitCode'), false);
   const evidence = extractEvidence(events, 3000);
   assert.ok(evidence.tool_traces.some(trace => trace.startsWith('apply_patch ')));
-  assert.ok(evidence.key_results.some(result => result.includes('patch rejected')));
+  assert.ok(evidence.key_results.some(result => result.includes('Process exited with code 1')));
   assert.ok(events.every(event => event.engineId === 'codex'));
   assert.ok(events.every(event => event.sourceRevision === revision.sourceRevision));
 });
