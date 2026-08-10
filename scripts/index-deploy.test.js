@@ -3,7 +3,7 @@
 require('./test-support/env-setup');
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -81,5 +81,23 @@ describe('index.js deploy command', () => {
     assert.equal(skillRegistry.schemaVersion, 1);
     assert.equal(skillRegistry.skills['skill-manager'], undefined);
     assert.equal(typeof skillRegistry.skills['agent-browser']?.managedHash, 'string');
+  });
+
+  it('keeps ordinary worktree deploys blocked without the isolated test target', () => {
+    const home = mkdtempForTest('metame-index-guard-home-');
+    const result = spawnSync(process.execPath, [path.join(ROOT, 'index.js'), 'deploy'], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        HOME: home,
+        METAME_AUTO_UPDATE: 'off',
+        METAME_TEST_ISOLATED_DEPLOY: '0',
+      },
+      encoding: 'utf8',
+      timeout: 30000,
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /ACTION BLOCKED: Worktree Deploy Prevented/);
   });
 });

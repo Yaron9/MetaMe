@@ -23,6 +23,10 @@ const {
   buildMetaMeCodexHooks,
   mergeMetaMeCodexHooks,
 } = require('./scripts/core/codex-host');
+const {
+  isDaemonStatusCommand,
+  printDaemonStatus,
+} = require('./scripts/daemon-status');
 
 // On Windows, resolve .cmd wrapper → actual Node.js entry and spawn node directly.
 // Completely bypasses cmd.exe, eliminating terminal flash.
@@ -182,9 +186,16 @@ const METAME_END = '<!-- METAME:END -->';
 // explicit temporary-HOME escape; real worktrees targeting ~/.metame remain
 // blocked below.
 const _cliCommand = String(process.argv[2] || '').trim().toLowerCase();
-const _cliSubcommand = String(process.argv[3] || '').trim().toLowerCase();
-const _isReadOnlyCommand = _cliCommand === 'status'
-  || (_cliCommand === 'daemon' && _cliSubcommand === 'status');
+const _isReadOnlyCommand = isDaemonStatusCommand(process.argv);
+
+// This is intentionally before the first ~/.metame mkdir, runtime sync,
+// hook install, plugin bootstrap, or local activity heartbeat.  Keep status
+// on one authoritative implementation so both source checkouts and installed
+// npm entry points have the same read-only behavior.
+if (_isReadOnlyCommand) {
+  printDaemonStatus({ homeDir: HOME_DIR, icon });
+  process.exit(0);
+}
 
 function resolveAutoUpdateBehavior() {
   const mode = String(process.env.METAME_AUTO_UPDATE || '').trim().toLowerCase();
@@ -2271,7 +2282,6 @@ if (isDaemon) {
   const daemonIndex = process.argv.indexOf('daemon');
   const subCmd = process.argv[daemonIndex + 1];
   const DAEMON_CONFIG = path.join(METAME_DIR, 'daemon.yaml');
-  const DAEMON_STATE = path.join(METAME_DIR, 'daemon_state.json');
   const DAEMON_PID = path.join(METAME_DIR, 'daemon.pid');
   const DAEMON_LOCK = path.join(METAME_DIR, 'daemon.lock');
   const DAEMON_LOG = path.join(METAME_DIR, 'daemon.log');
@@ -2772,72 +2782,7 @@ WantedBy=default.target
   }
 
   if (subCmd === 'status') {
-    let state = {};
-    try { state = JSON.parse(fs.readFileSync(DAEMON_STATE, 'utf8')); } catch { /* empty */ }
-
-    // Check if running
-    let isRunning = false;
-    let runningPid = null;
-    if (fs.existsSync(DAEMON_PID)) {
-      const pid = parseInt(fs.readFileSync(DAEMON_PID, 'utf8').trim(), 10);
-      try { process.kill(pid, 0); isRunning = true; runningPid = pid; } catch { /* dead */ }
-    }
-    if (!isRunning && fs.existsSync(DAEMON_LOCK)) {
-      try {
-        const lock = JSON.parse(fs.readFileSync(DAEMON_LOCK, 'utf8'));
-        const pid = parseInt(lock && lock.pid, 10);
-        if (pid) {
-          process.kill(pid, 0);
-          isRunning = true;
-          runningPid = pid;
-        }
-      } catch { /* lock stale or invalid */ }
-    }
-    if (!isRunning && process.platform === 'darwin' && fs.existsSync(LAUNCHD_PLIST)) {
-      const pid = launchdIsRunning();
-      if (pid) {
-        isRunning = true;
-        runningPid = pid;
-      }
-    }
-
-    console.log(`${icon("bot")} MetaMe Daemon: ${isRunning ? icon("green") + ' Running' : icon("red") + ' Stopped'}`);
-    if (state.started_at) console.log(`   Started: ${state.started_at}`);
-    if (runningPid || state.pid) console.log(`   PID: ${runningPid || state.pid}`);
-
-    // Budget
-    const budget = state.budget || {};
-    const config = {};
-    try { Object.assign(config, yaml.load(fs.readFileSync(DAEMON_CONFIG, 'utf8'))); } catch { /* empty */ }
-    const limit = (config.budget && config.budget.daily_limit) || 50000;
-    console.log(`   Budget: ${budget.tokens_used || 0}/${limit} tokens (${budget.date || 'no data'})`);
-
-    // Tasks
-    const tasks = state.tasks || {};
-    const configuredTaskNames = new Set();
-    for (const t of ((config.heartbeat && config.heartbeat.tasks) || [])) {
-      if (t && t.name) configuredTaskNames.add(t.name);
-    }
-    for (const proj of Object.values(config.projects || {})) {
-      for (const t of ((proj && proj.heartbeat_tasks) || [])) {
-        if (t && t.name) configuredTaskNames.add(t.name);
-      }
-    }
-    const taskEntries = Object.entries(tasks).filter(([name]) =>
-      configuredTaskNames.size === 0 || configuredTaskNames.has(name)
-    );
-    if (taskEntries.length > 0) {
-      console.log("   Recent tasks:");
-      for (const [name, info] of taskEntries) {
-        const sym = info.status === 'success' ? icon("ok") : icon("fail");
-        console.log(`     ${sym} ${name}: ${info.last_run || 'unknown'}`);
-        if (info.output_preview) console.log(`        ${info.output_preview.slice(0, 80)}...`);
-      }
-      const hiddenStale = Object.keys(tasks).length - taskEntries.length;
-      if (hiddenStale > 0) {
-        console.log(`     … ${hiddenStale} stale task record(s) hidden`);
-      }
-    }
+    printDaemonStatus({ homeDir: HOME_DIR, icon });
     process.exit(0);
   }
 
