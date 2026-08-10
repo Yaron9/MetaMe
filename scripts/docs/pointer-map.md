@@ -10,7 +10,7 @@
 - 多引擎 runtime 适配层：`scripts/daemon-engine-runtime.js`
 - 会话执行引擎（Claude/Codex 共用入口）：`scripts/daemon-claude-engine.js`
 - **核心纯逻辑模块**：`scripts/core/handoff.js`（子进程生命周期）、`scripts/core/audit.js`（审计状态）
-- Codex 宿主兼容：`scripts/core/codex-host.js`（插件 hooks 审计、配置隔离、原生 hooks 合并）；`scripts/hooks/memory-recall-context.js` 复用 daemon recall gateway 为原生 Codex 按需注入历史上下文
+- Codex 宿主兼容：`scripts/core/codex-host.js`（插件 hooks 审计、配置隔离、原生 hooks 合并）；MetaMe MCP 默认提供按需记忆访问，`scripts/hooks/memory-recall-context.js` 仅作为可选 legacy 自动召回 hook（`METAME_CODEX_MEMORY_RECALL=on`）
 - 管理命令：`scripts/daemon-admin-commands.js`
 - 命令路由：`scripts/daemon-command-router.js`
 - 执行命令（`/stop`、`/compact` 等）：`scripts/daemon-exec-commands.js`

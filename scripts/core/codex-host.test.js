@@ -82,4 +82,26 @@ describe('codex host compatibility', () => {
     assert.match(once.hooks.Stop[0].hooks[0].command, /custom\.js/);
     assert.match(once.hooks.Stop[1].hooks[0].command, /\.metame\/hooks\/stop-session-capture\.js/);
   });
+
+  it('retires the legacy automatic memory recall hook when disabled', () => {
+    const managed = buildMetaMeCodexHooks({
+      signalCaptureScript: '/home/.metame/signal-capture.js',
+      memoryRecallScript: null,
+      stopCaptureScript: '/home/.metame/hooks/stop-session-capture.js',
+    });
+    const existing = {
+      hooks: {
+        UserPromptSubmit: [{
+          hooks: [
+            { type: 'command', command: 'node /home/.metame/signal-capture.js' },
+            { type: 'command', command: 'node /home/.metame/hooks/memory-recall-context.js' },
+          ],
+        }],
+      },
+    };
+    const merged = mergeMetaMeCodexHooks(existing, managed);
+    const commands = merged.hooks.UserPromptSubmit.flatMap(group => group.hooks.map(hook => hook.command));
+    assert.equal(commands.some(command => command.includes('memory-recall-context.js')), false);
+    assert.equal(commands.some(command => command.includes('signal-capture.js')), true);
+  });
 });

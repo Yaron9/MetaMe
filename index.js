@@ -937,7 +937,11 @@ function ensureCodexHooksInstalled() {
     if (fs.existsSync(hooksFile)) existing = JSON.parse(fs.readFileSync(hooksFile, 'utf8'));
     const managed = buildMetaMeCodexHooks({
       signalCaptureScript: SIGNAL_CAPTURE_SCRIPT.replace(/\\/g, '/'),
-      memoryRecallScript: path.join(METAME_DIR, 'hooks', 'memory-recall-context.js').replace(/\\/g, '/'),
+      // Prefer the metame MCP memory_recall tool on demand. Opt into the
+      // legacy automatic hook only when explicitly requested.
+      memoryRecallScript: process.env.METAME_CODEX_MEMORY_RECALL === 'on'
+        ? path.join(METAME_DIR, 'hooks', 'memory-recall-context.js').replace(/\\/g, '/')
+        : null,
       stopCaptureScript: path.join(METAME_DIR, 'hooks', 'stop-session-capture.js').replace(/\\/g, '/'),
     });
     const merged = mergeMetaMeCodexHooks(existing, managed);

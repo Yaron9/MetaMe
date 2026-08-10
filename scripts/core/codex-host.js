@@ -89,8 +89,12 @@ function mergeMetaMeCodexHooks(existing, managedHooks) {
     const managedScriptNames = groups.flatMap((group) => group.hooks || [])
       .map((hook) => String(hook.command || '').match(/([\w-]+\.js)/)?.[1])
       .filter(Boolean);
+    const retiredScriptNames = event === 'UserPromptSubmit' && !managedScriptNames.includes('memory-recall-context.js')
+      ? ['memory-recall-context.js']
+      : [];
+    const managedOrRetiredNames = [...managedScriptNames, ...retiredScriptNames];
     const retained = current.filter((group) => !(group.hooks || []).some((hook) =>
-      managedScriptNames.some((name) => String(hook.command || '').includes(name))));
+      managedOrRetiredNames.some((name) => String(hook.command || '').includes(name))));
     result.hooks[event] = [...retained, ...groups];
   }
   return result;
