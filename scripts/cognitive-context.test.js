@@ -156,3 +156,27 @@ test('same logical session shares in-flight projection and keeps its ledger entr
   assert.equal(calls, 1);
   assert.ok(store.getContextDeliveryLedger('logical-same', 'fixture')[left.key]);
 });
+
+test('different no-CAS session-store wrappers share ledger-scoped in-flight state', async () => {
+  const manifest = buildProjectContextManifest({ assets: [claim], access });
+  const sharedLedger = {};
+  let calls = 0;
+  const adapter = {
+    projectContext() {
+      calls += 1;
+      return new Promise(resolve => setTimeout(() => resolve({ state: 'projected', fingerprint: 'shared-ledger' }), 10));
+    },
+  };
+  // These wrappers expose no CAS method, so persistence falls back to the
+  // shared pure ledger and must use that ledger identity for in-flight scope.
+  const wrapperA = { getContextDeliveryLedger() { return {}; } };
+  const wrapperB = { getContextDeliveryLedger() { return {}; } };
+  const common = { manifest, access, adapter, host: 'fixture', nativeSessionId: 'shared-ledger-native', ledger: sharedLedger };
+  const first = deliverProjectContext({ ...common, sessionStore: wrapperA, logicalSessionId: 'logical-wrapper' });
+  const second = deliverProjectContext({ ...common, sessionStore: wrapperB, logicalSessionId: 'logical-wrapper' });
+  assert.equal(first, second);
+  const [left, right] = await Promise.all([first, second]);
+  assert.equal(left.delivered, true);
+  assert.equal(right.delivered, true);
+  assert.equal(calls, 1);
+});

@@ -65,13 +65,22 @@ function projectContext(options = {}) {
   }
 }
 
-function currentDeliveryLedger(options = {}) {
-  if (options.ledger && typeof options.ledger === 'object' && !Array.isArray(options.ledger)) {
-    return { ...options.ledger };
+function deliveryBackend(options = {}) {
+  if (options.sessionStore && typeof options.sessionStore.compareAndSetContextDelivery === 'function') {
+    return { kind: 'session-store', target: options.sessionStore };
   }
-  if (options.sessionStore && typeof options.sessionStore.getContextDeliveryLedger === 'function') {
+  if (options.ledger && typeof options.ledger === 'object' && !Array.isArray(options.ledger)) {
+    return { kind: 'ledger', target: options.ledger };
+  }
+  return { kind: 'ephemeral', target: null };
+}
+
+function currentDeliveryLedger(options = {}, backend = deliveryBackend(options)) {
+  if (backend.kind === 'ledger') return { ...backend.target };
+  if (backend.kind === 'session-store'
+    && typeof backend.target.getContextDeliveryLedger === 'function') {
     try {
-      const ledger = options.sessionStore.getContextDeliveryLedger(
+      const ledger = backend.target.getContextDeliveryLedger(
         options.logicalSessionId || options.chatId,
         options.engine || options.host,
       );
@@ -81,8 +90,8 @@ function currentDeliveryLedger(options = {}) {
   return {};
 }
 
-function deliveryAlreadyRecorded(options, key) {
-  const ledger = currentDeliveryLedger(options);
+function deliveryAlreadyRecorded(options, key, backend) {
+  const ledger = currentDeliveryLedger(options, backend);
   return {
     recorded: Object.prototype.hasOwnProperty.call(ledger, key),
     ledger,
@@ -100,11 +109,11 @@ function objectScopeId(value) {
   return id;
 }
 
-function inFlightKey(options, key) {
+function inFlightKey(options, key, backend) {
   const sessionId = options.logicalSessionId || options.chatId || null;
   const engine = options.engine || options.host || null;
-  const storeId = objectScopeId(options.sessionStore);
-  const ledgerId = storeId ? null : objectScopeId(options.ledger);
+  const storeId = backend.kind === 'session-store' ? objectScopeId(backend.target) : null;
+  const ledgerId = backend.kind === 'ledger' ? objectScopeId(backend.target) : null;
   return JSON.stringify({
     delivery: key,
     logical_session: sessionId == null ? null : String(sessionId),
@@ -113,14 +122,14 @@ function inFlightKey(options, key) {
   });
 }
 
-function persistDelivery(options, key, manifest) {
+function persistDelivery(options, key, manifest, backend = deliveryBackend(options)) {
   const metadata = {
     revision: manifest.revision,
     project: manifest.project,
     delivered_at: options.deliveredAt,
   };
-  if (options.sessionStore && typeof options.sessionStore.compareAndSetContextDelivery === 'function') {
-    return options.sessionStore.compareAndSetContextDelivery(
+  if (backend.kind === 'session-store') {
+    return backend.target.compareAndSetContextDelivery(
       options.logicalSessionId || options.chatId,
       options.engine || options.host,
       key,
@@ -128,23 +137,23 @@ function persistDelivery(options, key, manifest) {
     );
   }
   const { compareAndSetDelivery } = require('./core/context-manifest');
-  return compareAndSetDelivery(options.ledger || {}, key, metadata);
+  return compareAndSetDelivery(backend.kind === 'ledger' ? backend.target : {}, key, metadata);
 }
 
-function finalizeDelivery(projected, options, manifest, key) {
+function finalizeDelivery(projected, options, manifest, key, backend) {
   if (!projected || projected.state !== 'projected') {
     return {
       ...projected,
       delivered: false,
       key,
       manifest,
-      ledger: currentDeliveryLedger(options),
+      ledger: currentDeliveryLedger(options, backend),
     };
   }
 
   let cas;
   try {
-    cas = persistDelivery(options, key, manifest);
+    cas = persistDelivery(options, key, manifest, backend);
   } catch (error) {
     return failedProjection(error, manifest);
   }
@@ -198,10 +207,11 @@ function deliverProjectContext(options = {}) {
     accessIdentity: accessIdentity(access),
     revision: manifest.revision,
   });
-  const scopeKey = inFlightKey(options, key);
+  const backend = deliveryBackend(options);
+  const scopeKey = inFlightKey(options, key, backend);
   const inFlight = IN_FLIGHT_DELIVERIES.get(scopeKey);
   if (inFlight) return inFlight;
-  const prior = deliveryAlreadyRecorded(options, key);
+  const prior = deliveryAlreadyRecorded(options, key, backend);
   if (prior.recorded) {
     return {
       state: 'skipped',
@@ -216,11 +226,11 @@ function deliverProjectContext(options = {}) {
   if (isThenable(projected)) {
     return trackDelivery(
       scopeKey,
-      Promise.resolve(projected).then(result => finalizeDelivery(result, options, manifest, key)),
+      Promise.resolve(projected).then(result => finalizeDelivery(result, options, manifest, key, backend)),
       manifest,
     );
   }
-  const finalized = finalizeDelivery(projected, options, manifest, key);
+  const finalized = finalizeDelivery(projected, options, manifest, key, backend);
   return isThenable(finalized) ? trackDelivery(scopeKey, finalized, manifest) : finalized;
 }
 
