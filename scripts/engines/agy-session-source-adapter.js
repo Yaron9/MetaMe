@@ -19,7 +19,7 @@ const { wrapSessionSourceAdapter } = require('./session-source-adapter');
 const { normalizeCanonicalSessionEvents } = require('../core/canonical-session-event');
 const { fingerprintSourceRevision } = require('../core/session-source-revision');
 const {
-  AGY_TOOL_TYPES,
+  AGY_SESSION_TOOL_TYPES,
   AGY_KNOWN_RECORD_TYPES,
   assessTranscriptFormat,
   canonicalizeCwd,
@@ -325,7 +325,7 @@ function projectCanonicalRecords(records, metadata, options = {}) {
       continue;
     }
     if (type === 'PLANNER_RESPONSE') {
-      const normalized = normalizeTranscriptRecord(record);
+      const normalized = normalizeTranscriptRecord(record, { extended: true });
       for (const event of normalized.filter(value => value.type === 'tool_use')) {
         const input = compactJson(event.toolInput, maxToolInput);
         if (input) append('tool', 'tool_call', input, item, { tool: event.toolName });
@@ -336,11 +336,11 @@ function projectCanonicalRecords(records, metadata, options = {}) {
       }
       continue;
     }
-    if (Object.prototype.hasOwnProperty.call(AGY_TOOL_TYPES, type)) {
+    if (Object.prototype.hasOwnProperty.call(AGY_SESSION_TOOL_TYPES, type)) {
       const outputText = cleanText(record.content || record.message || record.error, maxToolText, { allowInternal: true }) || '';
-      const normalized = normalizeTranscriptRecord(record).find(value => value.type === 'tool_result');
+      const normalized = normalizeTranscriptRecord(record, { extended: true }).find(value => value.type === 'tool_result');
       append('tool', 'tool_result', outputText, item, {
-        tool: normalized ? normalized.toolName : AGY_TOOL_TYPES[type],
+        tool: normalized ? normalized.toolName : AGY_SESSION_TOOL_TYPES[type],
         outcome: normalizedToolOutcome(record, outputText, type),
       });
     }
@@ -731,7 +731,7 @@ module.exports = {
   ENGINE_ID,
   DEFAULT_MAX_FILE_SIZE,
   DEFAULT_MAX_EVENTS,
-  AGY_TOOL_TYPES,
+  AGY_TOOL_TYPES: AGY_SESSION_TOOL_TYPES,
   AGY_KNOWN_RECORD_TYPES,
   createAgySessionSourceAdapter,
   createAgySessionSource: createAgySessionSourceAdapter,

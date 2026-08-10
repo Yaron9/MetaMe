@@ -7,6 +7,13 @@ const AGY_TOOL_TYPES = Object.freeze({
   VIEW_FILE: 'Read',
   LIST_DIRECTORY: 'Glob',
   SEARCH_WEB: 'WebSearch',
+});
+
+// Session Source projection recognizes the wider vocabulary observed in
+// durable transcripts.  Keep the runtime stream vocabulary above stable so
+// adding ingestible evidence does not change foreground agy behavior.
+const AGY_SESSION_TOOL_TYPES = Object.freeze({
+  ...AGY_TOOL_TYPES,
   CODE_ACTION: 'CodeAction',
   GREP_SEARCH: 'GrepSearch',
   MCP_TOOL: 'McpTool',
@@ -81,7 +88,7 @@ const AGY_KNOWN_RECORD_TYPES = new Set([
   'PLANNER_RESPONSE',
   'SYSTEM_MESSAGE',
   'CHECKPOINT',
-  ...Object.keys(AGY_TOOL_TYPES),
+  ...Object.keys(AGY_SESSION_TOOL_TYPES),
 ]);
 
 function assessTranscriptFormat(records) {
@@ -96,10 +103,11 @@ function assessTranscriptFormat(records) {
   return { known, unknown, formatDrift: list.length > 0 && known === 0 };
 }
 
-function normalizeTranscriptRecord(record) {
+function normalizeTranscriptRecord(record, options = {}) {
   if (!record || typeof record !== 'object') return [];
   const out = [];
   const type = String(record.type || '').toUpperCase();
+  const toolTypes = options.extended ? AGY_SESSION_TOOL_TYPES : AGY_TOOL_TYPES;
 
   if (type === 'PLANNER_RESPONSE' && Array.isArray(record.tool_calls)) {
     for (const call of record.tool_calls) {
@@ -111,10 +119,10 @@ function normalizeTranscriptRecord(record) {
     }
   }
 
-  if (AGY_TOOL_TYPES[type]) {
+  if (toolTypes[type]) {
     out.push({
       type: 'tool_result',
-      toolName: AGY_TOOL_TYPES[type],
+      toolName: toolTypes[type],
       status: String(record.status || '').toUpperCase(),
     });
   }
@@ -254,6 +262,7 @@ function collectDescendantPids(rows, rootPid) {
 
 module.exports = {
   AGY_TOOL_TYPES,
+  AGY_SESSION_TOOL_TYPES,
   AGY_EVIDENCE_TYPES,
   AGY_KNOWN_RECORD_TYPES,
   assessTranscriptFormat,
