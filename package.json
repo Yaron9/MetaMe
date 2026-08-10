@@ -1,6 +1,6 @@
 {
     "name": "metame-cli",
-    "version": "1.6.4",
+    "version": "1.7.0",
     "description": "The cognitive profile and agent runtime layer for Claude Code and Codex.",
     "main": "index.js",
     "bin": {
@@ -16,7 +16,9 @@
         "!scripts/hooks/test-*.js",
         "!scripts/daemon.yaml",
         "!scripts/daemon.yaml.bak",
-        "skills/"
+        "skills/",
+        "!skills/**/__pycache__/",
+        "!skills/**/*.pyc"
     ],
     "scripts": {
         "test": "node --require ./scripts/test-support/env-setup.js --test scripts/*.test.js",

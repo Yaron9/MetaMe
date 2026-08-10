@@ -1,6 +1,6 @@
 {
   "name": "metame",
-  "version": "1.6.4",
+  "version": "1.7.0",
   "description": "The cognitive profile and agent runtime layer for Claude Code and Codex.",
   "author": {
     "name": "Yaron",
