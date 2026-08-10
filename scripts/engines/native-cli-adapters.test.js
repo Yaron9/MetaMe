@@ -15,8 +15,11 @@ const { createEngineRuntimeFactory } = require('../daemon-engine-runtime');
 const { createEnginePlugin } = require('./engine-plugin');
 const { getEngineDescriptor } = require('../core/engine-descriptors');
 
+const CODEX_FIXTURE = path.join(__dirname, 'codex-fixtures', 'codex-native-session.jsonl');
+
 function createRegistry(overrides = {}) {
   return createDefaultEngineRegistry({
+    ...overrides,
     normalizeEngineName: value => String(value || 'claude').trim().toLowerCase(),
     HOME: overrides.HOME,
     claude: {
@@ -72,9 +75,11 @@ test('registry exposes one deep adapter per native CLI with private session stor
 test('registry preserves nested per-engine Session Source roots and options', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-source-registry-'));
   const claudeRoot = path.join(root, 'claude-projects');
+  const topLevelClaudeRoot = path.join(root, 'top-level-claude-projects');
   const codexRoot = path.join(root, 'codex');
   const codexSessionsRoot = path.join(codexRoot, 'sessions');
   const codexHistory = path.join(root, 'codex-history.jsonl');
+  const topLevelHistory = path.join(root, 'top-level-history.jsonl');
   const codexDb = path.join(root, 'custom-state.sqlite');
   const codexCwd = path.join(root, 'project');
   const daemonState = path.join(root, 'daemon-state.json');
@@ -85,10 +90,13 @@ test('registry preserves nested per-engine Session Source roots and options', ()
   const piAgentDir = path.join(root, 'pi-agent');
   const piSessionDir = path.join(root, 'pi-sessions');
   fs.writeFileSync(codexHistory, JSON.stringify({ session_id: 'history-1', text: 'from custom history' }) + '\n');
+  fs.writeFileSync(topLevelHistory, JSON.stringify({ session_id: 'top-history-1', text: 'from top-level history' }) + '\n');
 
   try {
     const registry = createRegistry({
       HOME: root,
+      historyPath: topLevelHistory,
+      projectsRoot: topLevelClaudeRoot,
       claude: { projectsRoot: claudeRoot },
       codex: {
         codexRoot,
@@ -130,6 +138,29 @@ test('registry preserves nested per-engine Session Source roots and options', ()
         sourceLocator: { root: 'configured', relativePath: 'pi.jsonl' },
       }),
       path.join(piSessionDir, 'pi.jsonl')
+    );
+
+    const topLevelRegistry = createRegistry({
+      HOME: root,
+      historyPath: topLevelHistory,
+      projectsRoot: topLevelClaudeRoot,
+      maxEvents: 1,
+    });
+    assert.equal(
+      topLevelRegistry.get('codex').sessionSource.readHistory('top-history-1')[0].text,
+      'from top-level history'
+    );
+    assert.equal(
+      topLevelRegistry.get('claude').sessionSource.resolveSessionRefPath({
+        sourceLocator: { relativePath: 'top-level.jsonl' },
+      }),
+      path.join(topLevelClaudeRoot, 'top-level.jsonl')
+    );
+    const limitedRollout = path.join(root, 'limited-rollout.jsonl');
+    fs.copyFileSync(CODEX_FIXTURE, limitedRollout);
+    assert.throws(
+      () => topLevelRegistry.get('codex').sessionSource.readPathEvents(limitedRollout, 'codex-fixture-parent'),
+      /session_source_event_limit/
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

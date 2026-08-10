@@ -144,11 +144,12 @@ const piModel = Object.freeze({
 function createCommonSessionSourceDeps({ deps, home, namespace = {} }) {
   const engineOptions = namespace && typeof namespace === 'object' ? namespace : {};
   return {
+    ...deps,
     ...engineOptions,
-    home,
-    HOME: home,
-    fs: deps.fs || engineOptions.fs,
-    path: deps.path || engineOptions.path,
+    home: engineOptions.home || home,
+    HOME: engineOptions.HOME || engineOptions.home || home,
+    fs: engineOptions.fs || deps.fs,
+    path: engineOptions.path || deps.path,
   };
 }
 
