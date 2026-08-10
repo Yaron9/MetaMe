@@ -545,20 +545,32 @@ function createAgySessionSourceAdapter(options = {}) {
     };
   }
 
-  function filterEntry(entry, query) {
-    if (!query.project && !query.cwd) return true;
-    let info;
-    try { info = inspectFile(transcriptPath(entry.sessionId), entry.sessionId); } catch { info = metadataForEntry(entry); }
+  function filterEntry(entry, query, info = null, nativeSessionIds = new Set()) {
+    if (!info) return false;
     return (!query.project || info.project === query.project)
       && (!query.cwd || info.cwd === normalizeCwd(query.cwd, pathMod, fsMod))
-      && (query.includeSubagents || info.classification !== 'subagent');
+      && (query.includeSubagents || info.classification !== 'subagent')
+      && (!query.suppressOwnedSubagents
+        || !info.parentNativeSessionId
+        || !nativeSessionIds.has(info.parentNativeSessionId));
   }
 
   function freshDiscoverySnapshot(query) {
-    return artifactEntries()
-      .filter(entry => filterEntry(entry, query))
+    const inspected = artifactEntries()
+      .filter(entry => entry.sourceKinds.includes('transcript'))
+      .map(entry => {
+        try {
+          return { entry, info: inspectFile(transcriptPath(entry.sessionId), entry.sessionId) };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+    const nativeSessionIds = new Set(inspected.map(item => item.info.nativeSessionId).filter(Boolean));
+    return inspected
+      .filter(item => filterEntry(item.entry, query, item.info, nativeSessionIds))
       .slice(0, MAX_DISCOVERY_SNAPSHOT_ENTRIES)
-      .map(entry => ({ sessionId: entry.sessionId, sourceKinds: entry.sourceKinds }));
+      .map(item => ({ sessionId: item.entry.sessionId, sourceKinds: item.entry.sourceKinds }));
   }
 
   function prepareDiscovery(request = {}) {
@@ -580,7 +592,7 @@ function createAgySessionSourceAdapter(options = {}) {
     for (let index = start; index < state.snapshot.length && page.length < Math.min(limit, DEFAULT_DISCOVERY_LIMIT - acceptedStart); index += 1) {
       const entry = state.snapshot[index];
       let info;
-      try { info = inspectFile(transcriptPath(entry.sessionId), entry.sessionId); } catch { info = metadataForEntry(entry); }
+      try { info = inspectFile(transcriptPath(entry.sessionId), entry.sessionId); } catch { continue; }
       page.push({ entry, info, snapshotIndex: index });
     }
     const acceptedEnd = acceptedStart + page.length;

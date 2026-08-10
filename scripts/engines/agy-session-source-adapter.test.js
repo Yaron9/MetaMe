@@ -124,6 +124,31 @@ test('agy defers an unterminated final JSONL record without losing its cursor po
   fs.rmSync(home, { recursive: true, force: true });
 });
 
+test('agy discovery applies subagent filters even without project or cwd queries', async () => {
+  const home = makeHome();
+  writeSession(home, 'agy-parent');
+  const child = writeSession(home, 'agy-child');
+  fs.writeFileSync(child.transcript, [
+    {
+      type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: 'child request',
+    },
+    {
+      type: 'PLANNER_RESPONSE', status: 'DONE', parentSessionId: 'agy-parent', content: 'child answer',
+    },
+  ].map(record => JSON.stringify(record)).join('\n'));
+  const source = createAgySessionSourceAdapter({ home });
+  const all = await discoverAll(source, { includeSubagents: true, suppressOwnedSubagents: false });
+  assert.deepEqual(all.map(ref => ref.nativeSessionId).sort(), ['agy-child', 'agy-parent']);
+  const withoutSubagents = await discoverAll(source, { includeSubagents: false });
+  assert.deepEqual(withoutSubagents.map(ref => ref.nativeSessionId), ['agy-parent']);
+  const withoutOwnedSubagents = await discoverAll(source, {
+    includeSubagents: true,
+    suppressOwnedSubagents: true,
+  });
+  assert.deepEqual(withoutOwnedSubagents.map(ref => ref.nativeSessionId), ['agy-parent']);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
 test('agy discovery cursor replays a stable newest-first snapshot', async () => {
   const home = makeHome();
   const first = writeSession(home, 'agy-old');
@@ -139,6 +164,40 @@ test('agy discovery cursor replays a stable newest-first snapshot', async () => 
   fs.utimesSync(first.transcript, new Date('2026-07-22T00:00:00.000Z'), new Date('2026-07-22T00:00:00.000Z'));
   const next = await discoverAll(source, { limit: 1, cursor: page[0].discoveryCursor });
   assert.deepEqual(next.map(ref => ref.nativeSessionId), ['agy-old']);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+test('agy discovery excludes PB-only sessions while direct diagnostics stay explicit', async () => {
+  const home = makeHome();
+  const old = writeSession(home, 'agy-readable-old');
+  const newest = writeSession(home, 'agy-readable-new');
+  const agyHome = path.join(home, '.gemini', 'antigravity-cli');
+  fs.mkdirSync(path.join(agyHome, 'conversations'), { recursive: true });
+  const pbOnly = path.join(agyHome, 'conversations', 'agy-pb-only.pb');
+  fs.writeFileSync(pbOnly, 'fixture protobuf marker');
+  const oldTime = new Date('2026-07-20T00:00:00.000Z');
+  const newTime = new Date('2026-07-21T00:00:00.000Z');
+  fs.utimesSync(old.transcript, oldTime, oldTime);
+  fs.utimesSync(newest.transcript, newTime, newTime);
+  fs.utimesSync(pbOnly, new Date('2026-07-22T00:00:00.000Z'), new Date('2026-07-22T00:00:00.000Z'));
+  const source = createAgySessionSourceAdapter({ home });
+  const page = await discoverAll(source, { limit: 1 });
+  assert.deepEqual(page.map(ref => ref.nativeSessionId), ['agy-readable-new']);
+  assert.ok(page[0].discoveryCursor);
+  const replayed = await discoverAll(source, { limit: 1, cursor: page[0].discoveryCursor });
+  assert.deepEqual(replayed.map(ref => ref.nativeSessionId), ['agy-readable-old']);
+  assert.deepEqual((await discoverAll(source)).map(ref => ref.nativeSessionId), [
+    'agy-readable-new', 'agy-readable-old',
+  ]);
+  const pbRef = {
+    engineId: 'agy',
+    nativeSessionId: 'agy-pb-only',
+    sourceLocator: { sessionId: 'agy-pb-only' },
+  };
+  const validation = await source.validate(pbRef);
+  assert.equal(validation.valid, false);
+  assert.match(validation.errorCode, /transcript_missing/);
+  await assert.rejects(() => source.inspect(pbRef), /session_source_.*transcript_missing/);
   fs.rmSync(home, { recursive: true, force: true });
 });
 
