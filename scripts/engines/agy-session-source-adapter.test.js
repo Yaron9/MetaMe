@@ -33,6 +33,12 @@ function writeSession(home, sessionId = 'agy-fixture-session') {
   return { agyHome, transcript };
 }
 
+function writeCache(home, mappings) {
+  const cache = path.join(home, '.gemini', 'antigravity-cli', 'cache', 'last_conversations.json');
+  fs.mkdirSync(path.dirname(cache), { recursive: true });
+  fs.writeFileSync(cache, JSON.stringify(mappings));
+}
+
 async function discoverAll(source, request = {}) {
   const refs = [];
   for await (const ref of source.discover(request)) refs.push(ref);
@@ -40,13 +46,14 @@ async function discoverAll(source, request = {}) {
 }
 
 function countingFs() {
-  const counter = { transcriptReads: 0 };
+  const counter = { transcriptReads: 0, cacheReads: 0 };
   return {
     counter,
     fs: {
       ...fs,
       readFileSync(filePath, ...args) {
         if (String(filePath).endsWith('transcript.jsonl')) counter.transcriptReads += 1;
+        if (String(filePath).endsWith('last_conversations.json')) counter.cacheReads += 1;
         return fs.readFileSync(filePath, ...args);
       },
     },
@@ -190,7 +197,8 @@ test('agy discovery reads only page candidates and skips invalid newest transcri
   fs.utimesSync(valid.transcript, new Date('2026-07-20T00:00:00.000Z'), new Date('2026-07-20T00:00:00.000Z'));
   for (let index = 0; index < 24; index += 1) {
     const session = writeSession(home, `agy-bulk-${String(index).padStart(2, '0')}`);
-    fs.utimesSync(session.transcript, new Date('2026-07-21T00:00:00.000Z'), new Date('2026-07-21T00:00:00.000Z'));
+    const time = new Date(Date.parse('2026-07-21T00:00:00.000Z') + index * 1000);
+    fs.utimesSync(session.transcript, time, time);
   }
   const invalid = writeSession(home, 'agy-invalid-newest');
   fs.writeFileSync(invalid.transcript, '{not-json}\n');
@@ -245,6 +253,77 @@ test('agy discovery excludes PB-only sessions while direct diagnostics stay expl
   assert.match(validation.errorCode, /transcript_missing/);
   await assert.rejects(() => source.inspect(pbRef), /session_source_.*transcript_missing/);
   fs.rmSync(home, { recursive: true, force: true });
+});
+
+test('agy scoped discovery prefilters snapshot locators from one cache index', async () => {
+  const home = makeHome('metame-agy-scope-');
+  const projectA = path.join(home, 'workspace-a', 'project');
+  const projectB = path.join(home, 'workspace-b', 'project');
+  const other = path.join(home, 'workspace-c', 'other');
+  fs.mkdirSync(projectA, { recursive: true });
+  fs.mkdirSync(projectB, { recursive: true });
+  fs.mkdirSync(other, { recursive: true });
+  const scopedA = writeSession(home, 'agy-scope-a');
+  const scopedB = writeSession(home, 'agy-scope-b');
+  const unrelated = writeSession(home, 'agy-scope-other');
+  fs.utimesSync(scopedA.transcript, new Date('2026-07-22T00:00:00.000Z'), new Date('2026-07-22T00:00:00.000Z'));
+  fs.utimesSync(scopedB.transcript, new Date('2026-07-21T00:00:00.000Z'), new Date('2026-07-21T00:00:00.000Z'));
+  fs.utimesSync(unrelated.transcript, new Date('2026-07-23T00:00:00.000Z'), new Date('2026-07-23T00:00:00.000Z'));
+  writeCache(home, {
+    [projectA]: 'agy-scope-a',
+    [projectB]: 'agy-scope-b',
+    [other]: 'agy-scope-other',
+  });
+  const reads = countingFs();
+  const source = createAgySessionSourceAdapter({ home, fs: reads.fs });
+  const first = await discoverAll(source, { project: 'project', limit: 1 });
+  assert.deepEqual(first.map(ref => ref.nativeSessionId), ['agy-scope-a']);
+  assert.deepEqual(first[0].discoveryCursor.snapshot.map(entry => entry.sessionId), [
+    'agy-scope-a', 'agy-scope-b',
+  ]);
+  assert.equal(reads.counter.transcriptReads, 1, 'scope snapshot must not inspect all transcript bodies');
+  assert.equal(reads.counter.cacheReads, 1, 'scope snapshot must use one cache index');
+  const second = await discoverAll(source, { project: 'project', limit: 1, cursor: first[0].discoveryCursor });
+  assert.deepEqual(second.map(ref => ref.nativeSessionId), ['agy-scope-b']);
+  assert.equal(reads.counter.transcriptReads, 2, 'cursor page must not reread the first page');
+  assert.equal(reads.counter.cacheReads, 2, 'each page may refresh the cache index once');
+  const cwdReads = countingFs();
+  const cwdSource = createAgySessionSourceAdapter({ home, fs: cwdReads.fs });
+  const cwdRefs = await discoverAll(cwdSource, { cwd: projectB, limit: 1 });
+  assert.deepEqual(cwdRefs.map(ref => ref.nativeSessionId), ['agy-scope-b']);
+  assert.deepEqual(cwdRefs[0].discoveryCursor, undefined);
+  assert.equal(cwdReads.counter.transcriptReads, 1);
+  assert.equal(cwdReads.counter.cacheReads, 1);
+  await assert.rejects(
+    async () => {
+      for await (const _ref of source.discover({ project: 'other', cursor: first[0].discoveryCursor })) { /* consume */ }
+    },
+    /session_source_.*cursor_invalid/
+  );
+
+  const malformedCacheHome = makeHome('metame-agy-scope-malformed-');
+  writeSession(malformedCacheHome, 'agy-malformed-cache');
+  const malformedCache = path.join(malformedCacheHome, '.gemini', 'antigravity-cli', 'cache', 'last_conversations.json');
+  fs.writeFileSync(malformedCache, '{not-json');
+  const malformedReads = countingFs();
+  const malformedSource = createAgySessionSourceAdapter({ home: malformedCacheHome, fs: malformedReads.fs });
+  assert.deepEqual(await discoverAll(malformedSource, { project: 'malformed-cache-project', limit: 1 }), []);
+  assert.equal(malformedReads.counter.transcriptReads, 0, 'torn cache cannot leak an unknown scope');
+
+  const unknownScopeHome = makeHome('metame-agy-scope-unknown-');
+  writeSession(unknownScopeHome, 'agy-known-scope');
+  writeSession(unknownScopeHome, 'agy-unknown-scope');
+  const knownProject = path.join(unknownScopeHome, 'known', 'project');
+  fs.mkdirSync(knownProject, { recursive: true });
+  writeCache(unknownScopeHome, { [knownProject]: 'agy-known-scope' });
+  const unknownReads = countingFs();
+  const unknownSource = createAgySessionSourceAdapter({ home: unknownScopeHome, fs: unknownReads.fs });
+  const knownRefs = await discoverAll(unknownSource, { project: 'project', limit: 1 });
+  assert.deepEqual(knownRefs.map(ref => ref.nativeSessionId), ['agy-known-scope']);
+  assert.equal(unknownReads.counter.transcriptReads, 1);
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(malformedCacheHome, { recursive: true, force: true });
+  fs.rmSync(unknownScopeHome, { recursive: true, force: true });
 });
 
 test('agy validation reports missing, malformed, oversized and unsafe sources explicitly', async () => {

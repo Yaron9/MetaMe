@@ -450,6 +450,26 @@ function createAgySessionSourceAdapter(options = {}) {
     return ownershipForSession(readOwnershipCache(cachePath, fsMod).cache, sessionId, pathMod, fsMod);
   }
 
+  function ownershipIndex() {
+    const loaded = readOwnershipCache(cachePath, fsMod);
+    const bySession = new Map();
+    for (const [cwd, sessionId] of loaded.cache.entries()) {
+      const normalized = normalizeCwd(cwd, pathMod, fsMod);
+      if (!normalized) continue;
+      const owners = bySession.get(sessionId) || [];
+      if (!owners.includes(normalized)) owners.push(normalized);
+      bySession.set(sessionId, owners);
+    }
+    return { available: loaded.available, bySession };
+  }
+
+  function ownershipFromIndex(index, sessionId) {
+    const owners = index && index.bySession && index.bySession.get(sessionId) || [];
+    if (owners.length === 1) return { cwd: owners[0], state: 'cache' };
+    if (owners.length > 1) return { cwd: null, state: 'ambiguous' };
+    return { cwd: null, state: 'unavailable' };
+  }
+
   function artifactEntries() {
     const entries = new Map();
     const add = (sessionId, kind, mtimeMs) => {
@@ -457,7 +477,12 @@ function createAgySessionSourceAdapter(options = {}) {
       if (!id) return;
       const entry = entries.get(id) || { sessionId: id, sourceKinds: new Set(), mtimeMs: 0 };
       entry.sourceKinds.add(kind);
-      entry.mtimeMs = Math.max(entry.mtimeMs, Number(mtimeMs) || 0);
+      // Transcript mtime orders transcript-bearing sessions.  A protobuf is
+      // durability evidence only and must not make an older transcript look
+      // newer than the authoritative readable source.
+      if (kind === 'transcript' || !entry.sourceKinds.has('transcript')) {
+        entry.mtimeMs = Math.max(entry.mtimeMs, Number(mtimeMs) || 0);
+      }
       entries.set(id, entry);
     };
     let brainEntries = [];
@@ -481,8 +506,8 @@ function createAgySessionSourceAdapter(options = {}) {
       .sort((left, right) => right.mtimeMs - left.mtimeMs || left.sessionId.localeCompare(right.sessionId));
   }
 
-  function metadataForEntry(entry) {
-    const info = ownership(entry.sessionId);
+  function metadataForEntry(entry, index = null) {
+    const info = index ? ownershipFromIndex(index, entry.sessionId) : ownership(entry.sessionId);
     const projectInfo = deriveProjectInfo(info.cwd);
     return {
       nativeSessionId: entry.sessionId,
@@ -497,11 +522,13 @@ function createAgySessionSourceAdapter(options = {}) {
     };
   }
 
-  function inspectFile(filePath, expectedSessionId = '') {
+  function inspectFile(filePath, expectedSessionId = '', index = null) {
     const source = readFileBounded(filePath, fsMod, maxFileSize);
     const parsed = recordsFromText(source.text);
     const sessionId = safeSessionId(expectedSessionId || pathMod.basename(pathMod.dirname(pathMod.dirname(pathMod.dirname(filePath)))));
-    const ownershipInfo = ownership(sessionId);
+    const ownershipInfo = index
+      ? ownershipFromIndex(index, sessionId)
+      : ownership(sessionId);
     const artifact = { conversationAvailable: !!statFile(conversationPath(sessionId), fsMod) };
     const metadata = metadataFromRecords(parsed.records, sessionId, ownershipInfo, pathMod, artifact);
     const events = projectCanonicalRecords(parsed.records, metadata, adapterOptions);
@@ -545,6 +572,16 @@ function createAgySessionSourceAdapter(options = {}) {
     };
   }
 
+  function scopeMatchesEntry(entry, query, index) {
+    if (!query.project && !query.cwd) return true;
+    if (!index || !index.available) return false;
+    const metadata = metadataForEntry(entry, index);
+    if (!metadata.ownershipAvailable) return false;
+    const normalizedQueryCwd = query.cwd ? normalizeCwd(query.cwd, pathMod, fsMod) : null;
+    return (!query.project || metadata.project === query.project)
+      && (!query.cwd || metadata.cwd === normalizedQueryCwd);
+  }
+
   function filterEntry(entry, query, info, nativeSessionIds) {
     if (!info || !entry.sourceKinds.includes('transcript')
       || info.eventCount < 1 || info.eventLimitExceeded || info.formatDrift) return false;
@@ -556,24 +593,26 @@ function createAgySessionSourceAdapter(options = {}) {
         || !nativeSessionIds.has(info.parentNativeSessionId));
   }
 
-  function freshDiscoverySnapshot() {
+  function freshDiscoverySnapshot(query, index) {
     // Do not inspect transcript bodies while constructing a snapshot.  The
     // snapshot is an ordered, bounded set of durable locators; page reads
     // below inspect only the candidates needed to fill the requested page.
     return artifactEntries()
       .filter(entry => entry.sourceKinds.includes('transcript'))
+      .filter(entry => scopeMatchesEntry(entry, query, index))
       .slice(0, MAX_DISCOVERY_SNAPSHOT_ENTRIES)
       .map(entry => ({ sessionId: entry.sessionId, sourceKinds: entry.sourceKinds }));
   }
 
   function prepareDiscovery(request = {}) {
     const query = discoveryQuery(request);
+    const index = query.project || query.cwd ? ownershipIndex() : null;
     const cursor = parseDiscoveryCursor(request.cursor);
     if (cursor) {
       if (!sameDiscoveryQuery(cursor.query, query)) throw adapterError('AGY_SESSION_SOURCE_CURSOR_INVALID', 'query_mismatch');
-      return { query, cursor, snapshot: cursor.snapshot };
+      return { query, cursor, snapshot: cursor.snapshot, index };
     }
-    return { query, cursor: null, snapshot: freshDiscoverySnapshot() };
+    return { query, cursor: null, snapshot: freshDiscoverySnapshot(query, index), index };
   }
 
   function refsForRequest(request = {}) {
@@ -588,8 +627,9 @@ function createAgySessionSourceAdapter(options = {}) {
     for (let index = start; index < state.snapshot.length && page.length < acceptedLimit; index += 1) {
       lastScannedIndex = index;
       const entry = state.snapshot[index];
+      if (!scopeMatchesEntry(entry, state.query, state.index)) continue;
       let info;
-      try { info = inspectFile(transcriptPath(entry.sessionId), entry.sessionId); } catch { continue; }
+      try { info = inspectFile(transcriptPath(entry.sessionId), entry.sessionId, state.index); } catch { continue; }
       if (!filterEntry(entry, state.query, info, nativeSessionIds)) continue;
       page.push({ entry, info, snapshotIndex: index });
     }
