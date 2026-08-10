@@ -6,6 +6,8 @@ const path = require('node:path');
 const { afterEach, describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { DatabaseSync } = require('node:sqlite');
+const { applyWikiSchema } = require('./memory-wiki-schema');
+const { exportManagedWikiPage } = require('./wiki-reflect-export');
 const { _internal } = require('./wiki-doctor');
 
 const tempFiles = [];
@@ -47,6 +49,43 @@ describe('wiki doctor reporting', () => {
     _internal.inspectDatabase(report, { enabled: true, outputRoot: path.join(dir, 'wiki'), recall_mode: 'shadow' }, { dbPath });
     assert.equal(report.metrics.openwiki_pages, 0);
     assert.equal(report.checks.find(check => check.name === 'openwiki-schema').level, 'degraded');
+  });
+
+  it('checks managed memory projections but ignores OpenWiki and artifact rows', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-doctor-projections-'));
+    tempFiles.push(dir);
+    const db = new DatabaseSync(':memory:');
+    applyWikiSchema(db);
+    db.prepare(`
+      INSERT INTO wiki_pages (id, slug, title, content, primary_topic, source_type)
+      VALUES
+        ('memory-1', 'managed', 'Managed', 'canonical', 'managed', 'memory'),
+        ('openwiki-1', 'external/openwiki/page', 'OpenWiki', 'external', 'external', 'openwiki'),
+        ('artifact-1', 'artifact/playbook/a1', 'Artifact', 'artifact', 'artifact', 'knowledge_artifact')
+    `).run();
+    const page = db.prepare("SELECT * FROM wiki_pages WHERE slug='managed'").get();
+    const frontmatter = {
+      title: page.title, slug: page.slug, tags: [],
+      created: String(page.created_at || '').slice(0, 10),
+      last_built: String(page.last_built_at || '').slice(0, 10),
+      raw_sources: page.raw_source_count || 0, staleness: page.staleness || 0, source_type: 'memory',
+    };
+    exportManagedWikiPage(db, 'managed', frontmatter, 'canonical', dir);
+
+    const healthy = { status: 'ok', checks: [], metrics: {} };
+    _internal.inspectWikiProjections(healthy, db, dir);
+    assert.equal(healthy.status, 'ok');
+    assert.equal(healthy.metrics.wiki_projection.tracked, 1);
+    assert.equal(healthy.metrics.wiki_projection.untracked, 0);
+    assert.equal(healthy.metrics.wiki_projection.details.some(item => item.slug.includes('external')), false);
+    assert.equal(healthy.metrics.wiki_projection.details.some(item => item.slug.includes('artifact')), false);
+
+    fs.appendFileSync(path.join(dir, 'topics', 'managed.md'), '\nuser edit\n');
+    const degraded = { status: 'ok', checks: [], metrics: {} };
+    _internal.inspectWikiProjections(degraded, db, dir);
+    assert.equal(degraded.status, 'degraded');
+    assert.equal(degraded.metrics.wiki_projection.modified, 1);
+    db.close();
   });
 
   it('marks parse_failed reflection records as unhealthy', () => {

@@ -20,6 +20,7 @@ const path = require('path');
 const { defaultWikiOutputDir } = require('./core/wiki-paths');
 const {
   WIKI_COLLECTIONS,
+  isManagedWikiSourceType,
   partitionWikiPages,
   resolveWikiPageRelativePath,
   wikiPageLink,
@@ -666,13 +667,12 @@ function exportDocPages(db, outputDir) {
 }
 
 function exportStoredWikiPages(pages, outputDir, { db = null } = {}) {
-  const exportable = new Set(['memory', 'managed_redirect', 'doc', 'topic_cluster']);
   const exported = [];
   const skipped = [];
   const projectionSkipped = [];
   const projectionReady = _hasProjectionSchema(db);
   for (const page of Array.isArray(pages) ? pages : []) {
-    if (!exportable.has(String(page.source_type || 'memory')) || !String(page.content || '').trim()) continue;
+    if (!isManagedWikiSourceType(page.source_type) || !String(page.content || '').trim()) continue;
     if (db && !projectionReady) {
       let filePath = null;
       try {

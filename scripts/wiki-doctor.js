@@ -10,7 +10,7 @@ const { DatabaseSync } = require('node:sqlite');
 const embedding = require('./core/embedding');
 const { loadOpenWikiConfig, preparePages } = require('./openwiki-sync')._internal;
 const { resolveConfiguredWikiOutputDir } = require('./core/wiki-paths');
-const { resolveWikiPageRelativePath } = require('./core/wiki-layout');
+const { isManagedWikiSourceType, resolveWikiPageRelativePath } = require('./core/wiki-layout');
 const { classifyProjectionHashes, projectionHash } = require('./core/wiki-projection');
 const { renderWikiPage } = require('./wiki-reflect-export');
 const { auditVault } = require('./wiki-link-maintain');
@@ -81,7 +81,8 @@ function inspectWikiProjections(report, db, outputDir) {
     sidecar_missing: 0,
   };
   const details = [];
-  const rows = db.prepare('SELECT * FROM wiki_pages').all();
+  const rows = db.prepare('SELECT * FROM wiki_pages').all()
+    .filter(row => isManagedWikiSourceType(row.source_type));
   for (const row of rows) {
     let classification;
     let filePath = null;

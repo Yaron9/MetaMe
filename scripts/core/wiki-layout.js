@@ -7,6 +7,17 @@ const WIKI_COLLECTIONS = Object.freeze({
   sources: Object.freeze({ title: '来源资料 Sources', description: '导入文档与研究资料形成的来源页。' }),
 });
 
+// These are the only wiki_pages rows whose Markdown is owned by the Wiki
+// projector. OpenWiki and knowledge-artifact rows have their own authorities
+// and must not enter projection Base/Current/User reconciliation.
+const MANAGED_WIKI_SOURCE_TYPES = Object.freeze([
+  'memory', 'managed_redirect', 'doc', 'topic_cluster',
+]);
+
+function isManagedWikiSourceType(sourceType) {
+  return MANAGED_WIKI_SOURCE_TYPES.includes(String(sourceType || 'memory').trim());
+}
+
 function normalizeSlug(slug) {
   const value = String(slug || '').trim().replaceAll('\\', '/');
   if (!value || value.startsWith('/') || value.split('/').some(part => !part || part === '.' || part === '..')) {
@@ -57,6 +68,8 @@ function partitionWikiPages(pages = []) {
 }
 
 module.exports = {
+  isManagedWikiSourceType,
+  MANAGED_WIKI_SOURCE_TYPES,
   WIKI_COLLECTIONS,
   normalizeSlug,
   partitionWikiPages,
