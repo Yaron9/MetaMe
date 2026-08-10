@@ -339,7 +339,6 @@ function hasAdapterOperations(adapter, capabilityName) {
     sessionSource: ['discover', 'inspect', 'read', 'validate'],
     cognitiveHost: ['detect', 'inspectCapabilities', 'planInstall', 'verify'],
   }[capabilityName];
-  if (capabilityName === 'runtime' && typeof adapter.runTurn === 'function') return true;
   // The capability boundaries are intentionally complete when present.  A
   // plugin may omit a whole capability, but a partial adapter cannot be
   // registered and later misreported as available.

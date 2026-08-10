@@ -7,6 +7,8 @@ const { execSync } = require('child_process');
 const { normalizeEngineName } = require('./daemon-utils');
 const { AGY_DEFAULT_MODEL, normalizeAgyModel } = require('./core/agy-model');
 const { createDefaultEngineRegistry } = require('./engines/engine-registry');
+const { createEnginePlugin, isEnginePlugin } = require('./engines/engine-plugin');
+const { getEngineDescriptor } = require('./core/engine-descriptors');
 const { _private: claudeAdapter } = require('./engines/claude-cli-adapter');
 const { _private: codexAdapter } = require('./engines/codex-cli-adapter');
 const { _private: agyAdapter } = require('./engines/agy-cli-adapter');
@@ -188,6 +190,107 @@ function resolveEngineTimeouts(engineName) {
   return { ...base };
 }
 
+/**
+ * Resolve the only supported execution registration unit: an Engine Plugin.
+ *
+ * The daemon historically accepted a bare native runtime from dependency
+ * injection.  That shape is normalized once at this external boundary so
+ * tests and older embedders can continue to construct the daemon.  Production
+ * callers receive the immutable plugin returned by the registry and never
+ * enter this compatibility path.
+ */
+function compatibilityDescriptor(runtime, engineName) {
+  const requestedId = String(engineName || runtime.name || '').trim().toLowerCase();
+  return runtime.descriptor
+    || getEngineDescriptor(requestedId)
+    || {
+      id: requestedId || 'unknown',
+      displayName: requestedId || 'unknown',
+      vendor: 'unknown',
+      executableNames: [requestedId || 'unknown'],
+      contextProjection: 'prompt-bootstrap',
+      nativeSessionKind: 'opaque',
+      capabilities: {
+        runtime: { state: 'verified' },
+        sessionSource: { state: 'unsupported' },
+        cognitiveHost: { state: 'unsupported' },
+      },
+      configSchemaVersion: 1,
+    };
+}
+
+function adaptCompatibilityRuntime(legacyRuntime, descriptor) {
+  const runtime = { ...legacyRuntime };
+  if (typeof runtime.probe !== 'function') {
+    runtime.probe = () => ({ engineId: descriptor.id, state: 'detected' });
+  }
+  if (typeof runtime.buildInvocation !== 'function' && typeof runtime.buildArgs === 'function') {
+    runtime.buildInvocation = (options = {}) => {
+      const session = options.session || options.nativeSession || {};
+      const executable = runtime.binary || runtime.executable || descriptor.executableNames[0];
+      return {
+        engine: descriptor.id,
+        executable,
+        binary: executable,
+        args: runtime.buildArgs({ ...options, session }),
+        env: typeof runtime.buildEnv === 'function' ? runtime.buildEnv({ ...options, session }) : {},
+        cwd: options.cwd || session.cwd || '',
+        input: options.input === undefined ? '' : options.input,
+        killSignal: runtime.killSignal || 'SIGTERM',
+        timeouts: runtime.timeouts || {},
+      };
+    };
+  }
+  if (typeof runtime.parseEvent !== 'function' && typeof runtime.parseStreamEvent === 'function') {
+    runtime.parseEvent = runtime.parseStreamEvent;
+  }
+  if (typeof runtime.classifyFailure !== 'function' && typeof runtime.classifyError === 'function') {
+    runtime.classifyFailure = runtime.classifyError;
+  }
+  if (typeof runtime.validateSession !== 'function') {
+    runtime.validateSession = session => {
+      if (typeof runtime.acceptsNativeSession === 'function' && !runtime.acceptsNativeSession(session)) {
+        throw new Error(`${descriptor.id}_native_session_mismatch`);
+      }
+      if (typeof runtime.validateNativeSession === 'function') return runtime.validateNativeSession(session);
+      return true;
+    };
+  }
+  if (typeof runtime.updateSession !== 'function') {
+    runtime.updateSession = (session, observation = {}) => {
+      if (typeof runtime.updateNativeSession === 'function') {
+        return runtime.updateNativeSession(session, observation);
+      }
+      if (!observation.sessionId) return session;
+      return {
+        ...(session || {}),
+        engine: descriptor.id,
+        id: observation.sessionId,
+        started: true,
+        cwd: observation.cwd || (session && session.cwd) || '',
+      };
+    };
+  }
+  return runtime;
+}
+
+function resolveEnginePlugin(value, engineName = '') {
+  if (isEnginePlugin(value)) return value;
+  const legacyRuntime = value && value.runtime && value.descriptor
+    ? value.runtime
+    : value;
+  if (!legacyRuntime || typeof legacyRuntime !== 'object') return null;
+  const descriptor = compatibilityDescriptor(legacyRuntime, engineName);
+  const runtime = adaptCompatibilityRuntime(legacyRuntime, descriptor);
+  return createEnginePlugin({
+    protocolVersion: 1,
+    descriptor,
+    runtime,
+    sessionSource: null,
+    cognitiveHost: null,
+  });
+}
+
 function buildClaudeArgs(options = {}) {
   return adapterBuildClaudeArgs(options);
 }
@@ -268,6 +371,7 @@ function createEngineRuntimeFactory(deps = {}) {
 
 module.exports = {
   createEngineRuntimeFactory,
+  resolveEnginePlugin,
   normalizeEngineName,
   resolveBinary,
   detectDefaultEngine,

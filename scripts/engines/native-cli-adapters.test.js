@@ -179,6 +179,23 @@ test('native event fixtures remain engine-specific behind the adapter seam', () 
   assert.deepEqual(agy.parseStreamEvent('{"type":"system","subtype":"init","session_id":"wrong"}'), []);
 });
 
+test('final runtime boundary exposes only normalized event vocabulary', () => {
+  const registry = createRegistry();
+  const fixtures = {
+    claude: JSON.stringify({
+      type: 'result', session_id: 'claude-final', result: 'done', usage: { input_tokens: 1 },
+    }),
+    codex: JSON.stringify({ type: 'turn.completed', usage: { output_tokens: 2 } }),
+    agy: JSON.stringify({ type: 'done' }),
+  };
+  for (const engine of ['claude', 'codex', 'agy']) {
+    const runtime = registry.get(engine).runtime;
+    const events = runtime.parseEvent(fixtures[engine]);
+    assert.ok(events.some(event => event.type === 'run_completed'), engine);
+    assert.ok(events.every(event => !['session', 'text', 'tool_use', 'tool_result', 'done', 'error'].includes(event.type)), engine);
+  }
+});
+
 test('registry adapters execute one logical turn and return engine-scoped session state', async () => {
   const registry = createRegistry();
   const fixtures = {

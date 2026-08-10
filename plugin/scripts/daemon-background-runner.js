@@ -6,25 +6,40 @@ const path = require('path');
 const { spawn, execSync } = require('child_process');
 const { runAsyncCommand, createPlatformSpawn, terminateChildProcess } = require('./core/handoff');
 const { COMPLETION_SCHEMA, normalizeCompletionResult } = require('./core/completion-contract');
+const { resolveEnginePlugin } = require('./daemon-engine-runtime');
 
-function collectNativeResult(runtime, output) {
+function collectNativeResult(enginePlugin, output) {
+  const plugin = resolveEnginePlugin(enginePlugin, enginePlugin && enginePlugin.name);
+  const runtimeAdapter = plugin && plugin.runtime;
+  if (!runtimeAdapter || typeof runtimeAdapter.parseEvent !== 'function') {
+    return { sessionId: '', usage: null, finalValue: null, classifiedError: null, toolUseCount: 0 };
+  }
   let sessionId = '';
   let usage = null;
   let finalValue = null;
   let classifiedError = null;
   let toolUseCount = 0;
+  let terminalType = '';
   for (const line of String(output || '').split('\n').filter(Boolean)) {
-    for (const event of runtime.parseStreamEvent(line)) {
-      if (event.type === 'session') sessionId = event.sessionId || sessionId;
-      if (event.type === 'text') finalValue = event.text;
-      if (event.type === 'done') {
+    for (const event of runtimeAdapter.parseEvent(line)) {
+      if (terminalType) continue;
+      if (event.type === 'session_observed' || event.type === 'session') {
+        sessionId = event.sessionId || event.nativeSessionId || sessionId;
+      }
+      if (event.type === 'message_delta' || event.type === 'text') finalValue = event.text;
+      if (event.type === 'usage_observed') usage = event.usage || usage;
+      if (event.type === 'run_completed' || event.type === 'done') {
+        terminalType = 'completed';
         usage = event.usage || usage;
         finalValue = event.raw && (event.raw.structured_output || event.raw.structuredOutput)
           || event.result
           || finalValue;
       }
-      if (event.type === 'error') classifiedError = event;
-      if (event.type === 'tool_use') toolUseCount += 1;
+      if (event.type === 'run_failed' || event.type === 'error') {
+        terminalType = 'failed';
+        classifiedError = event;
+      }
+      if (event.type === 'tool_started' || event.type === 'tool_use') toolUseCount += 1;
     }
   }
   return { sessionId, usage, finalValue, classifiedError, toolUseCount };
@@ -46,26 +61,60 @@ function createBackgroundRunner(deps = {}) {
   }).spawn;
   const activeChildren = new Set();
 
-  function runAdapterTurn(runtime, request) {
-    if (typeof runtime.runTurn === 'function') return runtime.runTurn(request);
+  async function runAdapterTurn(enginePlugin, request) {
+    const runtime = enginePlugin && enginePlugin.runtime;
+    if (!runtime) throw new Error('engine_runtime_missing');
     const turn = request.turn || {};
-    const session = request.nativeSession || {};
-    return request.executionPolicy.execute({
-      engine: runtime.name,
-      binary: runtime.binary,
-      args: runtime.buildArgs({ ...turn, session }),
-      env: runtime.buildEnv({ ...turn, session }),
-      input: turn.input,
-      cwd: turn.cwd,
-      killSignal: runtime.killSignal,
-      timeouts: runtime.timeouts,
+    const candidateSession = request.nativeSession || {};
+    const sessionWasValid = runtime.validateSession(candidateSession);
+    const nativeSession = sessionWasValid ? candidateSession : null;
+    const invocation = runtime.buildInvocation({ ...turn, session: nativeSession });
+    const executionResult = await request.executionPolicy.execute(invocation);
+    const result = executionResult || {};
+    const events = [];
+    for (const event of result.events || []) events.push(event);
+    for (const line of result.nativeLines || []) {
+      for (const event of runtime.parseEvent(line)) events.push(event);
+    }
+    let sessionId = result.sessionId || '';
+    for (let index = events.length - 1; index >= 0 && !sessionId; index -= 1) {
+      const event = events[index];
+      if (event.type === 'session_observed' || event.type === 'session') {
+        sessionId = event.sessionId || event.nativeSessionId || '';
+      }
+    }
+    const failure = result.failure || (result.error ? runtime.classifyFailure(result.error) : null);
+    const nativeSessionNext = runtime.updateSession(nativeSession, {
+      sessionId,
+      cwd: invocation.cwd,
+      result,
+      events,
     });
+    return {
+      ...result,
+      events,
+      sessionId,
+      failure,
+      nativeSession: nativeSessionNext,
+      sessionWasValid,
+    };
   }
 
   async function startTurn(options = {}) {
-    const runtime = deps.getEngineRuntime(options.engine);
+    const plugin = resolveEnginePlugin(deps.getEngineRuntime(options.engine), options.engine);
+    const runtime = plugin && plugin.runtime;
+    const engineName = plugin && plugin.descriptor
+      ? plugin.descriptor.id
+      : (runtime && runtime.name) || options.engine || 'unknown';
+    const timeouts = (runtime && runtime.timeouts) || {};
+    const runtimeCapability = plugin && plugin.descriptor && plugin.descriptor.capabilities
+      ? plugin.descriptor.capabilities.runtime
+      : null;
+    if (!runtime || (runtimeCapability && (runtimeCapability.supported === false || runtimeCapability.state === 'unsupported'))) {
+      return { ok: false, error: `${engineName}_runtime_unsupported`, errorCode: 'CAPABILITY_UNSUPPORTED' };
+    }
     if (typeof runtime.isReady === 'function' && !runtime.isReady()) {
-      return { ok: false, error: `${runtime.name}_runtime_not_ready`, errorCode: 'RUNTIME_NOT_READY' };
+      return { ok: false, error: `${engineName}_runtime_not_ready`, errorCode: 'RUNTIME_NOT_READY' };
     }
     const structured = options.structured !== false;
     const schema = structured ? (options.outputSchema || COMPLETION_SCHEMA) : null;
@@ -73,7 +122,7 @@ function createBackgroundRunner(deps = {}) {
     let outputSchemaPath = '';
     let childRef = null;
     try {
-      if (runtime.name === 'codex' && schema) {
+      if (engineName === 'codex' && schema) {
         schemaDir = fsModule.mkdtempSync(pathModule.join(osModule.tmpdir(), 'metame-schema-'));
         outputSchemaPath = pathModule.join(schemaDir, 'completion.schema.json');
         fsModule.writeFileSync(outputSchemaPath, JSON.stringify(schema), { mode: 0o600 });
@@ -83,12 +132,12 @@ function createBackgroundRunner(deps = {}) {
         model: options.model || runtime.defaultModel,
         readOnly: !!options.readOnly,
         cwd: options.cwd,
-        timeoutMs: options.timeoutMs || runtime.timeouts.idleMs,
+        timeoutMs: options.timeoutMs || timeouts.idleMs || 600000,
         daemonCfg: options.daemonCfg || {},
         permissionProfile: options.permissions || null,
-        outputSchema: runtime.name === 'claude' ? schema : null,
+        outputSchema: engineName === 'claude' ? schema : null,
         outputSchemaPath,
-        outputFormat: runtime.name === 'claude' ? 'json' : '',
+        outputFormat: engineName === 'claude' ? 'json' : '',
         allowedTools: options.allowedTools || [],
         mcpConfig: options.mcpConfig || '',
         metameProject: options.projectKey || '',
@@ -96,25 +145,25 @@ function createBackgroundRunner(deps = {}) {
         providerEnv: options.providerEnv || {},
         internalPrompt: !!options.internalPrompt,
       };
-      const commandResult = await runAdapterTurn(runtime, {
+      const commandResult = await runAdapterTurn(plugin, {
         turn,
         nativeSession: options.sessionRef || {},
         executionPolicy: {
           execute: invocation => runCommand({
             spawn: spawnProcess,
-            cmd: invocation.binary,
+            cmd: invocation.executable,
             args: invocation.args,
             cwd: invocation.cwd,
             env: invocation.env,
             input: invocation.input,
-            timeoutMs: options.timeoutMs || runtime.timeouts.idleMs,
-            killSignal: runtime.killSignal,
+            timeoutMs: options.timeoutMs || timeouts.idleMs || 600000,
+            killSignal: invocation.killSignal || runtime.killSignal || 'SIGTERM',
             useProcessGroup: process.platform !== 'win32',
             signal: options.signal || null,
             // Structured/Codex JSONL keeps the tail where the final native event lives.
             // Legacy Claude text keeps its historical prefix preview. Structured truncation
             // is rejected below, so neither mode can silently validate partial output.
-            stdoutBufferMode: structured || runtime.name === 'codex' ? 'tail' : 'prefix',
+            stdoutBufferMode: structured || engineName === 'codex' ? 'tail' : 'prefix',
             onChild(child) {
               childRef = child;
               activeChildren.add(child);
@@ -128,7 +177,7 @@ function createBackgroundRunner(deps = {}) {
           return { ok: false, error: commandResult.error, errorCode: 'INTERRUPTED' };
         }
         const timedOut = /^Timeout:/i.test(commandResult.error);
-        const classified = timedOut ? null : runtime.classifyError(commandResult.error);
+        const classified = timedOut ? null : runtime.classifyFailure(commandResult.error);
         return {
           ok: false,
           error: commandResult.error,
@@ -142,7 +191,7 @@ function createBackgroundRunner(deps = {}) {
           errorCode: 'BUFFER_LIMIT_EXCEEDED',
         };
       }
-      let native = collectNativeResult(runtime, commandResult.output);
+      let native = collectNativeResult(plugin, commandResult.output);
       if (!structured && typeof runtime.recoverFinalOutput === 'function') {
         native = runtime.recoverFinalOutput(commandResult.output, native);
       }
@@ -170,11 +219,16 @@ function createBackgroundRunner(deps = {}) {
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
       const isContractError = message.startsWith('completion_');
-      const classified = isContractError ? null : deps.getEngineRuntime(options.engine).classifyError(err);
+      const isSessionMismatch = message.endsWith('_native_session_mismatch');
+      const classified = isContractError ? null : runtime.classifyFailure(err);
       return {
         ok: false,
         error: message,
-        errorCode: isContractError ? 'INVALID_STRUCTURED_OUTPUT' : (classified ? classified.code : 'EXEC_FAILURE'),
+        errorCode: isContractError
+          ? 'INVALID_STRUCTURED_OUTPUT'
+          : isSessionMismatch
+            ? 'NATIVE_SESSION_MISMATCH'
+            : (classified ? classified.code : 'EXEC_FAILURE'),
       };
     } finally {
       if (childRef) activeChildren.delete(childRef);

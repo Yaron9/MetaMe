@@ -1,5 +1,21 @@
 'use strict';
 
+function toCompatibilityEvent(event) {
+  if (!event || typeof event !== 'object') return event;
+  const types = {
+    session_observed: 'session',
+    message_delta: 'text',
+    thinking_delta: 'thinking',
+    tool_started: 'tool_use',
+    tool_updated: 'tool_updated',
+    tool_finished: 'tool_result',
+    usage_observed: 'usage',
+    run_completed: 'done',
+    run_failed: 'error',
+  };
+  return types[event.type] ? { ...event, type: types[event.type] } : event;
+}
+
 function collectNativeEvents(adapter, executionResult, onEvent) {
   const events = [];
   const emit = event => {
@@ -8,9 +24,9 @@ function collectNativeEvents(adapter, executionResult, onEvent) {
     if (typeof onEvent === 'function') onEvent(event);
   };
 
-  for (const event of executionResult.events || []) emit(event);
+  for (const event of executionResult.events || []) emit(toCompatibilityEvent(event));
   for (const line of executionResult.nativeLines || []) {
-    for (const event of adapter.parseStreamEvent(line)) emit(event);
+    for (const event of adapter.parseEvent(line)) emit(toCompatibilityEvent(event));
   }
   return events;
 }
@@ -45,27 +61,15 @@ async function executeNativeCliTurn(adapter, request = {}) {
   }
 
   const candidateSession = request.nativeSession || null;
-  if (!adapter.acceptsNativeSession(candidateSession)) {
-    throw new Error(`${adapter.name}_native_session_mismatch`);
-  }
-  const sessionWasValid = adapter.validateNativeSession(candidateSession);
+  const sessionWasValid = adapter.validateSession(candidateSession);
   const nativeSession = sessionWasValid ? candidateSession : null;
-  const invocation = Object.freeze({
-    engine: adapter.name,
-    binary: adapter.binary,
-    args: adapter.buildArgs({ ...turn, session: nativeSession }),
-    env: adapter.buildEnv({ ...turn, session: nativeSession }),
-    input: turn.input === undefined ? '' : turn.input,
-    cwd: turn.cwd || (nativeSession && nativeSession.cwd) || '',
-    killSignal: adapter.killSignal,
-    timeouts: adapter.timeouts,
-  });
+  const invocation = adapter.buildInvocation({ ...turn, session: nativeSession });
 
   let executionResult;
   try {
     executionResult = await execute(invocation);
   } catch (error) {
-    const failure = adapter.classifyError(error);
+    const failure = adapter.classifyFailure(error);
     return {
       events: [],
       final: null,
@@ -81,8 +85,8 @@ async function executeNativeCliTurn(adapter, request = {}) {
   const sessionId = findObservedSessionId(events, normalizedResult);
   const errorValue = normalizedResult.error || '';
   const failure = normalizedResult.failure
-    || (errorValue ? adapter.classifyError(errorValue) : null);
-  const nextNativeSession = adapter.updateNativeSession(nativeSession, {
+    || (errorValue ? adapter.classifyFailure(errorValue) : null);
+  const nextNativeSession = adapter.updateSession(nativeSession, {
     sessionId,
     cwd: invocation.cwd,
     result: normalizedResult,

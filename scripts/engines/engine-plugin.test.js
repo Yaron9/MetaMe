@@ -122,6 +122,16 @@ test('capability absence is valid, while a declared-but-missing capability is re
   }
 });
 
+test('runtime capability cannot be registered through the legacy runTurn-only seam', () => {
+  assert.throws(() => createEnginePlugin({
+    protocolVersion: 1,
+    descriptor: pluginFixture().descriptor,
+    runtime: { runTurn: async () => ({}) },
+    sessionSource: null,
+    cognitiveHost: null,
+  }), /capability_adapter_operations_required/);
+});
+
 test('registry rejects malformed and duplicate plugins and distinguishes unknown from explicit fallback', () => {
   const fixture = pluginFixture();
   const registry = createEngineRegistry([fixture], { defaultEngineId: 'fixture-agent' });

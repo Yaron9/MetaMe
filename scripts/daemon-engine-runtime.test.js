@@ -315,6 +315,31 @@ describe('daemon-engine-runtime error classification', () => {
 });
 
 describe('daemon-engine-runtime factory', () => {
+  it('returns immutable Engine Plugins whose runtime boundary is canonical', () => {
+    const getEnginePlugin = createEngineRuntimeFactory({
+      CLAUDE_BIN: '/opt/test/claude',
+      CODEX_BIN: '/opt/test/codex',
+      AGY_BIN: '/opt/test/agy',
+      AGY_ADAPTER: '/opt/test/agy-adapter.js',
+      getActiveProviderEnv: () => ({}),
+    });
+    for (const name of ['claude', 'codex', 'agy']) {
+      const plugin = getEnginePlugin(name);
+      assert.equal(plugin.descriptor.id, name);
+      assert.equal(plugin.descriptor.capabilities.runtime.state, 'verified');
+      assert.equal(Object.isFrozen(plugin), true);
+      assert.equal(typeof plugin.runtime.buildInvocation, 'function');
+      assert.equal(typeof plugin.runtime.parseEvent, 'function');
+      assert.equal(typeof plugin.runtime.classifyFailure, 'function');
+      assert.equal(typeof plugin.runtime.validateSession, 'function');
+      assert.equal(typeof plugin.runtime.updateSession, 'function');
+      const invocation = plugin.runtime.buildInvocation({ input: 'hello', cwd: '/tmp/project', session: {} });
+      assert.equal(invocation.executable, plugin.runtime.binary);
+      assert.ok(Array.isArray(invocation.args));
+      assert.equal(invocation.shell, undefined);
+    }
+  });
+
   it('attaches the registry descriptor to every runtime', () => {
     const { ENGINE_NAMES, getEngineDescriptor } = require('./core/engine-descriptors');
     const getRuntime = createEngineRuntimeFactory({

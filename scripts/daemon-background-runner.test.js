@@ -5,6 +5,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createBackgroundRunner } = require('./daemon-background-runner');
 const { _private } = require('./daemon-engine-runtime');
+const { createEnginePlugin } = require('./engines/engine-plugin');
+const { getEngineDescriptor } = require('./core/engine-descriptors');
 
 const result = {
   status: 'candidate_complete', summary: 'done', artifacts: [], claims: ['tests passed'], next: null,
@@ -43,6 +45,7 @@ test('background runner maps Completion Contract through Claude native output', 
   const completed = await runner.startTurn({ engine: 'claude', prompt: 'work', cwd: '/tmp' });
   assert.equal(completed.ok, true);
   assert.deepEqual(completed.result, result);
+  assert.equal(invocation.cmd, 'claude');
   assert.equal(completed.sessionId, 'claude-1');
   assert.ok(invocation.args.includes('--json-schema'));
   assert.ok(invocation.args.includes('--output-format'));
@@ -123,4 +126,113 @@ test('background runner rejects a successful process without a terminal answer',
   const completed = await runner.startTurn({ engine: 'agy', prompt: 'summarize', structured: false });
   assert.equal(completed.ok, false);
   assert.equal(completed.errorCode, 'EMPTY_FINAL_REPLY');
+});
+
+test('background runner executes through plugin.runtime final operations', async () => {
+  const calls = [];
+  let invocation = null;
+  const plugin = createEnginePlugin({
+    protocolVersion: 1,
+    descriptor: getEngineDescriptor('claude'),
+    runtime: {
+      name: 'claude',
+      binary: 'fixture-claude',
+      defaultModel: 'auto',
+      timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: null },
+      killSignal: 'SIGTERM',
+      probe: () => ({ state: 'verified' }),
+      buildInvocation: options => {
+        calls.push('buildInvocation');
+        return {
+          executable: 'fixture-claude',
+          binary: 'fixture-claude',
+          args: ['-p'],
+          env: {},
+          cwd: options.cwd || '',
+          input: options.input || '',
+          killSignal: 'SIGTERM',
+          timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: null },
+        };
+      },
+      parseEvent: line => {
+        calls.push('parseEvent');
+        const record = JSON.parse(line);
+        return [{ type: 'run_completed', result: record.result }];
+      },
+      classifyFailure: () => {
+        calls.push('classifyFailure');
+        return null;
+      },
+      validateSession: () => {
+        calls.push('validateSession');
+        return true;
+      },
+      updateSession: () => {
+        calls.push('updateSession');
+        return null;
+      },
+    },
+    sessionSource: null,
+    cognitiveHost: null,
+  });
+  const runner = createBackgroundRunner({
+    getEngineRuntime: () => plugin,
+    runCommand: async options => {
+      invocation = options;
+      return {
+        output: JSON.stringify({ result }),
+        error: null,
+      };
+    },
+  });
+  const completed = await runner.startTurn({ engine: 'claude', prompt: 'work', cwd: '/tmp' });
+  assert.equal(completed.ok, true);
+  assert.deepEqual(completed.result, result);
+  assert.equal(invocation.cmd, 'fixture-claude');
+  assert.deepEqual(calls, ['validateSession', 'buildInvocation', 'updateSession', 'parseEvent']);
+});
+
+test('background runner keeps terminal failure exclusive and kills active child trees on shutdown', async () => {
+  const runtimePlugin = createEnginePlugin({
+    protocolVersion: 1,
+    descriptor: getEngineDescriptor('claude'),
+    runtime: {
+      name: 'claude', binary: 'fixture-claude', defaultModel: 'auto',
+      timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: null }, killSignal: 'SIGTERM',
+      buildInvocation: () => ({ executable: 'fixture-claude', binary: 'fixture-claude', args: [], env: {}, cwd: '', input: '', killSignal: 'SIGTERM', timeouts: { idleMs: 1000 } }),
+      parseEvent: line => {
+        const record = JSON.parse(line);
+        return record.type === 'failed'
+          ? [{ type: 'run_failed', code: 'FIXTURE_FAILURE', message: 'failed' }]
+          : [{ type: 'run_completed', result }];
+      },
+      classifyFailure: error => ({ code: 'EXEC_FAILURE', message: String(error) }),
+      validateSession: () => true,
+      updateSession: session => session,
+    },
+    sessionSource: null,
+    cognitiveHost: null,
+  });
+  const terminal = require('./daemon-background-runner')._internal.collectNativeResult(
+    runtimePlugin,
+    '{"type":"failed"}\n{"type":"completed"}'
+  );
+  assert.equal(terminal.classifiedError.code, 'FIXTURE_FAILURE');
+  assert.equal(terminal.finalValue, null);
+
+  let resolveCommand;
+  const child = { pid: 999999999, killSignals: [], kill(signal) { this.killSignals.push(signal); } };
+  const runner = createBackgroundRunner({
+    getEngineRuntime: () => runtimePlugin,
+    runCommand: options => new Promise(resolve => {
+      resolveCommand = resolve;
+      options.onChild(child);
+    }),
+  });
+  const pending = runner.startTurn({ engine: 'claude', prompt: 'work' });
+  await new Promise(resolve => setImmediate(resolve));
+  runner.shutdown('SIGTERM');
+  assert.deepEqual(child.killSignals, ['SIGTERM']);
+  resolveCommand({ output: '', error: 'Stopped by user', errorCode: 'INTERRUPTED' });
+  await pending;
 });

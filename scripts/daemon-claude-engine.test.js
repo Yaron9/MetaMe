@@ -9,6 +9,8 @@ const os = require('os');
 const { PassThrough } = require('stream');
 const { EventEmitter } = require('events');
 const { createClaudeEngine } = require('./daemon-claude-engine');
+const { createEnginePlugin } = require('./engines/engine-plugin');
+const { getEngineDescriptor } = require('./core/engine-descriptors');
 
 function createEngineWithState(state, overrides = {}) {
   return createClaudeEngine({
@@ -693,6 +695,81 @@ describe('daemon-claude-engine private helpers', () => {
       entry && entry.logicalChatId === '_bound_paper_rev' && entry.cwd === path.resolve('E:\\paper\\paper30-reloading')
     );
     assert.ok(tracked);
+  });
+
+  it('routes foreground turns through plugin.runtime final operations', async () => {
+    const calls = [];
+    const plugin = createEnginePlugin({
+      protocolVersion: 1,
+      descriptor: getEngineDescriptor('claude'),
+      runtime: {
+        defaultModel: 'sonnet',
+        timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: 2000 },
+        buildInvocation: options => {
+          calls.push('buildInvocation');
+          return {
+            executable: 'fixture-claude',
+            args: ['-p'],
+            env: process.env,
+            cwd: options.cwd || '',
+            input: options.input || '',
+            killSignal: 'SIGTERM',
+            timeouts: { idleMs: 1000, toolMs: 1000, ceilingMs: 2000 },
+          };
+        },
+        parseEvent: line => {
+          calls.push('parseEvent');
+          const event = JSON.parse(line);
+          if (event.type === 'session') return [{ type: 'session_observed', sessionId: event.id }];
+          if (event.type === 'done') return [{ type: 'run_completed', result: event.result }];
+          return [];
+        },
+        classifyFailure: () => {
+          calls.push('classifyFailure');
+          return null;
+        },
+        validateSession: () => {
+          calls.push('validateSession');
+          return true;
+        },
+        updateSession: (session, observation) => {
+          calls.push('updateSession');
+          return {
+            ...(session || {}),
+            engine: 'claude',
+            id: observation.sessionId,
+            started: true,
+          };
+        },
+      },
+      sessionSource: null,
+      cognitiveHost: null,
+    });
+    const engine = createEngineWithState({ sessions: {} }, {
+      spawn: () => createFakeCodexProcess([
+        { type: 'session', id: 'foreground-session' },
+        { type: 'done', result: 'foreground reply' },
+      ]),
+      getEngineRuntime: () => plugin,
+    });
+    const bot = {
+      suppressAck: true,
+      sendTyping: async () => {},
+      sendMessage: async () => ({ message_id: 'msg-foreground' }),
+      sendMarkdown: async () => ({ message_id: 'msg-foreground-md' }),
+      sendCard: async () => ({ message_id: 'msg-foreground-card' }),
+      editMessage: async () => true,
+      deleteMessage: async () => true,
+    };
+
+    const result = await engine.askClaude(bot, 'foreground-chat', 'hello', {}, false, 'ou_admin');
+
+    assert.equal(result.ok, true);
+    assert.ok(calls.includes('buildInvocation'));
+    assert.ok(calls.includes('parseEvent'));
+    assert.ok(calls.includes('validateSession'));
+    assert.ok(calls.includes('updateSession'));
+    assert.equal(calls.includes('classifyFailure'), false);
   });
 
   it('does not reuse the previous reply card for a fresh idle turn', async () => {
