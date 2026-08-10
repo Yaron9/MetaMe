@@ -6,7 +6,7 @@ const {
   USAGE_CATEGORY_LABEL,
 } = require('./usage-classifier');
 const { IS_WIN } = require('./platform');
-const { ENGINE_MODEL_CONFIG, resolveEngineModel, normalizeClaudeModel } = require('./daemon-engine-runtime');
+const { ENGINE_MODEL_CONFIG, resolveEngineModel, normalizeEngineModel } = require('./daemon-engine-runtime');
 const { resolveScopedEngine } = require('./core/engine-policy');
 const { ENGINE_NAMES, isExperimentalEngineName } = require('./core/engine-descriptors');
 // agy remains a background/project configuration engine; preserve the existing
@@ -1640,7 +1640,7 @@ function createAdminCommandHandler(deps) {
       const normalizedArg = arg.toLowerCase();
       // Claude session/config layer only accepts canonical slots; provider mapping stays in CC Switch.
       if (currentEngine === 'claude' && !optionValues.includes(normalizedArg)) {
-        const suggested = normalizeClaudeModel(arg, '');
+        const suggested = normalizeEngineModel('claude', arg, '');
         const hint = suggested
           ? `\n💡 检测到它更像 Claude 槽位 ${suggested}，请直接用 /model ${suggested}`
           : '';

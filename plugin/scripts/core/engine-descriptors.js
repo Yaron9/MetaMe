@@ -4,12 +4,12 @@
  * scripts/core/engine-descriptors.js — single source of truth for engine identity.
  *
  * One declarative descriptor per engine. Adding a new engine = add an entry
- * here + implement its runtime in daemon-engine-runtime.js + (if its context
- * projection strategy is new) one projection adapter. Nothing else should
+ * here + add its built-in runtime policy to engines/native-runtime-factory.js
+ * + (if its context projection strategy is new) one projection adapter. Nothing else should
  * hardcode engine names for these traits — consult the descriptor instead.
  *
  * Pure data, zero dependencies. Behavior (buildArgs/parse/classify) stays in
- * daemon-engine-runtime.js; this module only declares WHAT an engine is.
+ * the owning adapter edge; this module only declares WHAT an engine is.
  */
 
 const ENGINE_DESCRIPTORS = Object.freeze({

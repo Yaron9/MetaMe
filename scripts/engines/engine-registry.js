@@ -1,13 +1,5 @@
 'use strict';
 
-const { createClaudeCliAdapter } = require('./claude-cli-adapter');
-const { createCodexCliAdapter } = require('./codex-cli-adapter');
-const { createAgyCliAdapter } = require('./agy-cli-adapter');
-const { createPiCliAdapter } = require('./pi-cli-adapter');
-const { createClaudeSessionSourceAdapter } = require('./claude-session-source-adapter');
-const { createCodexSessionSourceAdapter } = require('./codex-session-source-adapter');
-const { createAgySessionSourceAdapter } = require('./agy-session-source-adapter');
-const { createPiSessionSourceAdapter } = require('./pi-session-source-adapter');
 const {
   createEnginePlugin,
   isEnginePlugin,
@@ -37,7 +29,7 @@ function normalizePlugin(value) {
  * Build a registry from immutable Engine Plugins.
  *
  * Generic registries use strict `get()`/`lookup()` semantics.  The built-in
- * registry opts into the historical default-to-Claude read path explicitly;
+ * registry opts into any historical default read path explicitly;
  * new code should use `lookup()` or `resolve()` when an unknown Engine must
  * remain distinguishable from an explicit fallback decision.
  */
@@ -45,7 +37,7 @@ function createEngineRegistry(plugins, options = {}) {
   const normalizeEngineName = typeof options.normalizeEngineName === 'function'
     ? options.normalizeEngineName
     : value => String(value || '').trim().toLowerCase();
-  const defaultEngineId = String(options.defaultEngineId || 'claude').trim().toLowerCase();
+  const defaultEngineId = String(options.defaultEngineId || '').trim().toLowerCase();
   const legacyFallback = options.legacyFallback === true;
   const byId = new Map();
   const disabled = new Set();
@@ -72,7 +64,8 @@ function createEngineRegistry(plugins, options = {}) {
   function normalizeRequestedId(engineName) {
     const raw = String(engineName || '').trim().toLowerCase();
     if (!raw) return '';
-    // Some legacy normalizers intentionally return Claude for unknown input.
+    // Some legacy normalizers intentionally return a configured default for
+    // unknown input.
     // Preserve the raw ID when that candidate is not registered so strict
     // lookup can still distinguish an unknown Engine from fallback behavior.
     // Case normalization is already represented by `raw`.  Do not accept a
@@ -184,47 +177,12 @@ function createEngineRegistry(plugins, options = {}) {
 }
 
 function createDefaultEngineRegistry(deps = {}) {
-  const adapters = [
-    {
-      runtime: createClaudeCliAdapter(deps.claude),
-      sessionSource: createClaudeSessionSourceAdapter(deps.claude),
-    },
-    {
-      runtime: createCodexCliAdapter(deps.codex),
-      sessionSource: createCodexSessionSourceAdapter(deps.codex),
-    },
-    {
-      runtime: createAgyCliAdapter(deps.agy),
-      sessionSource: createAgySessionSourceAdapter(deps.agy),
-    },
-    {
-      runtime: createPiCliAdapter(deps.pi),
-      sessionSource: createPiSessionSourceAdapter(deps.pi),
-    },
-  ];
-  const plugins = adapters.map(({ runtime, sessionSource }) => {
-    const descriptor = sessionSource
-      ? {
-        ...runtime.descriptor,
-        capabilities: {
-          ...runtime.descriptor.capabilities,
-          sessionSource: { state: 'verified' },
-        },
-      }
-      : runtime.descriptor;
-    return createEnginePlugin({
-      protocolVersion: 1,
-      descriptor,
-      runtime,
-      sessionSource,
-      cognitiveHost: null,
-    });
-  });
-  return createEngineRegistry(plugins, {
-    normalizeEngineName: deps.normalizeEngineName,
-    defaultEngineId: 'claude',
-    legacyFallback: true,
-  });
+  // Keep this compatibility entry point for adapter-focused tests and
+  // external callers, but delegate built-in assembly to the sole catalog
+  // boundary.  The dynamic require avoids a module cycle: the catalog uses
+  // the generic createEngineRegistry above.
+  const { createBuiltinEngineRegistry } = require('./native-runtime-factory');
+  return createBuiltinEngineRegistry(deps);
 }
 
 module.exports = {

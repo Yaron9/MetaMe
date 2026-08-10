@@ -1,417 +1,158 @@
 'use strict';
 
 require('./test-support/env-setup');
-const { describe, it } = require('node:test');
+const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   createEngineRuntimeFactory,
   resolveEnginePlugin,
   normalizeEngineName,
   resolveEngineModel,
+  normalizeEngineModel,
+  resolveEngineTimeouts,
   ENGINE_MODEL_CONFIG,
-  _private,
 } = require('./daemon-engine-runtime');
+const { BUILTIN_RUNTIME_CATALOG } = require('./engines/native-runtime-factory');
 
-it('uses the Codex CLI default for distill instead of a stale account-specific model', () => {
+test('runtime facade derives model metadata from the built-in catalog', () => {
+  assert.deepEqual(
+    Object.keys(ENGINE_MODEL_CONFIG),
+    BUILTIN_RUNTIME_CATALOG.map(definition => definition.id)
+  );
+  for (const definition of BUILTIN_RUNTIME_CATALOG) {
+    const config = ENGINE_MODEL_CONFIG[definition.id];
+    assert.equal(config.main, definition.model.main);
+    assert.equal(config.distill, definition.model.distill);
+    assert.equal(config.provider, definition.model.provider);
+  }
   assert.equal(ENGINE_MODEL_CONFIG.codex.distill, 'auto');
 });
 
-describe('daemon-engine-runtime normalize', () => {
-  it('normalizes known engines and defaults to claude', () => {
-    assert.equal(normalizeEngineName('codex'), 'codex');
-    assert.equal(normalizeEngineName('agy'), 'agy');
-    assert.equal(normalizeEngineName('Claude'), 'claude');
-    assert.equal(normalizeEngineName(''), 'claude');
-    assert.equal(normalizeEngineName('unknown'), 'claude');
-  });
+test('runtime facade normalizes known engines through the shared identity policy', () => {
+  assert.equal(normalizeEngineName('codex'), 'codex');
+  assert.equal(normalizeEngineName('agy'), 'agy');
+  assert.equal(normalizeEngineName('Claude'), 'claude');
+  assert.equal(normalizeEngineName(''), 'claude');
+  assert.equal(normalizeEngineName('unknown'), 'claude');
 });
 
-describe('daemon-engine-runtime args builder', () => {
-  it('skips explicit model flag when codex is set to auto', () => {
-    const args = _private.buildCodexArgs({
-      model: 'auto',
-      session: {},
-      cwd: '/tmp/proj',
-    });
-    assert.deepEqual(args.slice(0, 1), ['exec']);
-    assert.ok(!args.includes('-m'));
-    assert.ok(args.includes('-C'));
-  });
-
-  it('builds codex native resume args with explicit permission flags', () => {
-    const args = _private.buildCodexArgs({
-      model: 'gpt-5-codex',
-      session: { started: true, id: 'sid-1' },
-      cwd: '/tmp/proj',
-    });
-    assert.deepEqual(args.slice(0, 3), ['exec', 'resume', 'sid-1']);
-    assert.ok(args.includes('--json'));
-    assert.ok(args.includes('-'));
-    assert.ok(args.includes('--dangerously-bypass-approvals-and-sandbox'));
-    assert.ok(!args.includes('-C'));
-  });
-
-  it('rejects Claude-only continue markers instead of silently starting fresh Codex', () => {
-    assert.throws(() => _private.buildCodexArgs({
-      session: { id: '__continue__', started: true },
-    }), /codex_continue_session_unsupported/);
-  });
-
-  it('keeps explicit codex sandbox flags on native resume when not full access', () => {
-    const args = _private.buildCodexArgs({
-      model: 'gpt-5-codex',
-      session: { started: true, id: 'sid-1' },
-      permissionProfile: {
-        sandboxMode: 'workspace-write',
-        approvalPolicy: 'on-request',
-        permissionMode: 'workspace-write',
-      },
-    });
-    assert.deepEqual(args.slice(0, 3), ['exec', 'resume', 'sid-1']);
-    assert.ok(args.includes('-s'));
-    assert.ok(args.includes('workspace-write'));
-    assert.ok(!args.includes('--dangerously-bypass-approvals-and-sandbox'));
-  });
-
-  it('always uses --dangerously-bypass-approvals-and-sandbox for codex (no config needed)', () => {
-    const args = _private.buildCodexArgs({
-      model: 'gpt-5-codex',
-      daemonCfg: {},
-      session: {},
-    });
-    assert.ok(args.includes('--dangerously-bypass-approvals-and-sandbox'));
-    assert.ok(!args.includes('--full-auto'));
-  });
-
-  it('maps codex config into explicit sandbox and approval flags', () => {
-    const args = _private.buildCodexArgs({
-      model: 'gpt-5-codex',
-      daemonCfg: { codex: { sandbox_mode: 'workspace-write', approval_policy: 'on-request' } },
-      session: {},
-    });
-    assert.ok(args.includes('-s'));
-    assert.ok(args.includes('workspace-write'));
-    assert.ok(!args.includes('--dangerously-bypass-approvals-and-sandbox'));
-  });
-
-  it('prefers explicit codex permissionProfile over stale session metadata on fresh exec', () => {
-    const args = _private.buildCodexArgs({
-      model: 'gpt-5-codex',
-      session: {
-        started: false,
-        sandboxMode: 'read-only',
-        approvalPolicy: 'never',
-        permissionMode: 'read-only',
-      },
-      permissionProfile: {
-        sandboxMode: 'danger-full-access',
-        approvalPolicy: 'never',
-        permissionMode: 'danger-full-access',
-      },
-    });
-    assert.ok(args.includes('--dangerously-bypass-approvals-and-sandbox'));
-    assert.ok(!args.includes('read-only'));
-  });
-
-  it('strips nested-session env vars from codex runtime', () => {
-    const env = _private.buildCodexEnv({
-      CODEX_THREAD_ID: 'tid',
-      METAME_ACTIVE_SESSION: 'true',
-      CLAUDE_CODE_SSE_PORT: '1234',
-      PATH: '/tmp/bin',
-    }, { metameProject: 'metame' });
-    assert.equal(env.CODEX_THREAD_ID, undefined);
-    assert.equal(env.METAME_ACTIVE_SESSION, undefined);
-    assert.equal(env.CLAUDE_CODE_SSE_PORT, undefined);
-    assert.equal(env.METAME_PROJECT, 'metame');
-    assert.equal(env.PATH, '/tmp/bin');
-  });
-
-  it('does not override CODEX_HOME from cwd for codex runtime', () => {
-    const env = _private.buildCodexEnv({
-      PATH: '/tmp/bin',
-    }, { metameProject: 'metame', cwd: '/tmp/project-a' });
-    assert.equal(env.CODEX_HOME, undefined);
-    assert.equal(env.METAME_PROJECT, 'metame');
-  });
-
-  it('builds claude args with read-only tools', () => {
-    const args = _private.buildClaudeArgs({
-      model: 'opus',
-      readOnly: true,
-      session: { started: false, id: 'sid-2' },
-    });
-    assert.equal(args[0], '-p');
-    assert.ok(args.includes('--session-id'));
-    assert.ok(args.includes('sid-2'));
-    assert.ok(args.includes('Read'));
-    assert.ok(!args.includes('Bash'));
-    assert.ok(!args.includes('Edit'));
-  });
-
-  it('does not let caller tools widen Claude read-only mode', () => {
-    const args = _private.buildClaudeArgs({ readOnly: true, allowedTools: ['Bash', 'Edit'] });
-    assert.ok(!args.includes('Bash'));
-    assert.ok(!args.includes('Edit'));
-  });
-
-  it('always uses --dangerously-skip-permissions for claude when not read-only', () => {
-    const args = _private.buildClaudeArgs({
-      model: 'opus',
-      daemonCfg: {},
-      session: {},
-    });
-    assert.ok(args.includes('--dangerously-skip-permissions'));
-    assert.ok(!args.includes('--allowedTools'));
-  });
-
-  it('maps the same structured output contract to native Claude and Codex flags', () => {
-    const schema = { type: 'object', required: ['status'] };
-    const claude = _private.buildClaudeArgs({ outputSchema: schema });
-    const codex = _private.buildCodexArgs({ outputSchemaPath: '/tmp/completion.schema.json' });
-    assert.equal(claude[claude.indexOf('--json-schema') + 1], JSON.stringify(schema));
-    assert.equal(codex[codex.indexOf('--output-schema') + 1], '/tmp/completion.schema.json');
-  });
-
-  it('builds agy adapter args and ignores fresh placeholder session IDs', () => {
-    const fresh = _private.buildAgyArgs({
-      adapterPath: '/tmp/agy-adapter.js',
-      cwd: '/tmp/proj',
-      session: { started: false, id: 'placeholder' },
-    });
-    assert.deepEqual(fresh.slice(0, 3), ['/tmp/agy-adapter.js', '--cwd', '/tmp/proj']);
-    assert.equal(fresh.includes('--session'), false);
-    const resumed = _private.buildAgyArgs({
-      adapterPath: '/tmp/agy-adapter.js',
-      cwd: '/tmp/proj',
-      session: { started: true, id: 'real-id' },
-    });
-    assert.equal(resumed[resumed.indexOf('--session') + 1], 'real-id');
-  });
-
-  it('rejects unsupported task-level capability restrictions for agy', () => {
-    assert.throws(() => _private.buildAgyArgs({
-      adapterPath: '/tmp/agy-adapter.js',
-      allowedTools: ['Read'],
-    }), /agy_capability_unsupported/);
-    assert.throws(() => _private.buildAgyArgs({
-      adapterPath: '/tmp/agy-adapter.js',
-      mcpConfig: '/tmp/.mcp.json',
-    }), /agy_capability_unsupported/);
-  });
+test('model resolution uses definition policy and preserves legacy migration semantics', () => {
+  assert.equal(resolveEngineModel('codex', {}), 'auto');
+  assert.equal(resolveEngineModel('codex', {
+    model: 'opus',
+    models: { codex: 'gpt-5.4' },
+  }), 'gpt-5.4');
+  assert.equal(resolveEngineModel('codex', { model: 'opus' }), 'auto');
+  assert.equal(resolveEngineModel('codex', { model: 'gpt-5-mini' }), 'gpt-5-mini');
+  assert.equal(resolveEngineModel('codex', { model: 'MiniMax-M2.1' }), 'auto');
+  assert.equal(resolveEngineModel('agy', { model: 'opus' }), 'Gemini 3.5 Flash (Medium)');
+  assert.equal(resolveEngineModel('agy', { models: { agy: 'gemini-custom' } }), 'gemini-custom');
+  assert.equal(
+    resolveEngineModel('agy', {}, 'claude-sonnet-4-6'),
+    'Claude Sonnet 4.6 (Thinking)'
+  );
+  assert.equal(resolveEngineModel('agy', {}, 'gpt-5.4'), 'Gemini 3.5 Flash (Medium)');
+  assert.equal(
+    resolveEngineModel('agy', {}, 'Gemini 3.5 Flash (High)'),
+    'Gemini 3.5 Flash (High)'
+  );
+  assert.equal(resolveEngineModel('claude', { model: 'MiniMax-M2.1' }), 'sonnet');
+  assert.equal(resolveEngineModel('claude', { model: 'claude-opus-4-6' }), 'opus');
+  assert.equal(
+    resolveEngineModel('claude', { models: { claude: 'claude-haiku-4-5-20251001' } }),
+    'haiku'
+  );
+  assert.equal(normalizeEngineModel('codex', 'auto'), 'auto');
 });
 
-describe('daemon-engine-runtime model resolution', () => {
-  it('defaults codex to auto when no explicit model is configured', () => {
-    const model = resolveEngineModel('codex', {});
-    assert.equal(model, 'auto');
+test('default-engine detection iterates catalog policies in declared priority order', () => {
+  const calls = [];
+  const engine = require('./daemon-engine-runtime').detectDefaultEngine({
+    HOME: '/tmp/metame-runtime-test',
+    CLAUDE_BIN: '/opt/test/claude',
+    CODEX_BIN: '/opt/test/codex',
+    execFileSync: () => {
+      calls.push('lookup');
+      throw new Error('fixture PATH lookup disabled');
+    },
+    fs: { existsSync: () => false },
   });
-
-  it('uses per-engine models before legacy daemon.model', () => {
-    const model = resolveEngineModel('codex', {
-      model: 'opus',
-      models: { codex: 'gpt-5.4' },
-    });
-    assert.equal(model, 'gpt-5.4');
-  });
-
-  it('does not leak legacy claude aliases into codex', () => {
-    const model = resolveEngineModel('codex', { model: 'opus' });
-    assert.equal(model, 'auto');
-  });
-
-  it('preserves legacy custom model ids for codex', () => {
-    const model = resolveEngineModel('codex', { model: 'gpt-5-mini' });
-    assert.equal(model, 'gpt-5-mini');
-  });
-
-  it('does not leak legacy non-codex custom model ids into codex', () => {
-    const model = resolveEngineModel('codex', { model: 'MiniMax-M2.1' });
-    assert.equal(model, 'auto');
-  });
-
-  it('does not leak legacy Claude models into agy', () => {
-    assert.equal(resolveEngineModel('agy', { model: 'opus' }), 'Gemini 3.5 Flash (Medium)');
-    assert.equal(resolveEngineModel('agy', { models: { agy: 'gemini-custom' } }), 'gemini-custom');
-  });
-
-  it('normalizes explicit task model overrides before launching agy', () => {
-    assert.equal(resolveEngineModel('agy', {}, 'claude-sonnet-4-6'), 'Claude Sonnet 4.6 (Thinking)');
-    assert.equal(resolveEngineModel('agy', {}, 'gpt-5.4'), 'Gemini 3.5 Flash (Medium)');
-    assert.equal(resolveEngineModel('agy', {}, 'Gemini 3.5 Flash (High)'), 'Gemini 3.5 Flash (High)');
-  });
-
-  it('normalizes legacy custom claude model ids back to canonical slots', () => {
-    assert.equal(resolveEngineModel('claude', { model: 'MiniMax-M2.1' }), 'sonnet');
-    assert.equal(resolveEngineModel('claude', { model: 'claude-opus-4-6' }), 'opus');
-    assert.equal(resolveEngineModel('claude', { models: { claude: 'claude-haiku-4-5-20251001' } }), 'haiku');
-  });
+  assert.equal(engine, 'claude');
+  assert.equal(calls.length, 0);
 });
 
-describe('daemon-engine-runtime parsers', () => {
-  it('parses codex session + text + done events', () => {
-    const e1 = _private.parseCodexStreamEvent('{"type":"thread.started","thread_id":"t-1"}');
-    const e2 = _private.parseCodexStreamEvent('{"type":"item.completed","item":{"type":"agent_message","text":"hello"}}');
-    const e3 = _private.parseCodexStreamEvent('{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":2}}');
-    assert.equal(e1[0].type, 'session');
-    assert.equal(e1[0].sessionId, 't-1');
-    assert.equal(e2[0].type, 'text');
-    assert.equal(e2[0].text, 'hello');
-    assert.equal(e3[0].type, 'done');
-    assert.equal(e3[0].usage.output_tokens, 2);
+test('runtime factory returns immutable Engine Plugins from the catalog registry', () => {
+  const getEnginePlugin = createEngineRuntimeFactory({
+    HOME: '/tmp/metame-runtime-test',
+    CLAUDE_BIN: '/opt/test/claude',
+    CODEX_BIN: '/opt/test/codex',
+    AGY_BIN: '/opt/test/agy',
+    AGY_ADAPTER: '/opt/test/agy-adapter.js',
+    getActiveProviderEnv: () => ({}),
   });
-
-  it('parses claude tool + text events', () => {
-    const line = JSON.stringify({
-      type: 'assistant',
-      message: {
-        content: [
-          { type: 'tool_use', name: 'Write', input: { file_path: '/tmp/a.js' } },
-          { type: 'text', text: 'done' },
-        ],
-      },
-    });
-    const events = _private.parseClaudeStreamEvent(line);
-    assert.equal(events[0].type, 'tool_use');
-    assert.equal(events[0].toolName, 'Write');
-    assert.equal(events[1].type, 'text');
-    assert.equal(events[1].text, 'done');
-  });
-
-  it('parses normalized agy adapter events', () => {
-    assert.deepEqual(_private.parseAgyStreamEvent('{"type":"heartbeat"}'), []);
-    const session = _private.parseAgyStreamEvent('{"type":"session","session_id":"agy-1"}');
-    const text = _private.parseAgyStreamEvent('{"type":"text","text":"answer"}');
-    const error = _private.parseAgyStreamEvent('{"type":"error","code":"AGY_CWD_BUSY","message":"busy"}');
-    assert.equal(session[0].sessionId, 'agy-1');
-    assert.equal(text[0].text, 'answer');
-    assert.equal(error[0].code, 'AGY_CWD_BUSY');
-  });
+  for (const definition of BUILTIN_RUNTIME_CATALOG) {
+    const plugin = getEnginePlugin(definition.id);
+    assert.equal(plugin.descriptor.id, definition.id);
+    assert.equal(plugin.descriptor.capabilities.runtime.state, 'verified');
+    assert.equal(Object.isFrozen(plugin), true);
+    assert.equal(typeof plugin.runtime.buildInvocation, 'function');
+    assert.equal(typeof plugin.runtime.parseEvent, 'function');
+    assert.equal(typeof plugin.runtime.classifyFailure, 'function');
+    assert.equal(typeof plugin.runtime.validateSession, 'function');
+    assert.equal(typeof plugin.runtime.updateSession, 'function');
+    assert.equal(plugin.runtime.structuredOutput.schema, definition.structuredOutput.schema);
+    const invocation = plugin.runtime.buildInvocation({ input: 'hello', cwd: '/tmp/project', session: {} });
+    assert.equal(invocation.executable, plugin.runtime.binary);
+    assert.ok(Array.isArray(invocation.args));
+    assert.equal(invocation.shell, undefined);
+  }
+  assert.equal(getEnginePlugin('unknown').descriptor.id, 'claude');
 });
 
-describe('daemon-engine-runtime error classification', () => {
-  it('returns null for empty inputs', () => {
-    assert.equal(_private.classifyEngineError(''), null);
-    assert.equal(_private.classifyEngineError(null), null);
-    assert.equal(_private.classifyEngineError(undefined), null);
-    assert.equal(_private.classifyEngineError('   '), null);
+test('runtime factory keeps descriptors attached to each runtime boundary', () => {
+  const getRuntime = createEngineRuntimeFactory({
+    CLAUDE_BIN: 'claude',
+    CODEX_BIN: 'codex',
+    AGY_BIN: '/tmp/agy',
+    AGY_ADAPTER: '/tmp/agy-adapter.js',
+    PI_BIN: 'pi',
   });
-
-  it('classifies auth errors', () => {
-    const out = _private.classifyEngineError('Unauthorized: please login');
-    assert.equal(out.code, 'AUTH_REQUIRED');
-    assert.match(out.message, /codex login/i);
-  });
-
-  it('classifies rate limit errors', () => {
-    const out = _private.classifyEngineError('429 Too many requests');
-    assert.equal(out.code, 'RATE_LIMIT');
-  });
-
-  it('falls back to exec failure', () => {
-    const out = _private.classifyEngineError('spawn failed');
-    assert.equal(out.code, 'EXEC_FAILURE');
-    assert.equal(out.message, 'spawn failed');
-  });
+  for (const definition of BUILTIN_RUNTIME_CATALOG) {
+    const plugin = getRuntime(definition.id);
+    assert.equal(plugin.runtime.descriptor, plugin.descriptor, `${definition.id} descriptor`);
+  }
 });
 
-describe('daemon-engine-runtime factory', () => {
-  it('rejects bare runtime injection instead of creating a compatibility plugin', () => {
-    assert.throws(
-      () => resolveEnginePlugin({ name: 'claude', buildArgs: () => [] }, 'claude'),
-      /engine_plugin_required:claude/
-    );
+test('runtime factory preserves adapter-specific runtime defaults at the edge', () => {
+  const getRuntime = createEngineRuntimeFactory({
+    CLAUDE_BIN: 'claude',
+    CODEX_BIN: 'codex',
+    AGY_BIN: '/tmp/agy',
+    AGY_ADAPTER: '/tmp/agy-adapter.js',
+    getActiveProviderEnv: () => ({ ANTHROPIC_API_KEY: 'fixture-only' }),
   });
-
-  it('returns immutable Engine Plugins whose runtime boundary is canonical', () => {
-    const getEnginePlugin = createEngineRuntimeFactory({
-      CLAUDE_BIN: '/opt/test/claude',
-      CODEX_BIN: '/opt/test/codex',
-      AGY_BIN: '/opt/test/agy',
-      AGY_ADAPTER: '/opt/test/agy-adapter.js',
-      getActiveProviderEnv: () => ({}),
-    });
-    for (const name of ['claude', 'codex', 'agy']) {
-      const plugin = getEnginePlugin(name);
-      assert.equal(plugin.descriptor.id, name);
-      assert.equal(plugin.descriptor.capabilities.runtime.state, 'verified');
-      assert.equal(Object.isFrozen(plugin), true);
-      assert.equal(typeof plugin.runtime.buildInvocation, 'function');
-      assert.equal(typeof plugin.runtime.parseEvent, 'function');
-      assert.equal(typeof plugin.runtime.classifyFailure, 'function');
-      assert.equal(typeof plugin.runtime.validateSession, 'function');
-      assert.equal(typeof plugin.runtime.updateSession, 'function');
-      const invocation = plugin.runtime.buildInvocation({ input: 'hello', cwd: '/tmp/project', session: {} });
-      assert.equal(invocation.executable, plugin.runtime.binary);
-      assert.ok(Array.isArray(invocation.args));
-      assert.equal(invocation.shell, undefined);
-    }
-    const claude = getEnginePlugin('claude');
-    assert.equal(claude.descriptor.capabilities.sessionSource.state, 'verified');
-    assert.equal(typeof claude.sessionSource.discover, 'function');
-  });
-
-  it('attaches the registry descriptor to every runtime', () => {
-    const { ENGINE_NAMES } = require('./core/engine-descriptors');
-    const getRuntime = createEngineRuntimeFactory({
-      CLAUDE_BIN: 'claude',
-      CODEX_BIN: 'codex',
-      AGY_BIN: '/tmp/agy',
-      AGY_ADAPTER: '/tmp/agy-adapter.js',
-      getActiveProviderEnv: () => ({}),
-    });
-    for (const name of ENGINE_NAMES) {
-      const plugin = getRuntime(name);
-      assert.equal(plugin.runtime.descriptor, plugin.descriptor, `${name} runtime must carry its plugin descriptor`);
-    }
-  });
-
-  it('creates codex runtime with expected defaults', () => {
-    const getRuntime = createEngineRuntimeFactory({
-      CLAUDE_BIN: 'claude',
-      CODEX_BIN: 'codex',
-      getActiveProviderEnv: () => ({ ANTHROPIC_API_KEY: 'x' }),
-    });
-    const codex = getRuntime('codex');
-    assert.equal(codex.name, 'codex');
-    assert.equal(codex.binary, 'codex');
-    assert.equal(codex.stdinBehavior, 'write-and-close');
-    assert.equal(codex.defaultModel, 'auto');
-  });
-
-  it('creates agy runtime through the protocol adapter', () => {
-    const getRuntime = createEngineRuntimeFactory({
-      AGY_BIN: '/tmp/agy',
-      AGY_ADAPTER: '/tmp/agy-adapter.js',
-    });
-    const agy = getRuntime('agy');
-    assert.equal(agy.name, 'agy');
-    assert.equal(agy.binary, process.execPath);
-    assert.equal(agy.nativeBinary, '/tmp/agy');
-    assert.equal(agy.capabilities.outputSchema, false);
-    assert.equal(agy.buildEnv({}).AGY_BIN, '/tmp/agy');
-  });
+  const codex = getRuntime('codex').runtime;
+  assert.equal(codex.name, 'codex');
+  assert.equal(codex.binary, 'codex');
+  assert.equal(codex.stdinBehavior, 'write-and-close');
+  assert.equal(codex.defaultModel, 'auto');
+  const agy = getRuntime('agy').runtime;
+  assert.equal(agy.name, 'agy');
+  assert.equal(agy.binary, process.execPath);
+  assert.equal(agy.nativeBinary, '/tmp/agy');
+  assert.equal(agy.capabilities.outputSchema, false);
+  assert.equal(agy.buildEnv({}).AGY_BIN, '/tmp/agy');
 });
 
-describe('daemon-engine-runtime timeout resolution', () => {
-  it('keeps codex on idle/tool watchdogs only', () => {
-    const timeouts = _private.resolveEngineTimeouts('codex');
-    assert.equal(timeouts.idleMs, 10 * 60 * 1000);
-    assert.equal(timeouts.toolMs, 25 * 60 * 1000);
-    assert.equal(timeouts.ceilingMs, null);
-  });
+test('runtime facade requires a versioned Engine Plugin at orchestration boundaries', () => {
+  assert.throws(
+    () => resolveEnginePlugin({ name: 'fixture', buildArgs: () => [] }, 'fixture'),
+    /engine_plugin_required:fixture/
+  );
+});
 
-  it('keeps claude on idle/tool watchdogs only', () => {
-    const timeouts = _private.resolveEngineTimeouts('claude');
-    assert.equal(timeouts.idleMs, 20 * 60 * 1000);
-    assert.equal(timeouts.toolMs, 25 * 60 * 1000);
-    assert.equal(timeouts.ceilingMs, null);
-  });
-
-  it('keeps agy on idle/tool watchdogs only', () => {
-    const timeouts = _private.resolveEngineTimeouts('agy');
-    assert.equal(timeouts.idleMs, 20 * 60 * 1000);
-    assert.equal(timeouts.toolMs, 25 * 60 * 1000);
-    assert.equal(timeouts.ceilingMs, null);
-  });
+test('timeouts are read from catalog definitions without facade host policy', () => {
+  for (const definition of BUILTIN_RUNTIME_CATALOG) {
+    assert.deepEqual(resolveEngineTimeouts(definition.id), definition.timeouts);
+  }
 });

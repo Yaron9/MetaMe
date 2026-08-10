@@ -338,6 +338,7 @@ function createPiCliAdapter(deps = {}) {
       projectMcp: true,
       projectSkills: true,
     },
+    structuredOutput: Object.freeze({ schema: 'none', format: '', buffer: 'prefix' }),
     isReady,
     probe() {
       if (!isReady()) {

@@ -109,6 +109,7 @@ function createBackgroundRunner(deps = {}) {
       return { ok: false, error: `${engineName}_runtime_unsupported`, errorCode: 'CAPABILITY_UNSUPPORTED' };
     }
     const timeouts = runtime.timeouts || {};
+    const structuredOutput = runtime.structuredOutput || {};
     if (typeof runtime.isReady === 'function' && !runtime.isReady()) {
       return { ok: false, error: `${engineName}_runtime_not_ready`, errorCode: 'RUNTIME_NOT_READY' };
     }
@@ -118,7 +119,7 @@ function createBackgroundRunner(deps = {}) {
     let outputSchemaPath = '';
     let childRef = null;
     try {
-      if (engineName === 'codex' && schema) {
+      if (schema && structuredOutput.schema === 'path') {
         schemaDir = fsModule.mkdtempSync(pathModule.join(osModule.tmpdir(), 'metame-schema-'));
         outputSchemaPath = pathModule.join(schemaDir, 'completion.schema.json');
         fsModule.writeFileSync(outputSchemaPath, JSON.stringify(schema), { mode: 0o600 });
@@ -131,9 +132,9 @@ function createBackgroundRunner(deps = {}) {
         timeoutMs: options.timeoutMs || timeouts.idleMs || 600000,
         daemonCfg: options.daemonCfg || {},
         permissionProfile: options.permissions || null,
-        outputSchema: engineName === 'claude' ? schema : null,
+        outputSchema: structuredOutput.schema === 'inline' ? schema : null,
         outputSchemaPath,
-        outputFormat: engineName === 'claude' ? 'json' : '',
+        outputFormat: structuredOutput.format || '',
         allowedTools: options.allowedTools || [],
         mcpConfig: options.mcpConfig || '',
         metameProject: options.projectKey || '',
@@ -156,10 +157,10 @@ function createBackgroundRunner(deps = {}) {
             killSignal: invocation.killSignal || runtime.killSignal || 'SIGTERM',
             useProcessGroup: process.platform !== 'win32',
             signal: options.signal || null,
-            // Structured/Codex JSONL keeps the tail where the final native event lives.
-            // Legacy Claude text keeps its historical prefix preview. Structured truncation
-            // is rejected below, so neither mode can silently validate partial output.
-            stdoutBufferMode: structured || engineName === 'codex' ? 'tail' : 'prefix',
+            // The runtime declares whether structured output requires tail
+            // retention; truncation is rejected below so no mode can silently
+            // validate partial output.
+            stdoutBufferMode: structured && structuredOutput.buffer === 'tail' ? 'tail' : 'prefix',
             onChild(child) {
               childRef = child;
               activeChildren.add(child);

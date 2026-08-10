@@ -39,10 +39,33 @@ test('runtime facade reaches native adapters only through the plugin assembly bo
   const facade = fs.readFileSync(path.join(ROOT, 'scripts/daemon-engine-runtime.js'), 'utf8');
   const assembly = fs.readFileSync(path.join(ROOT, 'scripts/engines/native-runtime-factory.js'), 'utf8');
   assert.doesNotMatch(facade, /require\(['"]\.\/engines\/(?:claude|codex|agy|pi)-cli-adapter['"]\)/i);
+  assert.doesNotMatch(
+    facade,
+    /\b(?:claude|codex|agy|pi)\b|\.(?:claude|codex|agy|pi)\b/i,
+    'the shared facade must remain free of built-in Engine identity tokens',
+  );
+  assert.doesNotMatch(facade, /_private|(?:build|parse)(?:Claude|Codex|Agy|Pi)/i);
+  assert.doesNotMatch(facade, /classify(?:Claude|Codex|Agy|Pi)|normalize(?:Claude|Codex|Agy|Pi)/i);
   assert.match(assembly, /claude-cli-adapter/);
   assert.match(assembly, /codex-cli-adapter/);
   assert.match(assembly, /agy-cli-adapter/);
   assert.match(assembly, /pi-cli-adapter/);
+  assert.match(assembly, /BUILTIN_RUNTIME_CATALOG/);
+});
+
+test('catalog definitions own adapter, model, binary, timeout, and source policies', () => {
+  const { BUILTIN_RUNTIME_CATALOG } = require('../engines/native-runtime-factory');
+  assert.ok(BUILTIN_RUNTIME_CATALOG.length >= 1);
+  for (const definition of BUILTIN_RUNTIME_CATALOG) {
+    assert.equal(typeof definition.id, 'string');
+    assert.equal(typeof definition.createRuntime, 'function');
+    assert.equal(typeof definition.resolveBinary, 'function');
+    assert.equal(typeof definition.probeBinary, 'function');
+    assert.equal(typeof definition.model.normalizeConfiguredModel, 'function');
+    assert.equal(typeof definition.model.resolveLegacyModel, 'function');
+    assert.ok(definition.timeouts && typeof definition.timeouts.idleMs === 'number');
+    assert.ok(definition.structuredOutput && typeof definition.structuredOutput.schema === 'string');
+  }
 });
 
 test('analytics keeps one revision-scoped processing identity', () => {
