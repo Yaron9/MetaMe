@@ -39,6 +39,20 @@ async function discoverAll(source, request = {}) {
   return refs;
 }
 
+function countingFs() {
+  const counter = { transcriptReads: 0 };
+  return {
+    counter,
+    fs: {
+      ...fs,
+      readFileSync(filePath, ...args) {
+        if (String(filePath).endsWith('transcript.jsonl')) counter.transcriptReads += 1;
+        return fs.readFileSync(filePath, ...args);
+      },
+    },
+  };
+}
+
 test('agy adapter discovers opaque transcript sources and projects sanitized canonical evidence', async () => {
   const home = makeHome();
   fs.mkdirSync(path.join(home, 'project'));
@@ -157,14 +171,46 @@ test('agy discovery cursor replays a stable newest-first snapshot', async () => 
   const newTime = new Date('2026-07-21T00:00:00.000Z');
   fs.utimesSync(first.transcript, oldTime, oldTime);
   fs.utimesSync(second.transcript, newTime, newTime);
-  const source = createAgySessionSourceAdapter({ home });
+  const reads = countingFs();
+  const source = createAgySessionSourceAdapter({ home, fs: reads.fs });
   const page = await discoverAll(source, { limit: 1 });
   assert.equal(page[0].nativeSessionId, 'agy-new');
   assert.ok(page[0].discoveryCursor);
+  assert.equal(reads.counter.transcriptReads, 1);
   fs.utimesSync(first.transcript, new Date('2026-07-22T00:00:00.000Z'), new Date('2026-07-22T00:00:00.000Z'));
   const next = await discoverAll(source, { limit: 1, cursor: page[0].discoveryCursor });
   assert.deepEqual(next.map(ref => ref.nativeSessionId), ['agy-old']);
+  assert.equal(reads.counter.transcriptReads, 2);
   fs.rmSync(home, { recursive: true, force: true });
+});
+
+test('agy discovery reads only page candidates and skips invalid newest transcripts', async () => {
+  const home = makeHome();
+  const valid = writeSession(home, 'agy-valid');
+  fs.utimesSync(valid.transcript, new Date('2026-07-20T00:00:00.000Z'), new Date('2026-07-20T00:00:00.000Z'));
+  for (let index = 0; index < 24; index += 1) {
+    const session = writeSession(home, `agy-bulk-${String(index).padStart(2, '0')}`);
+    fs.utimesSync(session.transcript, new Date('2026-07-21T00:00:00.000Z'), new Date('2026-07-21T00:00:00.000Z'));
+  }
+  const invalid = writeSession(home, 'agy-invalid-newest');
+  fs.writeFileSync(invalid.transcript, '{not-json}\n');
+  fs.utimesSync(invalid.transcript, new Date('2026-07-22T00:00:00.000Z'), new Date('2026-07-22T00:00:00.000Z'));
+  const reads = countingFs();
+  const source = createAgySessionSourceAdapter({ home, fs: reads.fs });
+  const refs = await discoverAll(source, { limit: 1 });
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].nativeSessionId, 'agy-bulk-23');
+  assert.equal(reads.counter.transcriptReads, 2);
+
+  const invalidOnlyHome = makeHome('metame-agy-invalid-');
+  const invalidOnly = writeSession(invalidOnlyHome, 'agy-invalid-only');
+  fs.writeFileSync(invalidOnly.transcript, '{not-json}\n');
+  const invalidReads = countingFs();
+  const invalidSource = createAgySessionSourceAdapter({ home: invalidOnlyHome, fs: invalidReads.fs });
+  assert.deepEqual(await discoverAll(invalidSource, { limit: 1 }), []);
+  assert.equal(invalidReads.counter.transcriptReads, 1);
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(invalidOnlyHome, { recursive: true, force: true });
 });
 
 test('agy discovery excludes PB-only sessions while direct diagnostics stay explicit', async () => {

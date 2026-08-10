@@ -545,8 +545,9 @@ function createAgySessionSourceAdapter(options = {}) {
     };
   }
 
-  function filterEntry(entry, query, info = null, nativeSessionIds = new Set()) {
-    if (!info) return false;
+  function filterEntry(entry, query, info, nativeSessionIds) {
+    if (!info || !entry.sourceKinds.includes('transcript')
+      || info.eventCount < 1 || info.eventLimitExceeded || info.formatDrift) return false;
     return (!query.project || info.project === query.project)
       && (!query.cwd || info.cwd === normalizeCwd(query.cwd, pathMod, fsMod))
       && (query.includeSubagents || info.classification !== 'subagent')
@@ -555,22 +556,14 @@ function createAgySessionSourceAdapter(options = {}) {
         || !nativeSessionIds.has(info.parentNativeSessionId));
   }
 
-  function freshDiscoverySnapshot(query) {
-    const inspected = artifactEntries()
+  function freshDiscoverySnapshot() {
+    // Do not inspect transcript bodies while constructing a snapshot.  The
+    // snapshot is an ordered, bounded set of durable locators; page reads
+    // below inspect only the candidates needed to fill the requested page.
+    return artifactEntries()
       .filter(entry => entry.sourceKinds.includes('transcript'))
-      .map(entry => {
-        try {
-          return { entry, info: inspectFile(transcriptPath(entry.sessionId), entry.sessionId) };
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean);
-    const nativeSessionIds = new Set(inspected.map(item => item.info.nativeSessionId).filter(Boolean));
-    return inspected
-      .filter(item => filterEntry(item.entry, query, item.info, nativeSessionIds))
       .slice(0, MAX_DISCOVERY_SNAPSHOT_ENTRIES)
-      .map(item => ({ sessionId: item.entry.sessionId, sourceKinds: item.entry.sourceKinds }));
+      .map(entry => ({ sessionId: entry.sessionId, sourceKinds: entry.sourceKinds }));
   }
 
   function prepareDiscovery(request = {}) {
@@ -580,7 +573,7 @@ function createAgySessionSourceAdapter(options = {}) {
       if (!sameDiscoveryQuery(cursor.query, query)) throw adapterError('AGY_SESSION_SOURCE_CURSOR_INVALID', 'query_mismatch');
       return { query, cursor, snapshot: cursor.snapshot };
     }
-    return { query, cursor: null, snapshot: freshDiscoverySnapshot(query) };
+    return { query, cursor: null, snapshot: freshDiscoverySnapshot() };
   }
 
   function refsForRequest(request = {}) {
@@ -588,17 +581,22 @@ function createAgySessionSourceAdapter(options = {}) {
     const limit = discoveryLimit(request);
     const start = state.cursor ? state.cursor.offset : 0;
     const acceptedStart = state.cursor ? state.cursor.accepted : 0;
+    const acceptedLimit = Math.min(limit, DEFAULT_DISCOVERY_LIMIT - acceptedStart);
+    const nativeSessionIds = new Set(state.snapshot.map(entry => entry.sessionId));
     const page = [];
-    for (let index = start; index < state.snapshot.length && page.length < Math.min(limit, DEFAULT_DISCOVERY_LIMIT - acceptedStart); index += 1) {
+    let lastScannedIndex = start - 1;
+    for (let index = start; index < state.snapshot.length && page.length < acceptedLimit; index += 1) {
+      lastScannedIndex = index;
       const entry = state.snapshot[index];
       let info;
       try { info = inspectFile(transcriptPath(entry.sessionId), entry.sessionId); } catch { continue; }
+      if (!filterEntry(entry, state.query, info, nativeSessionIds)) continue;
       page.push({ entry, info, snapshotIndex: index });
     }
     const acceptedEnd = acceptedStart + page.length;
     const hasMore = page.length > 0
       && acceptedEnd < DEFAULT_DISCOVERY_LIMIT
-      && page[page.length - 1].snapshotIndex + 1 < state.snapshot.length;
+      && lastScannedIndex + 1 < state.snapshot.length;
     return page.map((item, index) => refForEntry(
       item.entry,
       item.info,
