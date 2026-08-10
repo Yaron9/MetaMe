@@ -341,6 +341,23 @@ function eventProvenance(record, nativeSequence, metadata, extra = {}) {
   };
 }
 
+function nativeCallId(payload, record = null) {
+  return stringValue(firstDefined(
+    payload && payload.call_id,
+    payload && payload.callId,
+    record && record.call_id,
+    record && record.callId,
+  )).trim();
+}
+
+function toolInputText(input, maxToolInput) {
+  let value = input;
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { return cleanText(value, maxToolInput, { allowInternal: true }) || ''; }
+  }
+  return cleanText(compactJson(value || {}), maxToolInput, { allowInternal: true }) || '';
+}
+
 function normalizedToolOutcome(payload, outputText = '') {
   const object = asObject(payload) || {};
   let parsed = object.output;
@@ -364,6 +381,18 @@ function projectCanonicalRecords(records, metadata, history = [], options = {}) 
   const maxToolInput = Number(options.maxToolInput || DEFAULT_MAX_TOOL_INPUT);
   const candidates = [];
   const hasHistory = history.length > 0 && metadata.classification !== 'subagent';
+  const toolCallNames = new Map();
+
+  for (const item of records) {
+    const record = item.record;
+    const payload = asObject(record.payload) || {};
+    const type = stringValue(record.type).trim().toLowerCase();
+    const payloadType = stringValue(payload.type).trim().toLowerCase();
+    if (type !== 'response_item' || !['custom_tool_call', 'function_call'].includes(payloadType)) continue;
+    const callId = nativeCallId(payload, record);
+    const name = stringValue(payload.name || payload.tool_name || '').trim();
+    if (callId && name) toolCallNames.set(callId, name.slice(0, 120));
+  }
 
   const append = (candidate, nativeSequence, extra = {}) => {
     candidates.push({ ...candidate, nativeSequence, ...extra });
@@ -388,9 +417,10 @@ function projectCanonicalRecords(records, metadata, history = [], options = {}) 
     const record = item.record;
     const payload = asObject(record.payload) || {};
     const type = stringValue(record.type).trim().toLowerCase();
+    const payloadType = stringValue(payload.type).trim().toLowerCase();
     if (type === 'session_meta') continue;
 
-    if (type === 'response_item' && payload.type === 'message') {
+    if (type === 'response_item' && payloadType === 'message') {
       const role = stringValue(payload.role).trim().toLowerCase();
       const text = extractMessageText(payload.content || payload);
       if (role === 'user') {
@@ -403,24 +433,28 @@ function projectCanonicalRecords(records, metadata, history = [], options = {}) 
       continue;
     }
 
-    if (type === 'response_item' && payload.type === 'custom_tool_call') {
-      let input = payload.input;
-      if (typeof input === 'string') {
-        try { input = JSON.parse(input); } catch { /* keep string */ }
-      }
-      const inputText = cleanText(compactJson(input || {}), maxToolInput, { allowInternal: true });
+    if (type === 'response_item' && ['custom_tool_call', 'function_call'].includes(payloadType)) {
+      const callId = nativeCallId(payload, record);
+      const input = payloadType === 'function_call'
+        ? firstDefined(payload.arguments, payload.input)
+        : payload.input;
+      const inputText = toolInputText(input, maxToolInput);
+      const tool = stringValue(payload.name || payload.tool_name || 'unknown').trim().slice(0, 120) || 'unknown';
       if (inputText) appendMessage('tool', 'tool_call', inputText, record, item.nativeSequence, {
-        tool: stringValue(payload.name || 'unknown').trim().slice(0, 120) || 'unknown',
+        tool,
+        ...(callId ? { provenance: { callId } } : {}),
       });
       continue;
     }
 
-    if (type === 'response_item' && payload.type === 'custom_tool_call_output') {
+    if (type === 'response_item' && ['custom_tool_call_output', 'function_call_output'].includes(payloadType)) {
+      const callId = nativeCallId(payload, record);
       const rawOutput = typeof payload.output === 'string' ? payload.output : compactJson(payload.output || '');
       const outputText = cleanText(rawOutput, maxToolText, { allowInternal: true }) || '';
       appendMessage('tool', 'tool_result', outputText, record, item.nativeSequence, {
         outcome: normalizedToolOutcome(payload, outputText),
-        tool: stringValue(payload.name || payload.tool_name || '').trim() || null,
+        tool: stringValue(payload.name || payload.tool_name || (callId && toolCallNames.get(callId)) || '').trim() || null,
+        ...(callId ? { provenance: { callId } } : {}),
       });
       continue;
     }

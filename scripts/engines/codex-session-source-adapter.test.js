@@ -9,6 +9,7 @@ const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const { applyWikiSchema } = require('../memory-wiki-schema');
 const { ingestDiscoveredSessions } = require('../cognitive-ingestion');
+const { extractEvidence } = require('../core/canonical-session-analytics');
 const {
   createCodexSessionSourceAdapter,
 } = require('./codex-session-source-adapter');
@@ -99,13 +100,25 @@ test('Codex adapter uses state_5.sqlite authority and enriches canonical events 
   const input = source.readPathEvents(rolloutPath, refs[0]);
   assert.equal(input.revision.sourceLocator.authority, 'state_5.sqlite');
   assert.equal(revision.classification, 'conversation');
+  assert.equal(revision.toolCallCount, 2);
+  assert.equal(revision.toolErrorCount, 1);
   const events = await readAll(source, refs[0], { sourceRevision: revision.sourceRevision });
   assert.deepEqual(events.map(event => `${event.actor}:${event.kind}`), [
-    'user:message', 'tool:tool_call', 'tool:tool_result', 'assistant:message', 'assistant:message',
+    'user:message', 'tool:tool_call', 'tool:tool_result', 'tool:tool_call', 'tool:tool_result',
+    'assistant:message', 'assistant:message',
   ]);
   assert.equal(events[0].text, '从 history 索引补充的用户请求。');
   assert.equal(events[1].tool, 'exec_command');
   assert.equal(events[2].outcome.error, false);
+  assert.equal(events[3].tool, 'apply_patch');
+  assert.equal(events[3].provenance.callId, 'call-function-1');
+  assert.equal(events[4].tool, 'apply_patch');
+  assert.equal(events[4].provenance.callId, 'call-function-1');
+  assert.equal(events[4].outcome.exitCode, 1);
+  assert.equal(events[4].outcome.error, true);
+  const evidence = extractEvidence(events, 3000);
+  assert.ok(evidence.tool_traces.some(trace => trace.startsWith('apply_patch ')));
+  assert.ok(evidence.key_results.some(result => result.includes('patch rejected')));
   assert.ok(events.every(event => event.engineId === 'codex'));
   assert.ok(events.every(event => event.sourceRevision === revision.sourceRevision));
 });
