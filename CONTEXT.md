@@ -52,6 +52,10 @@ _Avoid_: Processed marker, analytics state
 An engine-neutral account of what occurred in a session. An Episode is evidence, not a trusted assertion.
 _Avoid_: Fact, Memory
 
+**Candidate Claim**:
+An assertion awaiting scope, durability, authority, and consistency checks before it can become canonical.
+_Avoid_: Fact, Convention
+
 **Canonical Claim**:
 The currently accepted assertion for one canonical key, scope, and validity interval, supported by provenance.
 _Avoid_: Raw memory, Transcript fact
@@ -59,6 +63,14 @@ _Avoid_: Raw memory, Transcript fact
 **Synthesis**:
 Derived, organized knowledge built from Claims and Episodes, such as a Wiki page.
 _Avoid_: Fact
+
+**Human Annotation**:
+A revision-bound user correction or note that becomes evidence for claim admission; it does not overwrite a Synthesis directly.
+_Avoid_: Wiki back-sync, Canonical Claim
+
+**Project Context Manifest**:
+A bounded, revisioned selection of verified project constraints and Synthesis pointers supplied at cold start or project switch.
+_Avoid_: Memory dump, Prompt snapshot
 
 **Capability**:
 A reusable way of working whose value has been verified through explicit approval or repeated successful outcomes.
