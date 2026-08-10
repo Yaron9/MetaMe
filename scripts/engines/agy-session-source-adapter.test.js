@@ -143,6 +143,17 @@ test('agy validation reports missing, malformed, oversized and unsafe sources ex
   const limitedResult = await limited.validate({ engineId: 'agy', nativeSessionId: 'oversized', sourceLocator: { sessionId: 'oversized' } });
   assert.equal(limitedResult.valid, false);
   assert.match(limitedResult.errorCode, /transcript_too_large/);
+
+  const cappedDir = path.join(agyHome, 'brain', 'capped', '.system_generated', 'logs');
+  fs.mkdirSync(cappedDir, { recursive: true });
+  fs.writeFileSync(path.join(cappedDir, 'transcript.jsonl'), [
+    { type: 'USER_INPUT', source: 'USER_EXPLICIT', content: 'one' },
+    { type: 'USER_INPUT', source: 'USER_EXPLICIT', content: 'two' },
+  ].map(record => JSON.stringify(record)).join('\n'));
+  const capped = createAgySessionSourceAdapter({ home, maxEvents: 1 });
+  const cappedResult = await capped.validate({ engineId: 'agy', nativeSessionId: 'capped', sourceLocator: { sessionId: 'capped' } });
+  assert.equal(cappedResult.valid, false);
+  assert.equal(cappedResult.errorCode, 'AGY_EVENT_LIMIT');
   fs.rmSync(home, { recursive: true, force: true });
 });
 

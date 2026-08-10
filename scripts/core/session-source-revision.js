@@ -175,7 +175,7 @@ function normalizeSessionRevision(revision = {}, context = {}) {
   const optionalMetadata = {};
   for (const key of [
     'eventCount', 'invalidLineCount', 'unknownRecordCount', 'knownRecordCount',
-    'formatDrift', 'conversationAvailable', 'ownershipAvailable', 'ownership',
+    'eventLimitExceeded', 'formatDrift', 'conversationAvailable', 'ownershipAvailable', 'ownership',
     'availability', 'lastModified', 'sourceState', 'conversationState',
   ]) {
     if (revision[key] !== undefined) optionalMetadata[key] = revision[key];

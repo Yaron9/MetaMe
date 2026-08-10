@@ -22,6 +22,8 @@ const {
   AGY_TOOL_TYPES,
   AGY_KNOWN_RECORD_TYPES,
   assessTranscriptFormat,
+  canonicalizeCwd,
+  parseConversationCache,
   normalizeTranscriptRecord,
 } = require('../core/agy-state');
 
@@ -65,12 +67,9 @@ function normalizeTimestamp(value) {
 }
 
 function normalizeCwd(value, pathMod, fsMod) {
-  const raw = stringValue(value).trim();
-  if (!raw) return null;
-  const resolved = pathMod.resolve(raw);
   const realpath = fsMod.realpathSync && (fsMod.realpathSync.native || fsMod.realpathSync);
-  if (typeof realpath !== 'function') return resolved;
-  try { return realpath(resolved); } catch { return resolved; }
+  const raw = stringValue(value).trim();
+  return raw ? canonicalizeCwd(raw, { path: pathMod, realpath }) : null;
 }
 
 function safeSessionId(value) {
@@ -175,8 +174,7 @@ function ownershipForSession(cache, sessionId, pathMod, fsMod) {
 function readOwnershipCache(cachePath, fsMod) {
   try {
     if (!fsMod.existsSync(cachePath)) return { cache: new Map(), available: false };
-    const raw = JSON.parse(fsMod.readFileSync(cachePath, 'utf8'));
-    if (!raw || Array.isArray(raw) || typeof raw !== 'object') throw new Error('shape');
+    const raw = parseConversationCache(fsMod.readFileSync(cachePath, 'utf8'));
     const cache = new Map();
     for (const [cwd, sessionId] of Object.entries(raw)) {
       const id = stringValue(sessionId).trim();
@@ -513,6 +511,7 @@ function createAgySessionSourceAdapter(options = {}) {
       toolCallCount: events.filter(event => event.kind === 'tool_call').length,
       toolErrorCount: events.filter(event => event.kind === 'tool_result' && event.outcome && event.outcome.error).length,
       eventCount: events.length,
+      eventLimitExceeded: events.length > maxEvents,
       invalidLineCount: parsed.invalidLineCount,
       firstTs: timestamps[0] || metadata.firstTs,
       lastTs: timestamps.at(-1) || metadata.lastTs,
@@ -675,6 +674,9 @@ function createAgySessionSourceAdapter(options = {}) {
         }
         if (revision.formatDrift) {
           return { valid: false, errorCode: 'AGY_TRANSCRIPT_FORMAT_DRIFT', detail: 'no recognized agy transcript records' };
+        }
+        if (revision.eventLimitExceeded) {
+          return { valid: false, errorCode: 'AGY_EVENT_LIMIT', detail: 'canonical event cap exceeded' };
         }
         if (revision.invalidLineCount > 0 && revision.eventCount === 0) {
           return { valid: false, errorCode: 'SOURCE_MALFORMED', detail: 'no valid canonical evidence' };
