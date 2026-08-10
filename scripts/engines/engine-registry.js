@@ -190,13 +190,24 @@ function createDefaultEngineRegistry(deps = {}) {
     { runtime: createAgyCliAdapter(deps.agy), sessionSource: null },
     { runtime: createPiCliAdapter(deps.pi), sessionSource: null },
   ];
-  const plugins = adapters.map(({ runtime, sessionSource }) => createEnginePlugin({
-    protocolVersion: 1,
-    descriptor: runtime.descriptor,
-    runtime,
-    sessionSource,
-    cognitiveHost: null,
-  }));
+  const plugins = adapters.map(({ runtime, sessionSource }) => {
+    const descriptor = sessionSource
+      ? {
+        ...runtime.descriptor,
+        capabilities: {
+          ...runtime.descriptor.capabilities,
+          sessionSource: { state: 'verified' },
+        },
+      }
+      : runtime.descriptor;
+    return createEnginePlugin({
+      protocolVersion: 1,
+      descriptor,
+      runtime,
+      sessionSource,
+      cognitiveHost: null,
+    });
+  });
   return createEngineRegistry(plugins, {
     normalizeEngineName: deps.normalizeEngineName,
     defaultEngineId: 'claude',

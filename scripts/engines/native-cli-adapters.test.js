@@ -11,6 +11,8 @@ const { defineNativeCliAdapter } = require('./native-cli-adapter');
 const { createClaudeCliAdapter } = require('./claude-cli-adapter');
 const { createCodexCliAdapter } = require('./codex-cli-adapter');
 const { createEngineRuntimeFactory } = require('../daemon-engine-runtime');
+const { createEnginePlugin } = require('./engine-plugin');
+const { getEngineDescriptor } = require('../core/engine-descriptors');
 
 function createRegistry() {
   return createDefaultEngineRegistry({
@@ -52,6 +54,19 @@ test('registry exposes one deep adapter per native CLI with private session stor
   assert.equal(typeof claude.sessionSource.discover, 'function');
   assert.equal(typeof claude.sessionSource.inspect, 'function');
   assert.equal(typeof claude.sessionSource.read, 'function');
+});
+
+test('shared Claude descriptor remains valid for explicit runtime-only plugin fixtures', () => {
+  const runtime = createClaudeCliAdapter({ binary: '/opt/test/claude' });
+  const plugin = createEnginePlugin({
+    protocolVersion: 1,
+    descriptor: getEngineDescriptor('claude'),
+    runtime,
+    sessionSource: null,
+    cognitiveHost: null,
+  });
+  assert.equal(plugin.descriptor.capabilities.sessionSource.state, 'unsupported');
+  assert.equal(plugin.sessionSource, null);
 });
 
 test('native session guards accept legacy or same-engine slots and reject cross-engine slots', () => {

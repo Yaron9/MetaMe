@@ -352,7 +352,7 @@ describe('daemon-engine-runtime factory', () => {
   });
 
   it('attaches the registry descriptor to every runtime', () => {
-    const { ENGINE_NAMES, getEngineDescriptor } = require('./core/engine-descriptors');
+    const { ENGINE_NAMES } = require('./core/engine-descriptors');
     const getRuntime = createEngineRuntimeFactory({
       CLAUDE_BIN: 'claude',
       CODEX_BIN: 'codex',
@@ -361,8 +361,8 @@ describe('daemon-engine-runtime factory', () => {
       getActiveProviderEnv: () => ({}),
     });
     for (const name of ENGINE_NAMES) {
-      const runtime = getRuntime(name);
-      assert.equal(runtime.descriptor, getEngineDescriptor(name), `${name} runtime must carry its descriptor`);
+      const plugin = getRuntime(name);
+      assert.equal(plugin.runtime.descriptor, plugin.descriptor, `${name} runtime must carry its plugin descriptor`);
     }
   });
 
