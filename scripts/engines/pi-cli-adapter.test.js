@@ -105,16 +105,33 @@ test('Pi parser follows the installed JSON event shapes', () => {
   };
   const assistantMessage = {
     role: 'assistant',
-    content: [{ type: 'text', text: 'done' }],
+    content: [
+      { type: 'thinking', thinking: 'reasoning' },
+      { type: 'text', text: 'hello world' },
+    ],
     usage,
     stopReason: 'stop',
   };
+  const partialHello = {
+    ...assistantMessage,
+    content: [{ type: 'text', text: 'hello' }],
+  };
+  const partialHelloWorld = {
+    ...assistantMessage,
+    content: [{ type: 'text', text: 'hello world' }],
+  };
   const records = [
     { type: 'session', version: 3, id: 'pi-session-2', timestamp: '2026-08-10T00:00:00.000Z', cwd: '/tmp/project' },
-    { type: 'message_update', message: assistantMessage, assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'hello' } },
-    { type: 'message_update', message: assistantMessage, assistantMessageEvent: { type: 'thinking_delta', contentIndex: 0, delta: 'reasoning' } },
+    { type: 'message_update', message: partialHello, assistantMessageEvent: { type: 'text_start', contentIndex: 0, partial: partialHello } },
+    { type: 'message_update', message: partialHello, assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'hello', partial: partialHello } },
+    { type: 'message_update', message: partialHelloWorld, assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: ' world', partial: partialHelloWorld } },
+    { type: 'message_update', message: partialHelloWorld, assistantMessageEvent: { type: 'text_end', contentIndex: 0, content: 'hello world', partial: partialHelloWorld } },
+    { type: 'message_update', message: assistantMessage, assistantMessageEvent: { type: 'thinking_start', contentIndex: 1, partial: assistantMessage } },
+    { type: 'message_update', message: assistantMessage, assistantMessageEvent: { type: 'thinking_delta', contentIndex: 1, delta: 'reasoning', partial: assistantMessage } },
+    { type: 'message_update', message: assistantMessage, assistantMessageEvent: { type: 'thinking_end', contentIndex: 1, content: 'reasoning', partial: assistantMessage } },
     { type: 'message_update', message: assistantMessage, assistantMessageEvent: {
       type: 'toolcall_end', contentIndex: 1, toolCall: { type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: 'README.md' } },
+      partial: assistantMessage,
     } },
     { type: 'tool_execution_start', toolCallId: 'call-1', toolName: 'read', args: { path: 'README.md' } },
     { type: 'tool_execution_update', toolCallId: 'call-1', toolName: 'read', args: { path: 'README.md' }, partialResult: { text: 'part' } },
@@ -125,18 +142,19 @@ test('Pi parser follows the installed JSON event shapes', () => {
   ];
   const parsed = records.flatMap(record => adapter.parseStreamEvent(line(record)));
   assert.deepEqual(parsed.map(event => event.type), [
-    'session', 'text', 'thinking', 'tool_update', 'tool_use', 'tool_update', 'tool_result', 'usage', 'usage', 'done',
+    'session', 'tool_update', 'tool_use', 'tool_update', 'tool_result', 'usage', 'text', 'thinking', 'usage', 'done',
   ]);
   assert.equal(parsed[0].sessionId, 'pi-session-2');
-  assert.equal(parsed[1].text, 'hello');
-  assert.equal(parsed[2].text, 'reasoning');
-  assert.equal(parsed[3].toolCallId, 'call-1');
-  assert.deepEqual(parsed[6].toolResult, { text: 'full' });
-  assert.deepEqual(parsed[7].usage, usage);
+  assert.equal(parsed[6].text, 'hello world', 'text_delta chunks must be emitted as one finalized message');
+  assert.equal(parsed[7].text, 'reasoning');
+  assert.equal(parsed[1].toolCallId, 'call-1');
+  assert.deepEqual(parsed[4].toolResult, { text: 'full' });
+  assert.deepEqual(parsed[5].usage, usage);
 
   const normalized = records.flatMap(record => adapter.parseEvent(line(record)));
   assert.ok(normalized.some(event => event.type === 'session_observed' && event.nativeSessionId === 'pi-session-2'));
-  assert.ok(normalized.some(event => event.type === 'message_delta' && event.text === 'hello'));
+  assert.ok(normalized.some(event => event.type === 'message_delta' && event.text === 'hello world'));
+  assert.equal(normalized.filter(event => event.type === 'message_delta').length, 1);
   assert.ok(normalized.some(event => event.type === 'thinking_delta' && event.text === 'reasoning'));
   assert.ok(normalized.some(event => event.type === 'tool_started'));
   assert.ok(normalized.some(event => event.type === 'tool_updated'));
@@ -202,6 +220,7 @@ test('Pi native turn keeps continuation engine-scoped', async () => {
           nativeLines: [
             line({ type: 'session', version: 3, id: 'pi-next', cwd: '/tmp/project' }),
             line({ type: 'message_update', message: { role: 'assistant' }, assistantMessageEvent: { type: 'text_delta', delta: 'continued' } }),
+            line({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'continued' }] } }),
             line({ type: 'agent_settled' }),
           ],
         };

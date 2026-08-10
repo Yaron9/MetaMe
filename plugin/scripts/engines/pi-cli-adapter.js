@@ -186,6 +186,18 @@ function assistantUsage(message) {
     : null;
 }
 
+function assistantContentText(message, contentType) {
+  if (!message || message.role !== 'assistant') return '';
+  const content = message.content;
+  if (contentType === 'text' && typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter(block => block && block.type === contentType)
+    .map(block => contentType === 'thinking' ? block.thinking : block.text)
+    .filter(value => typeof value === 'string')
+    .join('');
+}
+
 function parsePiStreamEvent(line) {
   const raw = parseJsonLine(line);
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
@@ -202,11 +214,11 @@ function parsePiStreamEvent(line) {
 
   if (raw.type === 'message_update' && raw.assistantMessageEvent) {
     const update = raw.assistantMessageEvent;
-    if (update.type === 'text_delta' && update.delta) {
-      out.push({ type: 'text', text: String(update.delta), raw });
-    } else if (update.type === 'thinking_delta' && update.delta) {
-      out.push({ type: 'thinking', text: String(update.delta), raw });
-    } else if (update.type === 'toolcall_delta' && update.delta) {
+    // Pi emits token deltas, while the shared foreground reducer treats each
+    // `text` event as a complete append.  Do not leak individual deltas here:
+    // the finalized message below contains the accumulated text and prevents
+    // blank paragraphs or last-chunk-only background results.
+    if (update.type === 'toolcall_delta' && update.delta) {
       out.push({ type: 'tool_update', toolInput: String(update.delta), raw });
     } else if (update.type === 'toolcall_end' && update.toolCall) {
       // The later tool_execution_start event is the single lifecycle start
@@ -230,6 +242,10 @@ function parsePiStreamEvent(line) {
   }
 
   if (raw.type === 'message_end' && raw.message && raw.message.role === 'assistant') {
+    const text = assistantContentText(raw.message, 'text');
+    if (text) out.push({ type: 'text', text, raw });
+    const thinking = assistantContentText(raw.message, 'thinking');
+    if (thinking) out.push({ type: 'thinking', text: thinking, raw });
     const usage = assistantUsage(raw.message);
     if (usage) out.push({ type: 'usage', usage, raw });
     if (raw.message.stopReason === 'error' || raw.message.stopReason === 'aborted') {
