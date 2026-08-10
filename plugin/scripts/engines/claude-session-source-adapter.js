@@ -544,8 +544,18 @@ function createClaudeSessionSourceAdapter(options = {}) {
     };
   }
 
-  function freshDiscoveryEntries(query) {
+  function snapshotPaths(files) {
+    return files.slice(0, DEFAULT_DISCOVERY_LIMIT).map(filePath => ({
+      relativePath: normalizeRelativePath(pathMod.relative(projectsRoot, filePath), pathMod),
+    }));
+  }
+
+  function freshDiscoverySnapshot(query) {
     const files = sortJsonlFilesByMtime(walkJsonl(projectsRoot, fsMod, pathMod), fsMod);
+    const canUsePathSnapshot = !query.project && !query.cwd
+      && query.includeSubagents && !query.suppressOwnedSubagents;
+    if (canUsePathSnapshot) return snapshotPaths(files);
+
     const inspected = [];
     const nativeSessionIds = new Set();
     for (const filePath of files) {
@@ -562,17 +572,22 @@ function createClaudeSessionSourceAdapter(options = {}) {
         || !info.parentNativeSessionId
         || !nativeSessionIds.has(info.parentNativeSessionId))
       .slice(0, DEFAULT_DISCOVERY_LIMIT)
-      .map((entry, snapshotIndex) => ({ ...entry, snapshotIndex }));
+      .map(entry => ({
+        relativePath: normalizeRelativePath(pathMod.relative(projectsRoot, entry.filePath), pathMod),
+      }));
   }
 
-  function entriesFromSnapshot(cursor) {
-    return cursor.snapshot.map((snapshotEntry, snapshotIndex) => {
+  function entriesFromSnapshot(snapshot, start, limit) {
+    const entries = [];
+    for (let snapshotIndex = start; snapshotIndex < snapshot.length && entries.length < limit; snapshotIndex++) {
+      const snapshotEntry = snapshot[snapshotIndex];
       const filePath = pathMod.resolve(projectsRoot, snapshotEntry.relativePath);
-      if (!isPathInside(projectsRoot, filePath, pathMod)) return null;
+      if (!isPathInside(projectsRoot, filePath, pathMod)) continue;
       let info;
-      try { info = inspectFile(filePath); } catch { return null; }
-      return { filePath, info, snapshotIndex };
-    }).filter(Boolean);
+      try { info = inspectFile(filePath); } catch { continue; }
+      entries.push({ filePath, info, snapshotIndex });
+    }
+    return entries;
   }
 
   function prepareDiscovery(request = {}) {
@@ -586,26 +601,16 @@ function createClaudeSessionSourceAdapter(options = {}) {
         query,
         cursor,
         snapshot: cursor.snapshot,
-        entries: entriesFromSnapshot(cursor),
       };
     }
-    const entries = freshDiscoveryEntries(query);
-    const snapshot = entries.map(entry => ({
-      relativePath: normalizeRelativePath(pathMod.relative(projectsRoot, entry.filePath), pathMod),
-    }));
-    return { query, cursor: null, snapshot, entries };
+    return { query, cursor: null, snapshot: freshDiscoverySnapshot(query) };
   }
 
   function refsForRequest(request = {}) {
     const state = prepareDiscovery(request);
     const limit = discoveryLimit(request);
     const start = state.cursor ? state.cursor.offset : 0;
-    const page = [];
-    for (const entry of state.entries) {
-      if (entry.snapshotIndex < start) continue;
-      page.push(entry);
-      if (page.length >= limit) break;
-    }
+    const page = entriesFromSnapshot(state.snapshot, start, limit);
     const hasMore = page.length > 0
       && page[page.length - 1].snapshotIndex + 1 < state.snapshot.length;
     return page.map((entry, index) => refForFile(

@@ -108,6 +108,30 @@ test('Claude discovery applies its cap after newest-session ordering', async () 
   assert.deepEqual(refs.map(ref => ref.nativeSessionId), ['new-session']);
 });
 
+test('Claude bounded discovery parses only the requested page without ownership filtering', async () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-bounded-'));
+  const sameTime = new Date('2026-07-01T00:00:00.000Z');
+  for (let index = 0; index < 20; index++) {
+    const filePath = path.join(tmpRoot, `session-${String(index).padStart(2, '0')}.jsonl`);
+    fs.writeFileSync(filePath, `${JSON.stringify({
+      type: 'user', sessionId: `session-${index}`, message: { content: `session ${index}` },
+    })}\n`);
+    fs.utimesSync(filePath, sameTime, sameTime);
+  }
+  let reads = 0;
+  const fsSpy = {
+    ...fs,
+    readFileSync(...args) {
+      reads += 1;
+      return fs.readFileSync(...args);
+    },
+  };
+  const source = createClaudeSessionSourceAdapter({ projectsRoot: tmpRoot, fs: fsSpy });
+  const refs = await discoverAll(source, { limit: 1 });
+  assert.equal(refs.length, 1);
+  assert.equal(reads, 1);
+});
+
 test('Claude discovery cursor replays a stable snapshot after files are touched', async () => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'metame-claude-cursor-'));
   const writeSession = (name, sessionId) => {
