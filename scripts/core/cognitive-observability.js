@@ -132,11 +132,18 @@ function aggregateRecall(auditRows = [], window = null) {
   const traces = new Set();
   const opportunityTraces = new Set();
   let missingTraceRows = 0;
-  rows.forEach((row) => {
+  rows.forEach((row, index) => {
     const trace = boundedIdentifier(row && row.trace_id);
     if (trace) traces.add(trace);
     else missingTraceRows++;
-    if (Number(row && row.should_recall) === 1 && trace) opportunityTraces.add(trace);
+    if (Number(row && row.should_recall) === 1) {
+      // Legacy audit rows predate trace attribution. Preserve their recall
+      // opportunity using a bounded row identity rather than silently
+      // deleting demand from the denominator. The missing trace count below
+      // keeps coverage degraded so this surrogate is never presented as a
+      // real trace.
+      opportunityTraces.add(trace || `__row:${boundedIdentifier(row && row.id) || index}`);
+    }
   });
 
   const injected = new Set();
@@ -266,6 +273,7 @@ function diagnoseObservability({ hygiene, recall, pipeline, auditDropped = 0, li
   if (pendingAnnotations > 0) diagnostics.push(diagnostic('pending_annotations', 'degraded', `${pendingAnnotations} pending human annotation(s)`, 'Review annotations through the normal claim workflow.'));
   if (Number(auditDropped) > 0) diagnostics.push(diagnostic('audit_dropped', 'degraded', `${Number(auditDropped)} recall audit row(s) were dropped`, 'Inspect database contention before tuning recall.'));
   if (recall.feedback_coverage === null) diagnostics.push(diagnostic('insufficient_data', 'degraded', 'Recall feedback coverage is unavailable for the selected window', 'Collect delivered and outcome feedback before judging utilization.'));
+  if (recall.missing_trace_rows > 0) diagnostics.push(diagnostic('trace_coverage', 'degraded', `${recall.missing_trace_rows} recall audit row(s) lack a trace ID`, 'Use a shared trace ID for each recall opportunity.'));
   if (recall.incomplete_delivery_coverage) diagnostics.push(diagnostic('trace_source_coverage', 'degraded', 'Some delivered audit rows lack a complete trace/source pair', 'Use a trace ID and bounded source reference for every delivery.'));
   if (recall.missing_token_data) diagnostics.push(diagnostic('token_coverage', 'degraded', 'Some delivered rows have no recorded token count', 'Record token_count when the consuming Host can report it; do not estimate.'));
   const hasPipeline = Object.keys(pipeline.session_sources).length + Object.keys(pipeline.extraction_runs).length > 0;

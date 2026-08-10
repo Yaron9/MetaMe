@@ -2189,14 +2189,6 @@ if (process.argv[2] === 'memory' && process.argv[3] === 'artifacts' && process.a
   ], { stdio: 'inherit', env: process.env });
   process.exit(result.status ?? 1);
 }
-if (process.argv[2] === 'memory' && ['status', 'doctor'].includes(process.argv[3])) {
-  const command = process.argv[3];
-  const result = spawnSync(process.execPath, [
-    path.join(__dirname, 'scripts', `memory-${command}.js`),
-    ...process.argv.slice(4),
-  ], { stdio: 'inherit', env: process.env });
-  process.exit(result.status ?? 1);
-}
 if (process.argv[2] === 'wiki') {
   const area = process.argv[3];
   const action = process.argv[4];

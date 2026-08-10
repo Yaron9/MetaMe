@@ -41,6 +41,20 @@ test('missing feedback is unknown rather than a fabricated hit rate', () => {
   assert.ok(result.diagnostics.some(item => item.code === 'insufficient_data'));
 });
 
+test('legacy opportunities without trace IDs use bounded row surrogates and stay degraded', () => {
+  const result = buildObservabilityResult({
+    auditRows: [
+      { id: 'legacy-observe-1', phase: 'observe', should_recall: 1 },
+      { id: 'legacy-observe-2', phase: 'observe', should_recall: 1 },
+    ],
+    sessionSources: [{ status: 'indexed' }],
+  });
+  assert.equal(result.recall.opportunities, 2);
+  assert.equal(result.recall.unique_traces, 0);
+  assert.equal(result.status, 'degraded');
+  assert.ok(result.diagnostics.some(item => item.code === 'trace_coverage'));
+});
+
 test('bounded source references reject recalled text and cap identifiers', () => {
   assert.equal(toBoundedSourceRef({ kind: 'fact', id: 'f1' }), 'fact:f1');
   assert.equal(toBoundedSourceRef('fact:credential_value'), 'fact:credential_value');
