@@ -217,7 +217,7 @@ function ensureSessionSourceSchema(db) {
 
 function encodeCursor(cursor) {
   if (cursor === null || cursor === undefined) return null;
-  if (typeof cursor === 'string') return cursor;
+  if (typeof cursor === 'string') return `@string:${cursor}`;
   if (typeof cursor === 'number') return `@number:${cursor}`;
   if (typeof cursor === 'boolean') return `@boolean:${cursor}`;
   return serializeCursor(cursor);
@@ -235,7 +235,7 @@ function decodeCursor(value) {
 
 function encodeSourceLocator(locator) {
   if (locator === null || locator === undefined) return null;
-  if (typeof locator === 'string') return locator;
+  if (typeof locator === 'string') return `@string:${locator}`;
   try {
     return `@json:${JSON.stringify(locator)}`;
   } catch {
@@ -246,6 +246,7 @@ function encodeSourceLocator(locator) {
 function decodeSourceLocator(value) {
   if (value === null || value === undefined) return null;
   const text = String(value);
+  if (text.startsWith('@string:')) return text.slice('@string:'.length);
   if (!text.startsWith('@json:')) return value;
   try { return JSON.parse(text.slice('@json:'.length)); } catch { return value; }
 }
@@ -289,7 +290,7 @@ function upsertSessionSource(db, source) {
     ? encodeSourceLocator(source.sourceLocator)
     : source.source_locator !== undefined
       ? encodeSourceLocator(source.source_locator)
-      : sourcePath;
+      : encodeSourceLocator(sourcePath);
   const cursor = encodeCursor(firstDefined(source.discoveryCursor, source.discovery_cursor));
   db.prepare(`
     INSERT INTO session_sources (

@@ -169,6 +169,28 @@ test('numeric zero discovery cursor survives source persistence and restart look
   db.close();
 });
 
+test('reserved-prefix string cursors and locators remain opaque after hydration', () => {
+  const db = openDb();
+  const source = upsertSessionSource(db, {
+    engine: 'fixture-agent',
+    sessionId: 'reserved-prefixes',
+    sourceHash: 'rev-reserved',
+    discoveryCursor: '@number:0',
+    sourceLocator: '@json:{"native":"opaque"}',
+  });
+  const row = getSessionSource(db, {
+    engine: 'fixture-agent',
+    sessionId: 'reserved-prefixes',
+    sourceHash: 'rev-reserved',
+  });
+  assert.equal(row.discovery_cursor_value, '@number:0');
+  assert.equal(row.sourceLocator, '@json:{"native":"opaque"}');
+  const stored = db.prepare('SELECT discovery_cursor, source_locator FROM session_sources WHERE id=?').get(source.id);
+  assert.equal(stored.discovery_cursor, '@string:@number:0');
+  assert.equal(stored.source_locator, '@string:@json:{"native":"opaque"}');
+  db.close();
+});
+
 test('source locators remain opaque across object and array serialization', () => {
   const db = openDb();
   const locator = { database: 'native', path: ['sessions', 0], key: { id: 'opaque' } };
