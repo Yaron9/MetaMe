@@ -77,12 +77,49 @@ const ENGINE_DESCRIPTORS = Object.freeze({
     sessionStorage: 'agy-transcript',
     hostHook: null,
   }),
+  pi: Object.freeze({
+    id: 'pi',
+    displayName: 'Pi',
+    vendor: 'earendil-works',
+    executableNames: Object.freeze(['pi']),
+    nativeSessionKind: 'pi-jsonl',
+    configSchemaVersion: 1,
+    capabilities: Object.freeze({
+      // The adapter probes the installed binary at runtime.  The descriptor
+      // declares the protocol capability; availability remains opt-in and
+      // probe-derived rather than being inferred from this static document.
+      runtime: Object.freeze({ state: 'verified' }),
+      sessionSource: Object.freeze({ state: 'unsupported' }),
+      cognitiveHost: Object.freeze({ state: 'unsupported' }),
+    }),
+    name: 'pi',
+    // `provider` is the legacy descriptor alias for vendor; the runtime's
+    // model provider default is declared separately in ENGINE_MODEL_CONFIG.
+    provider: 'earendil-works',
+    // Pi natively discovers project context files; no host-side rewrite is
+    // needed for the reference adapter.
+    contextProjection: 'prompt-bootstrap',
+    sessionStorage: 'pi-jsonl',
+    hostHook: null,
+  }),
 });
 
 const ENGINE_NAMES = Object.freeze(Object.keys(ENGINE_DESCRIPTORS));
+const EXPERIMENTAL_ENGINE_NAMES = Object.freeze(['agy', 'pi']);
+const EXPERIMENTAL_ENGINE_NAME_SET = new Set(EXPERIMENTAL_ENGINE_NAMES);
 
 function getEngineDescriptor(name) {
   return ENGINE_DESCRIPTORS[String(name || '').trim().toLowerCase()] || null;
 }
 
-module.exports = { ENGINE_DESCRIPTORS, ENGINE_NAMES, getEngineDescriptor };
+function isExperimentalEngineName(name) {
+  return EXPERIMENTAL_ENGINE_NAME_SET.has(String(name || '').trim().toLowerCase());
+}
+
+module.exports = {
+  ENGINE_DESCRIPTORS,
+  ENGINE_NAMES,
+  EXPERIMENTAL_ENGINE_NAMES,
+  getEngineDescriptor,
+  isExperimentalEngineName,
+};

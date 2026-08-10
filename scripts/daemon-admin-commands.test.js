@@ -924,6 +924,47 @@ describe('daemon-admin-commands /engine', () => {
     assert.match(sent[0], /当前 chat 绑定 Agent: personal/);
     assert.match(sent[0], /当前 chat 已绑定 Agent；切换时会同步更新该 Agent 的 engine\/model/);
   });
+
+  it('allows Pi only for an enabled allowlisted Agent and keeps agy non-switchable', async () => {
+    const sent = [];
+    let cfg = {
+      feishu: { chat_agent_map: { 'chat-research': 'research' } },
+      projects: { research: { name: 'Research', engine: 'claude', model: 'sonnet' } },
+      daemon: { experimental_engines: { pi: { enabled: true, allowed_projects: ['research'] } } },
+    };
+    const { handleAdminCommand } = createHandler(
+      () => ({ general: [], project: [] }),
+      {
+        providerMod: { getActiveName: () => 'anthropic' },
+        loadConfig: () => cfg,
+        writeConfigSafe: next => { cfg = next; },
+        getDistillModel: () => 'auto',
+      }
+    );
+    const bot = createBot(sent);
+
+    const switched = await handleAdminCommand({
+      bot,
+      chatId: 'chat-research',
+      text: '/engine pi',
+      config: cfg,
+      state: { tasks: {} },
+    });
+    assert.equal(switched.handled, true);
+    assert.equal(cfg.projects.research.engine, 'pi');
+    assert.equal(cfg.projects.research.model, '');
+    assert.match(sent[0], /pi 认证/i);
+
+    await handleAdminCommand({
+      bot,
+      chatId: 'chat-research',
+      text: '/engine agy',
+      config: cfg,
+      state: { tasks: {} },
+    });
+    assert.equal(cfg.projects.research.engine, 'pi');
+    assert.match(sent[1], /不支持的引擎: agy/);
+  });
 });
 
 describe('daemon-admin-commands /doctor', () => {

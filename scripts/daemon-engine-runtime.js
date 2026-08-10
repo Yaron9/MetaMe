@@ -5,12 +5,14 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 const { normalizeEngineName } = require('./daemon-utils');
+const { isExperimentalEngineName } = require('./core/engine-descriptors');
 const { AGY_DEFAULT_MODEL, normalizeAgyModel } = require('./core/agy-model');
 const { createDefaultEngineRegistry } = require('./engines/engine-registry');
 const { isEnginePlugin } = require('./engines/engine-plugin');
 const { _private: claudeAdapter } = require('./engines/claude-cli-adapter');
 const { _private: codexAdapter } = require('./engines/codex-cli-adapter');
 const { _private: agyAdapter } = require('./engines/agy-cli-adapter');
+const { _private: piAdapter } = require('./engines/pi-cli-adapter');
 
 const CODEX_AUTO_MODEL = 'auto';
 const AGY_AUTO_MODEL = AGY_DEFAULT_MODEL;
@@ -19,6 +21,7 @@ const ENGINE_TIMEOUT_DEFAULTS = Object.freeze({
   codex: codexAdapter.DEFAULT_TIMEOUTS,
   claude: claudeAdapter.DEFAULT_TIMEOUTS,
   agy: agyAdapter.DEFAULT_TIMEOUTS,
+  pi: piAdapter.DEFAULT_TIMEOUTS,
 });
 
 const {
@@ -121,6 +124,15 @@ const ENGINE_MODEL_CONFIG = Object.freeze({
     provider: 'google',
     hint:     'agy 1.1.0 需要显式模型；当前默认使用 Gemini 3.5 Flash (Medium)',
   },
+  pi: {
+    // Empty means “use Pi's configured/default model”; an explicit value in
+    // daemon.models.pi is passed through unchanged by the adapter.
+    main:     '',
+    distill:  '',
+    options:  [],
+    provider: 'google',
+    hint:     'Pi 为实验性引擎；provider/model/thinking 由 Pi 配置或 daemon.pi 显式传入',
+  },
 });
 
 // Backward-compat aliases (derived, do not edit directly)
@@ -172,6 +184,7 @@ function resolveEngineModel(engineName, daemonCfg = {}, overrideModel = '') {
     return engineCfg.main;
   }
   if (engine === 'agy') return engineCfg.main;
+  if (isExperimentalEngineName(engine)) return engineCfg.main;
   return legacyModel;
 }
 
@@ -270,6 +283,17 @@ function createEngineRuntimeFactory(deps = {}) {
       timeouts: resolveEngineTimeouts('agy'),
       validateNativeSession: deps.validateNativeSession,
     },
+    pi: {
+      home,
+      binary: deps.PI_BIN,
+      sessionDir: deps.PI_SESSION_DIR,
+      defaultProvider: ENGINE_MODEL_CONFIG.pi.provider,
+      defaultModel: ENGINE_MODEL_CONFIG.pi.main,
+      timeouts: resolveEngineTimeouts('pi'),
+      fs: deps.fs,
+      path: deps.path,
+      execFileSync: deps.execFileSync,
+    },
   });
 
   return engineName => registry.get(engineName);
@@ -294,6 +318,10 @@ module.exports = {
     parseClaudeStreamEvent,
     parseCodexStreamEvent,
     parseAgyStreamEvent,
+    parsePiStreamEvent: piAdapter.parsePiStreamEvent,
+    classifyPiError: piAdapter.classifyPiError,
+    buildPiArgs: piAdapter.buildPiArgs,
+    resolvePiBinary: piAdapter.resolvePiBinary,
     buildClaudeArgs,
     buildCodexArgs,
     buildAgyArgs,

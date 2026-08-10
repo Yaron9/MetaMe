@@ -34,4 +34,28 @@ describe('scoped engine policy', () => {
     assert.equal(unavailable.engine, 'codex');
     assert.equal(unavailable.reason, 'agy_unavailable');
   });
+
+  it('keeps Pi opt-in and project-scoped', () => {
+    const denied = resolveScopedEngine({
+      requestedEngine: 'pi',
+      projectKey: 'personal',
+      project: { fallback_engine: 'codex' },
+      daemonCfg: { experimental_engines: { pi: { enabled: true, allowed_projects: ['research'] } } },
+    });
+    assert.deepEqual({ engine: denied.engine, reason: denied.reason }, {
+      engine: 'codex', reason: 'project_not_allowlisted',
+    });
+
+    const allowed = resolveScopedEngine({
+      requestedEngine: 'pi',
+      projectKey: 'research',
+      daemonCfg: { experimental_engines: { pi: { enabled: true, allowed_projects: ['research'] } } },
+    });
+    assert.equal(allowed.engine, 'pi');
+    assert.equal(allowed.fallback, false);
+
+    const unavailable = fallbackForUnavailableRuntime({ engine: 'pi', requested: 'pi' }, { fallback_engine: 'claude' });
+    assert.equal(unavailable.engine, 'claude');
+    assert.equal(unavailable.reason, 'pi_unavailable');
+  });
 });

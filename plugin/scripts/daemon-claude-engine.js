@@ -11,6 +11,7 @@ const {
 } = require('./daemon-engine-runtime');
 const { rawChatId } = require('./core/thread-chat-id');
 const { resolveScopedEngine, fallbackForUnavailableRuntime } = require('./core/engine-policy');
+const { isExperimentalEngineName } = require('./core/engine-descriptors');
 const { buildAgentContextForEngine, buildMemorySnapshotContent, selectSnapshotContext, refreshMemorySnapshot } = require('./agent-layer');
 const {
   adaptDaemonHintForEngine,
@@ -1290,11 +1291,12 @@ function createClaudeEngine(deps) {
       const agyNativeBinaryUnavailable = runtime
         && Object.prototype.hasOwnProperty.call(runtime, 'nativeBinary')
         && (!runtime.nativeBinary || runtime.nativeBinary === 'agy');
-      if (engineName === 'agy' && (
+      const experimentalRuntimeUnavailable = isExperimentalEngineName(engineName) && (
         !runtime
         || agyNativeBinaryUnavailable
         || (typeof runtime.isReady === 'function' && !runtime.isReady())
-      )) {
+      );
+      if (experimentalRuntimeUnavailable) {
         enginePolicy = fallbackForUnavailableRuntime(enginePolicy, boundProject, getDefaultEngine());
         engineName = enginePolicy.engine;
         boundEngineName = engineName;
@@ -1320,7 +1322,7 @@ function createClaudeEngine(deps) {
         return { ok: false, error, errorCode };
       }
       if (enginePolicy.fallback) {
-        log('WARN', `[EnginePolicy] ${boundProjectKey || chatId}: agy -> ${engineName} (${enginePolicy.reason})`);
+        log('WARN', `[EnginePolicy] ${boundProjectKey || chatId}: ${enginePolicy.requested} -> ${engineName} (${enginePolicy.reason})`);
       }
       const requestedCodexPermissionProfile = engineName === 'codex'
         ? getCodexPermissionProfile(readOnly, daemonCfg)

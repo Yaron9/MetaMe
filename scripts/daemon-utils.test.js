@@ -20,9 +20,11 @@ describe('normalizeEngineName', () => {
   });
 
   it('recognizes agy without widening unknown engine values', () => {
-    assert.deepEqual(ENGINE_NAMES, ['claude', 'codex', 'agy']);
+    assert.deepEqual(ENGINE_NAMES, ['claude', 'codex', 'agy', 'pi']);
     assert.equal(normalizeEngineName(' AGY '), 'agy');
+    assert.equal(normalizeEngineName(' Pi '), 'pi');
     assert.equal(isKnownEngineName('agy'), true);
+    assert.equal(isKnownEngineName('pi'), true);
     assert.equal(isKnownEngineName('unknown'), false);
     assert.equal(normalizeEngineName('unknown'), 'claude');
   });

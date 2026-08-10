@@ -212,12 +212,21 @@ daemon:
     backend: ollama
     model: bge-m3
     dimensions: 1024
-  # Experimental engines are opt-in and project-scoped. agy is never selected
-  # globally or for newly created agents.
+  # Experimental engines are opt-in and project-scoped. They are never
+  # selected globally or for newly created agents by default.
   experimental_engines:
     agy:
       enabled: false
       allowed_projects: [digital_me, munger]
+    pi:
+      enabled: false
+      allowed_projects: []
+  # Pi CLI protocol options are inert until the project is allowlisted above.
+  pi:
+    provider: google
+    model: ""
+    thinking: ""
+    session_dir: ""
   log_max_size: 1048576
   wiki_output_dir: ~/Documents/ObsidianVault/MetaMe/wiki  # Obsidian vault wiki subdirectory
   heartbeat_check_interval: 60

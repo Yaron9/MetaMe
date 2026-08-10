@@ -36,14 +36,14 @@ test('registry exposes one deep adapter per native CLI with private session stor
   const registry = createRegistry();
   const adapters = registry.list();
 
-  assert.deepEqual(adapters.map(adapter => adapter.name), ['claude', 'codex', 'agy']);
+  assert.deepEqual(adapters.map(adapter => adapter.name), ['claude', 'codex', 'agy', 'pi']);
   assert.deepEqual(
     adapters.map(adapter => adapter.descriptor.contextProjection),
-    ['claude-import', 'agents-md-merge', 'prompt-bootstrap']
+    ['claude-import', 'agents-md-merge', 'prompt-bootstrap', 'prompt-bootstrap']
   );
   assert.deepEqual(
     adapters.map(adapter => adapter.nativeSession.storage),
-    ['claude-jsonl', 'codex-sqlite', 'agy-transcript']
+    ['claude-jsonl', 'codex-sqlite', 'agy-transcript', 'pi-jsonl']
   );
   assert.ok(adapters.every(adapter => adapter.nativeSession.opaque));
   assert.ok(adapters.every(Object.isFrozen));

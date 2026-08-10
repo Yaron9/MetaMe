@@ -8,6 +8,10 @@ const {
 const { IS_WIN } = require('./platform');
 const { ENGINE_MODEL_CONFIG, resolveEngineModel, normalizeClaudeModel } = require('./daemon-engine-runtime');
 const { resolveScopedEngine } = require('./core/engine-policy');
+const { ENGINE_NAMES, isExperimentalEngineName } = require('./core/engine-descriptors');
+// agy remains a background/project configuration engine; preserve the existing
+// /engine surface while exposing the new project-scoped Pi choice.
+const ENGINE_SWITCH_NAMES = Object.freeze(ENGINE_NAMES.filter(name => name !== 'agy'));
 const { resolveProjectKey: _resolveProjectKey } = require('./daemon-team-dispatch');
 const { buildDispatchResponseCard } = require('./daemon-dispatch-cards');
 const {
@@ -1500,18 +1504,27 @@ function createAdminCommandHandler(deps) {
         issues++;
       }
 
-      const hasClaude = hasCli(execSync, 'claude');
-      const hasCodex = hasCli(execSync, 'codex');
-      const hasAgy = hasCli(execSync, 'agy');
-      checks.push(hasClaude ? '✅ Claude CLI' : '⚠️ Claude CLI 未找到');
-      checks.push(hasCodex ? '✅ Codex CLI' : '⚠️ Codex CLI 未找到');
-      const agyCfg = daemonCfg.experimental_engines && daemonCfg.experimental_engines.agy;
-      if (agyCfg && agyCfg.enabled === true) checks.push(hasAgy ? '✅ agy CLI' : '❌ agy 已启用但 CLI 未找到');
-      else checks.push(hasAgy ? 'ℹ️ agy CLI（scoped engine 未启用）' : 'ℹ️ agy CLI 未安装');
-      if (agyCfg && agyCfg.enabled === true && !hasAgy) issues++;
+      const engineReady = Object.fromEntries(ENGINE_NAMES.map(name => [name, hasCli(execSync, name)]));
+      const experimentalCfg = daemonCfg.experimental_engines || {};
+      for (const engineName of ENGINE_NAMES) {
+        const ready = engineReady[engineName];
+        const cliLabel = engineName === 'agy'
+          ? engineName
+          : `${engineName.slice(0, 1).toUpperCase()}${engineName.slice(1)}`;
+        if (!isExperimentalEngineName(engineName)) {
+          checks.push(ready ? `✅ ${cliLabel} CLI` : `⚠️ ${cliLabel} CLI 未找到`);
+          continue;
+        }
+        const engineCfg = experimentalCfg[engineName];
+        if (engineCfg && engineCfg.enabled === true) {
+          checks.push(ready ? `✅ ${cliLabel} CLI` : `❌ ${cliLabel} 已启用但 CLI 未找到`);
+          if (!ready) issues++;
+        } else {
+          checks.push(ready ? `ℹ️ ${cliLabel} CLI（scoped engine 未启用）` : `ℹ️ ${cliLabel} CLI 未安装`);
+        }
+      }
 
       const currentEngine = getDefaultEngine();
-      const engineReady = { claude: hasClaude, codex: hasCodex, agy: hasAgy };
       if (engineReady[currentEngine] === false) {
         checks.push(`❌ 当前默认引擎是 ${currentEngine}，但对应 CLI 不可用`);
         issues++;
@@ -1668,7 +1681,8 @@ function createAdminCommandHandler(deps) {
       return { handled: true, config };
     }
 
-    // /engine [name] — show or switch default session engine (claude/codex)
+    // /engine [name] — show or switch the session engine. Experimental
+    // engines remain project-scoped and never become the global default.
     if (text === '/engine' || text.startsWith('/engine ')) {
       const arg = text.slice('/engine'.length).trim().toLowerCase();
       const boundProjectKey = resolveBoundProjectKey(chatId, config);
@@ -1702,21 +1716,34 @@ function createAdminCommandHandler(deps) {
           `🤖 会话模型: ${currentModel}  |  后台: ${distillEngine}/${distill}`,
           scopeLine,
           '',
-          '用法: /engine claude 或 /engine codex',
+          `用法: /engine ${ENGINE_SWITCH_NAMES.join(' 或 /engine ')}`,
           boundProjectKey
             ? '当前 chat 已绑定 Agent；切换时会同步更新该 Agent 的 engine/model'
             : '切换引擎只影响会话引擎；后台蒸馏/记忆沉淀固定走 agy',
         ].join('\n'));
         return { handled: true, config };
       }
-      if (arg !== 'claude' && arg !== 'codex') {
-        await bot.sendMessage(chatId, `❌ 不支持的引擎: ${arg}\n可选: claude, codex`);
+      if (!ENGINE_SWITCH_NAMES.includes(arg)) {
+        await bot.sendMessage(chatId, `❌ 不支持的引擎: ${arg}\n可选: ${ENGINE_SWITCH_NAMES.join(', ')}`);
+        return { handled: true, config };
+      }
+
+      const requestedPolicy = resolveScopedEngine({
+        requestedEngine: arg,
+        projectKey: boundProjectKey || '',
+        project: boundProject,
+        daemonCfg: (config && config.daemon) || {},
+        defaultEngine: getDefaultEngine(),
+      });
+      if (isExperimentalEngineName(arg)
+        && (!boundProjectKey || requestedPolicy.engine !== arg || requestedPolicy.fallback)) {
+        await bot.sendMessage(chatId, `❌ ${arg} 是实验性引擎，仅可在已启用且 allowlist 命中的 Agent 中使用。`);
         return { handled: true, config };
       }
 
       const preferredProvider = (ENGINE_MODEL_CONFIG[arg] || {}).provider;
 
-      setDefaultEngine(arg); // switches session engine only; background distill stays on agy
+      if (!isExperimentalEngineName(arg)) setDefaultEngine(arg);
       const distill = getDistillModel();
       const distillEngine = providerMod && typeof providerMod.getDistillEngine === 'function'
         ? providerMod.getDistillEngine()
@@ -1739,10 +1766,12 @@ function createAdminCommandHandler(deps) {
       );
 
       // Auto-switch provider only for Claude-compatible routing.
-      // Codex auth is handled by `codex login` / `OPENAI_API_KEY`, not providers.yaml.
+      // Codex/Pi auth is handled by their own CLI/provider configuration.
       let providerNote = '';
       if (arg === 'codex') {
         providerNote = '\n🔌 Codex 认证: 使用 `codex login` 或 OPENAI_API_KEY（/provider 不参与 Codex 路由）';
+      } else if (isExperimentalEngineName(arg)) {
+        providerNote = `\n🔌 ${arg} 认证: 由 ${arg} CLI/provider 配置负责（/provider 不参与该引擎路由）`;
       } else if (providerMod && preferredProvider) {
         try {
           providerMod.setActive(preferredProvider);

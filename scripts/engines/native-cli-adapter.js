@@ -49,6 +49,14 @@ function normalizeRuntimeEvents(events) {
       normalized.push({ ...event, type: 'tool_finished', raw });
       continue;
     }
+    if (event.type === 'tool_update') {
+      normalized.push({ ...event, type: 'tool_updated', raw });
+      continue;
+    }
+    if (event.type === 'usage') {
+      normalized.push({ ...event, type: 'usage_observed', raw });
+      continue;
+    }
     if (event.type === 'done') {
       if (event.usage) normalized.push({ type: 'usage_observed', usage: event.usage, raw });
       normalized.push({ ...event, type: 'run_completed', raw });
@@ -115,7 +123,7 @@ function defineNativeCliAdapter(spec) {
       input: options.input === undefined ? '' : options.input,
       stdinStrategy: adapter.stdinBehavior || 'write-and-close',
       stdin: adapter.stdinBehavior || 'write-and-close',
-      outputFraming: options.outputFormat || options.outputFraming || '',
+      outputFraming: options.outputFormat || options.outputFraming || adapter.outputFraming || '',
       killSignal: adapter.killSignal || 'SIGTERM',
       timeouts: adapter.timeouts || {},
     });

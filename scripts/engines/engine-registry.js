@@ -3,6 +3,7 @@
 const { createClaudeCliAdapter } = require('./claude-cli-adapter');
 const { createCodexCliAdapter } = require('./codex-cli-adapter');
 const { createAgyCliAdapter } = require('./agy-cli-adapter');
+const { createPiCliAdapter } = require('./pi-cli-adapter');
 const {
   createEnginePlugin,
   isEnginePlugin,
@@ -183,6 +184,7 @@ function createDefaultEngineRegistry(deps = {}) {
     createClaudeCliAdapter(deps.claude),
     createCodexCliAdapter(deps.codex),
     createAgyCliAdapter(deps.agy),
+    createPiCliAdapter(deps.pi),
   ];
   const plugins = adapters.map(runtime => createEnginePlugin({
     protocolVersion: 1,

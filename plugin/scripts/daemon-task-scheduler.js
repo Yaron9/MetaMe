@@ -643,7 +643,7 @@ function createTaskScheduler(deps) {
     const preamble = buildProfilePreamble();
     const enginePolicy = resolveTaskEngine(task, config, getDistillEngine(), 'background');
     const engine = enginePolicy.engine;
-    if (enginePolicy.fallback) log('WARN', `Task ${task.name} engine fallback: agy -> ${engine} (${enginePolicy.reason})`);
+    if (enginePolicy.fallback) log('WARN', `Task ${task.name} engine fallback: ${enginePolicy.requested} -> ${engine} (${enginePolicy.reason})`);
     const model = engine === 'claude'
       ? normalizeModel(task.model || getDistillModel())
       : resolveEngineModel(engine, (config && config.daemon) || {}, task.model);
@@ -779,7 +779,7 @@ function createTaskScheduler(deps) {
     // Background workflows share the same isolated subconscious boundary.
     const enginePolicy = resolveTaskEngine(task, config, getDistillEngine(), 'background');
     const engine = enginePolicy.engine;
-    if (enginePolicy.fallback) log('WARN', `Workflow ${task.name} engine fallback: agy -> ${engine} (${enginePolicy.reason})`);
+    if (enginePolicy.fallback) log('WARN', `Workflow ${task.name} engine fallback: ${enginePolicy.requested} -> ${engine} (${enginePolicy.reason})`);
     const model = resolveEngineModel(engine, (config && config.daemon) || {}, task.model);
     const cwd = ensureBackgroundCwd();
     let sessionId = crypto.randomUUID();
