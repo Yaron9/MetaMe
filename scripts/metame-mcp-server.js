@@ -37,7 +37,7 @@ const SERVER_INFO = { name: 'metame', version: '1.0.0' };
 const TOOLS = [
   {
     name: 'memory_search',
-    description: 'Search MetaMe long-term memory (facts + knowledge wiki) with hybrid FTS/vector ranking. Returns matching items with titles and content.',
+    description: 'Search MetaMe long-term memory (facts + knowledge wiki) with hybrid FTS/vector ranking. Use proactively before acting when a task depends on project conventions, historical technical decisions, recurring failures, or prior experience. Returns summary-first references; open only necessary details with memory_get.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -53,7 +53,7 @@ const TOOLS = [
   },
   {
     name: 'memory_get',
-    description: 'Open one typed memory_search result by type and id. Records an opened consumption event without changing memory promotion counters.',
+    description: 'Open one necessary typed memory_search result by type and id. Records an opened consumption event without changing memory promotion counters. If the asset materially affects execution, call memory_feedback after outcome evidence exists.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -99,7 +99,7 @@ const TOOLS = [
   },
   {
     name: 'memory_feedback',
-    description: 'Record evidence that previously delivered memory was applied or validated. Does not change promotion or ranking counters.',
+    description: 'Record evidence that previously delivered memory materially affected execution. Use applied only after it influenced an action; use validated only after objective evidence such as passing tests, accepted output, or explicit user confirmation. Never mark task/session completion alone as validation. Does not change promotion or ranking counters.',
     inputSchema: {
       type: 'object',
       properties: {

@@ -35,6 +35,11 @@ describe('metame-mcp-server protocol', () => {
       assert.ok(tool.description.length > 20, `${tool.name} needs a real description`);
       assert.equal(tool.inputSchema.type, 'object');
     }
+    const byName = Object.fromEntries(list.result.tools.map(tool => [tool.name, tool]));
+    assert.match(byName.memory_search.description, /Use proactively/);
+    assert.match(byName.memory_search.description, /memory_get/);
+    assert.match(byName.memory_get.description, /memory_feedback/);
+    assert.match(byName.memory_feedback.description, /Never mark task\/session completion alone as validation/);
   });
 
   it('notifications are silently ignored, unknown methods error', async () => {
