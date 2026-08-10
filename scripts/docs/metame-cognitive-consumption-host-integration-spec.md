@@ -2,6 +2,15 @@
 
 > 状态：历史规划记录，已由 `scripts/docs/universal-agent-cli-spec.md` 与 ADR 0003 取代。文中的 Claude/Codex 范围描述只代表写作时的首批验证，不是当前支持边界；现行实现必须复用统一 Capability Registry、Session Source 与 Extraction Run 契约。
 
+> #29 验收注记（2026-08）：现行跨 Host 验收入口是
+> `scripts/cognitive-quality-integration.test.js`。它复用 #24–#28 的 claim、reconcile、
+> Project Context Manifest、MCP、Wiki annotation、observability 与 Engine Plugin seam，
+> 并以临时 fixture 验证生命周期、authority、预算/幂等和 stale recovery。`metame host
+> status|doctor` 报告实际 capability：Claude/Codex 的 MCP/context 只有在探测到时才
+> `verified`/`detected`，Pi、agy 或 external adapter 不因 PATH 可执行而获得 Cognitive
+> Host 权限；未声明投影能力保持 `unsupported`。Wiki 人工修改始终留在 annotation 或
+> conflict 边界，legacy null-key 只保留检索兼容，不进入新的 Synthesis/Manifest。
+
 ## Problem Statement
 
 MetaMe 已经具备长期记忆、Wiki、Profile、Agent Context、Skill Evolution、Session 提炼、混合检索、MCP 服务、Claude/Codex 宿主接入和后台治理等大量基础设施，但这些资产的生产能力强于消费能力。系统目前不能可靠回答：Claude 与 Codex 实际拥有了哪些 MetaMe 能力；某项资产是否能被发现、返回、展开、采用并帮助任务成功；消费链路断在何处；哪些后台任务仍在持续生产没有消费出口的资产。

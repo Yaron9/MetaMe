@@ -68,7 +68,8 @@ function walkMarkdown(rootDir) {
       const rel = path.join(relDir, entry.name);
       if (entry.isDirectory()) {
         if (!['node_modules', '.git', '_review'].includes(entry.name)) stack.push(rel);
-      } else if (entry.isFile() && entry.name.endsWith('.md') && entry.name !== DEPRECATED_MARKER) {
+      } else if (entry.isFile() && entry.name.endsWith('.md')
+        && !entry.name.endsWith('.notes.md') && entry.name !== DEPRECATED_MARKER) {
         files.push(rel);
       }
     }

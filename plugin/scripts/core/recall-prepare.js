@@ -18,6 +18,7 @@
 const crypto = require('crypto');
 const { planRecall } = require('./recall-plan');
 const { recordAudit } = require('./recall-audit-db');
+const { toBoundedSourceRef } = require('./cognitive-effectiveness');
 
 function _hashAnchor(label) {
   return 'sha256:' + crypto.createHash('sha256').update(String(label || '')).digest('hex').slice(0, 16);
@@ -25,6 +26,10 @@ function _hashAnchor(label) {
 
 function _newAuditId(prefix = 'ra') {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function _newTraceId() {
+  return `recall_${crypto.randomUUID()}`;
 }
 
 function _emptyPlan() {
@@ -70,10 +75,9 @@ function _commonAuditFields({ chatId, scope, runtime, plan, queryHashes }) {
 
 function _toSourceRef(s) {
   if (!s || typeof s !== 'object') return null;
-  if (s.id) return `id:${s.id}`;
-  if (s.slug) return `wiki:${s.slug}`;
-  if (s.sessionId) return `session:${s.sessionId}`;
-  if (s.kind) return `kind:${s.kind}`;
+  if (s.id) return toBoundedSourceRef(`id:${s.id}`);
+  if (s.slug) return toBoundedSourceRef(`wiki:${s.slug}`);
+  if (s.sessionId) return toBoundedSourceRef(`session:${s.sessionId}`);
   return null;
 }
 
@@ -122,9 +126,13 @@ async function prepareRecall({
 
   const queryHashes = Array.isArray(plan.anchors) ? plan.anchors.map(_hashAnchor) : [];
   const common = _commonAuditFields({ chatId, scope, runtime, plan, queryHashes });
+  // One user opportunity may have both observe and inject rows.  Keeping the
+  // trace on both rows lets aggregation deduplicate the opportunity instead of
+  // mistaking two audit rows for two turns.
+  const traceId = _newTraceId();
 
   // Phase 1: always write observe row (preserves PR1 behaviour).
-  _writeAudit({ id: _newAuditId('ra'), phase: 'observe', ...common });
+  _writeAudit({ id: _newAuditId('ra'), phase: 'observe', trace_id: traceId, ...common });
 
   // Phase 2: only enter inject path when both flag is on AND plan triggered.
   if (!enabled || !plan.shouldRecall) return _emptyResult(plan);
@@ -155,6 +163,7 @@ async function prepareRecall({
       _writeAudit({
         id: _newAuditId('ri'),
         phase: 'inject',
+        trace_id: traceId,
         ...common,
         injected_chars: 0,
         outcome: 'harmful',
@@ -175,6 +184,7 @@ async function prepareRecall({
       _writeAudit({
         id: _newAuditId('ri'),
         phase: 'inject',
+        trace_id: traceId,
         ...common,
         injected_chars: 0,
         external_shadow_hits: externalShadowHits,
@@ -201,12 +211,14 @@ async function prepareRecall({
   _writeAudit({
     id: _newAuditId('ri'),
     phase: 'inject',
+    trace_id: traceId,
     ...common,
     source_refs: sourceRefs,
     injected_chars: injectedChars,
     truncated: ctx.truncated ? 1 : 0,
     wiki_dropped: ctx.wikiDropped ? 1 : 0,
     external_shadow_hits: Number(ctx.externalShadowHits || 0),
+    outcome: 'injected',
   });
 
   return {

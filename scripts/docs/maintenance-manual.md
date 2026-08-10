@@ -99,6 +99,42 @@ feishu:
 - 技能演化分三级：L1 只可自动记录 evidence metadata，不改 live `SKILL.md`；L2 是持久 proposal；L3 权限、凭证、shell、网络、发布和自修改必须明确批准。`shadow/canary` 字段当前仅是治理状态，不宣称已有流量实验执行器。
 - 迁移顺序固定为 `--dry-run` → `--stage` → `--apply`；stage/apply 强制 drain embedding 至 0 pending/0 missing。apply 以 publish journal 记录阶段，并在 `~/.metame/backups/` 保存 SQLite、Markdown 与 Vault 可回滚副本；异常中断用 `--recover --backup-root <目录>` 恢复。
 
+## 4.3 Cognitive Plane 最终验收、权威与恢复
+
+- 唯一的跨 Host 验收 seam：`scripts/cognitive-quality-integration.test.js`。
+  它只创建临时 SQLite/文件 fixture，复用 claim、reconcile、Manifest、MCP、Wiki、
+  observability 与 Engine Plugin 的公开边界；各模块的详细行为仍由 focused tests
+  负责。验收覆盖 claim decision matrix、reconcile 的 dry-run/stage/apply 与 stale
+  safety、Manifest access/budget/idempotency、MCP explicit recall/JIT/cold-start/
+  honest-empty、Wiki annotation protection、status/doctor schema、legacy null-key
+  兼容，以及 Claude/Codex/Pi/agy/fixture/external Host capability truth。
+- 生命周期固定为：episode/evidence → candidate claim → reconcile/admit 或 conflict →
+  active canonical claim → derived synthesis/Manifest → explicit recall/JIT → delivery
+  audit/outcome。搜索命中不等于采用或验证；task episode、candidate、conflict 与
+  legacy null-key 都不能成为新的 Synthesis/Manifest 证据。
+- 权威顺序为：用户/项目 canonical claim 与已验证 artifact source > 派生 Wiki 投影 >
+  revision-bound human annotation。MCP 请求中的 project/agent 只是 selector，不能
+  改写已绑定 access context；annotation 永不直接写入 canonical memory。
+- `metame memory status|doctor` 是同一 versioned read model；`doctor` 只增加诊断与
+  退出码。`metame host status|doctor` 的 `verified`/`detected`/`unsupported` 来自
+  实际探测或已注册 adapter，不能由 PATH 上的 CLI 推断 Cognitive Host 权限。Pi、agy
+  和 external adapter 可以只有 Runtime/Session 能力；未声明或未验证的 context
+  projection 必须保持 unsupported。
+- 恢复顺序：先 status/doctor；保留人工编辑的冲突页面和 pending annotation；
+  `memory reconcile --dry-run` → `--stage` 审阅计划 → `--apply`。apply 的 stale
+  precondition 会整批中止且不做部分写入；需要回滚时使用既有 backup/publish journal，
+  不通过 Host 重启或直接编辑 `plugin/scripts/`、`~/.metame/` 修复。
+
+常用入口：
+
+```text
+metame memory status|doctor [--json] [--days N]
+metame memory reconcile --dry-run [--json]
+metame memory reconcile --stage <plan.json> | --apply <plan.json>
+metame wiki annotate <slug> --from-file <path>
+metame host status|doctor [--json]
+```
+
 ## 5. Agent Soul 身份层
 
 - 集中存储：`~/.metame/agents/<agent_id>/`（soul.md、memory-snapshot.md、agent.yaml）

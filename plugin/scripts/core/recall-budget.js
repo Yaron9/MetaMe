@@ -84,7 +84,12 @@ function consumeTier(items, allowance, perItemSpec) {
     const wasTruncated = text.length > maxChars;
     const capped = wasTruncated ? _truncate(text, maxChars) : text;
     if (used + capped.length > allowance) { dropped++; continue; }
-    taken.push({ text: capped, source: raw && raw.source != null ? raw.source : null });
+    const takenItem = { text: capped, source: raw && raw.source != null ? raw.source : null };
+    const fingerprint = raw && typeof raw === 'object'
+      ? (raw.source_fingerprint || raw.sourceFingerprint || raw.fingerprint)
+      : null;
+    if (fingerprint) takenItem.source_fingerprint = String(fingerprint);
+    taken.push(takenItem);
     used += capped.length;
     if (wasTruncated) truncatedTexts++;
   }

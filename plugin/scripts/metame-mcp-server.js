@@ -26,6 +26,8 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { assembleSearchResults, scopeKeys } = require('./core/cognitive-consumption');
+const { toBoundedSourceRef } = require('./core/cognitive-effectiveness');
+const { isTrustedAccess, resolveAccessContext } = require('./core/context-manifest');
 
 const HOME = os.homedir();
 const SKILLS_DIR = path.join(HOME, '.claude', 'skills');
@@ -173,6 +175,31 @@ function defaultDeps() {
   };
 }
 
+function normalizeLegacyAgentKey(args = {}) {
+  const raw = String(args.agent_key || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  return raw || null;
+}
+
+function resolveMcpAccess(args, deps) {
+  const hasAccessProvider = typeof deps.accessContext === 'function';
+  let suppliedContext = null;
+  if (hasAccessProvider) {
+    try { suppliedContext = deps.accessContext(); } catch { suppliedContext = null; }
+  }
+  const hasTrustedSeam = !!(suppliedContext && isTrustedAccess(suppliedContext));
+  return {
+    hasTrustedSeam,
+    context: resolveAccessContext({
+      trustedContext: hasTrustedSeam ? suppliedContext : null,
+      request: args,
+    }),
+    // Existing direct callers predate managed binding injection. Keep their
+    // explicit agent selector working, but sanitize it and never use it when
+    // a real trusted binding is present.
+    legacyAgentKey: hasTrustedSeam ? null : normalizeLegacyAgentKey(args),
+  };
+}
+
 function readSkillMeta(dir, name) {
   const file = path.join(dir, name, 'SKILL.md');
   try {
@@ -189,10 +216,12 @@ const handlers = {
   async memory_search(args, deps) {
     const startedAt = Date.now();
     const memory = deps.memory();
+    const access = resolveMcpAccess(args, deps);
+    const project = access.context.project || null;
     const limit = Math.min(Math.max(Number(args.limit) || 5, 1), 20);
     const hybrid = await memory.hybridSearchWiki(String(args.query || ''), {
-      scopeKeys: scopeKeys(args.project),
-      projectKey: args.project || null,
+      scopeKeys: scopeKeys(project),
+      projectKey: project,
       trackSearch: false,
     });
     const assembled = assembleSearchResults(hybrid, { limit, maxChars: args.max_chars });
@@ -204,9 +233,9 @@ const handlers = {
         consumer_stage: 'delivered',
         consumer_type: 'mcp',
         trace_id: traceId,
-        engine: args.host || null,
-        agent_key: args.agent_key || null,
-        project: args.project || null,
+        engine: access.hasTrustedSeam ? access.context.host : (args.host || null),
+        agent_key: access.hasTrustedSeam ? access.context.agent_id : (args.agent_key || null),
+        project,
         source_refs: [`${item.type}:${item.id}`],
         injected_chars: JSON.stringify(item).length,
         latency_ms: Date.now() - startedAt,
@@ -220,9 +249,11 @@ const handlers = {
     const traceId = String(args.trace_id || '').trim();
     const assetRef = `${args.type}:${args.id}`;
     if (!traceId) return { found: false, error: 'trace_id is required' };
+    const access = resolveMcpAccess(args, deps);
+    const project = access.context.project || null;
     const memory = deps.memory();
     const asset = memory.getCognitiveAsset(String(args.type || ''), String(args.id || ''), {
-      project: args.project || null,
+      project,
       history: args.history === true,
     });
     if (!asset) return { found: false };
@@ -232,9 +263,9 @@ const handlers = {
       consumer_stage: 'opened',
       consumer_type: 'mcp',
       trace_id: traceId,
-      engine: args.host || null,
-      agent_key: args.agent_key || null,
-      project: args.project || null,
+      engine: access.hasTrustedSeam ? access.context.host : (args.host || null),
+      agent_key: access.hasTrustedSeam ? access.context.agent_id : (args.agent_key || null),
+      project,
       source_refs: [assetRef],
       injected_chars: JSON.stringify(asset).length,
       outcome: 'used',
@@ -243,6 +274,7 @@ const handlers = {
   },
 
   async memory_recall(args, deps) {
+    const access = resolveMcpAccess(args, deps);
     const text = String(args.text || '').trim();
     const planned = deps.planRecall()({ text });
     const plan = planned.shouldRecall ? planned : {
@@ -254,18 +286,45 @@ const handlers = {
     };
     const ctx = await deps.assembleRecallContext()({
       plan,
-      scope: { project: args.project || null, agentKey: args.agent_key || null },
+      scope: {
+        project: access.context.project || null,
+        agentKey: access.hasTrustedSeam ? access.context.agent_id : access.legacyAgentKey,
+      },
     });
-    return { recalled: true, reason: plan.reason, context: ctx.text || '', sources: ctx.sources || [], truncated: !!ctx.truncated };
+    const traceId = `mcp_${crypto.randomUUID()}`;
+    const sourceRefs = Array.isArray(ctx.sources)
+      ? [...new Set(ctx.sources.map(toBoundedSourceRef).filter(Boolean))].slice(0, 32)
+      : [];
+    const context = typeof ctx.text === 'string' ? ctx.text : '';
+    if (context.length > 0) {
+      // Audit only the bounded delivery metadata.  The prompt and assembled
+      // recall text must never enter recall_audit, even when an MCP caller
+      // supplied sensitive search terms.
+      deps.recordAudit()({
+        id: `ca_${crypto.randomUUID()}`,
+        phase: 'consume',
+        consumer_stage: 'delivered',
+        consumer_type: 'mcp',
+        trace_id: traceId,
+        engine: access.hasTrustedSeam ? access.context.host : (args.host || null),
+        agent_key: access.hasTrustedSeam ? access.context.agent_id : (args.agent_key || null),
+        project: access.context.project || null,
+        source_refs: sourceRefs,
+        injected_chars: Math.min(context.length, 12000),
+        outcome: 'injected',
+      });
+    }
+    return { recalled: true, trace_id: traceId, reason: plan.reason, context, sources: ctx.sources || [], truncated: !!ctx.truncated };
   },
 
   async memory_write(args, deps) {
+    const access = resolveMcpAccess(args, deps);
     const outcome = deps.writeFact()({
       entity: args.entity,
       relation: args.relation,
       value: args.value,
       confidence: args.confidence || 'medium',
-      project: args.project || '*',
+      project: access.context.project || args.project || '*',
       tags: Array.isArray(args.tags) ? args.tags : [],
       sourceType: 'mcp',
     });
@@ -274,6 +333,7 @@ const handlers = {
   },
 
   async memory_feedback(args, deps) {
+    const access = resolveMcpAccess(args, deps);
     const stage = ['applied', 'validated'].includes(args.stage) ? args.stage : null;
     const traceId = String(args.trace_id || '').trim();
     const assetIds = Array.isArray(args.asset_ids) ? args.asset_ids.map(String).filter(Boolean).slice(0, 20) : [];
@@ -286,9 +346,9 @@ const handlers = {
       consumer_stage: stage,
       consumer_type: 'mcp',
       trace_id: traceId,
-      engine: args.host || null,
-      agent_key: args.agent_key || null,
-      project: args.project || null,
+      engine: access.hasTrustedSeam ? access.context.host : (args.host || null),
+      agent_key: access.hasTrustedSeam ? access.context.agent_id : (args.agent_key || null),
+      project: access.context.project || null,
       source_refs: assetIds,
       outcome,
       evidence_class: args.evidence ? String(args.evidence).slice(0, 80) : null,
@@ -312,6 +372,7 @@ const handlers = {
   },
 
   async skill_list(args, deps) {
+    const access = resolveMcpAccess(args, deps);
     let entries = [];
     try {
       entries = fs.readdirSync(deps.skillsDir, { withFileTypes: true })
@@ -323,8 +384,10 @@ const handlers = {
     for (const entry of entries) {
       deps.recordAudit()({
         id: `ca_${crypto.randomUUID()}`, phase: 'consume', consumer_stage: 'delivered', consumer_type: 'mcp',
-        trace_id: traceId, engine: args.host || null, agent_key: args.agent_key || null,
-        project: args.project || null, source_refs: [`skill:${entry.name}`],
+        trace_id: traceId,
+        engine: access.hasTrustedSeam ? access.context.host : (args.host || null),
+        agent_key: access.hasTrustedSeam ? access.context.agent_id : (args.agent_key || null),
+        project: access.context.project || null, source_refs: [`skill:${entry.name}`],
         injected_chars: JSON.stringify(entry).length, outcome: 'injected',
       });
     }
@@ -336,11 +399,14 @@ const handlers = {
     if (!name) return { error: 'invalid skill name' };
     try {
       const content = fs.readFileSync(path.join(deps.skillsDir, name, 'SKILL.md'), 'utf8');
+      const access = resolveMcpAccess(args, deps);
       const traceId = String(args.trace_id || `mcp_${crypto.randomUUID()}`);
       deps.recordAudit()({
         id: `ca_${crypto.randomUUID()}`, phase: 'consume', consumer_stage: 'opened', consumer_type: 'mcp',
-        trace_id: traceId, engine: args.host || null, agent_key: args.agent_key || null,
-        project: args.project || null, source_refs: [`skill:${name}`], injected_chars: content.length, outcome: 'used',
+        trace_id: traceId,
+        engine: access.hasTrustedSeam ? access.context.host : (args.host || null),
+        agent_key: access.hasTrustedSeam ? access.context.agent_id : (args.agent_key || null),
+        project: access.context.project || null, source_refs: [`skill:${name}`], injected_chars: content.length, outcome: 'used',
       });
       return { name, trace_id: traceId, content };
     } catch {
@@ -351,6 +417,14 @@ const handlers = {
   async agent_context(args, deps) {
     const id = String(args.agent_id || '').replace(/[^a-zA-Z0-9_-]/g, '');
     if (!id) return { error: 'invalid agent id' };
+    // Keep the old injectable characterization seam, but the executable MCP
+    // boundary must prove the requested agent is the managed principal.
+    const access = resolveMcpAccess(args, deps);
+    if (access.hasTrustedSeam) {
+      if (!access.context.agent_id || access.context.agent_id !== id) {
+        return { error: 'agent_context_unauthorized' };
+      }
+    }
     const base = path.join(deps.agentsDir, id);
     const read = (f) => { try { return fs.readFileSync(path.join(base, f), 'utf8'); } catch { return ''; } };
     const soul = read('soul.md');

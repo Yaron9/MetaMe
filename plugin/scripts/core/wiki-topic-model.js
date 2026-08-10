@@ -56,12 +56,12 @@ function buildDossierSlug(topicSlug, projectKey, options = {}) {
 }
 
 function isAtomicMemoryFact(item = {}) {
-  const { eligibleFor } = require('./knowledge-eligibility');
+  const { isSynthesisEvidenceEligible } = require('./claim-contract');
   const state = String(item.state || 'active');
   const kind = String(item.kind || 'insight');
   return state === 'active'
     && (kind === 'insight' || kind === 'convention')
-    && eligibleFor('wiki_evidence', item);
+    && isSynthesisEvidenceEligible(item);
 }
 
 function groupTopicEvidence(items = []) {

@@ -1734,7 +1734,13 @@ function createClaudeEngine(deps) {
       // memory_recall intent hint to avoid double-emit (v4.1 §P1.6).
       // recallMeta is captured in a turn-local variable for Step 6's
       // marker pipeline; never leaks into prompt body or session diary.
-      const _recallEnabled = !!(config && config.daemon && config.daemon.memory_recall_enabled);
+      // Codex's optional legacy UserPromptSubmit hook owns automatic recall
+      // when explicitly enabled.  Do not let the managed daemon inject the
+      // same JIT block a second time in that configuration.
+      const _codexLegacyRecallHook = engineName === 'codex'
+        && process.env.METAME_CODEX_MEMORY_RECALL === 'on';
+      const _recallEnabled = !_codexLegacyRecallHook
+        && !!(config && config.daemon && config.daemon.memory_recall_enabled);
       const _recallTotalChars = (config && config.daemon
         && Number.isFinite(config.daemon.memory_recall_max_chars))
         ? config.daemon.memory_recall_max_chars : 4000;

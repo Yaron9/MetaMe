@@ -114,6 +114,42 @@ idle 30min → memory consolidation triggered
   without auto-injecting a synthetic conversation summary.
 ```
 
+### Cognitive quality lifecycle, authority, and recovery
+
+The Cognitive Plane is Host-neutral: evidence is captured as an episode, a
+canonical claim is admitted or isolated, active claims may feed a derived
+synthesis, and the bounded Project Context Manifest is delivered to a Host.
+Explicit MCP recall and JIT expansion remain demand-driven; a search hit is not
+proof that an Agent used or validated the result.
+
+The authority boundary is deliberate. User/project claims and validated
+artifact sources are authoritative; Wiki pages are rebuildable projections;
+human corrections live in revision-bound annotation sidecars. A bound access
+context, not an MCP request field, selects project/agent scope. Legacy rows
+without a `canonical_key` remain searchable for compatibility, but cannot enter
+new Synthesis or Manifest output.
+
+Read-only operations and recovery commands are:
+
+- `metame memory status [--json] [--days N]` and `metame memory doctor ...` share
+  one versioned schema; doctor adds diagnostics and a meaningful exit status.
+- `metame memory reconcile --dry-run [--json]` inspects only; `--stage
+  <plan.json>` writes a reviewable plan; `--apply <plan.json>` archives only
+  exact duplicates, marks dependent artifacts stale, and aborts on stale
+  preconditions. Keep the plan and database backup for recovery.
+- `metame wiki annotate <slug> --from-file <path>` records a pending annotation
+  without overwriting a generated page. A human-edited projection is preserved
+  as a conflict for review.
+- `metame host status|doctor` reports observed `verified`, `detected`, or
+  `unsupported` capabilities. Claude/Codex, Pi, agy, and external adapters do
+  not inherit Cognitive Host authority from executable discovery alone; only a
+  registered, trusted adapter or an observed native connection can declare it.
+
+When recovery is needed, inspect status/doctor first, preserve conflict files
+and annotations, review a staged plan, then apply only while its preconditions
+are current. No Host restart or deployment is implied by these read-only and
+staged operations.
+
 ### 4. Heartbeat — A Programmable Nervous System
 
 Most AI tools react when you talk to them. MetaMe keeps running while you sleep.

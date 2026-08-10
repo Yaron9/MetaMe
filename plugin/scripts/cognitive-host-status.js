@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { HOST_NAMES, inspectHosts, planInstall } = require('./core/cognitive-host');
+const { createDefaultEngineRegistry } = require('./engines/engine-registry');
 
 function probeServer(serverPath, { probeScript = path.join(__dirname, 'metame-mcp-stdio-probe.mjs') } = {}) {
   const bundledProbe = path.join(path.dirname(probeScript), 'metame-mcp-stdio-probe.bundle.mjs');
@@ -83,11 +84,12 @@ function renderPlan(plan) {
 }
 
 function main(argv = process.argv.slice(2)) {
+  const registry = createDefaultEngineRegistry({ HOME: os.homedir(), fs, path });
   const planIndex = argv.includes('--plan') ? argv.indexOf('--plan') : argv.indexOf('--repair');
   if (planIndex >= 0) {
     const host = argv[planIndex + 1];
     if (!host) throw new Error('--plan requires a host name');
-    const plan = planInstall(host, { home: os.homedir(), cwd: process.cwd(), fs });
+    const plan = planInstall(host, { home: os.homedir(), cwd: process.cwd(), fs, registry });
     console.log(argv.includes('--json') ? JSON.stringify(plan, null, 2) : renderPlan(plan));
     process.exitCode = plan.supported ? 0 : 1;
     return plan;
@@ -98,6 +100,7 @@ function main(argv = process.argv.slice(2)) {
     cwd: process.cwd(),
     probeServer,
     hosts: HOST_NAMES,
+    registry,
   });
   console.log(argv.includes('--json') ? JSON.stringify({ hosts }, null, 2) : render(hosts));
   const applicable = hosts.filter(host => host.capabilities.mcp !== 'unsupported');

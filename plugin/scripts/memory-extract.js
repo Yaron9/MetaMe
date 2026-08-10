@@ -17,6 +17,11 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { callHaiku, buildDistillEnv } = require('./providers');
+const {
+  CLAIM_LIFECYCLES,
+  normalizeCanonicalKey,
+  validateCanonicalKey,
+} = require('./core/claim-contract');
 
 const HOME = os.homedir();
 const LOCK_FILE = path.join(HOME, '.metame', 'memory-extract.lock');
@@ -31,13 +36,33 @@ const ALLOWED_FACT_RELATIONS = new Set([
 ]);
 
 function isValidExtractedFact(f) {
-  if (!f || !f.entity || !f.relation || !f.value) return false;
+  if (!f || typeof f !== 'object') return false;
+  if (typeof f.entity !== 'string' || !f.entity || typeof f.relation !== 'string' || !f.relation) return false;
+  if (typeof f.value !== 'string' || !f.value) return false;
   if (!ALLOWED_FACT_RELATIONS.has(f.relation)) return false;
   if (f.value.length < 20 || f.value.length > 300) return false;
   if (VAGUE_PATTERNS.some(re => re.test(f.value))) return false;
   if (!f.entity.includes('.') && !ALLOWED_FLAT.has(f.entity)) return false;
   if (f.confidence === 'medium' && (!f.tags || f.tags.length === 0)) return false;
+  if (f.lifecycle !== undefined && (typeof f.lifecycle !== 'string' || !CLAIM_LIFECYCLES.has(f.lifecycle.trim().toLowerCase()))) return false;
+  if (f.canonical_key !== undefined && f.canonical_key !== null
+    && typeof f.canonical_key !== 'string') return false;
+  if (f.canonical_key !== undefined && !validateCanonicalKey(f.canonical_key).valid) return false;
+  if (f.tags !== undefined && (!Array.isArray(f.tags) || f.tags.some(tag => typeof tag !== 'string'))) return false;
   return true;
+}
+
+/**
+ * Normalize the small compatibility surface accepted from the extractor.
+ * Older models did not emit lifecycle/canonical_key; those records are
+ * deliberately task-local and therefore cannot enter Claim admission.
+ */
+function normalizeExtractedFact(f) {
+  if (!isValidExtractedFact(f)) return null;
+  const lifecycle = f.lifecycle === undefined ? 'task' : f.lifecycle.trim().toLowerCase();
+  const key = f.canonical_key === undefined || f.canonical_key === null
+    ? null : normalizeCanonicalKey(f.canonical_key);
+  return { ...f, lifecycle, canonical_key: key };
 }
 
 // Atomic fact extraction prompt (local copy — distill.js no longer exports this)
@@ -68,6 +93,8 @@ const FACT_EXTRACTION_PROMPT = `你是精准的知识提取引擎。从以下会
       "relation":"类型",
       "value":"脱离上下文可独立理解的一句话",
       "confidence":"high或medium",
+      "lifecycle":"task|project|global",
+      "canonical_key":"可选稳定身份，如metame.daemon.execute",
       "tags":["最多3个标签"],
       "concepts":["最多3个抽象概念标签，如流量控制/背压/解耦"],
       "domain":"可选领域标签，如backend/frontend/devops"
@@ -81,6 +108,10 @@ const FACT_EXTRACTION_PROMPT = `你是精准的知识提取引擎。从以下会
 - value长度20-200字
 - entity用英文点号路径，value可用中文
 - medium confidence必须有非空tags
+- lifecycle必须是 task、project 或 global。一次性指令、当前任务上下文和未明确确认的配置变更必须是 task。
+- project/global 仅用于证据明确表明其为可跨会话持久规则、且用户明确确认 durable 的内容；config_change 默认 task，除非明确确认长期生效。
+- canonical_key 可选；提供时必须是小写点号分隔标识（每段以字母或数字开头，可含 a-z、0-9、_、-，最长160字符）。不确定时省略，不要猜测。
+- 旧版输出可能没有 lifecycle/canonical_key；系统会按 task Episode 处理，绝不能据此推断 durable Claim。
 - concepts 可为空；若存在，最多3个，必须是抽象概念词而非文件名
 - 优先引用证据里的具体锚点（文件名、命令、报错关键词）；没有锚点时不要硬编
 - 没有值得提取的事实时 facts 返回 []
@@ -229,7 +260,7 @@ async function extractFacts(skeleton, evidence, distillEnv) {
   let facts = Array.isArray(parsed.facts) ? parsed.facts : [];
   const session_name = parsed.session_name || "未命名会话";
 
-  const filteredFacts = facts.filter(isValidExtractedFact);
+  const filteredFacts = facts.map(normalizeExtractedFact).filter(Boolean);
 
   return { ok: true, facts: filteredFacts, session_name };
 }
@@ -401,5 +432,5 @@ if (require.main === module) {
 module.exports = {
   run,
   extractFacts,
-  _internal: { isValidExtractedFact },
+  _internal: { isValidExtractedFact, normalizeExtractedFact, FACT_EXTRACTION_PROMPT },
 };

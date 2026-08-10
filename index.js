@@ -191,6 +191,13 @@ const _isMemoryObservabilityCommand = _cliCommand === 'memory'
   && ['status', 'doctor'].includes(String(process.argv[3] || '').trim().toLowerCase());
 const _isMemoryReconcileCommand = _cliCommand === 'memory'
   && String(process.argv[3] || '').trim().toLowerCase() === 'reconcile';
+const _isMemoryArtifactsMigrateCommand = _cliCommand === 'memory'
+  && String(process.argv[3] || '').trim().toLowerCase() === 'artifacts'
+  && String(process.argv[4] || '').trim().toLowerCase() === 'migrate';
+const _isMemoryUsageCommand = _cliCommand === 'memory'
+  && !_isMemoryObservabilityCommand
+  && !_isMemoryReconcileCommand
+  && !_isMemoryArtifactsMigrateCommand;
 const _isReadOnlyCommand = _isDaemonStatusCommand || _isMemoryObservabilityCommand || _isMemoryReconcileCommand;
 
 // This is intentionally before the first ~/.metame mkdir, runtime sync,
@@ -214,6 +221,10 @@ if (_isMemoryReconcileCommand) {
     console.error(error.message);
     process.exit(1);
   }
+}
+if (_isMemoryUsageCommand) {
+  console.error('Usage: metame memory status|doctor [--json] [--days N] | reconcile --dry-run [--json] | reconcile --stage <plan.json> | reconcile --apply <plan.json> | artifacts migrate <--dry-run|--stage|--apply>');
+  process.exit(1);
 }
 
 function resolveAutoUpdateBehavior() {

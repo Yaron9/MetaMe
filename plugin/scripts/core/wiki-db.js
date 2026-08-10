@@ -44,6 +44,39 @@ function getWikiPageBySlug(db, slug) {
 }
 
 /**
+ * Return the last safely exported projection metadata for a page.
+ * Keeping this query in the Wiki data layer makes the Base hash distinct from
+ * source-membership hashes used to decide whether a page needs rebuilding.
+ */
+function getWikiPageProjection(db, slug) {
+  const columns = new Set(db.prepare('PRAGMA table_info(wiki_pages)').all().map(row => row.name));
+  if (!columns.has('projection_hash') || !columns.has('projection_at')) {
+    return { schemaReady: false, projection_hash: null, projection_at: null };
+  }
+  const row = db.prepare('SELECT projection_hash, projection_at FROM wiki_pages WHERE slug = ?').get(slug);
+  return {
+    schemaReady: true,
+    projection_hash: row?.projection_hash || null,
+    projection_at: row?.projection_at || null,
+  };
+}
+
+/**
+ * Record a projection only after the generated file has been written safely.
+ */
+function recordWikiProjection(db, slug, projectionHash, projectionAt = null) {
+  const columns = new Set(db.prepare('PRAGMA table_info(wiki_pages)').all().map(row => row.name));
+  if (!columns.has('projection_hash') || !columns.has('projection_at')) return false;
+  db.prepare(`
+    UPDATE wiki_pages
+       SET projection_hash = ?,
+           projection_at = COALESCE(?, datetime('now'))
+     WHERE slug = ?
+  `).run(projectionHash || null, projectionAt, slug);
+  return true;
+}
+
+/**
  * @param {object} db
  * @param {{ limit?: number, orderBy?: string }} opts
  * @returns {object[]}
@@ -237,8 +270,11 @@ function upsertWikiTopic(db, tag, { label, pinned = 0, force = false } = {}) {
  * @returns {boolean}
  */
 function checkTopicThreshold(db, tag) {
-  const { primarySqlForDb } = require('./knowledge-eligibility');
-  const eligibility = primarySqlForDb(db, 'mi');
+  // Topic registration is the first step toward a new Wiki Synthesis.  Keep
+  // it on the draft Claim boundary so legacy null-key rows and task Episodes
+  // cannot create a topic that the renderer could never use as evidence.
+  const { claimSqlForDb } = require('./knowledge-eligibility');
+  const eligibility = claimSqlForDb(db, 'mi', { draft: true });
 
   // Condition 1: lifetime count >= 5 (active or candidate)
   const row1 = db.prepare(`
@@ -542,6 +578,8 @@ function listClusterPages(db) {
 module.exports = {
   // wiki_pages
   getWikiPageBySlug,
+  getWikiPageProjection,
+  recordWikiProjection,
   listWikiPages,
   getStalePages,
   upsertWikiPage,

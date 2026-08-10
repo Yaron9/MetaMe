@@ -68,7 +68,9 @@ function formatRecallBlock(taken = {}) {
       const rendered = _renderItem(it);
       if (!rendered) continue;
       lines.push(rendered);
-      if (it && it.source) sources.push({ tier, ...it.source });
+      if (it && it.source) {
+        sources.push({ tier, ...it.source, ...(it.source_fingerprint ? { source_fingerprint: it.source_fingerprint } : {}) });
+      }
     }
     if (lines.length > 0) {
       sections.push(`${TIER_LABELS[tier]}:\n${lines.join('\n')}`);

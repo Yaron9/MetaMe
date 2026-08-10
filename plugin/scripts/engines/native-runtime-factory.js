@@ -24,6 +24,7 @@ const { createClaudeSessionSourceAdapter } = require('./claude-session-source-ad
 const { createCodexSessionSourceAdapter } = require('./codex-session-source-adapter');
 const { createAgySessionSourceAdapter } = require('./agy-session-source-adapter');
 const { createPiSessionSourceAdapter } = require('./pi-session-source-adapter');
+const { createCognitiveHostAdapter } = require('../core/cognitive-host');
 
 function identityModel(value, fallback = '') {
   const text = String(value || '').trim();
@@ -215,6 +216,7 @@ const BUILTIN_RUNTIME_CATALOG = Object.freeze([
       validateNativeSession: deps.validateNativeSession,
     }),
     createRuntime: createClaudeCliAdapter,
+    createCognitiveHost: () => createCognitiveHostAdapter('claude'),
     createSessionSourceDeps: context => createCatalogSessionSourceDeps(context, context.deps.claude),
     createSessionSource: createClaudeSessionSourceAdapter,
   }),
@@ -238,6 +240,7 @@ const BUILTIN_RUNTIME_CATALOG = Object.freeze([
       log: deps.log,
     }),
     createRuntime: createCodexCliAdapter,
+    createCognitiveHost: () => createCognitiveHostAdapter('codex'),
     createSessionSourceDeps: context => createCatalogSessionSourceDeps(context, context.deps.codex),
     createSessionSource: createCodexSessionSourceAdapter,
   }),
@@ -309,21 +312,33 @@ function createBuiltinEnginePlugins(deps = {}) {
     const runtime = definition.createRuntime(definition.createRuntimeDeps(context));
     const sourceDeps = definition.createSessionSourceDeps(context);
     const sessionSource = definition.createSessionSource(sourceDeps);
+    const cognitiveHost = typeof definition.createCognitiveHost === 'function'
+      ? definition.createCognitiveHost(context)
+      : null;
     const descriptor = sessionSource
       ? {
         ...runtime.descriptor,
         capabilities: {
           ...runtime.descriptor.capabilities,
           sessionSource: { state: 'verified' },
+          ...(cognitiveHost ? { cognitiveHost: { state: 'verified' } } : {}),
         },
       }
-      : runtime.descriptor;
+      : cognitiveHost
+        ? {
+          ...runtime.descriptor,
+          capabilities: {
+            ...runtime.descriptor.capabilities,
+            cognitiveHost: { state: 'verified' },
+          },
+        }
+        : runtime.descriptor;
     return createEnginePlugin({
       protocolVersion: 1,
       descriptor,
       runtime,
       sessionSource,
-      cognitiveHost: null,
+      cognitiveHost,
     });
   });
 }

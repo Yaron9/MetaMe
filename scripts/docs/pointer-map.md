@@ -80,6 +80,31 @@
   - `scripts/daemon-admin-commands.js`
   - 关键点：`/engine` 切换 registry plugin；`/doctor` 分开报告 descriptor、CLI discovery、enabled/allowlist/trust，不把 PATH 当作信任
 
+## Cognitive Plane 最终验收与消费边界
+
+- 唯一 Host-neutral acceptance seam：`scripts/cognitive-quality-integration.test.js`；
+  复用以下公开边界，不复制各模块的 fixture 框架。
+- Claim 决策/资格：`scripts/core/claim-contract.js`、`scripts/core/knowledge-eligibility.js`。
+  task episode、candidate、conflict、legacy null-key 不能成为新的 Synthesis/Manifest 证据。
+- Reconcile 生命周期：`scripts/core/memory-reconcile.js` + `scripts/memory-reconcile.js`；
+  `--dry-run`/`--stage` 只读，`--apply` 以 stale precondition 防止部分写入，并标记派生
+  artifact stale。
+- Project Context：`scripts/core/context-manifest.js`（access、预算、去重、JIT）与
+  `scripts/cognitive-context.js`（cold-start 投影及 delivery ledger 幂等）。
+- MCP northbound：`scripts/metame-mcp-server.js`；explicit recall、JIT 与 honest empty
+  共用同一审计/作用域模型。
+- Wiki authority：`scripts/wiki-reflect-export.js` 只维护可重建 projection，
+  `scripts/wiki-annotation.js` 将人工修订写入 revision-bound sidecar；冲突页面不覆盖。
+- Observability：`scripts/core/cognitive-observability.js` + `scripts/memory-observability.js`；
+  `metame memory status|doctor` 共用 versioned result model，doctor 只增加诊断与退出码。
+- Host truth：`scripts/core/cognitive-host.js`、`scripts/engines/engine-registry.js`、
+  `scripts/engines/external-adapter-plugin.js`；Claude/Codex/Pi/agy/fixture/external 的
+  capability 必须来自实际探测或显式注册，不由 PATH 可执行文件推断。
+- 日常入口：`metame memory status|doctor [--json] [--days N]`、
+  `metame memory reconcile --dry-run|--stage <plan.json>|--apply <plan.json>`、
+  `metame wiki annotate ...`、`metame host status|doctor`。恢复先看 status/doctor，保留
+  conflict/annotation，审阅 stage 后才 apply；这些命令不隐含部署或 Host 重启。
+
 ## 核心模块层（scripts/core/）
 
 纯逻辑，无副作用，返回意图标志由调用方执行。

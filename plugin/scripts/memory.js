@@ -65,6 +65,7 @@ function getDb() {
       task_key        TEXT,
       session_id      TEXT,
       agent_key       TEXT,
+      canonical_key   TEXT,
       supersedes_id   TEXT,
       source_type     TEXT,
       source_id       TEXT,
@@ -113,6 +114,8 @@ function getDb() {
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_scope ON memory_items(scope)'); } catch { }
   try { _db.exec('ALTER TABLE memory_items ADD COLUMN supersedes_id TEXT'); } catch { /* column already exists */ }
   try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_supersedes ON memory_items(supersedes_id)'); } catch { }
+  try { _db.exec('ALTER TABLE memory_items ADD COLUMN canonical_key TEXT'); } catch { /* column already exists */ }
+  try { _db.exec('CREATE INDEX IF NOT EXISTS idx_mi_canonical_identity ON memory_items(canonical_key, project, scope)'); } catch { }
 
   // Migration: add relation column if not present (existing DBs)
   try { _db.exec('ALTER TABLE memory_items ADD COLUMN relation TEXT'); } catch { /* column already exists */ }
@@ -148,15 +151,16 @@ function saveMemoryItem(item) {
   const provenanceRootId = deriveProvenanceRootId(item);
   const stmt = db.prepare(`
     INSERT INTO memory_items (id, kind, state, title, content, summary, confidence,
-      project, scope, task_key, session_id, agent_key, supersedes_id,
+      project, scope, task_key, session_id, agent_key, canonical_key, supersedes_id,
       source_type, source_id, origin_class, provenance_root_id, relation, search_count, last_searched_at, tags,
       created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
     ON CONFLICT(id) DO UPDATE SET
       kind=excluded.kind, state=excluded.state, title=excluded.title,
       content=excluded.content, summary=excluded.summary, confidence=excluded.confidence,
       project=excluded.project, scope=excluded.scope, task_key=excluded.task_key,
       session_id=excluded.session_id, agent_key=excluded.agent_key,
+      canonical_key=excluded.canonical_key,
       supersedes_id=excluded.supersedes_id, source_type=excluded.source_type,
       source_id=excluded.source_id, origin_class=excluded.origin_class,
       provenance_root_id=excluded.provenance_root_id,
@@ -176,6 +180,7 @@ function saveMemoryItem(item) {
     item.task_key || null,
     item.session_id || null,
     item.agent_key || null,
+    require('./core/claim-contract').normalizeCanonicalKey(item.canonical_key),
     item.supersedes_id || null,
     item.source_type || null,
     item.source_id || null,
@@ -386,6 +391,36 @@ function saveFacts(sessionId, project, facts, { scope = null, source_type = null
   let saved = 0;
   let skipped = 0;
   const savedFacts = [];
+  const { mapClaimStorage, reconcileClaim, claimContentDigest, normalizeCanonicalKey } = require('./core/claim-contract');
+
+  function findIdentityMatches(candidate) {
+    if (!candidate.canonical_key) return [];
+    return getDb().prepare(`
+      SELECT * FROM memory_items
+       WHERE canonical_key=? AND project IS ? AND scope IS ?
+         AND state IN ('candidate','active','conflict')
+    `).all(candidate.canonical_key, candidate.project, candidate.scope);
+  }
+
+  function findSourceReplay(candidate) {
+    if (!candidate.source_id) return null;
+    const rows = getDb().prepare(`
+      SELECT * FROM memory_items
+       WHERE source_id=? AND COALESCE(source_type, '')=COALESCE(?, '')
+         AND state != 'archived'
+    `).all(candidate.source_id, candidate.source_type || null);
+    const digest = claimContentDigest(candidate.content);
+    return rows.find(row => claimContentDigest(row.content) === digest) || null;
+  }
+
+  function recordSourceLineage(claimId, candidate) {
+    if (!candidate.source_id) return;
+    _mutate.mergeClaimLineage(getDb(), claimId, {
+      parentKind: candidate.source_type === 'session' ? 'session_source' : 'source',
+      parentId: candidate.source_id,
+      role: 'evidence',
+    });
+  }
 
   for (const f of facts) {
     if (!f.entity || !f.relation || !f.value) { skipped++; continue; }
@@ -395,25 +430,49 @@ function saveFacts(sessionId, project, facts, { scope = null, source_type = null
     const conf = f.confidence === 'high' ? 0.9 : f.confidence === 'medium' ? 0.7 : 0.4;
     const id = `mi_f_${String(sessionId).slice(0, 8)}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const tags = Array.isArray(f.tags) ? f.tags.slice(0, 3) : [];
+    const baseCandidate = {
+      id,
+      kind,
+      state: 'candidate',
+      title: `${f.entity} \u00b7 ${f.relation}`,
+      content: f.value.slice(0, 300),
+      confidence: conf,
+      lifecycle: f.lifecycle,
+      canonical_key: normalizeCanonicalKey(f.canonical_key),
+      project: normalizedProject,
+      scope: scope || null,
+      task_key: f.task_key || null,
+      session_id: sessionId,
+      source_type: f.source_type || source_type || 'session',
+      source_id: f.source_id || source_id || sessionId,
+      relation: f.relation,
+      tags,
+    };
+    // Admission is fail-closed: an omitted or unknown lifecycle is a
+    // task-local Episode. Durable Claims must opt in with lifecycle=project or
+    // lifecycle=global (and may provide a canonical_key).
+    const candidate = mapClaimStorage(baseCandidate, { sessionSourceId: source_id || sessionId });
 
     try {
-      saveMemoryItem({
-        id,
-        kind,
-        state: 'candidate',
-        title: `${f.entity} \u00b7 ${f.relation}`,
-        content: f.value.slice(0, 300),
-        confidence: conf,
-        project: normalizedProject,
-        scope: scope || null,
-        session_id: sessionId,
-        source_type: f.source_type || source_type || 'session',
-        source_id: f.source_id || source_id || sessionId,
-        relation: f.relation,
-        tags,
-      });
+      const replay = findSourceReplay(candidate);
+      if (replay) {
+        recordSourceLineage(replay.id, candidate);
+        skipped++;
+        savedFacts.push({ ...candidate, id: replay.id, state: replay.state, duplicate: true, created_at: replay.created_at });
+        continue;
+      }
+      const decision = reconcileClaim(candidate, findIdentityMatches(candidate));
+      if (decision.outcome === 'duplicate') {
+        recordSourceLineage(decision.existing_id, candidate);
+        skipped++;
+        savedFacts.push({ ...candidate, id: decision.existing_id, state: 'candidate', duplicate: true, created_at: new Date().toISOString() });
+        continue;
+      }
+      saveMemoryItem({ ...candidate, state: decision.outcome === 'conflict' ? 'conflict' : candidate.state });
+      recordSourceLineage(id, candidate);
       savedFacts.push({
-        id, entity: f.entity, relation: f.relation, value: f.value,
+        ...candidate, entity: f.entity, relation: f.relation, value: f.value,
+        state: decision.outcome === 'conflict' ? 'conflict' : candidate.state,
         project: normalizedProject, scope, tags, created_at: new Date().toISOString(),
       });
       saved++;
@@ -423,11 +482,14 @@ function saveFacts(sessionId, project, facts, { scope = null, source_type = null
   if (savedFacts.length > 0) {
     try {
       const { markTopicEvidenceDirty, checkTopicThreshold, upsertWikiTopic } = require('./core/wiki-db');
+      const { isSynthesisEvidenceEligible } = require('./core/claim-contract');
       const db = getDb();
+      const wikiFacts = savedFacts.filter(fact => isSynthesisEvidenceEligible(fact, { draft: true }));
 
-      // Build tag → new-fact count map from saved facts' tags
+      // Only canonical Claim evidence can dirty Wiki projections; task
+      // Episodes remain session history and never trigger a topic.
       const dirtyTagCounts = new Map();
-      for (const f of savedFacts) {
+      for (const f of wikiFacts) {
         const tags = Array.isArray(f.tags) ? f.tags : [];
         for (const tag of tags) {
           if (tag && typeof tag === 'string') {
@@ -439,7 +501,7 @@ function saveFacts(sessionId, project, facts, { scope = null, source_type = null
       if (dirtyTagCounts.size > 0) {
         markTopicEvidenceDirty(db, [...dirtyTagCounts].map(([rawTag, count]) => ({
           rawTag,
-          projectKey: savedFacts.find(fact => fact.tags.includes(rawTag))?.project || scope,
+          projectKey: wikiFacts.find(fact => fact.tags.includes(rawTag))?.project || scope,
           count,
         })));
 
@@ -677,6 +739,7 @@ function getCognitiveAsset(type, id, { project = null, history = false } = {}) {
   if (!['fact', 'wiki'].includes(type) || !id) return null;
   const db = getDb();
   if (type === 'fact') {
+    const { unresolvedConflictSql } = require('./core/knowledge-eligibility');
     const params = [id];
     let scopeSql = '';
     if (project) {
@@ -709,7 +772,8 @@ function getCognitiveAsset(type, id, { project = null, history = false } = {}) {
              source_type, source_id, provenance_root_id, updated_at
         FROM memory_items
        WHERE id = ? AND kind IN ('fact','insight','convention')
-         AND state = 'active' AND supersedes_id IS NULL ${scopeSql}
+         AND state = 'active' AND supersedes_id IS NULL
+         AND ${unresolvedConflictSql('memory_items')} ${scopeSql}
     `).get(...params);
     return row ? { type: 'fact', ...row } : null;
   }

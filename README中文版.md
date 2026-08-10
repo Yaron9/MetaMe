@@ -110,6 +110,34 @@ MetaMe 的记忆系统完全在后台自动运行——不打扰你，不需要�
   不再自动注入伪造的“上次对话摘要”。
 ```
 
+### 认知质量生命周期、权威边界与恢复
+
+Cognitive Plane 与 Host 无关：证据先作为 episode 捕获，再进入 canonical
+claim 的晋级或隔离；active claim 才能参与派生 Synthesis，最后由有预算的
+Project Context Manifest 投递给 Host。显式 MCP recall 与 JIT 展开仍按需执行；
+“搜索命中”不等于 Agent 已采用或验证。
+
+权威边界保持明确：用户/项目 claim 与已验证产物源是权威；Wiki 页面是可重建
+投影；人工修订写入绑定 revision 的 annotation sidecar。MCP 请求字段不能改写
+已绑定的 project/agent scope。没有 `canonical_key` 的 legacy 行仍可检索，但
+不会进入新的 Synthesis 或 Manifest。
+
+只读检查与恢复命令：
+
+- `metame memory status [--json] [--days N]` 与 `metame memory doctor ...` 共用
+  一个版本化 schema；doctor 额外输出诊断并返回有意义的退出码。
+- `metame memory reconcile --dry-run [--json]` 只读检查；`--stage <plan.json>`
+  生成可审阅计划；`--apply <plan.json>` 只归档精确重复、标记依赖产物 stale，
+  发现前置条件过期就中止。保留计划与数据库备份以便恢复。
+- `metame wiki annotate <slug> --from-file <path>` 写入 pending annotation，
+  不覆盖生成页面；人工修改的投影会保留为 conflict 待审。
+- `metame host status|doctor` 报告实际的 `verified`、`detected` 或 `unsupported`。
+  Claude/Codex、Pi、agy 和 external adapter 不会仅因可执行文件存在就获得
+  Cognitive Host 权限；必须有已注册且可信的 adapter 或观测到的原生连接。
+
+需要恢复时，先看 status/doctor，保留 conflict 文件与 annotation，审阅 staged
+计划，再在前置条件仍有效时 apply。上述只读/分阶段操作不会隐含 Host 重启或部署。
+
 ### 4. 心跳——可编程的神经系统
 
 大多数 AI 工具等你开口才响应。MetaMe 趁你睡觉的时候也在工作。
